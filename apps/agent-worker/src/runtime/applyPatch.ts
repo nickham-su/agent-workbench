@@ -203,6 +203,17 @@ export function classifyApplyPatchFailureMessage(message: string): {
 } {
   const normalized = String(message || "");
   const failedFiles = extractFailedFilesFromMessage(normalized);
+  const invalidFormatResult = {
+    code: "INVALID_FORMAT" as const,
+    retryable: false,
+    failedFiles,
+    hint: "Provide a valid git unified diff patch with diff --git, ---/+++ file headers, and @@ hunks."
+  };
+
+  // The parser's anchored prefix is authoritative; quoted paths are not error codes.
+  if (/^Invalid unified diff:/i.test(normalized)) {
+    return invalidFormatResult;
+  }
 
   if (/operation aborted/i.test(normalized)) {
     return {
@@ -317,12 +328,7 @@ export function classifyApplyPatchFailureMessage(message: string): {
   }
 
   if (/invalid patch/i.test(normalized) || /invalid unified diff/i.test(normalized) || /no hunks found/i.test(normalized)) {
-    return {
-      code: "INVALID_FORMAT",
-      retryable: false,
-      failedFiles,
-      hint: "Provide a valid git unified diff patch with diff --git, ---/+++ file headers, and @@ hunks."
-    };
+    return invalidFormatResult;
   }
 
   return {
@@ -595,9 +601,11 @@ function stripGitPathPrefix(raw: string) {
   return raw;
 }
 
+const UNIFIED_DIFF_HUNK_HEADER_REGEX = /^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@/;
+
 function parseUnifiedDiffHunkHeader(raw: string) {
   const line = String(raw || "").trim();
-  const match = /^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@/.exec(line);
+  const match = UNIFIED_DIFF_HUNK_HEADER_REGEX.exec(line);
   if (!match) return null;
   const oldStart = Number(match[1]);
   const oldLen = match[2] == null ? 1 : Number(match[2]);
@@ -610,6 +618,29 @@ function parseUnifiedDiffHunkHeader(raw: string) {
     newStart: Math.floor(newStart),
     newLen: Math.floor(newLen)
   };
+}
+
+function validateUnifiedDiffHunkOrder(filePath: string, chunks: UpdateFileChunk[]) {
+  let previous: { oldStart: bigint; header: string } | undefined;
+  for (const chunk of chunks) {
+    const rawHeader = chunk.sourceHunkHeader || "";
+    const match = UNIFIED_DIFF_HUNK_HEADER_REGEX.exec(rawHeader);
+    if (!match) continue; // Header syntax has already been checked by the parser.
+    // Compare only the old start, exactly, without imposing new count constraints.
+    const oldStart = BigInt(match[1]);
+    // Omit the optional section heading: diagnostics must not quote document content.
+    const header = match[0];
+    if (previous && oldStart < previous.oldStart) {
+      const relativePath = ensureSafeRelativePath(filePath);
+      throw new Error([
+        `Invalid unified diff: hunks for path '${relativePath}' must follow old-file line order.`,
+        `Previous hunk: ${previous.header}`,
+        `Current hunk: ${header}`,
+        "Hint: regenerate the patch with hunks in ascending old-file line order."
+      ].join("\n"));
+    }
+    previous = { oldStart, header };
+  }
 }
 
 function buildNewFileContentsFromUnifiedDiffChunks(chunks: UpdateFileChunk[]) {
@@ -731,7 +762,7 @@ function parseUnifiedDiffPatchText(input: string): { hunks: Hunk[] } {
     current = null;
   }
 
-  const hunkHeaderRegex = /^@@\s+-\d+(?:,\d+)?\s+\+\d+(?:,\d+)?\s+@@/;
+  const hunkHeaderRegex = UNIFIED_DIFF_HUNK_HEADER_REGEX;
 
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i] ?? "";
@@ -908,6 +939,9 @@ function parseUnifiedDiffPatchText(input: string): { hunks: Hunk[] } {
       });
       continue;
     }
+
+    // Validate each original file block before prepare performs any workspace I/O.
+    validateUnifiedDiffHunkOrder(oldPath, patch.chunks);
 
     if (newIsDevNull) {
       if (!oldPath || oldPath === "/dev/null") {

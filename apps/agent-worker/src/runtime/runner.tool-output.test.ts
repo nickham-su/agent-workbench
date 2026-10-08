@@ -3475,16 +3475,23 @@ test("启用错误落盘后遗留 running 工具保持静默且不重放", async
   });
 });
 
-test("启用错误落盘时 Abort 不会发布 artifact", async () => {
+for (const cancelled of [false, true]) test(`启用错误落盘时 AbortError ${cancelled ? "真实取消不发布" : "信号未取消发布失败"} artifact`, async () => {
   await withTempWorkspace(async (workspacePath) => {
     const script = `
       import { AgentRunner, executeToolSafelyForTest } from ${JSON.stringify(runnerModuleUrl)};
-      const api = { updateToolExecution: async (input) => ({ id: input.toolExecutionId, ...input }) };
+      const statuses = [];
+      const api = { updateToolExecution: async (input) => { statuses.push(input.status); return { result: "updated" }; } };
       const runner = new AgentRunner(api, {}, console, 1);
+      const controller = new AbortController();
       runner.toolRegistry.isToolEnabled = async () => true;
-      runner.toolRegistry.execute = async () => { throw new DOMException("cancelled", "AbortError"); };
-      await executeToolSafelyForTest(runner, { profile: { agent: { tools: ["bash"], pluginTools: [] } }, run: { workspaceId: "ws", sessionId: "session", runId: "run", workspacePath: ${JSON.stringify(workspacePath)}, workspaceRepoDirNames: [] }, tool: { toolExecutionId: "execution-14", callPartId: "part-14", assistantMessageId: "message-14", status: "queued", toolName: "bash", toolCallId: "call_abort", args: { command: "abort fixture" } }, parentSessionId: "session", signal: new AbortController().signal, promptContext: { pendingTools: [], tools: [], headMessageId: null,
+      runner.toolRegistry.execute = async () => {
+        if (${cancelled}) controller.abort();
+        throw new DOMException("cancelled", "AbortError");
+      };
+      await executeToolSafelyForTest(runner, { profile: { agent: { tools: ["bash"], pluginTools: [] } }, run: { workspaceId: "ws", sessionId: "session", runId: "run", workspacePath: ${JSON.stringify(workspacePath)}, workspaceRepoDirNames: [] }, tool: { toolExecutionId: "execution-14", callPartId: "part-14", assistantMessageId: "message-14", status: "queued", toolName: "bash", toolCallId: "call_abort", args: { command: "abort fixture" } }, parentSessionId: "session", signal: controller.signal, promptContext: { pendingTools: [], tools: [], headMessageId: null,
     sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, externalSkills: [] } });
+      const expected = ${JSON.stringify(cancelled ? ["running"] : ["running", "failed"])};
+      if (JSON.stringify(statuses) !== JSON.stringify(expected)) throw new Error("unexpected tool statuses: " + JSON.stringify(statuses));
     `;
     await execFileAsync(
       process.execPath,
@@ -3494,9 +3501,19 @@ test("启用错误落盘时 Abort 不会发布 artifact", async () => {
         env: { ...process.env, AWB_TOOL_ERROR_STORE_ENABLED: "1" },
       },
     );
-    await assert.rejects(
-      fs.access(path.join(workspacePath, ".awb", "agent", "tool-errors")),
-    );
+    if (cancelled) {
+      await assert.rejects(fs.access(path.join(workspacePath, ".awb", "agent", "tool-errors")));
+    } else {
+      const artifact = JSON.parse(await fs.readFile(path.join(
+        workspacePath, ".awb", "agent", "tool-errors", "by_run", "session", "run",
+        "execution-14-call_abort.tool.json",
+      ), "utf8"));
+      assert.equal(artifact.failureKind, "tool");
+      assert.deepEqual(artifact.events.map((event: any) => event.stage), ["provider_execute_rejected"]);
+      assert.deepEqual(artifact.writebacks.map((writeback: any) => [writeback.role, writeback.outcome]), [
+        ["initial_running", "succeeded"], ["inner_failed", "succeeded"],
+      ]);
+    }
   });
 });
 

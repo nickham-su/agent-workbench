@@ -828,12 +828,9 @@ function isAbortLikeError(err: unknown, signal?: AbortSignal) {
   const name = error?.name
     || (typeof record?.name === "string" ? record.name : "");
   const code = typeof record?.code === "string" ? record.code : "";
-  const message = error?.message
-    || (typeof record?.message === "string" ? record.message : "");
+  // Run-level cancellation may be typed by a provider; diagnostic text is not a control signal.
   return name === "AbortError"
-    || code === "ABORT_ERR"
-    || /\babort(ed)?\b/i.test(message)
-    || /\babort(ed)?\b/i.test(name);
+    || code === "ABORT_ERR";
 }
 
 export class FencedWriteIgnoredError extends Error {
@@ -2106,7 +2103,8 @@ export class AgentRunner {
       });
       return { paused: false as const };
     } catch (err) {
-      if (isAbortLikeError(err, signal)) return { paused: false as const };
+      // A tool's own AbortError (or quoted file content) does not cancel its owning run.
+      if (signal.aborted) return { paused: false as const };
       if (err instanceof FencedWriteIgnoredError || err instanceof FencedWriteMissingError) throw err;
       if (err instanceof ControlWritePermanentError) {
         if (phase === "running_writeback") capture?.recordEvent("running_writeback_failed", err);
@@ -2188,7 +2186,7 @@ export class AgentRunner {
     try {
       return await this.executeTool({ ...params, capture });
     } catch (err) {
-      if (params.signal.aborted || isAbortLikeError(err, params.signal)) {
+      if (params.signal.aborted) {
         aborted = true;
         return { paused: false as const };
       }
@@ -2280,6 +2278,10 @@ export class AgentRunner {
     availableToolNames?: ReadonlySet<string>;
     signal: AbortSignal;
   }) {
+    // Running records are not local jobs to resume or policy failures to rewrite.
+    if (params.context.pendingTools.length > 0 && params.context.pendingTools.every((tool) => tool.status === "running")) {
+      return { paused: false as const };
+    }
     const promptContextForAvailability = params.context.tools ? params.context : {
       ...EMPTY_PROMPT_CONTEXT,
       ...params.context,
@@ -2299,6 +2301,10 @@ export class AgentRunner {
     };
 
     for (const item of params.context.pendingTools) {
+      if (item.status !== "queued") {
+        flushSegment();
+        continue;
+      }
       if (!(await this.toolRegistry.isToolEnabled(item.toolName, {
         profile: params.profile,
         promptContext: promptContextForAvailability,
@@ -2355,10 +2361,6 @@ export class AgentRunner {
             catch (storeError) { await this.warnToolErrorStoreFailure({ operation: "publish", error: storeError, workspacePath: params.run.workspacePath }); }
           }
         }
-        continue;
-      }
-      if (item.status !== "queued") {
-        flushSegment();
         continue;
       }
       const toolCallId = String(item.toolCallId || "").trim();
@@ -3664,6 +3666,32 @@ export class AgentRunner {
         return;
       }
 
+      const stopForOrphanedRunningTools = async (context: PromptContext) => {
+        if (context.pendingTools.length === 0 || context.pendingTools.some((tool) => tool.status !== "running")) return false;
+        // Called only after executePendingTools awaited every local batch. Confirm
+        // a fresh, unchanged snapshot; never infer ownership from elapsed time.
+        const refreshed = await this.apiClient.getPromptContext({
+          workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId,
+        });
+        if (signal.aborted) {
+          await finishOnce("cancelled");
+          return true;
+        }
+        if (refreshed.sessionRevision !== context.sessionRevision ||
+          refreshed.pendingTools.length !== context.pendingTools.length ||
+          refreshed.pendingTools.some((tool) => tool.status !== "running")) return false;
+        const executionIds = context.pendingTools.map((tool) => tool.toolExecutionId).sort();
+        const refreshedIds = refreshed.pendingTools.map((tool) => tool.toolExecutionId).sort();
+        if (executionIds.some((id, index) => id !== refreshedIds[index])) return false;
+        // Terminal detail is null by contract. Keep the actionable diagnostic in
+        // logs, without tool arguments, and let API convergence mark running unknown.
+        this.logger.error(`[agent-worker] orphaned running tool executions; no local batch or state progress: ${JSON.stringify({
+          sessionId: run.sessionId, runId: run.runId, executionIds,
+        })}`);
+        await finishOnce("failed");
+        return true;
+      };
+
       let pendingToolNamesSnapshot: ReadonlySet<string> | undefined;
       // A skip is consumed only by the next model step, even when refreshed
       // pending tools must finish before that step can start.
@@ -3690,6 +3718,7 @@ export class AgentRunner {
             if (signal.aborted) await finishOnce("cancelled");
             return;
           }
+          if (await stopForOrphanedRunningTools(context)) return;
           continue;
         }
 
@@ -3724,6 +3753,7 @@ export class AgentRunner {
               if (signal.aborted) await finishOnce("cancelled");
               return;
             }
+            if (await stopForOrphanedRunningTools(context)) return;
             continue;
           }
         }

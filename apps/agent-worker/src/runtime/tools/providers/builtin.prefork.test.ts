@@ -655,6 +655,50 @@ test("apply_patch 仅对明确可恢复的 prepare IO 错误单次重试", async
   assert.equal((result as any).text, "Success. Updated the following files:\n");
 });
 
+for (const fileName of ["normal.md", "operation aborted.md", "EBUSY.md", "ECANCELED.md", "Abort.md"]) {
+  test(`apply_patch 真实倒序 hunk 失败不进入 IO 自动重试: ${fileName}`, async () => {
+    class CountingBuiltinProvider extends BuiltinToolProvider {
+      prepareCalls = 0;
+      applyCalls = 0;
+
+      protected override async prepareApplyPatch(params: {
+        workspacePath: string;
+        patchText: string;
+        signal?: AbortSignal;
+      }) {
+        this.prepareCalls += 1;
+        return await super.prepareApplyPatch(params);
+      }
+
+      protected override async applyPreparedPatch() {
+        this.applyCalls += 1;
+      }
+    }
+
+    const provider = new CountingBuiltinProvider();
+    const oldPath = JSON.stringify(`a/${fileName}`);
+    const newPath = JSON.stringify(`b/${fileName}`);
+    const patchText = [
+      `diff --git ${oldPath} ${newPath}`, `--- ${oldPath}`, `+++ ${newPath}`,
+      "@@ -143,1 +191,2 @@", "-old-later", "+new-later", "+extra",
+      "@@ -135,1 +183,1 @@", "-old-earlier", "+new-earlier"
+    ].join("\n");
+    await assert.rejects(
+      () => provider.execute("apply_patch", { patchText }, createPreforkContext({} as PreforkApiClient)),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /^apply_patch verification failed: INVALID_FORMAT/);
+        assert.ok(error.message.includes(`path '${fileName}'`));
+        assert.match(error.message, /Retryable: no[\s\S]*Repair attempted: no/);
+        assert.match(error.message, /ascending old-file line order/);
+        return true;
+      }
+    );
+    assert.equal(provider.prepareCalls, 1);
+    assert.equal(provider.applyCalls, 0);
+  });
+}
+
 test("apply_patch 不会对 legacy patch 做自动重试且失败文本不重复套壳", async () => {
   class TestBuiltinProvider extends BuiltinToolProvider {
     prepareCalls = 0;

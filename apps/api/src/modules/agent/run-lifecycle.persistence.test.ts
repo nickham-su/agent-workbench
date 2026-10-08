@@ -19,10 +19,15 @@ import { RunLifecycleApplication } from "./lifecycle/run-lifecycle-application.j
 import type { RunLifecycleApplicationDependencies, UserRunActivationInput } from "./lifecycle/run-lifecycle-ports.js";
 import {
   appendMessage,
+  appendStreamingAssistant,
+  completeAssistantWithExecutions,
   createMessageSession,
+  flushStreamingParts,
   getMessageRunState,
   getMessageSessionHead,
+  getToolExecution,
   startMessageRun,
+  updateToolExecution,
 } from "./agent-message.store.js";
 import { createMessageRunRecord, getRunRecord } from "./agent-message.store.js";
 import { SqliteRunLifecyclePersistence } from "./lifecycle/sqlite-run-lifecycle-persistence.js";
@@ -325,6 +330,50 @@ test("P1 real SQLite: recovery final fence observes cancellation and does not en
   assert.deepEqual(runtime.enqueueRunCalls, []);
   assert.equal(getRunRecord(fixture.db, runId)?.status, "cancelled");
   assert.equal(getMessageRunState(fixture.db, workspace.id, sessionId)?.status, "idle");
+});
+
+test("orphaned running real SQLite: failed worker settlement preserves unknown effects and releases session", async () => {
+  const { fixture, workspace, sessionId, createdAt } = await createMessageLifecycleFixture("orphaned tool settlement");
+  const runId = newSortableId("run");
+  createAndActivateRun({ fixture, workspaceId: workspace.id, sessionId, runId, createdAt });
+  const assistantId = newSortableId("msg");
+  const runningPartId = newSortableId("part");
+  const queuedPartId = newSortableId("part");
+  const runningId = newSortableId("exec");
+  const queuedId = newSortableId("exec");
+  const scope = { workspaceId: workspace.id, sessionId, runId };
+  const head = getMessageSessionHead(fixture.db, scope)!;
+  appendStreamingAssistant(fixture.db, {
+    ...scope, id: assistantId, expectedHeadMessageId: head.headMessageId,
+    expectedRevision: head.revision, createdAt: createdAt + 1,
+  });
+  assert.equal(flushStreamingParts(fixture.db, {
+    ...scope, messageId: assistantId, updatedAt: createdAt + 2, parts: [
+      { id: runningPartId, position: 0, type: "tool_call", toolName: "apply_patch", input: {} },
+      { id: queuedPartId, position: 1, type: "tool_call", toolName: "read", input: {} },
+    ],
+  }), "updated");
+  assert.equal(completeAssistantWithExecutions(fixture.db, {
+    ...scope, messageId: assistantId, updatedAt: createdAt + 3, executions: [
+      { id: runningId, callPartId: runningPartId, originSessionId: sessionId, originRunId: runId, status: "queued" },
+      { id: queuedId, callPartId: queuedPartId, originSessionId: sessionId, originRunId: runId, status: "queued" },
+    ],
+  }), "updated");
+  assert.equal(updateToolExecution(fixture.db, {
+    ...scope, executionId: runningId, status: "running", startedAt: createdAt + 4, updatedAt: createdAt + 4,
+  }), "updated");
+  const service = createAgentService(fixture.ctx, fixture.app!.log);
+  assert.equal(service.persistRunTerminalIntentFromWorker({
+    ...scope, status: "failed", code: "run_failed", detail: null, updatedAt: createdAt + 5,
+  }).result, "updated");
+  assert.equal(service.convergeRunTerminalFromWorker({ ...scope, updatedAt: createdAt + 6 }).kind, "transitioned");
+  assert.equal(getRunRecord(fixture.db, runId)?.status, "failed");
+  assert.equal(getRunRecord(fixture.db, runId)?.terminalResultCode, "run_failed");
+  assert.equal(getToolExecution(fixture.db, runningId)?.status, "unknown");
+  assert.equal(getToolExecution(fixture.db, queuedId)?.status, "cancelled");
+  const state = getMessageRunState(fixture.db, workspace.id, sessionId);
+  assert.equal(state?.status, "idle");
+  assert.equal(state?.activeRunId, null);
 });
 
 test("P4 real SQLite: completing an old Run does not idle a newer active Run", async () => {

@@ -154,6 +154,48 @@ test("apply_patch 错误分类收敛到预期语义", () => {
   assert.match(contextText, /Retryable: yes/);
 });
 
+test("apply_patch 锚定格式错误开头优先于正文，非开头格式文本不覆盖真实取消和 IO", () => {
+  const format = classifyApplyPatchFailureMessage(
+    "Invalid unified diff: hunks for path 'operation aborted EBUSY.md' must follow old-file line order."
+  );
+  assert.equal(format.code, "INVALID_FORMAT");
+  assert.equal(format.retryable, false);
+
+  const cancellation = classifyApplyPatchFailureMessage(
+    "operation aborted\nDetails: Invalid unified diff: quoted diagnostic"
+  );
+  assert.equal(cancellation.code, "ABORTED");
+  assert.equal(cancellation.retryable, false);
+
+  for (const message of [
+    "IO_RETRYABLE: update failed for a.txt (EBUSY)\nDetails: Invalid unified diff: quoted diagnostic",
+    "Tool error: Invalid unified diff: quoted diagnostic (EBUSY)"
+  ]) {
+    const io = classifyApplyPatchFailureMessage(message);
+    assert.equal(io.code, "IO_RETRYABLE");
+    assert.equal(io.retryable, true);
+  }
+});
+
+test("apply_patch 真实取消信号仍优先于倒序 hunk 解析", async (t) => {
+  const controller = new AbortController();
+  controller.abort();
+  const realpath = t.mock.method(fs, "realpath", async () => { throw new Error("unexpected workspace I/O"); });
+  const patchText = [
+    "diff --git a/EBUSY.md b/EBUSY.md", "--- a/EBUSY.md", "+++ b/EBUSY.md",
+    "@@ -2,1 +2,1 @@", "-later", "+LATER", "@@ -1,1 +1,1 @@", "-earlier", "+EARLIER"
+  ].join("\n");
+  await assert.rejects(
+    () => prepareApplyPatchTool({ workspacePath: process.cwd(), patchText, signal: controller.signal }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal(classifyApplyPatchFailureMessage(error.message).code, "ABORTED");
+      return true;
+    }
+  );
+  assert.equal(realpath.mock.callCount(), 0);
+});
+
 test("apply_patch 在 prepare 后 update 内容漂移时会失败且不覆盖", async () => {
   await withTempWorkspace(async (workspacePath) => {
     const target = path.join(workspacePath, "drift.txt");
@@ -762,6 +804,208 @@ test("apply_patch 支持 git unified diff 单文件多个 @@ hunk", async () => 
 
     const content = await fs.readFile(target, "utf8");
     assert.equal(content, "a\nb-1\nc\nd-2\n");
+  });
+});
+
+const descendingHunkCases: Array<{
+  name: string;
+  path: string;
+  fileHeaders: string[];
+  oldStarts: Array<number | string>;
+  deleting?: boolean;
+  implicitCounts?: boolean;
+  oldCount?: string;
+}> = [
+  ...["operation aborted.md", "EBUSY.md", "ECANCELED.md"].map((fileName) => ({
+    name: `文件名中的错误词不覆盖格式分类 (${fileName})`,
+    path: fileName,
+    fileHeaders: [
+      `diff --git ${JSON.stringify(`a/${fileName}`)} ${JSON.stringify(`b/${fileName}`)}`,
+      `--- ${JSON.stringify(`a/${fileName}`)}`,
+      `+++ ${JSON.stringify(`b/${fileName}`)}`
+    ],
+    oldStarts: [143, 135]
+  })),
+  {
+    name: "现场结构 22 → 30 → 143 → 135",
+    path: "Abort.md",
+    fileHeaders: ["diff --git a/Abort.md b/Abort.md", "--- a/Abort.md", "+++ b/Abort.md"],
+    oldStarts: [22, 30, 143, 135]
+  },
+  {
+    name: "现场结构 59 → 143 → 135",
+    path: "Abort.md",
+    fileHeaders: ["diff --git a/Abort.md b/Abort.md", "--- a/Abort.md", "+++ b/Abort.md"],
+    oldStarts: [59, 143, 135]
+  },
+  {
+    name: "old-style unified diff",
+    path: "old-style.txt",
+    fileHeaders: ["--- a/old-style.txt", "+++ b/old-style.txt"],
+    oldStarts: [2, 1]
+  },
+  {
+    name: "rename + modify",
+    path: "source.txt",
+    fileHeaders: [
+      "diff --git a/source.txt b/target.txt", "rename from source.txt", "rename to target.txt",
+      "--- a/source.txt", "+++ b/target.txt"
+    ],
+    oldStarts: [2, 1]
+  },
+  {
+    name: "删除文件",
+    path: "deleted.txt",
+    fileHeaders: ["diff --git a/deleted.txt b/deleted.txt", "--- a/deleted.txt", "+++ /dev/null"],
+    oldStarts: [2, 1],
+    deleting: true
+  },
+  {
+    name: "后续文件倒序时前面的文件也不读取",
+    path: "later.txt",
+    fileHeaders: [
+      "diff --git a/first.txt b/first.txt", "--- a/first.txt", "+++ b/first.txt",
+      "@@ -1,1 +1,1 @@", "-first", "+first-updated",
+      "diff --git a/later.txt b/later.txt", "--- a/later.txt", "+++ b/later.txt"
+    ],
+    oldStarts: [2, 1]
+  },
+  {
+    name: "大整数起始行不因 Number 精度丢失漏检",
+    path: "large-start.txt",
+    fileHeaders: ["diff --git a/large-start.txt b/large-start.txt", "--- a/large-start.txt", "+++ b/large-start.txt"],
+    oldStarts: ["9007199254740993", "9007199254740992"]
+  },
+  {
+    name: "计数超出 Number 范围也不跳过起始行比较",
+    path: "large-count.txt",
+    fileHeaders: ["diff --git a/large-count.txt b/large-count.txt", "--- a/large-count.txt", "+++ b/large-count.txt"],
+    oldStarts: [2, 1],
+    oldCount: "9".repeat(310)
+  },
+  {
+    name: "省略单行计数的 hunk",
+    path: "implicit-count.txt",
+    fileHeaders: ["diff --git a/implicit-count.txt b/implicit-count.txt", "--- a/implicit-count.txt", "+++ b/implicit-count.txt"],
+    oldStarts: [2, 1],
+    implicitCounts: true
+  }
+];
+
+for (const item of descendingHunkCases) {
+  test(`apply_patch 在任何 workspace I/O 前拒绝倒序 hunk: ${item.name}`, async (t) => {
+    const realpath = t.mock.method(fs, "realpath", async () => { throw new Error("unexpected workspace I/O"); });
+    const readFile = t.mock.method(fs, "readFile", async () => { throw new Error("unexpected target read"); });
+    const writeFile = t.mock.method(fs, "writeFile", async () => { throw new Error("unexpected target write"); });
+    const headers = item.oldStarts.map((start) => item.implicitCounts
+      ? `@@ -${start} +${start} @@`
+      : `@@ -${start},${item.oldCount || "1"} +${item.deleting ? "0,0" : `${start},1`} @@`);
+    const patchText = [
+      ...item.fileHeaders,
+      ...headers.flatMap((header, index) => [
+        `${header} PRIVATE_SECTION`,
+        `-PRIVATE_BODY_${index}`,
+        ...(item.deleting ? [] : [`+NEW_BODY_${index}`])
+      ])
+    ].join("\n");
+
+    await assert.rejects(() => prepareApplyPatchTool({ workspacePath: process.cwd(), patchText }), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /^Invalid unified diff:/);
+      assert.ok(error.message.includes(`path '${item.path}'`));
+      assert.ok(error.message.includes(`Previous hunk: ${headers.at(-2)}`));
+      assert.ok(error.message.includes(`Current hunk: ${headers.at(-1)}`));
+      assert.match(error.message, /regenerate the patch with hunks in ascending old-file line order/);
+      assert.doesNotMatch(error.message, /PRIVATE_SECTION|PRIVATE_BODY|NEW_BODY/);
+      assert.equal(error.message.includes(process.cwd()), false);
+      const classified = classifyApplyPatchFailureMessage(error.message);
+      assert.equal(classified.code, "INVALID_FORMAT");
+      assert.equal(classified.retryable, false);
+      return true;
+    });
+    assert.equal(realpath.mock.callCount(), 0);
+    assert.equal(readFile.mock.callCount(), 0);
+    assert.equal(writeFile.mock.callCount(), 0);
+  });
+}
+
+test("apply_patch 多文件的 hunk 顺序分别从头判断", async () => {
+  await withTempWorkspace(async (workspacePath) => {
+    await fs.writeFile(path.join(workspacePath, "a.txt"), "a\nb\n", "utf8");
+    await fs.writeFile(path.join(workspacePath, "b.txt"), "x\n", "utf8");
+    const patchText = [
+      "diff --git a/a.txt b/a.txt", "--- a/a.txt", "+++ b/a.txt", "@@ -2,1 +2,1 @@", "-b", "+B",
+      "diff --git a/b.txt b/b.txt", "--- a/b.txt", "+++ b/b.txt", "@@ -1,1 +1,1 @@", "-x", "+X"
+    ].join("\n");
+    const prepared = await prepareApplyPatchTool({ workspacePath, patchText });
+    await applyPreparedPatch({ workspacePath, prepared });
+    assert.equal(await fs.readFile(path.join(workspacePath, "a.txt"), "utf8"), "a\nB\n");
+    assert.equal(await fs.readFile(path.join(workspacePath, "b.txt"), "utf8"), "X\n");
+  });
+});
+
+for (const oldStyle of [false, true]) {
+  test(`apply_patch 同一文件的重复 file block 独立判断顺序 (${oldStyle ? "old-style" : "git"})`, async () => {
+    await withTempWorkspace(async (workspacePath) => {
+      const target = path.join(workspacePath, "repeat.txt");
+      await fs.writeFile(target, "a\nb\n", "utf8");
+      const fileHeaders = [
+        ...(oldStyle ? [] : ["diff --git a/repeat.txt b/repeat.txt"]),
+        "--- a/repeat.txt", "+++ b/repeat.txt"
+      ];
+      const patchText = [
+        ...fileHeaders, "@@ -2,1 +2,1 @@", "-b", "+B",
+        ...fileHeaders, "@@ -1,1 +1,1 @@", "-a", "+A"
+      ].join("\n");
+      const prepared = await prepareApplyPatchTool({ workspacePath, patchText });
+      await applyPreparedPatch({ workspacePath, prepared });
+      assert.equal(await fs.readFile(target, "utf8"), "A\nB\n");
+    });
+  });
+}
+
+test("apply_patch 保留相同起始行和内容匹配的既有行为", async () => {
+  await withTempWorkspace(async (workspacePath) => {
+    const target = path.join(workspacePath, "same-start.txt");
+    await fs.writeFile(target, "a\nb\n", "utf8");
+    const patchText = [
+      "diff --git a/same-start.txt b/same-start.txt", "--- a/same-start.txt", "+++ b/same-start.txt",
+      "@@ -1,1 +1,1 @@", "-a", "+A", "@@ -1,1 +1,1 @@", "-b", "+B"
+    ].join("\n");
+    const prepared = await prepareApplyPatchTool({ workspacePath, patchText });
+    await applyPreparedPatch({ workspacePath, prepared });
+    assert.equal(await fs.readFile(target, "utf8"), "A\nB\n");
+  });
+});
+
+test("apply_patch 顺序校验不增加更新 hunk 的计数或重叠限制", async () => {
+  await withTempWorkspace(async (workspacePath) => {
+    const target = path.join(workspacePath, "counts.txt");
+    await fs.writeFile(target, "a\nb\n", "utf8");
+    const patchText = [
+      "diff --git a/counts.txt b/counts.txt", "--- a/counts.txt", "+++ b/counts.txt",
+      "@@ -1,99 +1,99 @@", "-a", "+A", "@@ -2,99 +2,99 @@", "-b", "+B"
+    ].join("\n");
+    const prepared = await prepareApplyPatchTool({ workspacePath, patchText });
+    await applyPreparedPatch({ workspacePath, prepared });
+    assert.equal(await fs.readFile(target, "utf8"), "A\nB\n");
+  });
+});
+
+test("apply_patch 保留新增文件多 hunk 的原有布局与删除文件正序 hunk", async () => {
+  await withTempWorkspace(async (workspacePath) => {
+    const deleted = path.join(workspacePath, "deleted.txt");
+    await fs.writeFile(deleted, "a\nb\n", "utf8");
+    const patchText = [
+      "diff --git a/new.txt b/new.txt", "--- /dev/null", "+++ b/new.txt",
+      "@@ -0,0 +2,1 @@", "+second", "@@ -0,0 +1,1 @@", "+first",
+      "diff --git a/deleted.txt b/deleted.txt", "--- a/deleted.txt", "+++ /dev/null",
+      "@@ -1,1 +0,0 @@", "-a", "@@ -2,1 +0,0 @@", "-b"
+    ].join("\n");
+    const prepared = await prepareApplyPatchTool({ workspacePath, patchText });
+    await applyPreparedPatch({ workspacePath, prepared });
+    assert.equal(await fs.readFile(path.join(workspacePath, "new.txt"), "utf8"), "first\nsecond\n");
+    await assert.rejects(() => fs.readFile(deleted, "utf8"), { code: "ENOENT" });
   });
 });
 
