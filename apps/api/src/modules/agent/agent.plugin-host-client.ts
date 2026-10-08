@@ -6,7 +6,7 @@ import type {
   PluginToolRpcExecuteResponse,
   PluginToolRpcListRequest,
   PluginToolRpcListResponse
-} from "@agent-workbench/shared";
+} from "@agent-workbench/shared/internal-contracts/agent-api-session";
 
 type RpcError = {
   message?: unknown;

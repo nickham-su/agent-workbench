@@ -1,6 +1,19 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
-import { createAgentSession, createRunRecord } from "./agent.store.js";
+import { Value } from "@sinclair/typebox/value";
+import { getPromptText } from "@agent-workbench/shared/prompts";
+import { AgentApiEndpoints, AgentApiPromptContextResponseSchema } from "@agent-workbench/shared/internal-contracts/agent-api";
+import { createMessageRunRecord } from "./agent-message.store.js";
+import {
+  appendMessage,
+  appendStreamingAssistant,
+  commitCompactionMessageForTest,
+  completeAssistantWithExecutions,
+  createMessageSession,
+  flushStreamingParts,
+  getMessageSessionHead,
+  startMessageRun
+} from "./agent-message.store.js";
 import { newSortableId } from "../../utils/ids.js";
 import {
   createAgentTestFixture,
@@ -24,7 +37,7 @@ afterEach(async () => {
   if (failures.length > 1) throw new AggregateError(failures, "Read-side API fixture cleanup failed");
 });
 
-async function configureReadSideDefaults(fixture: AgentTestFixture) {
+async function configureReadSideDefaults(fixture: AgentTestFixture, tools = ["bash", "read", "write"]) {
   assert.ok(fixture.app);
   const providers = await fixture.app.inject({
     method: "PUT",
@@ -50,7 +63,7 @@ async function configureReadSideDefaults(fixture: AgentTestFixture) {
         name: "default",
         summary: "",
         prompt: "You are a helpful coding assistant.",
-        tools: ["bash", "read", "write"],
+        tools,
         pluginTools: [],
         mcpServers: [],
         defaultModel: { providerId: "ppchat", modelId: "gpt-5.2" },
@@ -62,38 +75,405 @@ async function configureReadSideDefaults(fixture: AgentTestFixture) {
   assert.equal(agents.statusCode, 200, agents.body);
 }
 
-async function createReadSideFixture() {
+async function createReadSideFixture(tools?: string[]) {
   const fixture = await createAgentTestFixture({ withApp: true, agentWorkerConcurrency: 0 });
   fixtures.push(fixture);
   const workspace = await createTestWorkspace(fixture, { title: "read-side API test workspace" });
-  await configureReadSideDefaults(fixture);
+  await configureReadSideDefaults(fixture, tools);
   return { fixture, workspace };
 }
 
-function createRun(fixture: AgentTestFixture, workspaceId: string) {
+function createRun(fixture: AgentTestFixture, workspaceId: string, options: {
+  runKind?: "user" | "manual_compaction";
+  uiLocale?: "zh-CN" | "en-US" | null;
+  subtaskDepth?: number;
+} = {}) {
   const sessionId = newSortableId("sess");
   const runId = newSortableId("run");
   const createdAt = Date.now();
-  createAgentSession(fixture.db, {
+  createMessageSession(fixture.db, {
     id: sessionId,
     workspaceId,
     title: "read-side API test session",
     kind: "primary",
     createdAt
   });
-  createRunRecord(fixture.db, {
+  const head = getMessageSessionHead(fixture.db, { workspaceId, sessionId });
+  assert.ok(head);
+  const triggerMessageId = newSortableId("msg");
+  appendMessage(fixture.db, {
+    id: triggerMessageId,
+    workspaceId,
+    sessionId,
+    expectedHeadMessageId: head.headMessageId,
+    expectedRevision: head.revision,
+    type: "user",
+    status: "completed",
+    originRunId: null,
+    parts: [{ id: newSortableId("part"), position: 0, type: "text", text: "read-side trigger" }],
+    createdAt
+  });
+  createMessageRunRecord(fixture.db, {
     runId,
     workspaceId,
     sessionId,
-    triggerItemId: 1,
+    triggerMessageId,
     agentId: "default",
     providerId: "ppchat",
     modelId: "gpt-5.2",
+    runKind: options.runKind,
+    subtaskDepth: options.subtaskDepth,
+    uiLocale: options.uiLocale,
     status: "running",
     createdAt
   });
+  startMessageRun(fixture.db, { workspaceId, sessionId, runId, updatedAt: createdAt });
   return { sessionId, runId };
 }
+
+test("compaction source forwards the active Run locale without changing oneShotSystem", async () => {
+  const { fixture, workspace } = await createReadSideFixture();
+  assert.ok(fixture.app);
+  for (const uiLocale of ["zh-CN", "en-US", null] as const) {
+    const { sessionId, runId } = createRun(fixture, workspace.id, {
+      runKind: uiLocale === "zh-CN" ? "manual_compaction" : "user",
+      uiLocale,
+    });
+    const response = await injectJson(fixture.app, {
+      method: "POST",
+      url: AgentApiEndpoints.getCompactionSource.path,
+      internalToken: fixture.internalToken,
+      payload: { workspaceId: workspace.id, sessionId, runId },
+    });
+    assert.equal(response.statusCode, 200, response.body);
+    const body = response.json();
+    assert.equal(body.uiLocale, uiLocale);
+    assert.equal(body.oneShotSystem, "");
+  }
+});
+
+test("compaction retained-anchor rejection is a stable conflict response without private context", async () => {
+  const { fixture, workspace } = await createReadSideFixture();
+  assert.ok(fixture.app);
+  const { sessionId, runId } = createRun(fixture, workspace.id, { runKind: "manual_compaction" });
+  const head = getMessageSessionHead(fixture.db, { workspaceId: workspace.id, sessionId });
+  assert.ok(head);
+  appendMessage(fixture.db, {
+    id: "empty-retained-anchor", workspaceId: workspace.id, sessionId,
+    expectedHeadMessageId: head.headMessageId, expectedRevision: head.revision,
+    type: "user", status: "completed",
+    parts: [{ id: "empty-retained-anchor-part", position: 0, type: "text", text: "" }],
+    createdAt: Date.now(),
+  });
+  const current = getMessageSessionHead(fixture.db, { workspaceId: workspace.id, sessionId });
+  assert.ok(current);
+
+  const response = await injectJson(fixture.app, {
+    method: AgentApiEndpoints.commitCompactionWithTerminalIntent.method,
+    url: AgentApiEndpoints.commitCompactionWithTerminalIntent.path,
+    internalToken: fixture.internalToken,
+    payload: {
+      workspaceId: workspace.id, sessionId, runId,
+      messageId: "rejected-summary", textPartId: "rejected-summary-part",
+      expectedHeadMessageId: current.headMessageId, expectedRevision: current.revision,
+      retainedFromMessageId: "empty-retained-anchor", summaryText: "summary",
+      intent: { status: "completed", code: "compaction_completed", detail: null },
+      createdAt: Date.now(),
+    },
+  });
+  assert.equal(response.statusCode, 409, response.body);
+  assert.deepEqual(response.json(), {
+    message: "retained compaction anchor is no longer valid",
+    code: "retained_anchor_invalid",
+  });
+  assert.equal(response.body.includes("encryptedContent"), false);
+});
+
+test("公开 Run 状态查询只返回最小投影，并严格校验 workspace/session/run 归属", async () => {
+  const { fixture, workspace } = await createReadSideFixture();
+  assert.ok(fixture.app);
+  const { sessionId, runId } = createRun(fixture, workspace.id);
+
+  const initial = await fixture.app.inject({
+    method: "GET",
+    url: `/api/agent/sessions/${sessionId}/runs/${runId}?workspaceId=${workspace.id}`,
+  });
+  assert.equal(initial.statusCode, 200, initial.body);
+  const body = JSON.parse(initial.body) as Record<string, unknown>;
+  assert.deepEqual(Object.keys(body).sort(), [
+    "code", "detail", "runId", "runKind",
+    "sessionId", "status", "updatedAt", "workspaceId",
+  ]);
+  assert.equal(body.workspaceId, workspace.id);
+  assert.equal(body.sessionId, sessionId);
+  assert.equal(body.runId, runId);
+  assert.equal(body.status, "running");
+  assert.equal(body.code, null);
+  assert.equal(body.detail, null);
+
+  const document = fixture.app.swagger() as unknown as {
+    paths: Record<string, { get?: { responses?: Record<string, unknown> } }>;
+  };
+  const operation = document.paths["/api/agent/sessions/{sessionId}/runs/{runId}"]?.get;
+  assert.ok(operation, "GET Run status must be documented in OpenAPI");
+  assert.ok(operation.responses?.["409"], "409 terminal invariant response must be documented");
+
+  for (const url of [
+    `/api/agent/sessions/${sessionId}/runs/${runId}?workspaceId=${workspace.id}&extra=x`,
+    `/api/agent/sessions/${sessionId}/runs/${runId}?workspaceId=${workspace.id}&workspaceId=duplicate`,
+    `/api/agent/sessions/${sessionId}/runs/${runId}?workspaceId=`,
+    `/api/agent/sessions/${sessionId}/runs/${runId}`,
+    `/api/agent/sessions/%20/runs/${runId}?workspaceId=${workspace.id}`,
+    `/api/agent/sessions/${sessionId}/runs/%20?workspaceId=${workspace.id}`,
+  ]) {
+    const response: { statusCode: number; body: string } = await fixture.app.inject({ method: "GET", url });
+    assert.equal(response.statusCode, 400, response.body);
+  }
+
+  const intent = await fixture.app.inject({
+    method: "POST", url: "/api/internal/agent/runs/terminal-intent",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken },
+    payload: {
+      workspaceId: workspace.id, sessionId, runId, status: "failed", code: "run_failed", detail: null, updatedAt: 10,
+    },
+  });
+  assert.equal(intent.statusCode, 200, intent.body);
+  const pendingTerminal = await fixture.app.inject({
+    method: "GET",
+    url: `/api/agent/sessions/${sessionId}/runs/${runId}?workspaceId=${workspace.id}`,
+  });
+  assert.equal(pendingTerminal.statusCode, 200, pendingTerminal.body);
+  assert.deepEqual(JSON.parse(pendingTerminal.body), { ...body, updatedAt: 10 });
+  const convergence = await fixture.app.inject({
+    method: "POST", url: "/api/internal/agent/runs/converge-terminal",
+    headers: { "x-awb-agent-internal-token": fixture.internalToken },
+    payload: { workspaceId: workspace.id, sessionId, runId, updatedAt: 10 },
+  });
+  assert.equal(convergence.statusCode, 200, convergence.body);
+  const terminal = await fixture.app.inject({
+    method: "GET",
+    url: `/api/agent/sessions/${sessionId}/runs/${runId}?workspaceId=${workspace.id}`,
+  });
+  assert.equal(terminal.statusCode, 200, terminal.body);
+  assert.deepEqual(JSON.parse(terminal.body), {
+    ...body, status: "failed", code: "run_failed", updatedAt: 10,
+  });
+
+  fixture.db.pragma("ignore_check_constraints = on");
+  fixture.db.prepare(`
+    update agent_run
+    set execution_phase='terminal', status='failed', terminal_result_code=null, terminal_result_detail=null
+    where run_id=?
+  `).run(runId);
+  fixture.db.pragma("ignore_check_constraints = off");
+  const inconsistent = await fixture.app.inject({
+    method: "GET",
+    url: `/api/agent/sessions/${sessionId}/runs/${runId}?workspaceId=${workspace.id}`,
+  });
+  assert.equal(inconsistent.statusCode, 409);
+  assert.match(inconsistent.body, /AGENT_RUN_TERMINAL_INVARIANT/);
+
+  for (const invalidTuple of [
+    { runKind: "user", status: "completed", code: "compaction_completed" },
+    { runKind: "manual_compaction", status: "completed", code: "run_completed" },
+    { runKind: "subtask", status: "failed", code: "run_failed" },
+  ]) {
+    fixture.db.pragma("ignore_check_constraints = on");
+    fixture.db.prepare(`
+      update agent_run
+      set execution_phase='terminal', run_kind=?, status=?, terminal_result_code=?, terminal_result_detail=null
+      where run_id=?
+    `).run(invalidTuple.runKind, invalidTuple.status, invalidTuple.code, runId);
+    fixture.db.pragma("ignore_check_constraints = off");
+    const response: { statusCode: number; body: string } = await fixture.app.inject({
+      method: "GET",
+      url: `/api/agent/sessions/${sessionId}/runs/${runId}?workspaceId=${workspace.id}`,
+    });
+    assert.equal(response.statusCode, 409, response.body);
+    assert.match(response.body, /AGENT_RUN_TERMINAL_INVARIANT/);
+  }
+
+  const wrongWorkspace = await fixture.app.inject({
+    method: "GET",
+    url: `/api/agent/sessions/${sessionId}/runs/${runId}?workspaceId=other-workspace`,
+  });
+  assert.equal(wrongWorkspace.statusCode, 404);
+  const wrongSession = await fixture.app.inject({
+    method: "GET",
+    url: `/api/agent/sessions/not-the-session/runs/${runId}?workspaceId=${workspace.id}`,
+  });
+  assert.equal(wrongSession.statusCode, 404);
+});
+
+function createCompletedToolExecution(fixture: AgentTestFixture, input: { workspaceId: string; sessionId: string; runId: string; result: unknown }) {
+  const now = Date.now();
+  const assistantId = newSortableId("msg");
+  const callPartId = newSortableId("part");
+  const executionId = newSortableId("exec");
+  assert.equal(appendStreamingAssistant(fixture.db, {
+    id: assistantId, workspaceId: input.workspaceId, sessionId: input.sessionId, runId: input.runId,
+    expectedHeadMessageId: getMessageSessionHead(fixture.db, { workspaceId: input.workspaceId, sessionId: input.sessionId })?.headMessageId ?? null,
+    expectedRevision: getMessageSessionHead(fixture.db, { workspaceId: input.workspaceId, sessionId: input.sessionId })?.revision ?? 0,
+    createdAt: now,
+  }).id, assistantId);
+  assert.equal(flushStreamingParts(fixture.db, {
+    workspaceId: input.workspaceId, sessionId: input.sessionId, runId: input.runId, messageId: assistantId, updatedAt: now + 1,
+    parts: [{ id: callPartId, position: 0, type: "tool_call", toolName: "todolist", input: { goal: "test" } }],
+  }), "updated");
+  assert.equal(completeAssistantWithExecutions(fixture.db, {
+    workspaceId: input.workspaceId, sessionId: input.sessionId, runId: input.runId, messageId: assistantId, updatedAt: now + 2,
+    executions: [{ id: executionId, callPartId, originSessionId: input.sessionId, originRunId: input.runId, status: "queued" }],
+  }), "updated");
+  fixture.db.prepare(`update agent_tool_execution set status='completed', result_preview=?, result_truncated=1, result_artifact_path=?, structured_result_json=?, updated_revision=(select revision from agent_session where id=?), updated_at=? where id=?`)
+    .run("brief result", "tool-results/private.json", JSON.stringify(input.result), input.sessionId, now + 3, executionId);
+  return { assistantId, executionId };
+}
+
+test("Compaction source truncates at the earliest pending Assistant and explains the boundary", async () => {
+  const { fixture, workspace } = await createReadSideFixture();
+  assert.ok(fixture.app);
+  const { sessionId, runId } = createRun(fixture, workspace.id);
+  const head = getMessageSessionHead(fixture.db, { workspaceId: workspace.id, sessionId })!;
+  appendStreamingAssistant(fixture.db, {
+    id: "pending-assistant", workspaceId: workspace.id, sessionId, runId,
+    expectedHeadMessageId: head.headMessageId, expectedRevision: head.revision, createdAt: Date.now(),
+  });
+  flushStreamingParts(fixture.db, {
+    workspaceId: workspace.id, sessionId, runId, messageId: "pending-assistant", updatedAt: Date.now(),
+    parts: [{ id: "pending-call", position: 0, type: "tool_call", toolName: "bash", input: { command: "pwd" } }],
+  });
+  completeAssistantWithExecutions(fixture.db, {
+    workspaceId: workspace.id, sessionId, runId, messageId: "pending-assistant", updatedAt: Date.now(),
+    executions: [{ id: "pending-execution", callPartId: "pending-call", originSessionId: sessionId, originRunId: runId, status: "queued" }],
+  });
+
+  const response = await fixture.app.inject({
+    method: "POST",
+    url: "/api/internal/agent/compaction-source",
+    headers: { "x-awb-agent-internal-token": fixture.ctx.agentInternalToken },
+    payload: { workspaceId: workspace.id, sessionId, runId },
+  });
+  assert.equal(response.statusCode, 200, response.body);
+  const source = response.json() as {
+    blocks: Array<{ sourceMessageId: string; toolExecutions: Array<{ status: string }> }>;
+    pendingBoundary: { reason: string; assistantMessageId: string; toolExecutionIds: string[] } | null;
+  };
+  const trigger = fixture.db.prepare(`
+    select trigger_message_id as triggerMessageId
+    from agent_run
+    where run_id = ?
+  `).get(runId) as { triggerMessageId: string };
+  assert.deepEqual(source.blocks.map((block) => block.sourceMessageId), [
+    trigger.triggerMessageId,
+  ]);
+  assert.equal(source.blocks.some((block) => block.sourceMessageId === "pending-assistant"), false);
+  assert.equal(source.blocks.some((block) => block.toolExecutions.some((execution) => (
+    execution.status === "queued" || execution.status === "running"
+  ))), false);
+  assert.deepEqual(source.pendingBoundary, {
+    reason: "pending_tool_execution", assistantMessageId: "pending-assistant", toolExecutionIds: ["pending-execution"],
+  });
+});
+
+test("Compaction source uses physical block order for a stable earliest pending boundary", async () => {
+  const { fixture, workspace } = await createReadSideFixture();
+  assert.ok(fixture.app);
+  const { sessionId, runId } = createRun(fixture, workspace.id);
+  const appendPendingAssistant = (messageId: string, callPartId: string, executionId: string) => {
+    const head = getMessageSessionHead(fixture.db, { workspaceId: workspace.id, sessionId })!;
+    appendStreamingAssistant(fixture.db, {
+      id: messageId, workspaceId: workspace.id, sessionId, runId,
+      expectedHeadMessageId: head.headMessageId, expectedRevision: head.revision, createdAt: Date.now(),
+    });
+    flushStreamingParts(fixture.db, {
+      workspaceId: workspace.id, sessionId, runId, messageId, updatedAt: Date.now(),
+      parts: [{ id: callPartId, position: 0, type: "tool_call", toolName: "bash", input: { command: "pwd" } }],
+    });
+    completeAssistantWithExecutions(fixture.db, {
+      workspaceId: workspace.id, sessionId, runId, messageId, updatedAt: Date.now(),
+      executions: [{ id: executionId, callPartId, originSessionId: sessionId, originRunId: runId, status: "queued" }],
+    });
+  };
+  appendPendingAssistant("first-pending", "first-call", "first-execution");
+  appendPendingAssistant("second-pending", "second-call", "second-execution");
+
+  const response = await fixture.app.inject({
+    method: "POST", url: "/api/internal/agent/compaction-source",
+    headers: { "x-awb-agent-internal-token": fixture.ctx.agentInternalToken },
+    payload: { workspaceId: workspace.id, sessionId, runId },
+  });
+  assert.equal(response.statusCode, 200, response.body);
+  const source = response.json() as {
+    blocks: Array<{ sourceMessageId: string }>;
+    pendingBoundary: { assistantMessageId: string; toolExecutionIds: string[] } | null;
+  };
+  const trigger = fixture.db.prepare("select trigger_message_id as triggerMessageId from agent_run where run_id=?")
+    .get(runId) as { triggerMessageId: string };
+  assert.deepEqual(source.blocks.map((block) => block.sourceMessageId), [trigger.triggerMessageId]);
+  assert.deepEqual(source.pendingBoundary, {
+    reason: "pending_tool_execution",
+    assistantMessageId: "first-pending",
+    toolExecutionIds: ["first-execution"],
+  });
+});
+
+test("ToolExecution detail 仅暴露当前 Session 可见链，timeline 保持轻量", async () => {
+  const { fixture, workspace } = await createReadSideFixture();
+  assert.ok(fixture.app);
+  const { sessionId, runId } = createRun(fixture, workspace.id);
+  const { executionId } = createCompletedToolExecution(fixture, { workspaceId: workspace.id, sessionId, runId, result: { goal: "detail", todos: [{ content: "x", status: "completed" }] } });
+
+  const timeline = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions/${sessionId}/timeline?workspaceId=${workspace.id}` });
+  assert.equal(timeline.statusCode, 200, timeline.body);
+  const timelineExecution = (timeline.json() as any).toolExecutions.find((item: any) => item.id === executionId);
+  assert.equal(timelineExecution.resultPreview, "brief result");
+  assert.equal(Object.hasOwn(timelineExecution, "structuredResult"), false);
+  assert.equal(Object.hasOwn(timelineExecution, "resultArtifactPath"), false);
+
+  const detail = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions/${sessionId}/tool-executions/${executionId}?workspaceId=${workspace.id}` });
+  assert.equal(detail.statusCode, 200, detail.body);
+  const detailBody = detail.json() as any;
+  assert.deepEqual(detailBody.structuredResult, { goal: "detail", todos: [{ content: "x", status: "completed" }] });
+  assert.equal(detailBody.resultArtifactPath, "tool-results/private.json");
+
+  const other = createRun(fixture, workspace.id);
+  const hidden = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions/${other.sessionId}/tool-executions/${executionId}?workspaceId=${workspace.id}` });
+  assert.equal(hidden.statusCode, 404, hidden.body);
+  assert.equal((hidden.json() as any).code, "TOOL_EXECUTION_NOT_FOUND");
+});
+
+test("Timeline 路由将显式 null root 前提传入查询，并在首次压缩后 reset", async () => {
+  const { fixture, workspace } = await createReadSideFixture();
+  assert.ok(fixture.app);
+  const { sessionId, runId } = createRun(fixture, workspace.id);
+  const initial = getMessageSessionHead(fixture.db, { workspaceId: workspace.id, sessionId });
+  assert.ok(initial?.headMessageId);
+
+  const beforeCompaction = await fixture.app.inject({
+    method: "GET",
+    url: `/api/agent/sessions/${sessionId}/timeline?workspaceId=${workspace.id}&mode=delta&sinceRevision=${initial.revision}&knownHeadMessageId=${initial.headMessageId}&knownContextRootIsNull=true`,
+  });
+  assert.equal(beforeCompaction.statusCode, 200, beforeCompaction.body);
+
+  commitCompactionMessageForTest(fixture.db, {
+    id: newSortableId("msg"), workspaceId: workspace.id, sessionId,
+    expectedHeadMessageId: initial.headMessageId, expectedRevision: initial.revision,
+    textPartId: newSortableId("part"), text: "summary", createdAt: Date.now(),
+  });
+  const afterCompaction = await fixture.app.inject({
+    method: "GET",
+    url: `/api/agent/sessions/${sessionId}/timeline?workspaceId=${workspace.id}&mode=delta&sinceRevision=${initial.revision}&knownHeadMessageId=${initial.headMessageId}&knownContextRootIsNull=true`,
+  });
+  assert.equal(afterCompaction.statusCode, 200, afterCompaction.body);
+  assert.equal((afterCompaction.json() as { timelineReset: boolean }).timelineReset, true);
+
+  const conflict = await fixture.app.inject({
+    method: "GET",
+    url: `/api/agent/sessions/${sessionId}/timeline?workspaceId=${workspace.id}&mode=delta&knownContextRootMessageId=${initial.headMessageId}&knownContextRootIsNull=true`,
+  });
+  assert.equal(conflict.statusCode, 400, conflict.body);
+  assert.equal((conflict.json() as { code: string }).code, "TIMELINE_ROOT_PRECONDITION_CONFLICT");
+});
 
 test("read-side internal routes preserve token, body validation, and missing-resource responses", async () => {
   const { fixture, workspace } = await createReadSideFixture();
@@ -192,8 +572,9 @@ test("read-side internal routes preserve token, body validation, and missing-res
   assert.equal(typeof profileBody.runtime?.modelIdleTimeoutMs, "number");
   assert.equal(typeof profileBody.runtime?.modelTotalTimeoutMs, "number");
   assert.equal(typeof profileBody.runtime?.modelRequestMaxRetries, "number");
+  assert.equal(typeof profileBody.runtime?.modelRequestRetryBackoffMaxMs, "number");
   assert.equal(typeof profileBody.runtime?.autoCompactThresholdPct, "number");
-  assert.ok(profileBody.vision === null || typeof profileBody.vision === "object");
+  assert.equal("vision" in profileBody, false);
   assert.ok(profileBody.compaction === null || typeof profileBody.compaction === "object");
 
   const prompt = await injectJson(fixture.app, {
@@ -204,28 +585,350 @@ test("read-side internal routes preserve token, body validation, and missing-res
   });
   assert.equal(prompt.statusCode, 200, prompt.body);
   const promptBody = prompt.json() as any;
-  assert.ok(promptBody.headItemId === null || typeof promptBody.headItemId === "number");
+  assert.ok(promptBody.headMessageId === null || typeof promptBody.headMessageId === "string");
+  assert.equal(typeof promptBody.sessionRevision, "number");
   assert.equal(typeof promptBody.system, "string");
   assert.equal(Array.isArray(promptBody.messages), true);
   assert.equal(Array.isArray(promptBody.tools), true);
   assert.equal(Array.isArray(promptBody.pendingTools), true);
   assert.ok(promptBody.lastResponseTotalTokens === null || typeof promptBody.lastResponseTotalTokens === "number");
   assert.ok(promptBody.uiLocale === null || promptBody.uiLocale === "zh-CN" || promptBody.uiLocale === "en-US");
-  assert.equal(Array.isArray(promptBody.externalSkillRoots), true);
+  assert.equal(Array.isArray(promptBody.externalSkills), true);
   for (const tool of promptBody.tools) {
     assert.equal(typeof tool.name, "string");
     assert.equal(typeof tool.description, "string");
     assert.equal(typeof tool.inputSchema, "object");
   }
   for (const pending of promptBody.pendingTools) {
-    assert.equal(typeof pending.itemId, "number");
-    assert.equal(typeof pending.status, "string");
+    assert.equal(typeof pending.toolExecutionId, "string");
+    assert.equal(typeof pending.callPartId, "string");
+    assert.equal(typeof pending.assistantMessageId, "string");
+    assert.ok(pending.status === "queued" || pending.status === "running");
     assert.equal(typeof pending.toolName, "string");
     assert.equal(typeof pending.args, "object");
   }
-  for (const root of promptBody.externalSkillRoots) {
-    assert.ok(root.sourceType === "workspace" || root.sourceType === "repo");
-    assert.equal(typeof root.rootDir, "string");
-    assert.equal(typeof root.rootPath, "string");
+  for (const skill of promptBody.externalSkills) {
+    assert.equal(typeof skill.skillId, "string");
+    assert.equal(typeof skill.skillDirectoryPath, "string");
   }
+});
+
+test("prompt-context returns queued/running tools with a transcript boundary, then emits complete envelopes after terminal state", async () => {
+  const { fixture, workspace } = await createReadSideFixture();
+  assert.ok(fixture.app);
+  const { sessionId, runId } = createRun(fixture, workspace.id);
+  const createdAt = Date.now();
+  const head = getMessageSessionHead(fixture.db, { workspaceId: workspace.id, sessionId });
+  assert.ok(head);
+  const assistantId = newSortableId("msg");
+  const callPartId = newSortableId("part");
+  const executionId = newSortableId("exec");
+  const { appendStreamingAssistant, flushStreamingParts, completeAssistantWithExecutions, updateToolExecution } = await import("./agent-message.store.js");
+  appendStreamingAssistant(fixture.db, { id: assistantId, workspaceId: workspace.id, sessionId, runId, expectedHeadMessageId: head.headMessageId, expectedRevision: head.revision, createdAt });
+  flushStreamingParts(fixture.db, { workspaceId: workspace.id, sessionId, runId, messageId: assistantId, updatedAt: createdAt + 1, parts: [{ id: callPartId, position: 0, type: "tool_call", toolName: "bash", input: { command: "pwd" }, providerToolCallId: "provider-call" }] });
+  completeAssistantWithExecutions(fixture.db, { workspaceId: workspace.id, sessionId, runId, messageId: assistantId, updatedAt: createdAt + 2, executions: [{ id: executionId, callPartId, originSessionId: sessionId, originRunId: runId, status: "queued" }] });
+  const request = { workspaceId: workspace.id, sessionId, runId };
+  const queued = await injectJson(fixture.app, { method: "POST", url: "/api/internal/agent/prompt-context", internalToken: fixture.internalToken, payload: request });
+  assert.equal(queued.statusCode, 200, queued.body);
+  assert.equal(Value.Check(AgentApiPromptContextResponseSchema, queued.json()), true);
+  const queuedBody = queued.json() as { messages: Array<{ role: string }>; pendingTools: Array<{ toolExecutionId: string; callPartId: string; assistantMessageId: string; status: string }> };
+  assert.deepEqual(queuedBody.pendingTools, [{ toolExecutionId: executionId, callPartId, assistantMessageId: assistantId, status: "queued", toolName: "bash", toolCallId: "provider-call", args: { command: "pwd" } }]);
+  assert.equal(queuedBody.messages.some((message) => message.role === "assistant" || message.role === "tool"), false);
+  updateToolExecution(fixture.db, { workspaceId: workspace.id, sessionId, runId, executionId, status: "running", updatedAt: createdAt + 3 });
+  const running = await injectJson(fixture.app, { method: "POST", url: "/api/internal/agent/prompt-context", internalToken: fixture.internalToken, payload: request });
+  assert.equal(running.statusCode, 200, running.body);
+  assert.equal(Value.Check(AgentApiPromptContextResponseSchema, running.json()), true);
+  assert.equal((running.json() as { pendingTools: Array<{ status: string }> }).pendingTools[0]?.status, "running");
+  updateToolExecution(fixture.db, { workspaceId: workspace.id, sessionId, runId, executionId, status: "completed", resultPreview: "workspace path", updatedAt: createdAt + 4 });
+  const completed = await injectJson(fixture.app, { method: "POST", url: "/api/internal/agent/prompt-context", internalToken: fixture.internalToken, payload: request });
+  assert.equal(completed.statusCode, 200, completed.body);
+  assert.equal(Value.Check(AgentApiPromptContextResponseSchema, completed.json()), true);
+  const completedBody = completed.json() as { pendingTools: unknown[]; messages: Array<{ role: string; content: unknown }> };
+  assert.deepEqual(completedBody.pendingTools, []);
+  assert.deepEqual(completedBody.messages.slice(-2), [
+    { role: "assistant", content: [{ type: "tool-call", toolCallId: "provider-call", toolName: "bash", input: { command: "pwd" } }] },
+    { role: "tool", content: [{ type: "tool-result", toolCallId: "provider-call", toolName: "bash", output: { type: "text", value: "workspace path" } }] }
+  ]);
+});
+
+test("timeline、messages-context 与 archive 不暴露私有 replay，受保护 PromptContext 可读取", async () => {
+  const { fixture, workspace } = await createReadSideFixture();
+  assert.ok(fixture.app);
+  const { sessionId, runId } = createRun(fixture, workspace.id);
+  const head = getMessageSessionHead(fixture.db, { workspaceId: workspace.id, sessionId });
+  assert.ok(head);
+  const assistantId = newSortableId("msg");
+  const secret = "opaque-private-replay-sentinel";
+  appendStreamingAssistant(fixture.db, {
+    id: assistantId, workspaceId: workspace.id, sessionId, runId,
+    expectedHeadMessageId: head.headMessageId, expectedRevision: head.revision, createdAt: Date.now(),
+  });
+  flushStreamingParts(fixture.db, {
+    workspaceId: workspace.id, sessionId, runId, messageId: assistantId, updatedAt: Date.now() + 1,
+    parts: [{
+      id: newSortableId("part"), position: 0, type: "reasoning", text: "visible summary",
+      providerReplay: {
+        version: 1,
+        provider: { npm: "@ai-sdk/openai", api: "responses", providerId: "ppchat", model: "gpt-5.2" },
+        item: { type: "reasoning", itemId: "rs_private", encryptedContent: secret },
+      },
+    }, { id: newSortableId("part"), position: 1, type: "text", text: "public answer" }],
+  });
+  completeAssistantWithExecutions(fixture.db, { workspaceId: workspace.id, sessionId, runId, messageId: assistantId, executions: [], updatedAt: Date.now() + 2 });
+
+  const timeline = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions/${sessionId}/timeline?workspaceId=${workspace.id}` });
+  assert.equal(timeline.statusCode, 200, timeline.body);
+  assert.doesNotMatch(timeline.body, new RegExp(secret));
+  assert.doesNotMatch(timeline.body, /providerReplay|provider_replay_json/);
+
+  const prompt = await injectJson(fixture.app, {
+    method: "POST", url: "/api/internal/agent/prompt-context", internalToken: fixture.internalToken,
+    payload: { workspaceId: workspace.id, sessionId, runId },
+  });
+  assert.equal(prompt.statusCode, 200, prompt.body);
+  const promptBody = prompt.json() as { providerReplay?: Array<{ parts: Array<{ providerReplay: { item: { encryptedContent?: string } } }> }> };
+  assert.equal(promptBody.providerReplay?.[0]?.parts[0]?.providerReplay.item.encryptedContent, secret, prompt.body);
+  assert.doesNotMatch(prompt.body, /provider_replay_json/);
+
+  const messages = await injectJson(fixture.app, {
+    method: "POST", url: "/api/internal/agent/messages-context", internalToken: fixture.internalToken,
+    payload: { workspaceId: workspace.id, sessionId },
+  });
+  assert.equal(messages.statusCode, 200, messages.body);
+  assert.doesNotMatch(messages.body, new RegExp(secret));
+  assert.doesNotMatch(messages.body, /providerReplay|provider_replay_json/);
+
+  const archiveRows = fixture.db.prepare("select text from agent_archived_text_fts").all();
+  assert.doesNotMatch(JSON.stringify(archiveRows), new RegExp(secret));
+});
+
+test("replay-only completed Assistant 仅在受保护 PromptContext 保留原始 ordinal", async () => {
+  const { fixture, workspace } = await createReadSideFixture();
+  assert.ok(fixture.app);
+  const { sessionId, runId } = createRun(fixture, workspace.id);
+  const initial = getMessageSessionHead(fixture.db, { workspaceId: workspace.id, sessionId });
+  assert.ok(initial);
+  appendMessage(fixture.db, {
+    id: "replay-only-user", workspaceId: workspace.id, sessionId,
+    expectedHeadMessageId: initial.headMessageId, expectedRevision: initial.revision,
+    type: "user", status: "completed",
+    parts: [{ id: "replay-only-user-text", position: 0, type: "text", text: "before" }],
+    createdAt: 1,
+  });
+  const afterUser = getMessageSessionHead(fixture.db, { workspaceId: workspace.id, sessionId });
+  assert.ok(afterUser);
+  const secret = "replay-only-private-cipher";
+  appendMessage(fixture.db, {
+    id: "replay-only-assistant", workspaceId: workspace.id, sessionId,
+    expectedHeadMessageId: afterUser.headMessageId, expectedRevision: afterUser.revision,
+    type: "assistant", status: "completed", originRunId: runId,
+    parts: [{
+      id: "replay-only-reasoning", position: 0, type: "reasoning", text: "",
+      providerReplay: {
+        version: 1,
+        provider: { npm: "@ai-sdk/openai", api: "responses", providerId: "ppchat", model: "gpt-5.2" },
+        item: { type: "reasoning", itemId: "replay-only-item", encryptedContent: secret },
+      },
+    }],
+    createdAt: 2,
+  });
+  const afterAssistant = getMessageSessionHead(fixture.db, { workspaceId: workspace.id, sessionId });
+  assert.ok(afterAssistant);
+  appendMessage(fixture.db, {
+    id: "replay-only-next-user", workspaceId: workspace.id, sessionId,
+    expectedHeadMessageId: afterAssistant.headMessageId, expectedRevision: afterAssistant.revision,
+    type: "user", status: "completed",
+    parts: [{ id: "replay-only-next-text", position: 0, type: "text", text: "after" }],
+    createdAt: 3,
+  });
+
+  const prompt = await injectJson(fixture.app, {
+    method: "POST", url: "/api/internal/agent/prompt-context", internalToken: fixture.internalToken,
+    payload: { workspaceId: workspace.id, sessionId, runId },
+  });
+  assert.equal(prompt.statusCode, 200, prompt.body);
+  const promptBody = prompt.json() as {
+    messages: Array<{ role: string; content: unknown }>;
+    providerReplay?: Array<{ assistantOrdinal: number; parts: Array<{ providerReplay: { item: { encryptedContent?: string } } }> }>;
+  };
+  assert.deepEqual(promptBody.messages, [
+    { role: "user", content: "read-side trigger" },
+    { role: "user", content: "before" },
+    { role: "assistant", content: [] },
+    { role: "user", content: "after" },
+  ]);
+  assert.equal(promptBody.providerReplay?.[0]?.assistantOrdinal, 2);
+  assert.equal(promptBody.providerReplay?.[0]?.parts[0]?.providerReplay.item.encryptedContent, secret);
+
+  const messages = await injectJson(fixture.app, {
+    method: "POST", url: "/api/internal/agent/messages-context", internalToken: fixture.internalToken,
+    payload: { workspaceId: workspace.id, sessionId },
+  });
+  assert.equal(messages.statusCode, 200, messages.body);
+  assert.deepEqual((messages.json() as { messages: unknown[] }).messages, [
+    { role: "user", content: "read-side trigger" },
+    { role: "user", content: "before" },
+    { role: "user", content: "after" },
+  ]);
+  assert.doesNotMatch(messages.body, new RegExp(secret));
+});
+
+test("PromptContext 私有 replay 服从当前 contextRoot..head completed 有效链", async () => {
+  const { fixture, workspace } = await createReadSideFixture();
+  assert.ok(fixture.app);
+  const { sessionId, runId } = createRun(fixture, workspace.id);
+  const appendReplayAssistant = (status: "completed" | "failed", encryptedContent: string) => {
+    const head = getMessageSessionHead(fixture.db, { workspaceId: workspace.id, sessionId });
+    assert.ok(head);
+    const messageId = newSortableId("msg");
+    appendStreamingAssistant(fixture.db, { id: messageId, workspaceId: workspace.id, sessionId, runId, expectedHeadMessageId: head.headMessageId, expectedRevision: head.revision, createdAt: Date.now() });
+    flushStreamingParts(fixture.db, {
+      workspaceId: workspace.id, sessionId, runId, messageId, updatedAt: Date.now() + 1,
+      parts: [{
+        id: newSortableId("part"), position: 0, type: "reasoning", text: "summary",
+        providerReplay: {
+          version: 1,
+          provider: { npm: "@ai-sdk/openai", api: "responses", providerId: "ppchat", model: "gpt-5.2" },
+          item: { type: "reasoning", itemId: `rs_${encryptedContent}`, encryptedContent },
+        },
+      }, { id: newSortableId("part"), position: 1, type: "text", text: "answer" }],
+    });
+    if (status === "completed") {
+      completeAssistantWithExecutions(fixture.db, { workspaceId: workspace.id, sessionId, runId, messageId, executions: [], updatedAt: Date.now() + 2 });
+    } else {
+      fixture.db.prepare("update agent_message set status='failed' where id=?").run(messageId);
+    }
+    return messageId;
+  };
+  appendReplayAssistant("completed", "valid-cipher");
+  appendReplayAssistant("failed", "failed-cipher");
+  const response = await injectJson(fixture.app, {
+    method: "POST", url: "/api/internal/agent/prompt-context", internalToken: fixture.internalToken,
+    payload: { workspaceId: workspace.id, sessionId, runId },
+  });
+  assert.equal(response.statusCode, 200, response.body);
+  assert.match(response.body, /valid-cipher/);
+  assert.doesNotMatch(response.body, /failed-cipher/);
+});
+
+test("compaction 替换旧上下文后不额外回放被摘要替换的 reasoning", async () => {
+  const { fixture, workspace } = await createReadSideFixture();
+  assert.ok(fixture.app);
+  const { sessionId, runId } = createRun(fixture, workspace.id);
+  const beforeAssistant = getMessageSessionHead(fixture.db, { workspaceId: workspace.id, sessionId });
+  assert.ok(beforeAssistant);
+  const assistantId = newSortableId("msg");
+  const oldCipher = "compacted-reasoning-must-not-replay";
+  const now = Date.now();
+  appendStreamingAssistant(fixture.db, {
+    id: assistantId,
+    workspaceId: workspace.id,
+    sessionId,
+    runId,
+    expectedHeadMessageId: beforeAssistant.headMessageId,
+    expectedRevision: beforeAssistant.revision,
+    createdAt: now,
+  });
+  flushStreamingParts(fixture.db, {
+    workspaceId: workspace.id,
+    sessionId,
+    runId,
+    messageId: assistantId,
+    updatedAt: now + 1,
+    parts: [{
+      id: newSortableId("part"),
+      position: 0,
+      type: "reasoning",
+      text: "old visible summary",
+      providerReplay: {
+        version: 1,
+        provider: { npm: "@ai-sdk/openai", api: "responses", providerId: "ppchat", model: "gpt-5.2" },
+        item: { type: "reasoning", itemId: "rs-compacted", encryptedContent: oldCipher },
+      },
+    }, {
+      id: newSortableId("part"), position: 1, type: "text", text: "old answer",
+    }],
+  });
+  completeAssistantWithExecutions(fixture.db, {
+    workspaceId: workspace.id, sessionId, runId, messageId: assistantId, executions: [], updatedAt: now + 2,
+  });
+  const beforeCompaction = getMessageSessionHead(fixture.db, { workspaceId: workspace.id, sessionId });
+  assert.ok(beforeCompaction);
+  const compactedId = newSortableId("msg");
+  commitCompactionMessageForTest(fixture.db, {
+    id: compactedId,
+    workspaceId: workspace.id,
+    sessionId,
+    expectedHeadMessageId: beforeCompaction.headMessageId,
+    expectedRevision: beforeCompaction.revision,
+    textPartId: newSortableId("part"),
+    text: "summary replaces older messages",
+    createdAt: now + 3,
+  });
+
+  const response = await injectJson(fixture.app, {
+    method: "POST", url: "/api/internal/agent/prompt-context", internalToken: fixture.internalToken,
+    payload: { workspaceId: workspace.id, sessionId, runId },
+  });
+  assert.equal(response.statusCode, 200, response.body);
+  assert.doesNotMatch(response.body, /old visible summary|old answer|compacted-reasoning-must-not-replay/);
+  const prompt = response.json() as { messages: Array<{ role: string; content: unknown }>; providerReplay?: unknown[] };
+  assert.deepEqual(prompt.messages, [{ role: "system", content: "summary replaces older messages" }]);
+  assert.deepEqual(prompt.providerReplay, []);
+});
+
+test("subtask model schema exposes source only on fork and publishes simplified usage guidance", async () => {
+  const { fixture, workspace } = await createReadSideFixture(["subtask"]);
+  assert.ok(fixture.app);
+  const { sessionId, runId } = createRun(fixture, workspace.id, { subtaskDepth: 0 });
+  const prompt = await injectJson(fixture.app, {
+    method: "POST", url: AgentApiEndpoints.getPromptContext.path,
+    internalToken: fixture.internalToken, payload: { workspaceId: workspace.id, sessionId, runId },
+  });
+  assert.equal(prompt.statusCode, 200, prompt.body);
+  const tool = prompt.json().tools.find((item: { name: string }) => item.name === "subtask");
+  assert.ok(tool);
+  const branches = tool.inputSchema.properties.session.oneOf;
+  assert.deepEqual(branches.map((branch: any) => branch.properties.mode.const), ["new", "existing", "fork"]);
+  for (const branch of branches) {
+    assert.equal(branch.additionalProperties, false);
+    const mode = branch.properties.mode.const;
+    assert.deepEqual(Object.keys(branch.properties).sort(), mode === "fork" ? ["mode", "sourceSessionId"] : mode === "existing" ? ["mode", "sessionId"] : ["mode"]);
+    assert.deepEqual(branch.required, mode === "existing" ? ["mode", "sessionId"] : ["mode"]);
+  }
+  const source = branches[2].properties.sourceSessionId;
+  assert.equal(source.type, "string");
+  assert.equal(source.minLength, 1);
+  assert.match(source.description, /inherit the source session/);
+  assert.match(source.description, /If left blank.*context of the current session/);
+  assert.match(branches[2].description, /full parent-session history as background context/);
+  assert.match(tool.description, /Run a task in a subtask session and bring the result back to the parent session\./);
+  assert.match(tool.description, /implementation and code review cannot be delegated in parallel/);
+  assert.match(tool.description, /prefer fork so the user's intent can be passed to the subtask without loss/);
+  assert.match(tool.description, /the prompt alone cannot capture the user's intent or constraints/);
+  assert.match(tool.description, /If sourceSessionId is not specified.*current session's context/);
+  assert.match(tool.description, /If sourceSessionId is specified.*specified session's context/);
+  assert.match(tool.description, /prefer reusing that session with existing instead of starting over/);
+  assert.match(tool.description, /you must reuse that session to check progress/);
+  assert.match(tool.description, /build on previous results/);
+  assert.match(tool.description, /Result: on success, returns subtaskSessionId and the subtask result text\.\n\nAvailable agents:/);
+  assert.doesNotMatch(tool.description, /prefork|Agent\/profile\/model overrides|automatic-compaction|No message boundary/);
+  assert.doesNotMatch(tool.description, /Concurrent subtasks may reuse the same agentId|Inherited history is background/);
+  assert.equal(JSON.stringify(tool.inputSchema).includes("sourceMessageId"), false);
+  assert.equal(JSON.stringify(tool.inputSchema).includes("excludedInProgress"), false);
+});
+
+test("Fork guards describe parent or explicit stable source in both locales without promising filesystem isolation", () => {
+  const zh = getPromptText("agent/subtask-fork-guard-system-text.zh-CN.txt");
+  const en = getPromptText("agent/subtask-fork-guard-system-text.en-US.txt");
+  assert.match(zh, /父会话或显式指定的来源 Session/);
+  assert.match(zh, /最新稳定有效上下文/);
+  assert.match(zh, /不要继续执行来源任务/);
+  assert.match(zh, /不隔离共享文件或外部资源/);
+  assert.match(en, /parent session or an explicitly specified source Session/);
+  assert.match(en, /latest stable effective context/);
+  assert.match(en, /Do not continue the source task/);
+  assert.match(en, /does not isolate shared files or external resources/);
+  assert.match(zh, /历史消息仅作为背景信息/);
+  assert.match(en, /background information.*do not constitute direct execution instructions/);
 });

@@ -32,8 +32,22 @@ export const UpdateSearchSettingsRequestSchema = Type.Object({
 });
 export type UpdateSearchSettingsRequest = Static<typeof UpdateSearchSettingsRequestSchema>;
 
+export const AgentAiSdkCallSettingsSchema = Type.Object({
+  maxOutputTokens: Type.Optional(Type.Integer({ minimum: 1 })),
+  temperature: Type.Optional(Type.Number()),
+  topP: Type.Optional(Type.Number()),
+  topK: Type.Optional(Type.Number()),
+  presencePenalty: Type.Optional(Type.Number()),
+  frequencyPenalty: Type.Optional(Type.Number()),
+  stopSequences: Type.Optional(Type.Array(Type.String())),
+  seed: Type.Optional(Type.Integer()),
+  headers: Type.Optional(Type.Record(Type.String({ minLength: 1 }), Type.String())),
+  allowSystemInMessages: Type.Optional(Type.Boolean())
+}, { additionalProperties: true });
+export type AgentAiSdkCallSettings = Static<typeof AgentAiSdkCallSettingsSchema>;
+
 export const AgentProviderModelOptionsSchema = Type.Object({
-  aiSdk: Type.Optional(Type.Record(Type.String({ minLength: 1 }), Type.Any())),
+  aiSdk: Type.Optional(AgentAiSdkCallSettingsSchema),
   providerOptionsByKey: Type.Optional(
     Type.Record(Type.String({ minLength: 1 }), Type.Record(Type.String({ minLength: 1 }), Type.Any()))
   )
@@ -53,20 +67,15 @@ export type AgentProviderModel = Static<typeof AgentProviderModelSchema>;
 export const AgentProviderNpmSchema = Type.Union([
   Type.Literal("@ai-sdk/openai"),
   Type.Literal("@ai-sdk/openai-compatible"),
-  Type.Literal("@ai-sdk/anthropic")
+  Type.Literal("@ai-sdk/anthropic"),
+  Type.Literal("@ai-sdk/moonshotai"),
+  Type.Literal("@ai-sdk/deepseek")
 ]);
 export type AgentProviderNpm = Static<typeof AgentProviderNpmSchema>;
 
-export const AgentProviderOpenAiApiModeSchema = Type.Union([
-  Type.Literal("responses"),
-  Type.Literal("chatCompletions")
-]);
-export type AgentProviderOpenAiApiMode = Static<typeof AgentProviderOpenAiApiModeSchema>;
-
 export const AgentProviderOptionsInputSchema = Type.Object({
   baseURL: Type.String({ minLength: 1 }),
-  apiKey: Type.Optional(Type.Union([Type.String(), Type.Null()])),
-  apiMode: Type.Optional(AgentProviderOpenAiApiModeSchema)
+  apiKey: Type.Optional(Type.Union([Type.String(), Type.Null()]))
 });
 export type AgentProviderOptionsInput = Static<typeof AgentProviderOptionsInputSchema>;
 
@@ -101,8 +110,7 @@ export type UpdateAgentProvidersSettingsRequest = Static<typeof UpdateAgentProvi
 export const AgentProviderOptionsViewSchema = Type.Object({
   baseURL: Type.String({ minLength: 1 }),
   hasApiKey: Type.Boolean(),
-  apiKeyMasked: Type.Union([Type.String(), Type.Null()]),
-  apiMode: Type.Optional(AgentProviderOpenAiApiModeSchema)
+  apiKeyMasked: Type.Union([Type.String(), Type.Null()])
 });
 export type AgentProviderOptionsView = Static<typeof AgentProviderOptionsViewSchema>;
 
@@ -205,12 +213,13 @@ export const AgentRuntimeSettingsSchema = Type.Object({
   // 0 表示关闭;单位毫秒。
   modelIdleTimeoutMs: Type.Integer({ minimum: 0 }),
   modelTotalTimeoutMs: Type.Integer({ minimum: 0 }),
-  // 模型请求首包前失败时的最大重试次数(0 表示不重试)。
+  // 主模型请求和上下文压缩摘要请求失败后的额外重试次数(0 表示不重试)。
   modelRequestMaxRetries: Type.Integer({ minimum: 0, maximum: 100 }),
+  // 主模型请求和压缩摘要重试的指数退避最大等待时间,单位毫秒。
+  modelRequestRetryBackoffMaxMs: Type.Integer({ minimum: 2_000, maximum: 3_600_000 }),
   // 自动压缩阈值百分比,达到 model.contextWindowTokens * pct/100 触发压缩。
   autoCompactThresholdPct: Type.Integer({ minimum: 50, maximum: 99 }),
   maxSubtaskDepth: Type.Integer({ minimum: 1, maximum: 5 }),
-  visionModel: Type.Union([AgentProvidersDefaultSchema, Type.Null()]),
   // 上下文压缩摘要的默认模型;未配置时使用当前 Agent 模型。
   compactionModel: Type.Union([AgentProvidersDefaultSchema, Type.Null()]),
   sessionTerminalSoundEnabled: Type.Boolean(),
@@ -222,9 +231,9 @@ export const UpdateAgentRuntimeSettingsRequestSchema = Type.Object({
   modelIdleTimeoutMs: Type.Optional(Type.Integer({ minimum: 0 })),
   modelTotalTimeoutMs: Type.Optional(Type.Integer({ minimum: 0 })),
   modelRequestMaxRetries: Type.Optional(Type.Integer({ minimum: 0, maximum: 100 })),
+  modelRequestRetryBackoffMaxMs: Type.Optional(Type.Integer({ minimum: 2_000, maximum: 3_600_000 })),
   autoCompactThresholdPct: Type.Optional(Type.Integer({ minimum: 50, maximum: 99 })),
   maxSubtaskDepth: Type.Optional(Type.Integer({ minimum: 1, maximum: 5 })),
-  visionModel: Type.Optional(Type.Union([AgentProvidersDefaultSchema, Type.Null()])),
   compactionModel: Type.Optional(Type.Union([AgentProvidersDefaultSchema, Type.Null()])),
   sessionTerminalSoundEnabled: Type.Optional(Type.Boolean())
 });
@@ -258,10 +267,10 @@ export const AgentToolNameSchema = Type.Union([
   Type.Literal("scratchpad"),
   Type.Literal("todolist"),
   Type.Literal("subtask"),
-  Type.Literal("archive_search"),
   Type.Literal("skill"),
+  Type.Literal("view_image"),
   Type.Literal("archive_read"),
-  Type.Literal("visual_analyze")
+  Type.Literal("archive_search")
 ]);
 export type AgentToolName = Static<typeof AgentToolNameSchema>;
 

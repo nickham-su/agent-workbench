@@ -1,10 +1,10 @@
-import type { AgentContextItemRecord, AgentContextItemStatus, AgentContextToolName, AgentUiLocale } from "@agent-workbench/shared";
+import type { AgentUiLocale } from "@agent-workbench/shared/internal-contracts/agent-api-session";
+import type { AgentApiPromptContextResponse } from "@agent-workbench/shared/internal-contracts/agent-api";
 import type { PromptStaticProfile, RunPromptStatic } from "../prompt/prompt-static-assembler.js";
 import { RunPromptStaticCache } from "../prompt/run-prompt-static-cache.js";
+import type { ResolvedPendingTool, ResolvedRunSnapshot } from "./model-context-resolver.js";
 
 export type PromptContextProjectorDependencies<Message> = {
-  getRunState: (input: { workspaceId: string; sessionId: string }) => { activeRunId: string | null; lastResponseTotalTokens: number | null };
-  resolveUiLocale: (input: { workspaceId: string; sessionId: string; activeRunId: string | null }) => AgentUiLocale | null;
   resolveProfile: (input: {
     surface: "user" | "subtask";
     workspaceId: string;
@@ -20,8 +20,20 @@ export type PromptContextProjectorDependencies<Message> = {
   }) => Promise<RunPromptStatic>;
   buildRuntimeInstruction: (input: { uiLocale: AgentUiLocale | null }) => string;
   appendRuntimeConstraints: (systemStatic: string, runtimeInstruction: string) => string;
-  listVisibleItems: (input: { workspaceId: string; sessionId: string }) => AgentContextItemRecord[];
-  buildMessages: (input: { workspaceId: string; sessionId: string; compactionSnippetUiLocale: AgentUiLocale | null }) => Promise<{ messages: Message[] }>;
+  resolveDynamicContext: (input: {
+    workspaceId: string;
+    sessionId: string;
+    runId: string;
+  }) => Promise<{
+    headMessageId: string | null;
+    sessionRevision: number;
+    run: ResolvedRunSnapshot;
+    pendingTools: ResolvedPendingTool[];
+    lastResponseTotalTokens: number | null;
+    uiLocale: AgentUiLocale | null;
+    messages: Message[];
+    providerReplay?: AgentApiPromptContextResponse["providerReplay"];
+  }>;
 };
 
 /** Composes cached static prompt data with the run/session dynamic read-side data. */
@@ -34,69 +46,44 @@ export class PromptContextProjector<Message> {
   async getPromptContextForRun(input: {
     workspaceId: string;
     sessionId: string;
-    session: { kind: "primary" | "subtask"; headItemId: number | null };
-    run: { runId: string; subtaskDepth: number | null; agentId: string; providerId: string; modelId: string };
+    session: { kind: "primary" | "subtask"; headMessageId: string | null; revision: number };
+    run: { runId: string; subtaskDepth: number | null; agentId: string; providerId: string; modelId: string; triggerMessageId: string | null };
   }) {
-    // Preserve the legacy order: profile validation precedes dynamic run-state reads,
-    // including when an already-built static prompt is reused from cache.
+    const cacheGeneration = this.cache.generation(input.run.runId);
+    const dynamic = await this.dependencies.resolveDynamicContext({
+      workspaceId: input.workspaceId, sessionId: input.sessionId, runId: input.run.runId,
+    });
     const profile = this.dependencies.resolveProfile({
       surface: input.session.kind === "subtask" ? "subtask" : "user",
       workspaceId: input.workspaceId,
-      agentId: input.run.agentId,
-      providerId: input.run.providerId,
-      modelId: input.run.modelId
+      agentId: dynamic.run.agentId,
+      providerId: dynamic.run.providerId,
+      modelId: dynamic.run.modelId
     });
-    const runState = this.dependencies.getRunState({ workspaceId: input.workspaceId, sessionId: input.sessionId });
-    const uiLocale = this.dependencies.resolveUiLocale({
+    const staticPrompt = await this.cache.getOrCreate(dynamic.run.runId, Date.now(), () => this.dependencies.assembleStatic({
       workspaceId: input.workspaceId,
-      sessionId: input.sessionId,
-      activeRunId: runState.activeRunId
-    });
-    const staticPrompt = await this.cache.getOrCreate(input.run.runId, Date.now(), () => this.dependencies.assembleStatic({
-      workspaceId: input.workspaceId,
-      run: input.run,
+      run: dynamic.run,
       profile,
-      uiLocale
-    }));
+      uiLocale: dynamic.uiLocale
+    }), cacheGeneration);
+    if (!this.cache.isCurrent(dynamic.run.runId, cacheGeneration)) {
+      throw new Error("prompt static cache was invalidated while assembling context");
+    }
     const system = this.dependencies.appendRuntimeConstraints(
       staticPrompt.systemStatic,
-      this.dependencies.buildRuntimeInstruction({ uiLocale })
+      this.dependencies.buildRuntimeInstruction({ uiLocale: dynamic.uiLocale })
     );
-    const visible = this.dependencies.listVisibleItems({ workspaceId: input.workspaceId, sessionId: input.sessionId });
-    const { messages } = await this.dependencies.buildMessages({
-      workspaceId: input.workspaceId,
-      sessionId: input.sessionId,
-      compactionSnippetUiLocale: uiLocale
-    });
-    const pendingTools = visible
-      .filter((item) => item.runId === input.run.runId && item.kind === "tool")
-      .filter((item) => item.status === "queued" || item.status === "running")
-      .map((item) => {
-        if (item.output.type !== "tool") return null;
-        return {
-          itemId: item.id,
-          status: item.status,
-          toolName: item.output.toolName,
-          toolCallId: item.output.toolCallId,
-          args: item.output.args ?? {}
-        };
-      })
-      .filter((item): item is {
-        itemId: number;
-        status: AgentContextItemStatus;
-        toolName: AgentContextToolName;
-        toolCallId: string | undefined;
-        args: Record<string, unknown>;
-      } => item !== null);
     return {
-      headItemId: input.session.headItemId,
+      headMessageId: dynamic.headMessageId,
+      sessionRevision: dynamic.sessionRevision,
       system,
-      messages,
+      messages: dynamic.messages,
+      ...(dynamic.providerReplay == null ? {} : { providerReplay: dynamic.providerReplay }),
       tools: staticPrompt.tools,
-      pendingTools,
-      lastResponseTotalTokens: runState.lastResponseTotalTokens,
-      uiLocale,
-      externalSkillRoots: staticPrompt.externalSkillRoots
+      pendingTools: dynamic.pendingTools,
+      lastResponseTotalTokens: dynamic.lastResponseTotalTokens,
+      uiLocale: dynamic.uiLocale,
+      externalSkills: staticPrompt.externalSkills
     };
   }
 }

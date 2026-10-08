@@ -11,7 +11,7 @@ function createApplication(params?: { workspaceExists?: boolean; hasRun?: boolea
       listRecentSessions: (limit, kind) => { calls.push(["sessions", limit, kind]); return [{ id: "session" }] as any; },
       listRecentWorkspaces: (limit) => { calls.push(["workspaces", limit]); return [{ id: "workspace" }] as any; },
       getRun: (runId) => params?.hasRun === false ? null : { runId },
-      getLatestTerminalAssistantText: () => ({ itemId: 1, text: "final" })
+      getLatestTerminalAssistantText: () => ({ messageId: "message-final", text: "final" })
     },
     availableAgentsQuery: {
       listUserAgents: (workspaceId) => {

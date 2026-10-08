@@ -15,6 +15,7 @@ export async function registerAgentRoutes(
     service: AgentService;
     runtime: AgentRuntimePort;
     internalToken: string;
+    dataDir: string;
     pluginHost?: AgentPluginHostClient | null;
     runCompletedEventHub: AgentRunCompletedEventHub;
   }

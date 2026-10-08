@@ -4,9 +4,9 @@ import { HttpError } from "../../app/errors.js";
 import { AUTH_COOKIE_NAME, parseCookieHeader, verifySessionCookieValue } from "../../infra/auth/sessionCookie.js";
 import { tmuxCountClients, tmuxHasSession } from "../../infra/tmux/session.js";
 import { nowMs } from "../../utils/time.js";
-import { getTerminal, updateTerminalStatus } from "./terminal.store.js";
+import { getTerminal } from "./terminal.store.js";
 import { getWorkspace } from "../workspaces/workspace.store.js";
-import { cleanupTerminalGitAuthArtifacts } from "./terminal.gitAuth.js";
+import { settleTerminalAfterSessionStopped } from "./terminal.service.js";
 import * as pty from "node-pty";
 
 type WsClientMessage =
@@ -104,10 +104,9 @@ export async function registerTerminalWsRoute(app: FastifyInstance, ctx: AppCont
         const ws = getWorkspace(ctx.db, term.workspaceId);
         if (!ws) throw new HttpError(404, "Workspace not found");
 
-        const exists = await tmuxHasSession({ sessionName: term.sessionName, cwd: ctx.dataDir });
-        if (!exists) {
-          updateTerminalStatus(ctx.db, term.id, "closed", nowMs());
-          await cleanupTerminalGitAuthArtifacts(ctx.dataDir, term.id);
+        const presence = await tmuxHasSession({ sessionName: term.sessionName, cwd: ctx.dataDir });
+        if (presence === "not_found") {
+          await settleTerminalAfterSessionStopped(ctx, app.log, term.id);
           throw new HttpError(410, "tmux session not found (may have exited)");
         }
 

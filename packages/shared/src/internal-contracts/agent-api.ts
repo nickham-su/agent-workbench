@@ -1,58 +1,105 @@
-import { AgentApiContextItemPathTemplate, buildAgentApiContextItemPath } from "./agent-api-context.js";
-
 export const AgentApiEndpoints = {
-  updateRunState: {
+  createStreamingAssistant: {
     method: "POST",
-    path: "/api/internal/agent/run-state"
+    path: "/api/internal/agent/messages/assistant",
   },
-  completeRun: {
+  flushAssistantParts: {
     method: "POST",
-    path: "/api/internal/agent/run-complete"
+    path: "/api/internal/agent/messages/assistant/parts",
   },
-  createContextItem: {
+  resumeStreamingAssistant: {
     method: "POST",
-    path: "/api/internal/agent/context-items"
+    path: "/api/internal/agent/messages/assistant/resume",
   },
-  updateContextItem: {
-    method: "PATCH",
-    path: buildAgentApiContextItemPath,
-    routeTemplate: AgentApiContextItemPathTemplate
-  },
-  compactContext: {
+  replaceStreamingAssistant: {
     method: "POST",
-    path: "/api/internal/agent/context/compact"
+    path: "/api/internal/agent/messages/assistant/replace",
+  },
+  discardStreamingAssistant: {
+    method: "POST",
+    path: "/api/internal/agent/messages/assistant/discard",
+  },
+  completeAssistant: {
+    method: "POST",
+    path: "/api/internal/agent/messages/assistant/complete",
+  },
+  completeTerminalAssistant: {
+    method: "POST",
+    path: "/api/internal/agent/messages/assistant/complete-terminal",
+  },
+  updateToolExecution: {
+    method: "POST",
+    path: "/api/internal/agent/tool-executions/update",
+  },
+  updateRunNotice: {
+    method: "POST",
+    path: "/api/internal/agent/run-notice",
+  },
+  commitCompactionWithTerminalIntent: {
+    method: "POST",
+    path: "/api/internal/agent/messages/compaction/complete",
+  },
+  confirmCompactionCommit: {
+    method: "POST",
+    path: "/api/internal/agent/messages/compaction/confirm",
+  },
+  markRunWorkInProgress: {
+    method: "POST",
+    path: "/api/internal/agent/runs/work-in-progress",
+  },
+  persistRunTerminalIntent: {
+    method: "POST",
+    path: "/api/internal/agent/runs/terminal-intent",
+  },
+  convergeRunTerminal: {
+    method: "POST",
+    path: "/api/internal/agent/runs/converge-terminal",
   },
   getSubtaskPreforkPlan: {
     method: "POST",
-    path: "/api/internal/agent/subtask/prefork-plan"
+    path: "/api/internal/agent/subtask/prefork-plan",
   },
   startSubtask: {
     method: "POST",
-    path: "/api/internal/agent/subtask/start"
+    path: "/api/internal/agent/subtask/start",
   },
   getSubtaskResult: {
     method: "POST",
-    path: "/api/internal/agent/subtask/result"
+    path: "/api/internal/agent/subtask/result",
   },
   getSubtaskStatus: {
     method: "POST",
-    path: "/api/internal/agent/subtask/status"
+    path: "/api/internal/agent/subtask/status",
   },
   getExecutionProfile: {
     method: "POST",
-    path: "/api/internal/agent/execution-profile"
+    path: "/api/internal/agent/execution-profile",
   },
   getPromptContext: {
     method: "POST",
-    path: "/api/internal/agent/prompt-context"
+    path: "/api/internal/agent/prompt-context",
   },
   getMessagesContext: {
     method: "POST",
-    path: "/api/internal/agent/messages-context"
-  }
+    path: "/api/internal/agent/messages-context",
+  },
+  getCompactionSource: {
+    method: "POST",
+    path: "/api/internal/agent/compaction-source",
+  },
+  archiveRead: {
+    method: "POST",
+    path: "/api/internal/agent/archive/read",
+  },
+  archiveSearch: {
+    method: "POST",
+    path: "/api/internal/agent/archive/search",
+  },
 } as const;
 
 export * from "./agent-api-run.js";
-export * from "./agent-api-context.js";
+export * from "./agent-api-message.js";
 export * from "./agent-api-subtask.js";
 export * from "./agent-api-read.js";
+export * from "./agent-image.js";
+export * from "./agent-provider-replay.js";

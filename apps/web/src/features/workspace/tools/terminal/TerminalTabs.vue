@@ -57,7 +57,7 @@
           </template>
           <div class="h-full flex flex-col min-h-0">
             <div class="flex-1 min-h-0">
-              <TerminalView :terminal="term" :active="effectiveActiveKey === term.id" @exited="onTerminalExited"/>
+              <TerminalView :terminal="term" :active="effectiveActiveKey === term.id" @exited="onTerminalExited" @invalidated="onTerminalInvalidated"/>
             </div>
           </div>
         </a-tab-pane>
@@ -98,6 +98,7 @@ const emit = defineEmits<{
   deleted: [];
   minimize: [];
   terminalExited: [terminalId: string];
+  terminalInvalidated: [terminalId: string];
 }>();
 
 const { t } = useI18n();
@@ -262,21 +263,35 @@ async function createOne() {
 }
 
 function confirmDelete(terminalId: string) {
+  let deleting = false;
   Modal.confirm({
     title: t("terminal.confirmClose.title"),
     content: t("terminal.confirmClose.content"),
     okText: t("terminal.confirmClose.ok"),
     okType: "danger",
     cancelText: t("terminal.confirmClose.cancel"),
-    onOk: async () => {
-      await deleteTerminal(terminalId);
-      emit("deleted");
+    onOk: (close) => {
+      if (deleting) return;
+      deleting = true;
+      void deleteTerminal(terminalId)
+        .then(() => {
+          emit("deleted");
+          close();
+        })
+        .catch((err) => {
+          deleting = false;
+          message.error(err instanceof Error ? err.message : String(err));
+        });
     }
   });
 }
 
 function onTerminalExited(payload: { terminalId: string; exitCode: number }) {
   emit("terminalExited", payload.terminalId);
+}
+
+function onTerminalInvalidated(terminalId: string) {
+  emit("terminalInvalidated", terminalId);
 }
 </script>
 

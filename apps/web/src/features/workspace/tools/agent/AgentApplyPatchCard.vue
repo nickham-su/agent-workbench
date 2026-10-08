@@ -1,49 +1,31 @@
 <template>
-  <div>
-    <div class="flex flex-col gap-0.5">
-      <div v-for="(file, idx) in files" :key="`${file.path}-${idx}`">
-        <div
-          class="flex items-center gap-2 min-w-0 flex-wrap w-full pl-2 pr-0 py-0.5 rounded cursor-pointer hover:bg-[var(--hover-bg)] transition-colors duration-100 font-mono text-[color:var(--text-secondary)]"
-          role="button"
-          tabindex="0"
-          @click="openFileDiff(file.path)"
-          @keydown.enter.prevent="openFileDiff(file.path)"
-          @keydown.space.prevent="openFileDiff(file.path)"
-        >
-          <span class="min-w-0 inline-flex items-baseline gap-0 max-w-full">
-            <span class="shrink-0">applypatch(</span>
-            <span class="min-w-0 truncate" :title="file.path">{{ file.path }}</span>
-            <span class="shrink-0">)</span>
-            <span class="shrink-0 ml-1">[+{{ file.additions }} -{{ file.deletions }}]</span>
-          </span>
-        </div>
-      </div>
-    </div>
-
-    <div v-if="errorText" class="pl-2 pr-0 text-red-500 py-0.5">error: {{ errorText }}</div>
-  </div>
+  <AgentToolCallRow
+    tool-name="apply_patch"
+    :input="input"
+    :execution="execution"
+    :now="now"
+    :interactive="canOpen"
+    :loading="opening"
+    @activate="openAllDiffs"
+  />
 </template>
 
 <script setup lang="ts">
+import type { AgentTimelineToolExecution } from "@agent-workbench/shared";
 import { message } from "ant-design-vue";
+import { computed, onBeforeUnmount, onBeforeUpdate, ref, watch } from "vue";
 import { useWorkspaceHost } from "@/features/workspace/host";
 import { inferLanguageFromPath } from "@/shared/monaco/languageUtils";
+import AgentToolCallRow from "./AgentToolCallRow.vue";
+import { runAgentArtifactOpenRequest } from "./agentArtifactOpenController";
+import { createAgentArtifactRequestGuard } from "./agentArtifactRequestGuard";
 
-type ApplyPatchFileMeta = {
+type ApplyPatchUiArtifactFile = {
   type: "add" | "update" | "delete" | "move";
   path: string;
   fromPath?: string;
   additions: number;
   deletions: number;
-};
-
-type ApplyPatchSummary = {
-  fileCount: number;
-  additions: number;
-  deletions: number;
-};
-
-type ApplyPatchUiArtifactFile = ApplyPatchFileMeta & {
   before: string;
   after: string;
 };
@@ -54,7 +36,6 @@ type ApplyPatchUiArtifact = {
   workspaceId: string;
   toolCallId: string;
   createdAt: number;
-  summary: ApplyPatchSummary;
   files: ApplyPatchUiArtifactFile[];
 };
 
@@ -62,28 +43,57 @@ const props = defineProps<{
   workspaceId: string;
   toolId: string;
   sessionId: string;
-  itemId: number;
-  toolCallId?: string;
-  summary: ApplyPatchSummary;
-  files: ApplyPatchFileMeta[];
-  omittedFiles: number;
-  errorText?: string;
+  toolExecutionId?: string;
+  input: unknown;
+  execution: AgentTimelineToolExecution | null;
+  now: number;
 }>();
 
 const host = useWorkspaceHost(props.toolId);
+const opening = ref(false);
+const canOpen = computed(
+  () => !!props.toolExecutionId && props.execution?.status === "completed",
+);
 const artifactCache = new Map<string, Promise<ApplyPatchUiArtifact>>();
+const requestGuard = createAgentArtifactRequestGuard({
+  workspaceId: props.workspaceId,
+  sessionId: props.sessionId,
+  executionId: props.toolExecutionId || "",
+});
+watch(
+  () => [props.workspaceId, props.sessionId, props.toolExecutionId || ""] as const,
+  ([workspaceId, sessionId, executionId]) =>
+    requestGuard.update({ workspaceId, sessionId, executionId }),
+  { flush: "sync" },
+);
+onBeforeUpdate(() =>
+  requestGuard.update({
+    workspaceId: props.workspaceId,
+    sessionId: props.sessionId,
+    executionId: props.toolExecutionId || "",
+  }),
+);
+onBeforeUnmount(() => requestGuard.dispose());
 
 function cacheKey() {
-  return `${props.workspaceId}:${props.toolCallId || props.itemId}`;
+  return `${props.workspaceId}:${props.sessionId}:${props.toolExecutionId || ""}`;
 }
 
-async function fetchArtifact() {
+async function fetchArtifact(request: ReturnType<typeof requestGuard.begin>) {
   const key = cacheKey();
   const existing = artifactCache.get(key);
-  if (existing) return existing;
+  if (existing) {
+    try {
+      return await existing;
+    } finally {
+      request.finish();
+    }
+  }
+  const executionId = props.toolExecutionId;
+  if (!executionId) throw new Error("apply_patch execution unavailable");
   const promise = (async () => {
-    const url = `/api/agent/sessions/${encodeURIComponent(props.sessionId)}/context-items/${props.itemId}/apply-patch-artifact`;
-    const response = await fetch(url);
+    const url = `/api/agent/sessions/${encodeURIComponent(props.sessionId)}/tool-executions/${encodeURIComponent(executionId)}/apply-patch-artifact?workspaceId=${encodeURIComponent(props.workspaceId)}`;
+    const response = await fetch(url, { signal: request.signal });
     if (!response.ok) {
       const text = await response.text().catch(() => "");
       throw new Error(text || `http ${response.status}`);
@@ -93,40 +103,51 @@ async function fetchArtifact() {
   artifactCache.set(key, promise);
   try {
     return await promise;
-  } catch (err) {
+  } catch (error) {
     artifactCache.delete(key);
-    throw err;
+    throw error;
+  } finally {
+    request.finish();
   }
 }
 
-async function openFileDiff(pathValue: string) {
-  const p = String(pathValue || "").trim();
-  if (!p) return;
-  if (!props.toolCallId) {
-    message.error("missing toolCallId");
-    return;
-  }
+async function openAllDiffs() {
+  if (!canOpen.value || opening.value) return;
+  opening.value = true;
   try {
-    const artifact = await fetchArtifact();
-    const file = artifact.files.find((item) => item.path === p);
-    if (!file) {
-      message.error(`diff unavailable: ${p}`);
-      return;
-    }
-    host.call("editor", {
-      type: "editor.openDiff",
-      payload: {
-        original: file.before || "",
-        modified: file.after || "",
-        path: p,
-        language: inferLanguageFromPath(p),
-        title: p,
-        tabKey: `agent:applyPatch:${props.toolCallId}:${p}`,
-        source: "agent.applyPatch"
-      }
+    await runAgentArtifactOpenRequest({
+      guard: requestGuard,
+      fetchArtifact,
+      onArtifact: (artifact) => {
+        const executionId = props.toolExecutionId;
+        const files = Array.isArray(artifact.files)
+          ? artifact.files.filter((file) => String(file.path || "").trim())
+          : [];
+        if (!executionId || files.length === 0) {
+          message.error("diff unavailable");
+          return;
+        }
+        for (const file of files) {
+          const path = String(file.path).trim();
+          host.call("editor", {
+            type: "editor.openDiff",
+            payload: {
+              original: file.before || "",
+              modified: file.after || "",
+              path,
+              language: inferLanguageFromPath(path),
+              title: path,
+              tabKey: `agent:applyPatch:${executionId}:${path}`,
+              source: "agent.applyPatch",
+            },
+          });
+        }
+      },
+      onError: (error) =>
+        message.error(error instanceof Error ? error.message : String(error)),
     });
-  } catch (err) {
-    message.error(err instanceof Error ? err.message : String(err));
+  } finally {
+    opening.value = false;
   }
 }
 </script>

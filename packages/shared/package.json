@@ -10,9 +10,17 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
+    "./contracts/agent-session-query": {
+      "types": "./dist/contracts/agent-session-query.d.ts",
+      "default": "./dist/contracts/agent-session-query.js"
+    },
     "./llm-single-call": {
       "types": "./dist/llm/single-call.d.ts",
       "default": "./dist/llm/single-call.js"
+    },
+    "./llm-ai-sdk-call-settings": {
+      "types": "./dist/llm/ai-sdk-call-settings.d.ts",
+      "default": "./dist/llm/ai-sdk-call-settings.js"
     },
     "./prompts": {
       "types": "./dist/prompts.d.ts",
@@ -33,17 +41,33 @@
     "./internal-contracts/agent-api": {
       "types": "./dist/internal-contracts/agent-api.d.ts",
       "default": "./dist/internal-contracts/agent-api.js"
+    },
+    "./internal-contracts/agent-api-session": {
+      "types": "./dist/internal-contracts/agent-api-session.d.ts",
+      "default": "./dist/internal-contracts/agent-api-session.js"
+    },
+    "./internal-contracts/agent-provider-provenance": {
+      "types": "./dist/internal-contracts/agent-provider-provenance.d.ts",
+      "default": "./dist/internal-contracts/agent-provider-provenance.js"
+    },
+    "./node/analytics-root": {
+      "types": "./dist/node/analytics-root.d.ts",
+      "default": "./dist/node/analytics-root.js"
     }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test:clean-build": "node scripts/verify-clean-build.mjs",
+    "test": "npm run test:clean-build && tsx --test tests/*.test.ts"
   },
   "dependencies": {
-    "@ai-sdk/anthropic": "^2.0.67",
-    "@ai-sdk/openai": "^2.0.23",
-    "@ai-sdk/openai-compatible": "^1.0.39",
+    "@ai-sdk/anthropic": "^2.0.102",
+    "@ai-sdk/deepseek": "1.0.57",
+    "@ai-sdk/moonshotai": "0.0.26",
+    "@ai-sdk/openai": "^2.0.127",
+    "@ai-sdk/openai-compatible": "^1.0.54",
     "@sinclair/typebox": "^0.34.47",
-    "ai": "^5.0.22"
+    "ai": "^5.0.260"
   }
 }

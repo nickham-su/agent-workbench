@@ -1,7 +1,7 @@
 import { HttpError } from "../../app/errors.js";
 import type { PreviewFileError, PreviewFileService, ResolvedPreviewFile } from "./preview-file.service.js";
 import type { PreviewRuntime } from "./preview-runtime.js";
-import { assertSameOriginBrowserRequest, PreviewBrowserRequestForbiddenError } from "./preview-security.js";
+import { assertPreviewOpenBrowserRequest, PreviewBrowserRequestForbiddenError } from "./preview-security.js";
 
 function isPreviewFileError(error: unknown): error is PreviewFileError {
   return error instanceof Error && error.name === "PreviewFileError" && typeof (error as PreviewFileError).failure === "string";
@@ -32,9 +32,8 @@ export async function openWorkspacePreview(params: {
   origin: string | undefined;
 }) {
   try {
-    // Main deployments can be behind Vite's development proxy. V1 has no trusted
-    // main public-origin config, so Fetch Metadata is the mandatory boundary.
-    assertSameOriginBrowserRequest({ secFetchSite: params.secFetchSite, origin: params.origin });
+    // Main deployments can be behind Vite's development proxy, which may omit Fetch Metadata.
+    assertPreviewOpenBrowserRequest(params.secFetchSite);
   } catch (error) {
     if (error instanceof PreviewBrowserRequestForbiddenError) {
       throw new HttpError(403, "Preview request is not allowed", "PREVIEW_REQUEST_FORBIDDEN");

@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { FastifyInstance } from "fastify";
-import type { RepoRecord, WorkspaceRecord } from "@agent-workbench/shared";
+import type { RepoRecord, WorkspaceRecord } from "@agent-workbench/shared/internal-contracts/agent-api-session";
 import { createApp as createDefaultApp } from "../../../app/createApp.js";
 import type { AppContext } from "../../../app/context.js";
 import { openDb, type Db } from "../../../infra/db/db.js";
@@ -39,6 +39,8 @@ export type CreateAgentTestFixtureOptions = {
    * consulted only with `withApp: true`; ordinary API tests use real createApp.
    */
   appFactory?: (ctx: AppContext) => Promise<FastifyInstance>;
+  /** Enables real cookie auth before the app registers its global auth guard. */
+  authToken?: string | null;
   /** Explicitly controls the otherwise fixed local-runtime concurrency default (2). */
   agentWorkerConcurrency?: number;
 };
@@ -174,7 +176,7 @@ export async function createAgentTestFixture(options: CreateAgentTestFixtureOpti
       credentialMasterKeySource: "generated",
       credentialMasterKeyId: "testkey",
       credentialMasterKeyCreatedAt: Date.now(),
-      authToken: null,
+      authToken: options.authToken ?? null,
       authCookieSecure: false,
       agentWorkerEnabled: false,
       agentWorkerHost: "127.0.0.1",
@@ -184,10 +186,10 @@ export async function createAgentTestFixture(options: CreateAgentTestFixtureOpti
       agentInternalToken: internalToken,
       agentWorkerResponseValidation: "strict",
       agentApiOrigin: "http://127.0.0.1:0",
-      agentStartupRecoveryMode: "recover",
       agentPluginHostEnabled: false,
       agentPluginHostSocketPath: path.join(dataDir, "agent-plugin-host.sock"),
-      agentPluginServicesEnabled: false
+      agentPluginServicesEnabled: false,
+      analytics: { enabled: false }
     };
 
     if (options.withApp === true) {

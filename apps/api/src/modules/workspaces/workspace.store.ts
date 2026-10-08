@@ -1,6 +1,7 @@
 import path from "node:path";
 import type { Db } from "../../infra/db/db.js";
-import type { AgentRecentWorkspaceItem, WorkspaceRecord } from "@agent-workbench/shared";
+import type { WorkspaceRecord } from "@agent-workbench/shared";
+import type { AgentRecentWorkspaceItem } from "@agent-workbench/shared/internal-contracts/agent-api-session";
 
 type WorkspaceRow = {
   id: string;

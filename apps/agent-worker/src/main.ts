@@ -2,8 +2,10 @@ import { loadWorkerEnv } from "./config/env.js";
 import { AgentApiClient } from "./runtime/apiClient.js";
 import { McpManager } from "./runtime/mcpManager.js";
 import { AgentRunner } from "./runtime/runner.js";
+import { AnalyticsSignalProducer } from "./runtime/analyticsSignals.js";
 import { createWorkerServer } from "./server.js";
 import { startBashToolProbe } from "./runtime/bashTools.js";
+import { createAgentAttachmentStorage } from "./runtime/agentAttachmentStorage.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 
@@ -13,18 +15,28 @@ const apiClient = new AgentApiClient({
   apiOrigin: env.apiOrigin,
   internalToken: env.internalToken,
   responseValidation: env.responseValidation,
-  logger: console
+  internalRpcTimeoutMs: env.internalRpcTimeoutMs,
+  logger: console,
 });
 
 const mcpManager = new McpManager(apiClient, console);
-const runner = new AgentRunner(apiClient, mcpManager, console, env.concurrency);
+const attachmentStorage = createAgentAttachmentStorage();
+const analyticsSignals = new AnalyticsSignalProducer({ apiOrigin: env.apiOrigin, internalToken: env.internalToken, dataDir: env.dataDir, namespace: "agent_worker", producerId: "agent_runner" });
+analyticsSignals.start();
+const runner = new AgentRunner(
+  apiClient,
+  mcpManager,
+  console,
+  env.concurrency,
+  { attachmentStorage, analyticsSignals },
+);
 startBashToolProbe(console);
 const server = createWorkerServer({
   host: env.host,
   port: env.port,
   socketPath: env.socketPath,
   internalToken: env.internalToken,
-  runner
+  runner,
 });
 
 await server.listen();
@@ -47,6 +59,7 @@ const shutdown = async () => {
       // ignore cleanup error
     }
   }
+  await analyticsSignals.close();
   await server.close();
   process.exit(0);
 };

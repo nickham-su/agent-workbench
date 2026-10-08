@@ -1,14 +1,92 @@
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 import type { streamText } from "ai";
-import { AgentRunner } from "./runner.js";
+import { AI_SDK_REDACTED_HEADER_VALUE } from "@agent-workbench/shared/llm-ai-sdk-call-settings";
+import { AgentRunner, ControlWritePermanentError } from "./runner.js";
+import { InternalRpcHttpError, InternalRpcInvalidResponseError, InternalRpcNetworkError } from "./apiClient.js";
+import { testProfile, testSource } from "./compaction/test-fixtures.js";
 
 type StreamChunk =
   | { type: "text-delta"; text: string }
+  | { type: "text-start"; id: string; providerMetadata?: unknown }
+  | { type: "text-end"; id: string; providerMetadata?: unknown }
+  | { type: "reasoning-start"; id: string; providerMetadata?: unknown }
+  | { type: "reasoning-end"; id: string; providerMetadata?: unknown }
+  | { type: "raw"; rawValue: unknown }
   | { type: "reasoning-delta"; text?: string; delta?: string }
-  | { type: "tool-call"; toolName: string; toolCallId?: string; input?: unknown }
-  | { type: "finish"; usage?: Record<string, unknown> }
-  | { type: "error"; error: unknown };
+  | { type: "tool-call"; toolName: string; toolCallId?: string; input?: unknown; functionItemId?: string; replayCallId?: string }
+  | { type: "finish"; totalUsage?: Record<string, unknown>; finishReason?: string }
+  | { type: "provider-replay"; partType: "reasoning"; partId: string; itemId: string; encryptedContent: string; summaryIndex?: number }
+  | { type: "provider-replay"; partType: "text"; partId: string; itemId: string; phase?: "commentary" | "final_answer" }
+  | { type: "provider-function-replay"; toolCallId: string; itemId: string }
+  | { type: "error"; error: unknown }
+  | { type: "abort" };
+
+type TestProviderReplayPartUpdate =
+  | { id: string; type: "reasoning"; text?: string; providerReplay: { version: 1; provider: { npm: "@ai-sdk/openai"; api: "responses"; providerId: string; model: string }; item: { type: "reasoning"; itemId: string; encryptedContent: string; summaryIndex?: number } } }
+  | { id: string; type: "text"; text?: string; providerReplay: { version: 1; provider: { npm: "@ai-sdk/openai"; api: "responses"; providerId: string; model: string }; item: { type: "text"; itemId: string; phase?: "commentary" | "final_answer" } } }
+  | { providerToolCallId: string; type: "function_call"; providerReplay: { version: 1; provider: { npm: "@ai-sdk/openai"; api: "responses"; providerId: string; model: string }; item: { type: "function_call"; itemId: string } } };
+
+function providerReplayPartFromTestChunk(chunk: unknown): TestProviderReplayPartUpdate | null {
+  if (!chunk || typeof chunk !== "object") return null;
+  const provider = { npm: "@ai-sdk/openai" as const, api: "responses" as const, providerId: "provider", model: "gpt-5" };
+  if ((chunk as { type?: unknown }).type === "provider-function-replay") {
+    const functionValue = chunk as Extract<StreamChunk, { type: "provider-function-replay" }>;
+    return {
+      type: "function_call",
+      providerToolCallId: functionValue.toolCallId,
+      providerReplay: {
+        version: 1,
+        provider,
+        item: { type: "function_call", itemId: functionValue.itemId },
+      },
+    };
+  }
+  if ((chunk as { type?: unknown }).type !== "provider-replay") return null;
+  const value = chunk as Extract<StreamChunk, { type: "provider-replay" }>;
+  if (value.partType === "reasoning") {
+    return {
+      id: value.partId,
+      type: "reasoning",
+      providerReplay: {
+        version: 1,
+        provider,
+        item: {
+          type: "reasoning",
+          itemId: value.itemId,
+          encryptedContent: value.encryptedContent,
+          ...(value.summaryIndex == null ? {} : { summaryIndex: value.summaryIndex }),
+        },
+      },
+    };
+  }
+  return {
+    id: value.partId,
+    type: "text",
+    providerReplay: {
+      version: 1,
+      provider,
+      item: { type: "text", itemId: value.itemId, ...(value.phase == null ? {} : { phase: value.phase }) },
+    },
+  };
+}
+
+function providerToolCallReplayFromTestChunk(chunk: unknown) {
+  if (!chunk || typeof chunk !== "object" || (chunk as { type?: unknown }).type !== "tool-call") return null;
+  const value = chunk as Extract<StreamChunk, { type: "tool-call" }>;
+  if (!value.functionItemId) return null;
+  return {
+    providerToolCallId: value.replayCallId ?? String(value.toolCallId ?? ""),
+    providerReplay: {
+      version: 1 as const,
+      provider: { npm: "@ai-sdk/openai" as const, api: "responses" as const, providerId: "provider", model: "gpt-5" },
+      item: { type: "function_call" as const, itemId: value.functionItemId },
+    },
+  };
+}
 
 type StreamResultLike = {
   fullStream: AsyncIterable<StreamChunk>;
@@ -20,14 +98,14 @@ type StreamResultLike = {
 
 function baseProfile() {
   return {
-    model: { id: "gpt-4o-mini" },
-    provider: { npm: "@ai-sdk/openai", options: { apiKey: "test-key" } },
+    model: { id: "gpt-4o-mini", options: undefined as Record<string, unknown> | undefined },
+    provider: { id: "provider", npm: "@ai-sdk/openai", options: { apiKey: "test-key", baseURL: "https://example.test/v1" } },
     agent: {
       tools: ["read"],
       pluginTools: [],
       mcpServers: []
     },
-    runtime: {}
+    runtime: { modelRequestRetryBackoffMaxMs: 60_000 }
   };
 }
 
@@ -35,12 +113,13 @@ function baseContext() {
   return {
     pendingTools: [],
     tools: [],
-    headItemId: null,
+    headMessageId: null,
+    sessionRevision: 0,
     system: "",
     messages: [],
     lastResponseTotalTokens: null,
     uiLocale: null,
-    externalSkillRoots: []
+    externalSkills: []
   };
 }
 
@@ -169,7 +248,20 @@ function createControlledStream() {
       enqueue({ chunk, ack: ack.promise, resolveAck: ack.resolve, rejectAck: ack.reject });
       return await ack.promise;
     },
-    async finish(options?: { reasoningText?: string; usage?: Record<string, unknown> }) {
+    async finish(options?: {
+      reasoningText?: string;
+      usage?: Record<string, unknown>;
+      terminal?: "completed" | "incomplete" | "failed" | false;
+    }) {
+      const terminal = options?.terminal ?? "completed";
+      if (terminal !== false) {
+        const ack = deferred<void>();
+        enqueue({
+          chunk: { type: "raw", rawValue: { type: `response.${terminal}`, response: { output: [] } } },
+          ack: ack.promise, resolveAck: ack.resolve, rejectAck: ack.reject,
+        });
+        await ack.promise;
+      }
       ended = true;
       reasoning.resolve(options?.reasoningText ?? "");
       usage.resolve(options?.usage ?? { inputTokens: 1, outputTokens: 1 });
@@ -190,27 +282,97 @@ function createControlledStream() {
 }
 
 function createRunnerHarness(options?: {
-  stream: ReturnType<typeof createControlledStream>;
+  stream?: ReturnType<typeof createControlledStream>;
+  streams?: Array<{ stream: StreamResultLike }>;
+  onAssistantComplete?: (input: Record<string, unknown>, terminal: boolean) => void;
   nowMs?: () => number;
+  promptContexts?: Array<Omit<ReturnType<typeof baseContext>, "headMessageId"> & { headMessageId: string | null }>;
+  createResults?: Array<unknown>;
   listTools?: Array<{ name: string; description: string; inputSchema: Record<string, unknown>; source: string }>;
+  onRunNotice?: (input: Record<string, unknown>) => void;
+  onNoticeRpc?: (options?: { abortSignal?: AbortSignal; timeoutMs?: number }) => void;
+  onWarning?: (text: string) => void;
+  flushResults?: Array<{ result: "updated" | "ignored" | "missing" } | Error>;
+  completeResults?: Array<{ result: "updated" | "ignored" | "missing" } | Error>;
+  replaceResults?: Array<{ result: "updated" | "ignored" | "missing" }>;
+  noticeResults?: Array<{ result: "updated" | "ignored" | "missing" } | Error>;
+  resumeResults?: Array<{ result: "updated" | "ignored" | "missing" }>;
+  discardResults?: Array<{ result: "updated" | "ignored" | "missing" } | Error>;
+  controlWriteSleep?: (ms: number, signal: AbortSignal) => Promise<boolean>;
+  providerReplayPartFromChunk?: (chunk: unknown) => TestProviderReplayPartUpdate | null;
+  providerToolCallReplayFromChunk?: typeof providerToolCallReplayFromTestChunk;
+  profile?: ReturnType<typeof baseProfile>;
+  workspacePath?: string;
 }) {
-  const updates: Array<{ itemId?: number; status?: string; output?: Record<string, unknown> }> = [];
-  const createdItems: Array<Record<string, unknown>> = [];
-  const runStateUpdates: Array<Record<string, unknown>> = [];
-  const logger = { info() {}, warn() {}, error() {} };
+  const flushes: Array<{ messageId: string; parts: Array<Record<string, unknown>> }> = [];
+  const completions: Array<Record<string, unknown>> = [];
+  const createdMessages: Array<Record<string, unknown>> = [];
+  const replacements: Array<Record<string, unknown>> = [];
+  const runNoticeUpdates: Array<Record<string, unknown>> = [];
+  const streamRequests: unknown[] = [];
+  const resumeRequests: Array<Record<string, unknown>> = [];
+  const discardRequests: Array<Record<string, unknown>> = [];
+  const terminalCompletions: Array<Record<string, unknown>> = [];
+  const logger = { info() {}, warn(text: string) { options?.onWarning?.(text); }, error() {} };
   const apiClient = {
-    async createContextItem(input: Record<string, unknown>) {
-      createdItems.push(input);
-      return { item: { id: createdItems.length } };
+    async getExecutionProfile() { return options?.profile ?? baseProfile(); },
+    async getPromptContext() { return options?.promptContexts?.shift() ?? baseContext(); },
+    async createStreamingAssistant(input: Record<string, unknown>) {
+      createdMessages.push(input);
+      const result = options?.createResults?.shift();
+      if (result instanceof Error) throw result;
+      return { result: "updated" };
     },
-    async updateContextItem(input: { itemId?: number; status?: string; output?: Record<string, unknown> }) {
-      updates.push({ itemId: input.itemId, status: input.status, output: input.output });
-      return { id: input.itemId ?? 1 };
+    async flushAssistantParts(input: { messageId: string; parts: Array<Record<string, unknown>> }) {
+      flushes.push({ messageId: input.messageId, parts: input.parts });
+      const result = options?.flushResults?.shift() ?? { result: "updated" as const };
+      if (result instanceof Error) throw result;
+      return result;
     },
-    async updateRunState(input: Record<string, unknown>) {
-      runStateUpdates.push(input);
-      return;
-    }
+    async resumeStreamingAssistant(input: Record<string, unknown>) {
+      resumeRequests.push(input);
+      const result = options?.resumeResults?.shift() ?? { result: "updated" as const };
+      return result;
+    },
+    async replaceStreamingAssistant(input: Record<string, unknown>) {
+      replacements.push(input);
+      const result = options?.replaceResults?.shift()?.result ?? "updated";
+      return { result, message: result === "updated" ? { id: input.newMessageId } : null };
+    },
+    async discardStreamingAssistant(input: Record<string, unknown>) {
+      discardRequests.push(input);
+      const result = options?.discardResults?.shift() ?? { result: "updated" as const };
+      if (result instanceof Error) throw result;
+      return result;
+    },
+    async completeAssistant(input: Record<string, unknown>) {
+      completions.push(input);
+      options?.onAssistantComplete?.(input, false);
+      const result = options?.completeResults?.shift() ?? { result: "updated" as const };
+      if (result instanceof Error) throw result;
+      return result;
+    },
+    async completeTerminalAssistant(input: Record<string, unknown>) {
+      completions.push(input);
+      options?.onAssistantComplete?.(input, true);
+      const result = options?.completeResults?.shift() ?? { result: "updated" as const };
+      if (result instanceof Error) throw result;
+      return result;
+    },
+    async updateRunNotice(input: Record<string, unknown>, rpcOptions?: { abortSignal?: AbortSignal; timeoutMs?: number }) {
+      runNoticeUpdates.push(input);
+      options?.onRunNotice?.(input);
+      options?.onNoticeRpc?.(rpcOptions);
+      const result = options?.noticeResults?.shift() ?? { result: "updated" };
+      if (result instanceof Error) throw result;
+      return result;
+    },
+    async markRunWorkInProgress() { return { result: "updated" as const }; },
+    async persistRunTerminalIntent(input: Record<string, unknown>) {
+      terminalCompletions.push(input);
+      return { result: "updated" as const };
+    },
+    async convergeRunTerminal() { return { kind: "transitioned" as const, finalStatus: "completed" as const }; }
   };
   const runner = new AgentRunner(
     apiClient as any,
@@ -218,31 +380,707 @@ function createRunnerHarness(options?: {
     logger,
     1,
     {
-      streamText: ((() => options?.stream.stream) as unknown) as typeof streamText,
-      nowMs: options?.nowMs
+      streamText: (((input: unknown) => {
+        streamRequests.push(input);
+        const stream = options?.streams?.shift() ?? options?.stream;
+        return stream?.stream;
+       }) as unknown) as typeof streamText,
+      nowMs: options?.nowMs,
+      controlWriteSleep: options?.controlWriteSleep,
+      providerReplayPartFromChunk: options?.providerReplayPartFromChunk,
+      providerToolCallReplayFromChunk: options?.providerToolCallReplayFromChunk,
     }
   );
   (runner as any).toolRegistry.listTools = async () => options?.listTools ?? [
     { name: "read", description: "fixture read", inputSchema: { type: "object", properties: {} }, source: "builtin" }
   ];
-  return { runner, updates, createdItems, runStateUpdates };
+  return { runner, flushes, createdMessages, replacements, completions, runNoticeUpdates, streamRequests, resumeRequests, discardRequests, terminalCompletions };
 }
 
 function startRunModelStep(params: {
-  stream: ReturnType<typeof createControlledStream>;
+  stream?: ReturnType<typeof createControlledStream>;
+  streams?: Array<ReturnType<typeof createControlledStream>>;
+  backoffMaxMs?: number;
   nowMs?: () => number;
+  signal?: AbortSignal;
+  createResults?: Array<unknown>;
+  onRunNotice?: (input: Record<string, unknown>) => void;
+  flushResults?: Array<{ result: "updated" | "ignored" | "missing" } | Error>;
+  completeResults?: Array<{ result: "updated" | "ignored" | "missing" } | Error>;
+  replaceResults?: Array<{ result: "updated" | "ignored" | "missing" }>;
+  noticeResults?: Array<{ result: "updated" | "ignored" | "missing" } | Error>;
+  resumeResults?: Array<{ result: "updated" | "ignored" | "missing" }>;
+  discardResults?: Array<{ result: "updated" | "ignored" | "missing" } | Error>;
+  controlWriteSleep?: (ms: number, signal: AbortSignal) => Promise<boolean>;
+  providerReplayPartFromChunk?: (chunk: unknown) => TestProviderReplayPartUpdate | null;
+  providerToolCallReplayFromChunk?: typeof providerToolCallReplayFromTestChunk;
+  profile?: ReturnType<typeof baseProfile>;
+  workspacePath?: string;
 }) {
-  const harness = createRunnerHarness({ stream: params.stream, nowMs: params.nowMs });
+  const harness = createRunnerHarness({
+    stream: params.stream,
+    streams: params.streams,
+    nowMs: params.nowMs,
+    createResults: params.createResults,
+    onRunNotice: params.onRunNotice,
+    flushResults: params.flushResults,
+    completeResults: params.completeResults,
+    replaceResults: params.replaceResults,
+    noticeResults: params.noticeResults,
+    resumeResults: params.resumeResults,
+    discardResults: params.discardResults,
+    controlWriteSleep: params.controlWriteSleep,
+    providerReplayPartFromChunk: params.providerReplayPartFromChunk,
+    providerToolCallReplayFromChunk: params.providerToolCallReplayFromChunk,
+    profile: params.profile,
+  });
+  const profile = params.profile ?? baseProfile();
   const promise = (harness.runner as any).runModelStep({
-    profile: baseProfile(),
-    run: baseRun(),
+    profile: { ...profile, runtime: { ...profile.runtime, modelRequestRetryBackoffMaxMs: params.backoffMaxMs ?? 60_000 } },
+    run: { ...baseRun(), ...(params.workspacePath === undefined ? {} : { workspacePath: params.workspacePath }) },
     context: baseContext(),
     step: 1,
-    signal: new AbortController().signal,
+    signal: params.signal ?? new AbortController().signal,
+    recoveryContinuation: { messageId: null },
     repeatedToolCallCounter: new Map()
   });
   return { ...harness, promise };
 }
+
+test("runModelStep: running、completed、failed debug 都记录最终 request 且不泄漏敏感正文", async () => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "awb-assistant-debug-"));
+  const previous = process.env.AWB_AGENT_DEBUG_DUMP;
+  process.env.AWB_AGENT_DEBUG_DUMP = "1";
+  try {
+    const successStream = createControlledStream();
+    const success = startRunModelStep({ stream: successStream, workspacePath });
+    await new Promise((resolve) => setImmediate(resolve));
+    successStream.push({ type: "text-delta", text: "final-materialized-request" });
+    await successStream.finish();
+    await success.promise;
+
+    const failedStream = createControlledStream();
+    const abortController = new AbortController();
+    const failed = startRunModelStep({ stream: failedStream, workspacePath, signal: abortController.signal });
+    await new Promise((resolve) => setImmediate(resolve));
+    // 真实 Provider terminal protocol failure 会写入 failed，然后在既有退避期间取消，避免改变 retry 策略。
+    await failedStream.finish({ terminal: "incomplete" });
+    await new Promise((resolve) => setImmediate(resolve));
+    abortController.abort();
+    await failed.promise;
+
+    const debugDirectory = path.join(workspacePath, ".debug", "agent_message_logs", "assistant");
+    const entries = await fs.readdir(debugDirectory);
+    assert.ok(entries.length >= 2);
+    const contents = await Promise.all(entries.map(async (entry) => await fs.readFile(path.join(debugDirectory, entry), "utf8")));
+    const output = contents.join("\n");
+    assert.match(output, /"status": "completed"/);
+    assert.match(output, /"status": "failed"/);
+    assert.match(output, /"request"/);
+    assert.match(output, /"messages"/);
+    assert.doesNotMatch(output, /ERROR-SENTINEL|token-SENTINEL|encrypted-SENTINEL/);
+  } finally {
+    if (previous === undefined) delete process.env.AWB_AGENT_DEBUG_DUMP;
+    else process.env.AWB_AGENT_DEBUG_DUMP = previous;
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  }
+});
+
+async function readAssistantDebugFiles(workspacePath: string) {
+  const directory = path.join(workspacePath, ".debug", "agent_message_logs", "assistant");
+  const entries = await fs.readdir(directory);
+  return await Promise.all(entries.map(async (entry) => await fs.readFile(path.join(directory, entry), "utf8")));
+}
+
+test("runModelStep: assistant 收尾失败只记录一次 failed debug，保留最终 request 与安全响应摘要", async () => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "awb-assistant-finalize-debug-"));
+  const previous = process.env.AWB_AGENT_DEBUG_DUMP;
+  process.env.AWB_AGENT_DEBUG_DUMP = "1";
+  try {
+    const stream = createControlledStream();
+    const started = startRunModelStep({ stream, workspacePath, completeResults: [{ result: "ignored" }] });
+    await new Promise((resolve) => setImmediate(resolve));
+    await stream.push({ type: "tool-call", toolName: "read", toolCallId: "call-finalize", input: { token: "TOOL-SENTINEL" } });
+    await stream.finish();
+    await assert.rejects(started.promise, /fenced write ignored: complete assistant/);
+
+    const logs = await readAssistantDebugFiles(workspacePath);
+    assert.equal(logs.length, 1);
+    const log = logs[0]!;
+    assert.match(log, /"status": "failed"/);
+    assert.match(log, /assistant-finalization/);
+    assert.match(log, /"request"/);
+    assert.match(log, /tool-content-not-logged/);
+    assert.doesNotMatch(log, /TOOL-SENTINEL/);
+  } finally {
+    if (previous === undefined) delete process.env.AWB_AGENT_DEBUG_DUMP;
+    else process.env.AWB_AGENT_DEBUG_DUMP = previous;
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  }
+});
+
+test("runModelStep: repeated tool threshold 收尾失败记录一次 failed debug 且不改变完成调用", async () => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "awb-assistant-threshold-debug-"));
+  const previous = process.env.AWB_AGENT_DEBUG_DUMP;
+  process.env.AWB_AGENT_DEBUG_DUMP = "1";
+  try {
+    const stream = createControlledStream();
+    const repeated = new Map<string, number>();
+    repeated.set("read:" + JSON.stringify({ filePath: "README.md" }), Number.MAX_SAFE_INTEGER);
+    const harness = createRunnerHarness({ stream });
+    (harness.runner as any).toolRegistry.listTools = async () => [{ name: "read", description: "read", inputSchema: { type: "object" }, source: "builtin" }];
+    const promise = (harness.runner as any).runModelStep({
+      profile: baseProfile(),
+      run: { ...baseRun(), workspacePath },
+      context: baseContext(),
+      step: 1,
+      signal: new AbortController().signal,
+      recoveryContinuation: { messageId: null },
+      repeatedToolCallCounter: repeated,
+    });
+    await stream.push({ type: "tool-call", toolName: "read", toolCallId: "repeat-call", input: { filePath: "README.md" } });
+    await stream.finish();
+    await assert.rejects(promise, /repeated tool call threshold exceeded/);
+    assert.equal(harness.completions.length, 0);
+    const logs = await readAssistantDebugFiles(workspacePath);
+    assert.equal(logs.length, 1);
+    assert.match(logs[0]!, /assistant-finalization/);
+  } finally {
+    if (previous === undefined) delete process.env.AWB_AGENT_DEBUG_DUMP;
+    else process.env.AWB_AGENT_DEBUG_DUMP = previous;
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  }
+});
+
+test("runModelStep: ToolExecution 构造失败不重试且写唯一安全 failed debug", async () => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "awb-tool-execution-build-debug-"));
+  const previous = process.env.AWB_AGENT_DEBUG_DUMP;
+  process.env.AWB_AGENT_DEBUG_DUMP = "1";
+  try {
+    const stream = createControlledStream();
+    const harness = createRunnerHarness({ stream });
+    (harness.runner as any).toolRegistry.listTools = async () => [{ name: "read", description: "read", inputSchema: { type: "object" }, source: "builtin" }];
+    const originalPush = Array.prototype.push;
+    try {
+      Array.prototype.push = function (...items: unknown[]) {
+        if (items.some((item) => item && typeof item === "object" && (item as Record<string, unknown>).originRunId === "run_test" && (item as Record<string, unknown>).status === "queued")) {
+          throw new Error("TOOL_EXECUTION_BUILD_SENTINEL");
+        }
+        return originalPush.apply(this, items);
+      };
+      const promise = (harness.runner as any).runModelStep({
+        profile: baseProfile(),
+        run: { ...baseRun(), workspacePath },
+        context: baseContext(),
+        step: 1,
+        signal: new AbortController().signal,
+        recoveryContinuation: { messageId: null },
+        repeatedToolCallCounter: new Map(),
+      });
+      await stream.push({ type: "tool-call", toolName: "read", toolCallId: "build-call", input: { token: "TOOL-INPUT-SENTINEL" } });
+      await stream.finish();
+      await assert.rejects(promise, /TOOL_EXECUTION_BUILD_SENTINEL/);
+    } finally {
+      Array.prototype.push = originalPush;
+    }
+    assert.equal(harness.streamRequests.length, 1);
+    assert.equal(harness.replacements.length, 0);
+    assert.equal(harness.completions.length, 0);
+    const logs = await readAssistantDebugFiles(workspacePath);
+    assert.equal(logs.length, 1);
+    assert.match(logs[0]!, /"status": "failed"/);
+    assert.match(logs[0]!, /"request"/);
+    assert.match(logs[0]!, /assistant-finalization/);
+    assert.doesNotMatch(logs[0]!, /TOOL_EXECUTION_BUILD_SENTINEL|TOOL-INPUT-SENTINEL/);
+  } finally {
+    if (previous === undefined) delete process.env.AWB_AGENT_DEBUG_DUMP;
+    else process.env.AWB_AGENT_DEBUG_DUMP = previous;
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  }
+});
+
+test("runModelStep: 共享 aiSdk settings 进入 Agent 主调用请求", async () => {
+  const stream = createControlledStream();
+  const profile = baseProfile();
+  profile.model.options = {
+    aiSdk: {
+      headers: { "x-model-config": "runner" },
+      allowSystemInMessages: true,
+      temperature: 0.25,
+    },
+  };
+  const started = startRunModelStep({ stream, profile });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const request = started.streamRequests[0] as Record<string, unknown>;
+  assert.deepEqual(request.headers, { "x-model-config": "runner" });
+  assert.equal(request.allowSystemInMessages, true);
+  assert.equal(request.temperature, 0.25);
+
+  await stream.push({ type: "text-delta", text: "configured" });
+  await stream.finish();
+  await started.promise;
+});
+
+test("runModelStep: 历史非法 aiSdk settings 在调用模型前明确失败", async () => {
+  const sensitiveValue = "runner-secret-sentinel";
+  const cases = [
+    { aiSdk: { unsupportedFlag: true }, pattern: /Unsupported AI SDK setting 'unsupportedFlag'/ },
+    { aiSdk: { model: "override" }, pattern: /AI SDK setting 'model' is reserved/ },
+    { aiSdk: { headers: { "X-API-KEY": sensitiveValue } }, pattern: /headers\.X-API-KEY.*not allowed to override/ },
+    { aiSdk: { headers: { Authorization: AI_SDK_REDACTED_HEADER_VALUE } }, pattern: /headers\.Authorization.*not allowed to override/ },
+  ];
+  for (const item of cases) {
+    const stream = createControlledStream();
+    const profile = baseProfile();
+    profile.model.options = { aiSdk: item.aiSdk };
+    const harness = createRunnerHarness({ stream, profile });
+
+    let errorMessage = "";
+    await assert.rejects(
+      (harness.runner as any).runModelStep({
+        profile,
+        run: baseRun(),
+        context: baseContext(),
+        step: 1,
+        signal: new AbortController().signal,
+        recoveryContinuation: { messageId: null },
+        repeatedToolCallCounter: new Map(),
+      }),
+      (error) => {
+        errorMessage = error instanceof Error ? error.message : String(error);
+        return item.pattern.test(errorMessage);
+      },
+    );
+    assert.equal(errorMessage.includes(sensitiveValue), false);
+    assert.equal(harness.streamRequests.length, 0);
+    assert.equal(harness.createdMessages.length, 0);
+    assert.equal(harness.replacements.length, 0);
+    assert.equal(harness.completions.length, 0);
+  }
+});
+
+test("runModelStep: 恢复 continuation 认领成功后复用 streaming Assistant", async () => {
+  const stream = createControlledStream();
+  const harness = createRunnerHarness({ stream });
+  const continuation = { messageId: "msg_recovered" };
+  const promise = (harness.runner as any).runModelStep({
+    profile: baseProfile(), run: baseRun(), context: baseContext(), step: 1,
+    signal: new AbortController().signal, recoveryContinuation: continuation,
+    repeatedToolCallCounter: new Map(),
+  });
+  await stream.push({ type: "text-delta", text: "recovered" });
+  await stream.finish();
+  await promise;
+  assert.deepEqual(harness.resumeRequests, [{ workspaceId: "ws_test", sessionId: "sess_test", runId: "run_test", messageId: "msg_recovered" }]);
+  assert.equal(harness.createdMessages.length, 0);
+  assert.equal(harness.flushes[0]?.messageId, "msg_recovered");
+  assert.equal(harness.completions[0]?.messageId, "msg_recovered");
+  assert.equal(continuation.messageId, null);
+});
+
+test("runModelStep: 恢复 continuation 认领失效时停止，不创建 Message 或调用模型", async () => {
+  const stream = createControlledStream();
+  const harness = createRunnerHarness({ stream, resumeResults: [{ result: "ignored" }] });
+  await assert.rejects((harness.runner as any).runModelStep({
+    profile: baseProfile(), run: baseRun(), context: baseContext(), step: 1,
+    signal: new AbortController().signal, recoveryContinuation: { messageId: "msg_stale" },
+    repeatedToolCallCounter: new Map(),
+  }), /fenced write ignored/);
+  assert.equal(harness.createdMessages.length, 0);
+  assert.equal(harness.streamRequests.length, 0);
+});
+
+test("runModelStep: streaming Assistant 创建 post-commit response-loss 使用同一不可变请求重放", async () => {
+  const stream = createControlledStream();
+  const started = startRunModelStep({
+    stream,
+    createResults: [
+      new InternalRpcNetworkError({ method: "POST", endpoint: "/streaming-assistants" }),
+      { result: "updated" },
+    ],
+    controlWriteSleep: async () => true,
+  });
+
+  await stream.push({ type: "text-delta", text: "after replay" });
+  await stream.finish();
+  await started.promise;
+
+  assert.equal(started.createdMessages.length, 2);
+  assert.deepEqual(started.createdMessages[1], started.createdMessages[0]);
+  assert.equal(started.streamRequests.length, 1);
+  assert.equal(started.completions.length, 1);
+});
+
+test("runModelStep: context-limit 流错误走普通退避重试，且耗尽后保持普通错误", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  (globalThis as any).setTimeout = ((handler: (...args: any[]) => void, _ms?: number, ...args: any[]) => originalSetTimeout(handler, 0, ...args)) as typeof setTimeout;
+  try {
+    const first = createControlledStream();
+    const second = createControlledStream();
+    const profile = { ...baseProfile(), runtime: { ...baseProfile().runtime, modelRequestMaxRetries: 1 } };
+    const started = await startRunModelStep({ streams: [first, second], profile });
+    void first.push({ type: "error", error: Object.assign(new Error("maximum context length exceeded"), { statusCode: 400, code: "context_length_exceeded" }) }).catch(() => undefined);
+    void second.push({ type: "error", error: Object.assign(new Error("prompt too long"), { statusCode: 400, code: "context_length_exceeded" }) }).catch(() => undefined);
+
+    await assert.rejects(started.promise, /prompt too long/);
+    assert.equal(started.streamRequests.length, 2);
+    assert.equal(started.discardRequests.length, 0);
+    assert.equal(started.replacements.length, 0);
+    assert.equal(started.runNoticeUpdates.filter((update) => String(update.runNoticeText).includes("Request failed, retrying")).length, 1);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+test("runModelStep: modelRequestMaxRetries 为 0 时首次 Provider 失败直接按普通错误结束", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  const scheduledDelays: number[] = [];
+  (globalThis as any).setTimeout = ((handler: (...args: any[]) => void, ms?: number, ...args: any[]) => {
+    scheduledDelays.push(Number(ms));
+    return originalSetTimeout(handler, 0, ...args);
+  }) as typeof setTimeout;
+  try {
+    const stream = createControlledStream();
+    const profile = { ...baseProfile(), runtime: { ...baseProfile().runtime, modelRequestMaxRetries: 0 } };
+    const started = await startRunModelStep({ stream, profile });
+    const providerError = Object.assign(new Error("maximum context length exceeded"), {
+      statusCode: 400,
+      code: "context_length_exceeded",
+    });
+    void stream.push({ type: "error", error: providerError }).catch(() => undefined);
+
+    await assert.rejects(started.promise, (error) => error === providerError);
+    assert.equal(started.streamRequests.length, 1);
+    assert.equal(started.runNoticeUpdates.length, 0);
+    assert.deepEqual(scheduledDelays, []);
+    assert.equal(started.discardRequests.length, 0);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+test("processRun: context-limit 流错误重试成功时不执行 compaction", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  (globalThis as any).setTimeout = ((handler: (...args: any[]) => void, _ms?: number, ...args: any[]) => originalSetTimeout(handler, 0, ...args)) as typeof setTimeout;
+  try {
+    const first = createControlledStream();
+    const second = createControlledStream();
+    const profile = { ...baseProfile(), runtime: { ...baseProfile().runtime, modelRequestMaxRetries: 1 } };
+    const harness = createRunnerHarness({ streams: [first, second], profile });
+    const compactionModes: string[] = [];
+    (harness.runner as any).executeCompaction = async ({ mode }: { mode: string }) => {
+      compactionModes.push(mode);
+      return { kind: "committed" };
+    };
+
+    const processing = (harness.runner as any).processRun(baseRun(), new AbortController().signal);
+    void first.push({ type: "error", error: Object.assign(new Error("maximum context length exceeded"), { statusCode: 400, code: "context_length_exceeded" }) }).catch(() => undefined);
+    await second.push({ type: "text-delta", text: "retried normally" });
+    await second.finish();
+    await processing;
+
+    assert.deepEqual(compactionModes, []);
+    assert.equal(harness.streamRequests.length, 2);
+    assert.equal(harness.completions.length, 1);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+test("manual and proactive compaction retry notices contain only attempts and delay; proactive clears before the model step", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  (globalThis as any).setTimeout = ((handler: (...args: any[]) => void, _ms?: number, ...args: any[]) => originalSetTimeout(handler, 0, ...args)) as typeof setTimeout;
+  try {
+    for (const mode of ["manual", "proactive"] as const) {
+      const noticeRpcOptions: Array<{ abortSignal?: AbortSignal; timeoutMs?: number } | undefined> = [];
+      const harness = createRunnerHarness({ profile: {
+        ...testProfile,
+        runtime: { ...testProfile.runtime, modelRequestMaxRetries: 1 },
+      } as any, onNoticeRpc: (options) => { noticeRpcOptions.push(options); } });
+      const api = (harness.runner as any).apiClient;
+      api.getCompactionSource = async () => testSource({ texts: ["x".repeat(100_000), "recent"] });
+      api.commitCompactionWithTerminalIntent = async () => ({ result: "updated", summaryMessageId: "summary" });
+      let calls = 0;
+      (harness.runner as any).generateSingleCallSummary = async () => {
+        calls += 1;
+        if (calls === 1) throw new Error("private provider response and credential");
+        return { text: "brief summary" };
+      };
+      let modelSteps = 0;
+      if (mode === "proactive") {
+        let compactOnce = true;
+        (harness.runner as any).shouldAutoCompact = () => {
+          if (!compactOnce) return false;
+          compactOnce = false;
+          return true;
+        };
+        (harness.runner as any).runModelStep = async () => {
+          modelSteps += 1;
+          assert.equal(harness.runNoticeUpdates.at(-1)?.runNoticeText, "");
+          return { aborted: false, toolCallCount: 0, hasVisibleText: true, terminalIntentPersisted: false };
+        };
+      }
+      await (harness.runner as any).processRun({ ...baseRun(), ...(mode === "manual" ? { runKind: "manual_compaction" } : {}) }, new AbortController().signal);
+      assert.equal(calls, 2);
+      assert.equal(modelSteps, mode === "proactive" ? 1 : 0);
+      const retryNotices = harness.runNoticeUpdates.filter(({ runNoticeText }) => String(runNoticeText).includes("压缩上下文") && String(runNoticeText).includes("重试"));
+      assert.equal(retryNotices.length, 1);
+      assert.equal(retryNotices[0]?.compactionExpectedRevision, 7);
+      assert.ok(harness.runNoticeUpdates.every((notice) => notice.compactionExpectedRevision === 7));
+      assert.ok(noticeRpcOptions.every((options) => options?.abortSignal instanceof AbortSignal && options.timeoutMs === 1000));
+      assert.match(String(retryNotices[0]?.runNoticeText), /2 秒后重试（1\/1）/);
+      assert.equal(JSON.stringify(harness.runNoticeUpdates).includes("private provider response"), false);
+      assert.equal(JSON.stringify(harness.runNoticeUpdates).includes("credential"), false);
+    }
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+test("compaction notices are best-effort: permanent and transient notice errors do not consume summary retries", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  (globalThis as any).setTimeout = ((handler: (...args: any[]) => void, _ms?: number, ...args: any[]) => originalSetTimeout(handler, 0, ...args)) as typeof setTimeout;
+  try {
+    for (const mode of ["manual", "proactive"] as const) {
+      const failure = mode === "manual"
+        ? new InternalRpcHttpError({ method: "POST", endpoint: "/notice", status: 400 })
+        : new InternalRpcNetworkError({ method: "POST", endpoint: "/notice" });
+      const harness = createRunnerHarness({
+        profile: { ...testProfile, runtime: { ...testProfile.runtime, modelRequestMaxRetries: 2 } } as any,
+        noticeResults: [failure],
+      });
+      const api = (harness.runner as any).apiClient;
+      api.getCompactionSource = async () => testSource({ texts: ["x".repeat(100_000), "recent"] });
+      let attempts = 0;
+      (harness.runner as any).generateSingleCallSummary = async () => {
+        attempts += 1;
+        throw new Error("private provider response");
+      };
+      if (mode === "proactive") (harness.runner as any).shouldAutoCompact = () => true;
+      await (harness.runner as any).processRun({ ...baseRun(), ...(mode === "manual" ? { runKind: "manual_compaction" } : {}) }, new AbortController().signal);
+      assert.equal(attempts, 3, `${mode} must make the initial summary call and two configured retries`);
+      assert.equal(harness.runNoticeUpdates.length, 1, "notice RPC must not retry without bound");
+      assert.equal(harness.terminalCompletions.at(-1)?.status, "failed");
+      assert.equal(JSON.stringify(harness.runNoticeUpdates).includes("private provider response"), false);
+    }
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+test("committed proactive compaction survives a failed notice cleanup and continues to the model", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  (globalThis as any).setTimeout = ((handler: (...args: any[]) => void, _ms?: number, ...args: any[]) => originalSetTimeout(handler, 0, ...args)) as typeof setTimeout;
+  try {
+    const harness = createRunnerHarness({
+      profile: { ...testProfile, runtime: { ...testProfile.runtime, modelRequestMaxRetries: 1 } } as any,
+      noticeResults: [
+        { result: "updated" },
+        new InternalRpcNetworkError({ method: "POST", endpoint: "/notice" }),
+      ],
+    });
+    const api = (harness.runner as any).apiClient;
+    api.getCompactionSource = async () => testSource({ texts: ["x".repeat(100_000), "recent"] });
+    api.commitCompactionWithTerminalIntent = async () => ({ result: "updated", summaryMessageId: "summary" });
+    let attempts = 0;
+    (harness.runner as any).generateSingleCallSummary = async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("private provider response");
+      return { text: "brief summary" };
+    };
+    let compactionTriggers = 0;
+    (harness.runner as any).shouldAutoCompact = () => ++compactionTriggers === 1;
+    let modelSteps = 0;
+    (harness.runner as any).runModelStep = async () => {
+      modelSteps += 1;
+      return { aborted: false, toolCallCount: 0, hasVisibleText: true, terminalIntentPersisted: false };
+    };
+    await (harness.runner as any).processRun(baseRun(), new AbortController().signal);
+    assert.equal(attempts, 2);
+    assert.equal(modelSteps, 1);
+    assert.equal(harness.runNoticeUpdates.length, 2, "cleanup should try once, never retry forever");
+    assert.equal(harness.runNoticeUpdates[1]?.runNoticeText, "");
+    assert.equal(harness.terminalCompletions.at(-1)?.status, "completed");
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+test("processRun: fenced cleanup after confirmed commit stops stale Run without a model request or failed terminal", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  (globalThis as any).setTimeout = ((handler: (...args: any[]) => void, _ms?: number, ...args: any[]) => originalSetTimeout(handler, 0, ...args)) as typeof setTimeout;
+  try {
+    for (const result of ["ignored", "missing"] as const) {
+      const warnings: string[] = [];
+      const harness = createRunnerHarness({
+        profile: { ...testProfile, runtime: { ...testProfile.runtime, modelRequestMaxRetries: 1 } } as any,
+        noticeResults: [{ result: "updated" }, { result }],
+        onWarning: (line) => { warnings.push(line); },
+      });
+      const api = (harness.runner as any).apiClient;
+      api.getCompactionSource = async () => testSource({ texts: ["x".repeat(100_000), "recent"] });
+      api.commitCompactionWithTerminalIntent = async () => ({ result: "updated", summaryMessageId: "summary" });
+      let calls = 0;
+      (harness.runner as any).generateSingleCallSummary = async () => {
+        if (++calls === 1) throw new Error("failed before retry notice");
+        return { text: "brief summary" };
+      };
+      (harness.runner as any).shouldAutoCompact = () => true;
+      let modelRequests = 0;
+      (harness.runner as any).runModelStep = async () => { modelRequests++; throw new Error("stale run requested model"); };
+      await (harness.runner as any).processRun(baseRun(), new AbortController().signal);
+      assert.equal(modelRequests, 0);
+      assert.equal(harness.terminalCompletions.length, 0);
+      assert.equal(harness.runNoticeUpdates.length, 2);
+      assert.equal(warnings.filter((line) => line.includes("cleanup fence lost")).length, 1);
+    }
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+test("compaction notice fence loss is not silently ignored", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  (globalThis as any).setTimeout = ((handler: (...args: any[]) => void, _ms?: number, ...args: any[]) => originalSetTimeout(handler, 0, ...args)) as typeof setTimeout;
+  try {
+    const harness = createRunnerHarness({
+      profile: { ...testProfile, runtime: { ...testProfile.runtime, modelRequestMaxRetries: 1 } } as any,
+      noticeResults: [{ result: "ignored" }],
+    });
+    const api = (harness.runner as any).apiClient;
+    api.getCompactionSource = async () => testSource({ texts: ["x".repeat(100_000), "recent"] });
+    let attempts = 0;
+    (harness.runner as any).generateSingleCallSummary = async () => { attempts += 1; throw new Error("summary failed"); };
+    (harness.runner as any).shouldAutoCompact = () => true;
+    let modelRequests = 0;
+    (harness.runner as any).runModelStep = async () => { modelRequests++; throw new Error("stale run requested model"); };
+    await (harness.runner as any).processRun(baseRun(), new AbortController().signal);
+    assert.equal(modelRequests, 0);
+    assert.equal(harness.terminalCompletions.length, 0);
+    assert.equal(attempts, 1);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+test("runModelStep: final flush 失败不会调用 completeAssistant", async () => {
+  const stream = createControlledStream();
+  const started = await startRunModelStep({
+    stream,
+    flushResults: [new InternalRpcHttpError({ method: "POST", endpoint: "/flush", status: 400, apiCode: "BAD_FLUSH" })],
+  });
+  await stream.push({ type: "text-delta", text: "answer" });
+  await stream.finish();
+
+  await assert.rejects(started.promise, ControlWritePermanentError);
+  assert.equal(started.completions.length, 0);
+});
+
+test("runModelStep: final flush 收尾失败写唯一 failed debug，保留最终 request 且原异常不变", async () => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "awb-final-flush-debug-"));
+  const previous = process.env.AWB_AGENT_DEBUG_DUMP;
+  process.env.AWB_AGENT_DEBUG_DUMP = "1";
+  try {
+    const stream = createControlledStream();
+    const started = await startRunModelStep({
+      stream,
+      workspacePath,
+      flushResults: [new InternalRpcHttpError({ method: "POST", endpoint: "/flush", status: 400, apiCode: "BAD_FLUSH" })],
+    });
+    await stream.push({ type: "text-delta", text: "final answer" });
+    await stream.finish();
+
+    await assert.rejects(started.promise, (error: unknown) => error instanceof ControlWritePermanentError && error.operation === "flush assistant parts");
+    assert.equal(started.completions.length, 0);
+    assert.equal(started.replacements.length, 0);
+    const logs = await readAssistantDebugFiles(workspacePath);
+    assert.equal(logs.length, 1);
+    assert.match(logs[0]!, /"status": "failed"/);
+    assert.match(logs[0]!, /assistant-finalization/);
+    assert.match(logs[0]!, /"request"/);
+  } finally {
+    if (previous === undefined) delete process.env.AWB_AGENT_DEBUG_DUMP;
+    else process.env.AWB_AGENT_DEBUG_DUMP = previous;
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  }
+});
+
+test("runModelStep: complete 失败不会写 completed assistant item log 或返回成功", async () => {
+  const stream = createControlledStream();
+  const started = await startRunModelStep({
+    stream,
+    completeResults: [new InternalRpcHttpError({ method: "POST", endpoint: "/complete", status: 400, apiCode: "BAD_COMPLETE" })],
+  });
+  await stream.push({ type: "text-delta", text: "answer" });
+  await stream.finish();
+
+  await assert.rejects(started.promise, ControlWritePermanentError);
+  assert.equal(started.completions.length, 1);
+});
+
+test("runModelStep: 含 input_too_long cause 的永久控制写错误不触发 discard", async () => {
+  const stream = createControlledStream();
+  const started = await startRunModelStep({
+    stream,
+    flushResults: [new InternalRpcHttpError({
+      method: "POST",
+      endpoint: "/flush",
+      status: 400,
+      apiCode: "input_too_long",
+    })],
+  });
+  await stream.push({ type: "text-delta", text: "partial" });
+  void stream.push({ type: "error", error: Object.assign(new Error("provider failed"), { statusCode: 500, code: "provider_error" }) }).catch(() => undefined);
+
+  await assert.rejects(started.promise, ControlWritePermanentError);
+  assert.equal(started.discardRequests.length, 0);
+  assert.equal(started.streamRequests.length, 1);
+});
+
+test("streaming Assistant 重放冲突是永久控制面错误，不重试且收敛 Run failed", async () => {
+  const stream = createControlledStream();
+  const sleepCalls: number[] = [];
+  const harness = createRunnerHarness({
+    stream,
+    createResults: [new InternalRpcHttpError({
+      method: "POST",
+      endpoint: "/api/internal/agent/streaming-assistants",
+      status: 409,
+      apiCode: "AGENT_STREAMING_ASSISTANT_REPLAY_MISMATCH",
+      safeMessage: "streaming assistant replay does not match existing message",
+    })],
+    controlWriteSleep: async (ms) => {
+      sleepCalls.push(ms);
+      return true;
+    },
+  });
+
+  await (harness.runner as any).processRun(baseRun(), new AbortController().signal);
+
+  assert.equal(harness.createdMessages.length, 1);
+  assert.equal(harness.streamRequests.length, 0);
+  assert.deepEqual(sleepCalls, []);
+  assert.deepEqual(harness.terminalCompletions.map((input) => input.status), ["failed"]);
+});
+
+test("runModelStep: streaming Assistant 创建重试可由取消打断", async () => {
+  const stream = createControlledStream();
+  const controller = new AbortController();
+  const started = startRunModelStep({
+    stream,
+    signal: controller.signal,
+    createResults: [new InternalRpcNetworkError({ method: "POST", endpoint: "/streaming-assistants" })],
+    controlWriteSleep: async (_ms, signal) => {
+      controller.abort();
+      return !signal.aborted;
+    },
+  });
+
+  await assert.rejects(started.promise, /fenced write ignored/);
+  assert.equal(started.createdMessages.length, 1);
+  assert.equal(started.streamRequests.length, 0);
+});
 
 test("runModelStep: 100 chars 且 <1s 时不发生阈值驱动的中途 streaming flush，正常结束保存尾段与 reasoning", async () => {
   let now = 0;
@@ -250,16 +1088,17 @@ test("runModelStep: 100 chars 且 <1s 时不发生阈值驱动的中途 streamin
   const started = await startRunModelStep({ stream, nowMs: () => now });
 
   await stream.push({ type: "text-delta", text: "x".repeat(100) });
-  assert.equal(started.updates.filter((item) => item.status === "streaming").length, 0);
+  assert.equal(started.flushes.filter((flush) => flush.parts.some((part) => part.type === "text")).length, 0);
 
   await stream.finish({ reasoningText: "final reasoning", usage: { inputTokens: 1, outputTokens: 2 } });
   const result = await started.promise;
 
   assert.equal(result.aborted, false);
-  assert.deepEqual(started.updates.map((item) => item.status), ["streaming", "completed"]);
-  assert.equal(started.updates[0]?.output?.text, "x".repeat(100));
-  assert.equal(started.updates[1]?.output?.text, "x".repeat(100));
-  assert.deepEqual(started.updates[1]?.output?.reasoning, { text: "final reasoning" });
+  assert.equal(started.flushes.length, 2);
+  assert.equal(started.completions.length, 1);
+  assert.equal(started.completions[0]?.responseTotalTokens, 3);
+  assert.equal(started.flushes[0]?.parts.find((part) => part.type === "text")?.text, "x".repeat(100));
+  assert.deepEqual(({ text: started.flushes[1]?.parts.find((part) => part.type === "reasoning")?.text }), { text: "final reasoning" });
 });
 
 test("runModelStep: 达到 160 chars 时在 finish 前触发 streaming flush", async () => {
@@ -268,12 +1107,72 @@ test("runModelStep: 达到 160 chars 时在 finish 前触发 streaming flush", a
   const started = await startRunModelStep({ stream, nowMs: () => now });
 
   await stream.push({ type: "text-delta", text: "a".repeat(160) });
-  const streaming = started.updates.filter((item) => item.status === "streaming");
+  const streaming = started.flushes.filter((flush) => flush.parts.some((part) => part.type === "text"));
   assert.equal(streaming.length, 1);
-  assert.equal(streaming[0]?.output?.text, "a".repeat(160));
+  assert.equal(streaming[0]?.parts.find((part) => part.type === "text")?.text, "a".repeat(160));
 
   await stream.finish({ usage: { inputTokens: 1, outputTokens: 2 } });
   await started.promise;
+});
+
+test("runModelStep: 按 Provider 原始交错顺序保存 text → tool → text，execution 关联实际 ToolCallPart", async () => {
+  const stream = createControlledStream();
+  const started = await startRunModelStep({ stream });
+
+  await stream.push({ type: "text-delta", text: "before" });
+  await stream.push({ type: "tool-call", toolName: "read", toolCallId: "call-read", input: { filePath: "a.ts" } });
+  await stream.push({ type: "text-delta", text: "after" });
+  await stream.finish();
+  await started.promise;
+
+  const parts = started.flushes.at(-1)!.parts;
+  assert.deepEqual(parts.map((part) => [part.type, part.position]), [
+    ["text", 0], ["tool_call", 1], ["text", 2],
+  ]);
+  assert.deepEqual(parts.map((part) => part.id), [
+    `${started.completions[0]?.messageId}:part:0`,
+    `${started.completions[0]?.messageId}:part:1`,
+    `${started.completions[0]?.messageId}:part:2`,
+  ]);
+  assert.equal((started.completions[0]?.executions as Array<Record<string, unknown>>)[0]?.callPartId, parts[1]?.id);
+});
+
+test("runModelStep: reasoning、text 和多个 ToolCall 保留原始交错 Part 序列", async () => {
+  const stream = createControlledStream();
+  const started = await startRunModelStep({ stream });
+
+  await stream.push({ type: "reasoning-delta", text: "r1" });
+  await stream.push({ type: "text-delta", text: "t1" });
+  await stream.push({ type: "tool-call", toolName: "read", toolCallId: "call-one", input: { filePath: "one" } });
+  await stream.push({ type: "reasoning-delta", text: "r2" });
+  await stream.push({ type: "tool-call", toolName: "read", toolCallId: "call-two", input: { filePath: "two" } });
+  await stream.push({ type: "text-delta", text: "t2" });
+  await stream.finish();
+  await started.promise;
+
+  const parts = started.flushes.at(-1)!.parts;
+  assert.deepEqual(parts.map((part) => part.type), ["reasoning", "text", "tool_call", "reasoning", "tool_call", "text"]);
+  assert.deepEqual(parts.map((part) => part.position), [0, 1, 2, 3, 4, 5]);
+  const executions = started.completions[0]?.executions as Array<Record<string, unknown>>;
+  assert.deepEqual(executions.map((execution) => execution.callPartId), [parts[2]?.id, parts[4]?.id]);
+});
+
+test("runModelStep: 多次 flush 仅追加或更新末尾 Part，既有 Part ID 和 position 稳定", async () => {
+  const stream = createControlledStream();
+  const started = await startRunModelStep({ stream });
+
+  await stream.push({ type: "text-delta", text: "a".repeat(160) });
+  const first = started.flushes.at(-1)!.parts;
+  await stream.push({ type: "tool-call", toolName: "read", toolCallId: "call-stable", input: {} });
+  await stream.push({ type: "text-delta", text: "b".repeat(160) });
+  await stream.finish();
+  await started.promise;
+
+  const last = started.flushes.at(-1)!.parts;
+  assert.deepEqual(first.map((part) => ({ id: part.id, position: part.position, text: part.text })), [{
+    id: last[0]?.id, position: last[0]?.position, text: "a".repeat(160),
+  }]);
+  assert.deepEqual(last.map((part) => part.type), ["text", "tool_call", "text"]);
 });
 
 test("runModelStep: 100 chars 且 300ms 时在 finish 前不触发 streaming flush", async () => {
@@ -284,7 +1183,7 @@ test("runModelStep: 100 chars 且 300ms 时在 finish 前不触发 streaming flu
   await stream.push({ type: "text-delta", text: "hello".repeat(20) });
   now = 300;
   await stream.push({ type: "reasoning-delta", text: "r" });
-  assert.equal(started.updates.filter((item) => item.status === "streaming").length, 0);
+  assert.equal(started.flushes.filter((flush) => flush.parts.some((part) => part.type === "text")).length, 0);
 
   await stream.finish({ reasoningText: "r", usage: { inputTokens: 1, outputTokens: 2 } });
   await started.promise;
@@ -298,10 +1197,10 @@ test("runModelStep: 100 chars 且 1000ms 时在 finish 前按时间阈值触发 
   await stream.push({ type: "text-delta", text: "hello".repeat(20) });
   now = 1_000;
   await stream.push({ type: "reasoning-delta", text: "r" });
-  const streaming = started.updates.filter((item) => item.status === "streaming");
+  const streaming = started.flushes.filter((flush) => flush.parts.some((part) => part.type === "text"));
   assert.equal(streaming.length, 1);
-  assert.equal(streaming[0]?.output?.text, "hello".repeat(20));
-  assert.deepEqual(streaming[0]?.output?.reasoning, { text: "r" });
+  assert.equal(streaming[0]?.parts.find((part) => part.type === "text")?.text, "hello".repeat(20));
+  assert.equal(streaming[0]?.parts.find((part) => part.type === "reasoning")?.text, "r");
 
   await stream.finish({ reasoningText: "r", usage: { inputTokens: 1, outputTokens: 2 } });
   await started.promise;
@@ -313,40 +1212,1247 @@ test("runModelStep: tool-call step 前未达阈值文本会在 completed 中保�
   const started = await startRunModelStep({ stream, nowMs: () => now });
 
   await stream.push({ type: "text-delta", text: "preface" });
-  assert.equal(started.updates.filter((item) => item.status === "streaming").length, 0);
-  assert.equal(started.updates.filter((item) => item.status === "completed").length, 0);
+  assert.equal(started.flushes.filter((flush) => flush.parts.some((part) => part.type === "text")).length, 0);
+  assert.equal(started.completions.length, 0);
 
   await stream.push({ type: "tool-call", toolName: "read", toolCallId: "call_read_1", input: { filePath: "README.md" } });
-  assert.equal(started.updates.filter((item) => item.status === "completed").length, 0);
+  assert.equal(started.completions.length, 0);
 
   await stream.finish({ usage: { inputTokens: 1, outputTokens: 2 } });
   const result = await started.promise;
 
   assert.equal(result.toolCallCount, 1);
-  const completed = started.updates.filter((item) => item.status === "completed");
+  const completed = started.completions;
   assert.equal(completed.length, 1);
-  assert.equal(completed[0]?.output?.text, "preface");
-  assert.equal(started.createdItems.some((item) => item.kind === "tool" && (item.output as Record<string, unknown>)?.toolCallId === "call_read_1"), true);
+  assert.equal(completed[0]?.messageId ? "preface" : undefined, "preface");
+  assert.equal(started.completions.some((item) => Array.isArray(item.executions) && (item.executions as Array<Record<string, unknown>>).some((execution) => execution.callPartId != null)), true);
 });
 
-test("runModelStep: 失败路径会保存未达阈值文本", async () => {
-  let now = 0;
-  const stream = createControlledStream();
-  const started = await startRunModelStep({ stream, nowMs: () => now });
-
-  await stream.push({ type: "text-delta", text: "partial output" });
-  assert.equal(started.updates.filter((item) => item.status === "streaming").length, 0);
-
-  const errorAck = stream.push({ type: "error", error: new Error("boom") }).catch((err) => err);
-  let thrown: unknown = null;
+test("runModelStep: 空输出重试复用同一 streaming Assistant，并清除重试提示", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  (globalThis as any).setTimeout = ((handler: (...args: any[]) => void, _ms?: number, ...args: any[]) => originalSetTimeout(handler, 0, ...args)) as typeof setTimeout;
   try {
-    await started.promise;
-  } catch (err) {
-    thrown = err;
+  const emptyStream = createControlledStream();
+  const successfulStream = createControlledStream();
+    const started = await startRunModelStep({ streams: [emptyStream, successfulStream] });
+
+    void emptyStream.finish({ usage: { inputTokens: 90, outputTokens: 10 } });
+    void successfulStream.push({ type: "text-delta", text: "ok" });
+    void successfulStream.finish({ usage: { inputTokens: 3, outputTokens: 4 } });
+    const result = await started.promise;
+
+    assert.equal(result.hasVisibleText, true);
+    assert.equal(started.createdMessages.length, 1);
+    assert.equal(started.replacements.length, 0);
+    assert.equal(started.completions.length, 1);
+    const retryNotice = started.runNoticeUpdates.find((update) => String(update.runNoticeText ?? "").includes("Request failed, retrying"));
+    assert.equal(retryNotice?.retryCount, 1);
+    assert.equal(typeof retryNotice?.nextRetryAt, "number");
+    assert.ok(started.runNoticeUpdates.some((update) => update.runNoticeText === "" && update.nextRetryAt === null));
+    assert.equal(started.completions[0]?.responseTotalTokens, 7);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
   }
-  await errorAck;
-  assert.match(thrown instanceof Error ? thrown.message : String(thrown), /boom/);
-  const failed = started.updates.filter((item) => item.status === "failed");
-  assert.equal(failed.length, 1);
-  assert.equal(failed[0]?.output?.text, "partial output");
+});
+
+test("runModelStep: 失败 attempt 的 usage 不会污染无 usage 的成功 attempt", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  (globalThis as any).setTimeout = ((handler: (...args: any[]) => void, _ms?: number, ...args: any[]) => originalSetTimeout(handler, 0, ...args)) as typeof setTimeout;
+  try {
+    const failed = createControlledStream();
+    const successful = createControlledStream();
+    const started = await startRunModelStep({ streams: [failed, successful] });
+
+    void failed.push({ type: "finish", totalUsage: { inputTokens: 90, outputTokens: 10 } });
+    void failed.push({ type: "error", error: new Error("retry after usage") }).catch(() => undefined);
+    void successful.push({ type: "text-delta", text: "ok" });
+    void successful.finish({ usage: {} });
+    await started.promise;
+
+    assert.equal(started.completions[0]?.responseTotalTokens, null);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+test("runModelStep: 重试成功后只上报最终 attempt 的 usage", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  (globalThis as any).setTimeout = ((handler: (...args: any[]) => void, _ms?: number, ...args: any[]) => originalSetTimeout(handler, 0, ...args)) as typeof setTimeout;
+  try {
+    const failed = createControlledStream();
+    const successful = createControlledStream();
+    const started = await startRunModelStep({ streams: [failed, successful] });
+
+    void failed.push({ type: "finish", totalUsage: { totalTokens: 100 } });
+    void failed.push({ type: "error", error: new Error("retry after usage") }).catch(() => undefined);
+    void successful.push({ type: "text-delta", text: "ok" });
+    void successful.finish({ usage: { totalTokens: 7 } });
+    await started.promise;
+
+    assert.equal(started.completions[0]?.responseTotalTokens, 7);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+test("runModelStep: metadata-only 原生输出失败后替换 Assistant，后续成功不复用旧 attempt", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  (globalThis as any).setTimeout = ((handler: (...args: any[]) => void, _ms?: number, ...args: any[]) => originalSetTimeout(handler, 0, ...args)) as typeof setTimeout;
+  try {
+    const failed = createControlledStream();
+    const successful = createControlledStream();
+    const started = startRunModelStep({
+      streams: [failed, successful],
+      providerReplayPartFromChunk: providerReplayPartFromTestChunk,
+    });
+
+    await failed.push({ type: "provider-replay", partType: "reasoning", partId: "reasoning-native-1", itemId: "rs_1", encryptedContent: "opaque-only" });
+    void failed.push({ type: "error", error: new Error("retry metadata-only attempt") }).catch(() => undefined);
+    void successful.push({ type: "text-delta", text: "ok" });
+    void successful.finish({ usage: { inputTokens: 1, outputTokens: 1 } });
+    const result = await started.promise;
+
+    assert.equal(result.hasVisibleText, true);
+    assert.equal(started.createdMessages.length, 1);
+    assert.equal(started.replacements.length, 1);
+    assert.notEqual(started.replacements[0]?.oldMessageId, started.replacements[0]?.newMessageId);
+    const replayFlush = started.flushes.find((flush) => flush.parts.some((part) => part.providerReplay != null));
+    assert.ok(replayFlush);
+    assert.deepEqual(replayFlush.parts, [{
+      id: "reasoning-native-1",
+      position: 0,
+      type: "reasoning",
+      text: "",
+      providerReplay: {
+        version: 1,
+        provider: { npm: "@ai-sdk/openai", api: "responses", providerId: "provider", model: "gpt-5" },
+        item: { type: "reasoning", itemId: "rs_1", encryptedContent: "opaque-only" },
+      },
+    }]);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+test("runModelStep: 首次 flush 前 reasoning replay 允许 summaryIndex 补齐、同值重放和密文更新", async () => {
+  const stream = createControlledStream();
+  const started = startRunModelStep({ stream, providerReplayPartFromChunk: providerReplayPartFromTestChunk });
+
+  await stream.push({ type: "provider-replay", partType: "reasoning", partId: "reasoning-1", itemId: "rs_1", encryptedContent: "cipher-initial" });
+  await stream.push({ type: "provider-replay", partType: "reasoning", partId: "reasoning-1", itemId: "rs_1", encryptedContent: "cipher-final", summaryIndex: 0 });
+  await stream.push({ type: "provider-replay", partType: "reasoning", partId: "reasoning-1", itemId: "rs_1", encryptedContent: "cipher-newer", summaryIndex: 0 });
+  assert.equal(started.flushes.length, 0);
+  await stream.push({ type: "text-delta", text: "ok" });
+  await stream.finish();
+  await started.promise;
+
+  const replayPart = started.flushes.at(-1)?.parts.find((part) => part.id === "reasoning-1");
+  assert.deepEqual(replayPart?.providerReplay, {
+    version: 1,
+    provider: { npm: "@ai-sdk/openai", api: "responses", providerId: "provider", model: "gpt-5" },
+    item: { type: "reasoning", itemId: "rs_1", encryptedContent: "cipher-newer", summaryIndex: 0 },
+  });
+});
+
+test("runModelStep: 首次 flush 前 text replay 允许 phase 补齐与同值重放", async () => {
+  const stream = createControlledStream();
+  const started = startRunModelStep({ stream, providerReplayPartFromChunk: providerReplayPartFromTestChunk });
+
+  await stream.push({ type: "provider-replay", partType: "text", partId: "text-1", itemId: "msg_1" });
+  await stream.push({ type: "provider-replay", partType: "text", partId: "text-1", itemId: "msg_1", phase: "commentary" });
+  await stream.push({ type: "provider-replay", partType: "text", partId: "text-1", itemId: "msg_1", phase: "commentary" });
+  assert.equal(started.flushes.length, 0);
+  await stream.push({ type: "text-delta", text: "ok" });
+  await stream.finish();
+  await started.promise;
+
+  const replayPart = started.flushes.at(-1)?.parts.find((part) => part.id === "text-1");
+  assert.deepEqual(replayPart?.providerReplay, {
+    version: 1,
+    provider: { npm: "@ai-sdk/openai", api: "responses", providerId: "provider", model: "gpt-5" },
+    item: { type: "text", itemId: "msg_1", phase: "commentary" },
+  });
+});
+
+const incompatiblePreFlushReplayCases: Array<{
+  name: string;
+  first: Extract<StreamChunk, { type: "provider-replay" }>;
+  second: Extract<StreamChunk, { type: "provider-replay" }>;
+  error: RegExp;
+}> = [
+  {
+    name: "summaryIndex known→different",
+    first: { type: "provider-replay", partType: "reasoning", partId: "reasoning-1", itemId: "rs_1", encryptedContent: "cipher", summaryIndex: 0 },
+    second: { type: "provider-replay", partType: "reasoning", partId: "reasoning-1", itemId: "rs_1", encryptedContent: "cipher-final", summaryIndex: 1 },
+    error: /summaryIndex is immutable once known/,
+  },
+  {
+    name: "summaryIndex known→undefined",
+    first: { type: "provider-replay", partType: "reasoning", partId: "reasoning-1", itemId: "rs_1", encryptedContent: "cipher", summaryIndex: 0 },
+    second: { type: "provider-replay", partType: "reasoning", partId: "reasoning-1", itemId: "rs_1", encryptedContent: "cipher-final" },
+    error: /summaryIndex is immutable once known/,
+  },
+  {
+    name: "phase known→different",
+    first: { type: "provider-replay", partType: "text", partId: "text-1", itemId: "msg_1", phase: "commentary" },
+    second: { type: "provider-replay", partType: "text", partId: "text-1", itemId: "msg_1", phase: "final_answer" },
+    error: /phase is immutable once known/,
+  },
+  {
+    name: "phase known→undefined",
+    first: { type: "provider-replay", partType: "text", partId: "text-1", itemId: "msg_1", phase: "commentary" },
+    second: { type: "provider-replay", partType: "text", partId: "text-1", itemId: "msg_1" },
+    error: /phase is immutable once known/,
+  },
+  {
+    name: "itemId 改变",
+    first: { type: "provider-replay", partType: "reasoning", partId: "reasoning-1", itemId: "rs_1", encryptedContent: "cipher" },
+    second: { type: "provider-replay", partType: "reasoning", partId: "reasoning-1", itemId: "rs_2", encryptedContent: "cipher-final" },
+    error: /item identity is immutable/,
+  },
+];
+
+for (const item of incompatiblePreFlushReplayCases) {
+  test(`runModelStep: 首次 flush 前 ${item.name} 立即 fail closed`, async () => {
+    const stream = createControlledStream();
+    const started = startRunModelStep({ stream, providerReplayPartFromChunk: providerReplayPartFromTestChunk });
+    await stream.push(item.first);
+    assert.equal(started.flushes.length, 0);
+    void stream.push(item.second).catch(() => undefined);
+    await assert.rejects(started.promise, item.error);
+    assert.equal(started.flushes.length, 0);
+    assert.equal(started.replacements.length, 0);
+    assert.equal(started.streamRequests.length, 1);
+  });
+}
+
+test("runModelStep: tool-call chunk 原子绑定 call_id 与 function item ID 到同一 Part", async () => {
+  const stream = createControlledStream();
+  const started = startRunModelStep({ stream, providerToolCallReplayFromChunk: providerToolCallReplayFromTestChunk });
+  await stream.push({
+    type: "tool-call", toolName: "read", toolCallId: "call-atomic", input: { filePath: "README.md" }, functionItemId: "fc_atomic",
+  });
+  await stream.finish();
+  const result = await started.promise;
+  assert.equal(result.toolCallCount, 1);
+  const part = started.flushes.at(-1)?.parts.find((candidate) => candidate.type === "tool_call");
+  assert.deepEqual(part, {
+    id: part?.id,
+    position: 0,
+    type: "tool_call",
+    toolName: "read",
+    input: { filePath: "README.md" },
+    providerToolCallId: "call-atomic",
+    providerReplay: {
+      version: 1,
+      provider: { npm: "@ai-sdk/openai", api: "responses", providerId: "provider", model: "gpt-5" },
+      item: { type: "function_call", itemId: "fc_atomic" },
+    },
+  });
+});
+
+test("runModelStep: tool-call 后续 function replay 按 call_id 关联，不要求 adapter 知道本地 Part ID", async () => {
+  const stream = createControlledStream();
+  const started = startRunModelStep({ stream, providerReplayPartFromChunk: providerReplayPartFromTestChunk });
+  await stream.push({ type: "tool-call", toolName: "read", toolCallId: "call-late", input: { filePath: "late.ts" } });
+  await stream.push({ type: "provider-function-replay", toolCallId: "call-late", itemId: "fc_late" });
+  await stream.finish();
+  await started.promise;
+  const part = started.flushes.at(-1)?.parts.find((candidate) => candidate.type === "tool_call");
+  assert.equal(part?.providerToolCallId, "call-late");
+  assert.equal((part?.providerReplay as { item?: { itemId?: string } } | undefined)?.item?.itemId, "fc_late");
+});
+
+test("runModelStep: function replay 相同更新幂等，item ID 改变立即 fail closed", async () => {
+  const stream = createControlledStream();
+  const started = startRunModelStep({ stream, providerReplayPartFromChunk: providerReplayPartFromTestChunk });
+  await stream.push({ type: "tool-call", toolName: "read", toolCallId: "call-stable", input: {} });
+  await stream.push({ type: "provider-function-replay", toolCallId: "call-stable", itemId: "fc_stable" });
+  await stream.push({ type: "provider-function-replay", toolCallId: "call-stable", itemId: "fc_stable" });
+  assert.equal(started.flushes.length, 0);
+  void stream.push({ type: "provider-function-replay", toolCallId: "call-stable", itemId: "fc_changed" }).catch(() => undefined);
+  await assert.rejects(started.promise, /item identity is immutable/);
+  assert.equal(started.flushes.length, 0);
+  assert.equal(started.replacements.length, 0);
+  assert.equal(started.streamRequests.length, 1);
+});
+
+test("runModelStep: 不存在或错误 call_id 的 function replay 不得串绑并立即 fail closed", async () => {
+  const stream = createControlledStream();
+  const started = startRunModelStep({ stream, providerReplayPartFromChunk: providerReplayPartFromTestChunk });
+  await stream.push({ type: "tool-call", toolName: "read", toolCallId: "call-one", input: {} });
+  await stream.push({ type: "tool-call", toolName: "read", toolCallId: "call-two", input: {} });
+  void stream.push({ type: "provider-function-replay", toolCallId: "call-missing", itemId: "fc_wrong" }).catch(() => undefined);
+  await assert.rejects(started.promise, /requires a matching tool_call call_id/);
+  assert.equal(started.flushes.length, 0);
+  assert.equal(started.replacements.length, 0);
+  assert.equal(started.streamRequests.length, 1);
+});
+
+test("runModelStep: tool-call chunk 内 replay call_id 与通用 call_id 不一致立即 fail closed", async () => {
+  const stream = createControlledStream();
+  const started = startRunModelStep({ stream, providerToolCallReplayFromChunk: providerToolCallReplayFromTestChunk });
+  void stream.push({
+    type: "tool-call", toolName: "read", toolCallId: "call-real", replayCallId: "call-other", input: {}, functionItemId: "fc_mismatch",
+  }).catch(() => undefined);
+  await assert.rejects(started.promise, /call_id does not match tool-call chunk/);
+  assert.equal(started.flushes.length, 0);
+  assert.equal(started.replacements.length, 0);
+  assert.equal(started.streamRequests.length, 1);
+});
+
+test("runModelStep: 重复 tool-call call_id 不得绑定到不同工具或参数", async () => {
+  const stream = createControlledStream();
+  const started = startRunModelStep({ stream, providerToolCallReplayFromChunk: providerToolCallReplayFromTestChunk });
+  await stream.push({ type: "tool-call", toolName: "read", toolCallId: "call-reused", input: { filePath: "one" }, functionItemId: "fc_reused" });
+  void stream.push({ type: "tool-call", toolName: "read", toolCallId: "call-reused", input: { filePath: "two" }, functionItemId: "fc_reused" }).catch(() => undefined);
+  await assert.rejects(started.promise, /call_id was reused with different name or input/);
+  assert.equal(started.flushes.length, 0);
+  assert.equal(started.replacements.length, 0);
+});
+
+test("fenced flush 网络异常会保留完整 Part 快照并在写回恢复后完成", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  (globalThis as any).setTimeout = ((handler: (...args: any[]) => void, _ms?: number, ...args: any[]) => originalSetTimeout(handler, 0, ...args)) as typeof setTimeout;
+  try {
+    const stream = createControlledStream();
+    const started = startRunModelStep({ stream, flushResults: [new InternalRpcNetworkError({ method: "POST", endpoint: "/flush" }), { result: "updated" }] });
+    await stream.push({ type: "text-delta", text: "text".repeat(40) });
+    await stream.push({ type: "reasoning-delta", text: "reasoning" });
+    await stream.push({ type: "tool-call", toolName: "read", toolCallId: "call-1", input: { filePath: "one" } });
+    await stream.push({ type: "tool-call", toolName: "read", toolCallId: "call-2", input: { filePath: "two" } });
+    await stream.finish();
+    const result = await started.promise;
+    assert.equal(result.aborted, false);
+    assert.equal(started.flushes.length >= 3, true);
+    const retried = started.flushes.find((flush) => flush.parts.some((part) => part.type === "reasoning") && flush.parts.filter((part) => part.type === "tool_call").length === 2)!;
+    assert.equal(retried.parts.find((part) => part.type === "text")?.text, "text".repeat(40));
+    assert.equal(retried.parts.find((part) => part.type === "reasoning")?.text, "reasoning");
+    assert.deepEqual(retried.parts.filter((part) => part.type === "tool_call").map((part) => part.providerToolCallId), ["call-1", "call-2"]);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+for (const result of ["ignored", "missing"] as const) {
+  test(`fenced flush ${result} 会立即停止且不完成或再次请求模型`, async () => {
+    const stream = createControlledStream();
+    const started = startRunModelStep({ stream, flushResults: [{ result }] });
+    await stream.push({ type: "text-delta", text: "x".repeat(160) });
+    await assert.rejects(started.promise, new RegExp(`fenced write ${result}: flush assistant parts`));
+    assert.equal(started.completions.length, 0);
+    assert.equal(started.streamRequests.length, 1);
+  });
+
+  test(`fenced complete ${result} 会立即停止后续流程`, async () => {
+    const stream = createControlledStream();
+    const started = startRunModelStep({ stream, completeResults: [{ result }] });
+    await stream.push({ type: "text-delta", text: "done" });
+    await stream.finish();
+    await assert.rejects(started.promise, new RegExp(`fenced write ${result}: complete terminal assistant`));
+    assert.equal(started.completions.length, 1);
+    assert.equal(started.streamRequests.length, 1);
+  });
+}
+
+test("partial retry replacement 原子写入 retry notice，且 ignored 不会开始下一次模型请求", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  (globalThis as any).setTimeout = ((handler: (...args: any[]) => void, _ms?: number, ...args: any[]) => originalSetTimeout(handler, 0, ...args)) as typeof setTimeout;
+  try {
+    const failed = createControlledStream();
+    const next = createControlledStream();
+    const started = startRunModelStep({ streams: [failed, next], replaceResults: [{ result: "ignored" }] });
+    await failed.push({ type: "text-delta", text: "partial" });
+    await failed.push({ type: "error", error: new Error("request failed: 500") }).catch(() => undefined);
+    await assert.rejects(started.promise, /fenced write ignored: replace streaming assistant/);
+    assert.equal(started.replacements.length, 1);
+    assert.equal(typeof started.replacements[0]?.runNoticeText, "string");
+    assert.equal(started.replacements[0]?.retryCount, 1);
+    assert.equal(typeof started.replacements[0]?.nextRetryAt, "number");
+    assert.equal(started.runNoticeUpdates.length, 0);
+    assert.equal(started.streamRequests.length, 1);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+const providerRetryErrors = [
+  ...[400, 401, 403, 404, 429, 500].map((status) => ({
+    name: `HTTP ${status}`,
+    error: Object.assign(new Error(`provider HTTP ${status}`), { status, statusCode: status })
+  })),
+  { name: "network", error: new Error("ECONNRESET") }
+];
+
+for (const { name, error } of providerRetryErrors) {
+  test(`模型错误 ${name} 持续退避并在后续成功后清理 retry notice`, async () => {
+    const originalSetTimeout = globalThis.setTimeout;
+    (globalThis as any).setTimeout = ((handler: (...args: any[]) => void, _ms?: number, ...args: any[]) => originalSetTimeout(handler, 0, ...args)) as typeof setTimeout;
+    try {
+      const first = createControlledStream();
+      const second = createControlledStream();
+      const started = startRunModelStep({ streams: [first, second] });
+      await first.push({ type: "error", error }).catch(() => undefined);
+      await new Promise((resolve) => originalSetTimeout(resolve, 0));
+      await second.push({ type: "text-delta", text: "recovered" });
+      await second.finish();
+      const result = await started.promise;
+      assert.equal(result.aborted, false);
+      assert.equal(started.streamRequests.length, 2);
+      assert.equal(started.runNoticeUpdates[0]?.retryCount, 1);
+      assert.equal(typeof started.runNoticeUpdates[0]?.nextRetryAt, "number");
+      const cleared = started.runNoticeUpdates.find((update) => update.runNoticeText === "");
+      assert.deepEqual(cleared && { retryCount: cleared.retryCount, nextRetryAt: cleared.nextRetryAt }, { retryCount: 0, nextRetryAt: null });
+    } finally {
+      globalThis.setTimeout = originalSetTimeout;
+    }
+  });
+}
+
+for (const error of [
+  ...[400, 401, 403, 404, 405, 409, 422].map((status) => new InternalRpcHttpError({ method: "POST", endpoint: "/complete", status })),
+  new InternalRpcInvalidResponseError({ method: "POST", endpoint: "/complete", stage: "schema" }),
+  new Error("programming bug")
+]) {
+  test(`完成请求错误 ${error.name} 不进入 Provider retry 或 replacement`, async () => {
+    const stream = createControlledStream();
+    const started = startRunModelStep({ stream, completeResults: [error] });
+    await stream.push({ type: "text-delta", text: "done" });
+    await stream.finish();
+    if (error instanceof InternalRpcInvalidResponseError) {
+      // The response could be malformed after an otherwise successful commit.
+      await assert.rejects(started.promise, /terminal Assistant completion outcome uncertain/);
+    } else {
+      await assert.rejects(started.promise, ControlWritePermanentError);
+    }
+    assert.equal(started.streamRequests.length, 1);
+    assert.equal(started.replacements.length, 0);
+  });
+}
+
+test("瞬态控制面 503 会原地恢复且不重发模型", async () => {
+  const stream = createControlledStream();
+  const sleeps: number[] = [];
+  const started = startRunModelStep({
+    stream,
+    completeResults: [new InternalRpcHttpError({ method: "POST", endpoint: "/complete", status: 503 }), { result: "updated" }],
+    controlWriteSleep: async (ms) => { sleeps.push(ms); return true; }
+  });
+  await stream.push({ type: "text-delta", text: "done" });
+  await stream.finish();
+  const result = await started.promise;
+  assert.equal(result.aborted, false);
+  assert.equal(started.streamRequests.length, 1);
+  assert.equal(started.replacements.length, 0);
+  assert.deepEqual(sleeps, [100]);
+});
+
+test("flush 与 complete 的控制面网络异常重试同一请求快照", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  (globalThis as any).setTimeout = ((handler: (...args: any[]) => void, ms?: number, ...args: any[]) =>
+    originalSetTimeout(handler, typeof ms === "number" && ms >= 1_000 ? 0 : ms, ...args)) as typeof setTimeout;
+  try {
+    const stream = createControlledStream();
+    const flushPayloads: Array<Record<string, unknown>> = [];
+    const completePayloads: Array<Record<string, unknown>> = [];
+    let flushAttempt = 0;
+    let completeAttempt = 0;
+    const runner = new AgentRunner({
+      async createStreamingAssistant() { return { result: "updated" }; },
+      async flushAssistantParts(input: Record<string, unknown>) {
+        flushPayloads.push(input);
+        flushAttempt += 1;
+        if (flushAttempt === 1) throw new InternalRpcNetworkError({ method: "POST", endpoint: "/flush" });
+        return { result: "updated" };
+      },
+      async completeTerminalAssistant(input: Record<string, unknown>) {
+        completePayloads.push(input);
+        completeAttempt += 1;
+        if (completeAttempt === 1) throw new InternalRpcHttpError({ method: "POST", endpoint: "/complete-terminal", status: 503 });
+        return { result: "updated" };
+      },
+      async updateRunNotice() { return { result: "updated" }; }
+    } as any, {} as any, { info() {}, warn() {}, error() {} }, 1, {
+      streamText: (() => stream.stream) as unknown as typeof streamText,
+      controlWriteSleep: async () => true,
+      nowMs: (() => { let value = 0; return () => ++value; })()
+    });
+    (runner as any).toolRegistry.listTools = async () => [];
+    const promise = (runner as any).runModelStep({
+      profile: baseProfile(), run: baseRun(), context: baseContext(), step: 1,
+      signal: new AbortController().signal, repeatedToolCallCounter: new Map()
+    });
+    await stream.push({ type: "text-delta", text: "recovered" });
+    await stream.finish();
+    await promise;
+    assert.equal(flushPayloads.length, 3);
+    assert.equal(completePayloads.length, 2);
+    assert.strictEqual(flushPayloads[0], flushPayloads[1]);
+    assert.strictEqual(completePayloads[0], completePayloads[1]);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+test("clear retry notice 控制面网络失败恢复后不 replacement 且不重复模型请求", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  (globalThis as any).setTimeout = ((handler: (...args: any[]) => void, ms?: number, ...args: any[]) =>
+    originalSetTimeout(handler, typeof ms === "number" && ms >= 1_000 ? 0 : ms, ...args)) as typeof setTimeout;
+  try {
+    const first = createControlledStream();
+    const second = createControlledStream();
+    const sleeps: number[] = [];
+    const started = startRunModelStep({
+      streams: [first, second],
+      noticeResults: [{ result: "updated" }, new InternalRpcNetworkError({ method: "POST", endpoint: "/notice" }), { result: "updated" }],
+      controlWriteSleep: async (ms) => { sleeps.push(ms); return true; }
+    });
+    await first.push({ type: "error", error: new Error("request failed: 500") }).catch(() => undefined);
+    while (started.streamRequests.length < 2) await new Promise<void>((resolve) => setImmediate(resolve));
+    await second.push({ type: "text-delta", text: "recovered" });
+    await second.finish();
+    const result = await started.promise;
+    assert.equal(result.aborted, false);
+    assert.equal(started.streamRequests.length, 2);
+    assert.equal(started.replacements.length, 0);
+    assert.deepEqual(sleeps, [100]);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+test("clear retry notice 持续控制面失败可由用户取消中断，且不 replacement 或再次模型调用", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  (globalThis as any).setTimeout = ((handler: (...args: any[]) => void, ms?: number, ...args: any[]) =>
+    originalSetTimeout(handler, typeof ms === "number" && ms >= 1_000 ? 0 : ms, ...args)) as typeof setTimeout;
+  try {
+    const first = createControlledStream();
+    const second = createControlledStream();
+    const controller = new AbortController();
+    let sleeps = 0;
+    const started = startRunModelStep({
+      streams: [first, second],
+      signal: controller.signal,
+      noticeResults: [{ result: "updated" }, new InternalRpcNetworkError({ method: "POST", endpoint: "/notice" })],
+      controlWriteSleep: async () => {
+        sleeps += 1;
+        controller.abort();
+        return false;
+      }
+    });
+    await first.push({ type: "error", error: new Error("request failed: 500") }).catch(() => undefined);
+    while (started.streamRequests.length < 2) await new Promise<void>((resolve) => setImmediate(resolve));
+    await second.push({ type: "text-delta", text: "recovered" });
+    await second.finish();
+    const result = await started.promise;
+    assert.equal(result.aborted, true);
+    assert.equal(sleeps, 1);
+    assert.equal(started.streamRequests.length, 2);
+    assert.equal(started.replacements.length, 0);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+function abortAwareTimeoutStream(signal: AbortSignal, busy: boolean): StreamResultLike {
+  return {
+    fullStream: (async function* () {
+      while (!signal.aborted) {
+        if (!busy) {
+          await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+        } else {
+          yield { type: "text-delta" as const, text: "x" };
+          await new Promise((resolve) => setTimeout(resolve, 1));
+        }
+      }
+      const error = new Error("request aborted");
+      error.name = "AbortError";
+      throw error;
+    })(),
+    reasoningText: Promise.resolve(""), usage: Promise.resolve({})
+  };
+}
+
+for (const mode of ["idle", "total"] as const) {
+  test(`真实 ${mode} timeout 触发请求中断、Provider 重试并在第二次成功`, async () => {
+    const originalSetTimeout = globalThis.setTimeout;
+    (globalThis as any).setTimeout = ((handler: (...args: any[]) => void, ms?: number, ...args: any[]) =>
+      originalSetTimeout(handler, typeof ms === "number" && ms >= 1_000 ? 0 : ms, ...args)) as typeof setTimeout;
+    try {
+    const second = createControlledStream();
+    let calls = 0;
+    const aborted: boolean[] = [];
+    const runner = new AgentRunner({
+      async createStreamingAssistant() { return { result: "updated" }; },
+      async flushAssistantParts() { return { result: "updated" }; },
+      async replaceStreamingAssistant() { return { result: "updated", message: {} }; },
+      async completeAssistant() { return { result: "updated" }; },
+      async completeTerminalAssistant() { return { result: "updated" }; },
+      async updateRunNotice() { return { result: "updated" }; }
+    } as any, {} as any, { info() {}, warn() {}, error() {} }, 1, {
+      streamText: ((request: { abortSignal: AbortSignal }) => {
+        calls += 1;
+        request.abortSignal.addEventListener("abort", () => aborted.push(true), { once: true });
+        return calls === 1 ? abortAwareTimeoutStream(request.abortSignal, mode === "total") : second.stream;
+      }) as unknown as typeof streamText,
+      controlWriteSleep: async () => true
+    });
+    (runner as any).toolRegistry.listTools = async () => [];
+    const promise = (runner as any).runModelStep({
+      profile: { ...baseProfile(), runtime: mode === "idle"
+        ? { modelIdleTimeoutMs: 20, modelRequestRetryBackoffMaxMs: 2_000 }
+        : { modelTotalTimeoutMs: 20, modelRequestRetryBackoffMaxMs: 2_000 } },
+      run: baseRun(), context: baseContext(), step: 1,
+      signal: new AbortController().signal, repeatedToolCallCounter: new Map()
+    });
+    while (calls < 2) await new Promise((resolve) => setTimeout(resolve, 5));
+    await second.push({ type: "text-delta", text: "recovered" });
+    await second.finish();
+    const result = await promise;
+    assert.equal(result.aborted, false);
+    assert.equal(calls, 2);
+    assert.deepEqual(aborted, [true]);
+    } finally {
+      globalThis.setTimeout = originalSetTimeout;
+    }
+  });
+}
+
+test("runModelStep: reasoning-only 响应完整保存并作为有效完成", async () => {
+  const reasoningStream = createControlledStream();
+  const started = await startRunModelStep({ stream: reasoningStream });
+
+  await reasoningStream.push({ type: "reasoning-delta", text: "internal reasoning only" });
+  await reasoningStream.finish();
+
+  const result = await started.promise;
+
+  assert.equal(result.hasVisibleText, true);
+  assert.equal(result.toolCallCount, 0);
+  assert.equal(started.createdMessages.length, 1);
+  assert.equal(started.replacements.length, 0);
+  const lastReasoningFlush = [...started.flushes]
+    .reverse()
+    .find((flush) => flush.parts.some((part) => part.type === "reasoning"));
+  assert.equal(lastReasoningFlush?.parts.find((part) => part.type === "reasoning")?.text, "internal reasoning only");
+});
+
+test("runModelStep: 部分 Text 失败先保存旧输出，再替代为新 Assistant", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  (globalThis as any).setTimeout = ((handler: (...args: any[]) => void, _ms?: number, ...args: any[]) => originalSetTimeout(handler, 0, ...args)) as typeof setTimeout;
+  try {
+    const failedStream = createControlledStream();
+    const successfulStream = createControlledStream();
+    const started = await startRunModelStep({ streams: [failedStream, successfulStream] });
+
+    await failedStream.push({ type: "text-delta", text: "partial output" });
+    void failedStream.push({ type: "error", error: new Error("boom") }).catch(() => undefined);
+    void successfulStream.push({ type: "text-delta", text: "replacement output" });
+    void successfulStream.finish();
+    const result = await started.promise;
+
+    assert.equal(started.replacements.length, 1);
+    const oldMessageId = String(started.replacements[0]?.oldMessageId);
+    const newMessageId = String(started.replacements[0]?.newMessageId);
+    assert.notEqual(oldMessageId, newMessageId);
+    assert.equal(started.flushes.some((flush) => flush.messageId === oldMessageId && flush.parts.some((part) => part.type === "text" && part.text === "partial output")), true);
+    assert.equal(started.completions[0]?.messageId, newMessageId);
+    assert.equal(result.assistantMessageId, newMessageId);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+test("runModelStep: 部分 ToolCall 按 provider 顺序保存到 superseded Assistant，且不创建旧执行", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  (globalThis as any).setTimeout = ((handler: (...args: any[]) => void, _ms?: number, ...args: any[]) => originalSetTimeout(handler, 0, ...args)) as typeof setTimeout;
+  try {
+    const failedStream = createControlledStream();
+    const successfulStream = createControlledStream();
+    const started = await startRunModelStep({ streams: [failedStream, successfulStream] });
+
+    await failedStream.push({ type: "tool-call", toolName: "read", toolCallId: "old-1", input: { filePath: "one" } });
+    await failedStream.push({ type: "tool-call", toolName: "read", toolCallId: "old-2", input: { filePath: "two" } });
+    void failedStream.push({ type: "error", error: new Error("boom") }).catch(() => undefined);
+    void successfulStream.push({ type: "tool-call", toolName: "read", toolCallId: "new-1", input: { filePath: "three" } });
+    void successfulStream.finish();
+    await started.promise;
+
+    const oldMessageId = String(started.replacements[0]?.oldMessageId);
+    const oldToolCalls = started.flushes
+      .filter((flush) => flush.messageId === oldMessageId)
+      .flatMap((flush) => flush.parts.filter((part) => part.type === "tool_call"));
+    assert.deepEqual(oldToolCalls.at(-2)?.providerToolCallId, "old-1");
+    assert.deepEqual(oldToolCalls.at(-1)?.providerToolCallId, "old-2");
+    assert.equal(started.completions.length, 1);
+    const executions = started.completions[0]?.executions as Array<Record<string, unknown>>;
+    assert.equal(executions.length, 1);
+    assert.equal(String(executions[0]?.callPartId).startsWith(`${started.replacements[0]?.newMessageId}:part:`), true);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+test("runModelStep: partial retry replacement 分别保留旧新 Assistant 的有序 Part 和实际 execution 关联", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  (globalThis as any).setTimeout = ((handler: (...args: any[]) => void, _ms?: number, ...args: any[]) => originalSetTimeout(handler, 0, ...args)) as typeof setTimeout;
+  try {
+    const failedStream = createControlledStream();
+    const successfulStream = createControlledStream();
+    const started = await startRunModelStep({ streams: [failedStream, successfulStream] });
+
+    await failedStream.push({ type: "text-delta", text: "old-before" });
+    await failedStream.push({ type: "tool-call", toolName: "read", toolCallId: "old-call", input: { filePath: "old" } });
+    void failedStream.push({ type: "error", error: new Error("retry") }).catch(() => undefined);
+    await successfulStream.push({ type: "reasoning-delta", text: "new-reasoning" });
+    await successfulStream.push({ type: "tool-call", toolName: "read", toolCallId: "new-call", input: { filePath: "new" } });
+    await successfulStream.push({ type: "text-delta", text: "new-after" });
+    await successfulStream.finish();
+    await started.promise;
+
+    const oldMessageId = String(started.replacements[0]?.oldMessageId);
+    const newMessageId = String(started.replacements[0]?.newMessageId);
+    const oldParts = started.flushes.filter((flush) => flush.messageId === oldMessageId).at(-1)!.parts;
+    const newParts = started.flushes.filter((flush) => flush.messageId === newMessageId).at(-1)!.parts;
+    assert.deepEqual(oldParts.map((part) => part.type), ["text", "tool_call"]);
+    assert.deepEqual(newParts.map((part) => part.type), ["reasoning", "tool_call", "text"]);
+    const execution = (started.completions[0]?.executions as Array<Record<string, unknown>>)[0]!;
+    assert.equal(execution.callPartId, newParts[1]?.id);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+test("runModelStep: 部分 Reasoning 失败会替代消息，且下一次请求不携带 reasoning", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  (globalThis as any).setTimeout = ((handler: (...args: any[]) => void, _ms?: number, ...args: any[]) => originalSetTimeout(handler, 0, ...args)) as typeof setTimeout;
+  try {
+    const failedStream = createControlledStream();
+    const successfulStream = createControlledStream();
+    const started = await startRunModelStep({ streams: [failedStream, successfulStream] });
+
+    await failedStream.push({ type: "reasoning-delta", text: "private chain" });
+    void failedStream.push({ type: "error", error: new Error("boom") }).catch(() => undefined);
+    void successfulStream.push({ type: "text-delta", text: "answer" });
+    void successfulStream.finish();
+    await started.promise;
+
+    assert.equal(started.replacements.length, 1);
+    const oldMessageId = String(started.replacements[0]?.oldMessageId);
+    assert.equal(started.flushes.some((flush) => flush.messageId === oldMessageId && flush.parts.some((part) => part.type === "reasoning" && part.text === "private chain")), true);
+    assert.equal(JSON.stringify(started.streamRequests[1]).includes("private chain"), false);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+test("runModelStep: 在退避期间取消不会发起下一次模型请求", async () => {
+  const controller = new AbortController();
+  const failedStream = createControlledStream();
+  const started = await startRunModelStep({
+    stream: failedStream,
+    signal: controller.signal,
+    onRunNotice(input) {
+      if (String(input.runNoticeText).includes("Request failed, retrying")) controller.abort();
+    }
+  });
+
+  void failedStream.finish();
+  const result = await started.promise;
+
+  assert.equal(result.aborted, true);
+  assert.equal(started.streamRequests.length, 1);
+  assert.equal(started.completions.length, 0);
+});
+
+test("runModelStep 使用 Profile 的 120s 退避上限并在第六次重试等待 64000ms", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  const observedDelays: number[] = [];
+  (globalThis as any).setTimeout = ((handler: (...args: any[]) => void, ms?: number, ...args: any[]) => {
+    if (typeof ms === "number" && ms > 0) observedDelays.push(ms);
+    return originalSetTimeout(handler, 0, ...args);
+  }) as typeof setTimeout;
+
+  try {
+    const streams = Array.from({ length: 7 }, (_, index) => ({
+      fullStream: (async function* () {
+        if (index === 6) yield { type: "text-delta", text: "ok" };
+        if (index === 6) yield { type: "raw", rawValue: { type: "response.completed", response: { output: [] } } };
+        yield { type: "finish" };
+      })(),
+      reasoningText: Promise.resolve(""),
+      usage: Promise.resolve({ inputTokens: 1, outputTokens: 1 })
+    }));
+    const runNoticeUpdates: Array<Record<string, unknown>> = [];
+    const streamRequests: unknown[] = [];
+    let streamCalls = 0;
+    const runner = new AgentRunner(
+      {
+        async createStreamingAssistant() { return { result: "updated" }; },
+        async flushAssistantParts() { return { result: "updated" }; },
+        async completeTerminalAssistant() { return { result: "updated" }; },
+        async completeAssistant() { return { result: "updated" }; },
+        async updateRunNotice(input: Record<string, unknown>) { runNoticeUpdates.push(input); return { result: "updated" }; }
+      } as any,
+      {} as any,
+      { info() {}, warn() {}, error() {} },
+      1,
+      {
+        streamText: ((input: unknown) => {
+          streamRequests.push(input);
+          return streams[streamCalls++];
+        }) as unknown as typeof streamText
+      }
+    );
+    (runner as any).toolRegistry.listTools = async () => [];
+
+    const result = await (runner as any).runModelStep({
+      profile: { ...baseProfile(), runtime: { modelRequestMaxRetries: 6, modelRequestRetryBackoffMaxMs: 120_000 } },
+      run: baseRun(),
+      context: baseContext(),
+      step: 1,
+      signal: new AbortController().signal,
+      repeatedToolCallCounter: new Map()
+    });
+
+    assert.equal(result.aborted, false);
+    assert.equal(streamRequests.length, 7);
+    assert.deepEqual(observedDelays.slice(-6), [2_000, 4_000, 8_000, 16_000, 32_000, 64_000]);
+    assert.ok(runNoticeUpdates.some((update) => String(update.runNoticeText || "").includes("64s")));
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+test("runModelStep: OpenAI final-only 密文形成空 reasoning part 并启用本地 replay 请求选项", async () => {
+  const stream = createControlledStream();
+  const started = startRunModelStep({ stream });
+  await new Promise((resolve) => setImmediate(resolve));
+  const request = started.streamRequests[0] as Record<string, unknown>;
+  assert.equal(request.includeRawChunks, true);
+  assert.deepEqual((request.providerOptions as Record<string, unknown>).openai, {
+    promptCacheKey: "awb:sess_test",
+    store: false,
+    include: ["reasoning.encrypted_content"],
+  });
+  await stream.push({ type: "reasoning-start", id: "rs-1:0", providerMetadata: { openai: { itemId: "rs-1", reasoningEncryptedContent: null } } });
+  await stream.push({ type: "raw", rawValue: { type: "response.completed", response: { output: [{ type: "reasoning", id: "rs-1", encrypted_content: "final-cipher" }] } } });
+  await stream.push({ type: "tool-call", toolName: "read", toolCallId: "call-1", input: {}, functionItemId: "fc-1" });
+  await stream.finish();
+  await started.promise;
+  const finalParts = started.flushes.at(-1)?.parts as Array<Record<string, unknown>>;
+  const reasoning = finalParts.find((part) => part.type === "reasoning");
+  assert.equal(reasoning?.text, "");
+  assert.equal(((reasoning?.providerReplay as Record<string, unknown>).item as Record<string, unknown>).encryptedContent, "final-cipher");
+});
+
+test("runModelStep: OpenAI replay-only Assistant 在终态 metadata flush 后完成", async () => {
+  const stream = createControlledStream();
+  const started = startRunModelStep({ stream });
+  await stream.push({
+    type: "reasoning-start",
+    id: "rs-only:0",
+    providerMetadata: { openai: { itemId: "rs-only", reasoningEncryptedContent: "cipher" } },
+  });
+  await stream.push({
+    type: "raw",
+    rawValue: {
+      type: "response.completed",
+      response: { output: [{ type: "reasoning", id: "rs-only", encrypted_content: "cipher" }] },
+    },
+  });
+  await stream.finish();
+  await started.promise;
+
+  const finalParts = started.flushes.at(-1)?.parts as Array<Record<string, unknown>>;
+  assert.ok(started.flushes.length >= 1);
+  assert.equal(finalParts[0]?.type, "reasoning");
+  assert.equal(finalParts[0]?.text, "");
+  assert.equal(((finalParts[0]?.providerReplay as Record<string, unknown>)?.item as Record<string, unknown>)?.encryptedContent, "cipher");
+  assert.equal(started.completions.length, 1);
+});
+
+test("processRun: replay-only empty responses complete normally for five steps and atomically at the sixth", { timeout: 10_000 }, async () => {
+  const streams = Array.from({ length: 6 }, (_, index) => {
+    const itemId = `reasoning-${index}`;
+    return { stream: {
+      fullStream: (async function* (): AsyncGenerator<StreamChunk> {
+        yield { type: "reasoning-start", id: `${itemId}:0`, providerMetadata: { openai: { itemId, reasoningEncryptedContent: "cipher" } } };
+        yield { type: "raw", rawValue: { type: "response.completed", response: { output: [{ type: "reasoning", id: itemId, encrypted_content: "cipher" }] } } };
+        yield { type: "finish" };
+      })(),
+      reasoningText: Promise.resolve(""),
+      usage: Promise.resolve({ inputTokens: 1, outputTokens: 1 }),
+    } };
+  });
+  const snapshots: Array<{ terminal: boolean; intent: unknown }> = [];
+  const harness = createRunnerHarness({ streams, onAssistantComplete(input, terminal) {
+    snapshots.push({ terminal, intent: input.intent ?? null });
+  } });
+
+  await (harness.runner as any).processRun(baseRun(), new AbortController().signal);
+  assert.equal(harness.streamRequests.length, 6);
+  assert.equal(harness.completions.length, 6);
+  assert.deepEqual(snapshots, [
+    ...Array.from({ length: 5 }, () => ({ terminal: false, intent: null })),
+    { terminal: true, intent: { status: "completed", code: "run_completed", detail: null } },
+  ]);
+  assert.deepEqual(harness.terminalCompletions, []);
+});
+
+test("processRun: cancelling immediately after a user or subtask terminal Assistant commit only converges completed", async () => {
+  for (const runKind of ["user", "subtask"] as const) {
+    const controller = new AbortController();
+    const streams = [{ stream: {
+      fullStream: (async function* (): AsyncGenerator<StreamChunk> {
+        yield { type: "text-delta", text: "done" };
+        yield { type: "raw", rawValue: { type: "response.completed", response: { output: [] } } };
+        yield { type: "finish" };
+      })(),
+      reasoningText: Promise.resolve(""),
+      usage: Promise.resolve({ inputTokens: 1, outputTokens: 1 }),
+    } }];
+    const harness = createRunnerHarness({ streams, onAssistantComplete(_input, terminal) {
+      assert.equal(terminal, true);
+      controller.abort();
+    } });
+    let convergences = 0;
+    (harness.runner as any).apiClient.convergeRunTerminal = async () => {
+      convergences += 1;
+      return { kind: "transitioned", finalStatus: "completed" };
+    };
+    await (harness.runner as any).processRun({ ...baseRun(), runKind }, controller.signal);
+    assert.deepEqual(harness.completions[0]?.intent, {
+      status: "completed", code: runKind === "subtask" ? "subtask_completed" : "run_completed", detail: null,
+    });
+    assert.equal(convergences, 1);
+    assert.deepEqual(harness.terminalCompletions, []);
+  }
+});
+
+for (const runKind of ["user", "subtask"] as const) {
+  for (const scenario of [
+    "lost-response-cancel", "cancel-during-replay-wait", "replay-permanent-error",
+    "convergence-failure", "missing-intent", "cancel-won", "invalid-response", "idempotent-replay", "definitive-permanent-error",
+  ] as const) {
+    test(`processRun: ${runKind} terminal Assistant ${scenario} uses only durable terminal intent`, async () => {
+      const controller = new AbortController();
+      const streams = [{ stream: {
+        fullStream: (async function* (): AsyncGenerator<StreamChunk> {
+          yield { type: "text-delta", text: "done" };
+          yield { type: "raw", rawValue: { type: "response.completed", response: { output: [] } } };
+          yield { type: "finish" };
+        })(),
+        reasoningText: Promise.resolve(""),
+        usage: Promise.resolve({ inputTokens: 1, outputTokens: 1 }),
+      } }];
+      const harness = createRunnerHarness({ streams, controlWriteSleep: async () => {
+        if (scenario === "cancel-during-replay-wait") {
+          controller.abort();
+          return false;
+        }
+        return true;
+      } });
+      const api = (harness.runner as any).apiClient;
+      let durableIntent: Record<string, unknown> | null = null;
+      let firstRequest: Record<string, unknown> | null = null;
+      let completeCalls = 0;
+      let convergeCalls = 0;
+      const independentIntents: string[] = [];
+      api.completeTerminalAssistant = async (input: Record<string, unknown>) => {
+        completeCalls += 1;
+        if (scenario === "definitive-permanent-error") {
+          throw new InternalRpcHttpError({ method: "POST", endpoint: "/complete-terminal-assistant", status: 400 });
+        }
+        if (completeCalls === 1) {
+          firstRequest = input;
+          if (scenario !== "missing-intent") durableIntent = scenario === "cancel-won"
+            ? { status: "cancelled", code: "run_cancelled", detail: null }
+            : input.intent as Record<string, unknown>;
+          if (scenario === "invalid-response") {
+            throw new InternalRpcInvalidResponseError({ method: "POST", endpoint: "/complete-terminal-assistant", stage: "schema" });
+          }
+          if (scenario !== "cancel-during-replay-wait" && scenario !== "replay-permanent-error" && scenario !== "idempotent-replay") controller.abort();
+          throw new InternalRpcNetworkError({ method: "POST", endpoint: "/complete-terminal-assistant" });
+        }
+        assert.deepEqual(input, firstRequest, "idempotent replay must use the identical request");
+        if (scenario === "replay-permanent-error") {
+          throw new InternalRpcHttpError({ method: "POST", endpoint: "/complete-terminal-assistant", status: 409 });
+        }
+        controller.abort();
+        return { result: "updated" };
+      };
+      api.persistRunTerminalIntent = async (input: { status: string }) => {
+        independentIntents.push(input.status);
+        durableIntent = input as unknown as Record<string, unknown>;
+        return { result: "updated" };
+      };
+      api.convergeRunTerminal = async () => {
+        convergeCalls += 1;
+        if (scenario === "convergence-failure" || scenario === "missing-intent") {
+          throw new InternalRpcHttpError({ method: "POST", endpoint: "/converge-terminal", status: 409 });
+        }
+        assert.ok(durableIntent, "convergence requires an existing intent");
+        return { kind: scenario === "idempotent-replay" ? "already_converged" : "transitioned", finalStatus: durableIntent.status };
+      };
+
+      await (harness.runner as any).processRun({ ...baseRun(), runKind }, controller.signal);
+      assert.equal(completeCalls, scenario === "idempotent-replay" || scenario === "replay-permanent-error" ? 2 : 1);
+      assert.equal(convergeCalls, 1);
+      assert.deepEqual(independentIntents, scenario === "definitive-permanent-error" ? ["failed"] : []);
+      assert.equal((durableIntent as Record<string, unknown> | null)?.status ?? null, scenario === "definitive-permanent-error" ? "failed" : scenario === "missing-intent" ? null : scenario === "cancel-won" ? "cancelled" : "completed");
+    });
+  }
+}
+
+test("runModelStep: 非 OpenAI 空输出仍被拒绝", async () => {
+  const stream = createControlledStream();
+  const controller = new AbortController();
+  const profile = baseProfile();
+  profile.provider.npm = "@ai-sdk/openai-compatible";
+  const started = startRunModelStep({ stream, profile, signal: controller.signal });
+  await stream.finish();
+  while (started.runNoticeUpdates.length === 0) await new Promise<void>((resolve) => setImmediate(resolve));
+  controller.abort();
+  const result = await started.promise;
+  assert.equal(result.aborted, true);
+  assert.equal(started.completions.length, 0);
+});
+
+test("runModelStep: 仅 OpenAI text identity 不允许 replay-only Assistant", async () => {
+  const stream = createControlledStream();
+  const controller = new AbortController();
+  const started = startRunModelStep({ stream, signal: controller.signal });
+  await stream.push({
+    type: "text-start",
+    id: "msg-empty",
+    providerMetadata: { openai: { itemId: "msg-empty", phase: "final_answer" } },
+  });
+  await stream.push({ type: "raw", rawValue: { type: "response.completed", response: { output: [] } } });
+  await stream.finish();
+  while (started.runNoticeUpdates.length === 0) await new Promise<void>((resolve) => setImmediate(resolve));
+  controller.abort();
+  const result = await started.promise;
+  assert.equal(result.aborted, true);
+  assert.equal(started.completions.length, 0);
+});
+
+test("runModelStep: 未知工具的 function identity 不允许 replay-only Assistant", async () => {
+  const stream = createControlledStream();
+  const controller = new AbortController();
+  const started = startRunModelStep({ stream, signal: controller.signal });
+  await stream.push({
+    type: "tool-call",
+    toolName: "not-available",
+    toolCallId: "call-unknown",
+    input: {},
+    providerMetadata: { openai: { itemId: "fc-unknown" } },
+  } as StreamChunk);
+  await stream.push({ type: "raw", rawValue: { type: "response.completed", response: { output: [] } } });
+  await stream.finish();
+  while (started.runNoticeUpdates.length === 0) await new Promise<void>((resolve) => setImmediate(resolve));
+  controller.abort();
+  const result = await started.promise;
+  assert.equal(result.aborted, true);
+  assert.equal(started.completions.length, 0);
+});
+
+test("runModelStep: replacement 不继承旧 Attempt 的 replay-only 完成权限", async () => {
+  const controller = new AbortController();
+  const originalSetTimeout = globalThis.setTimeout;
+  (globalThis as unknown as { setTimeout: typeof setTimeout }).setTimeout = ((handler: (...args: unknown[]) => void, _ms?: number, ...args: unknown[]) => originalSetTimeout(handler, 0, ...args)) as typeof setTimeout;
+  try {
+    const first = createControlledStream();
+    const second = createControlledStream();
+    const started = startRunModelStep({ streams: [first, second], signal: controller.signal });
+    await first.push({
+      type: "reasoning-start",
+      id: "rs-old:0",
+      providerMetadata: { openai: { itemId: "rs-old", reasoningEncryptedContent: "cipher" } },
+    });
+    await first.push({ type: "raw", rawValue: { type: "response.failed", response: {} } });
+    await first.finish();
+    while (started.replacements.length === 0) await new Promise<void>((resolve) => originalSetTimeout(resolve, 0));
+    await second.push({ type: "raw", rawValue: { type: "response.completed", response: { output: [] } } });
+    await second.finish();
+    while (started.runNoticeUpdates.length === 0) await new Promise<void>((resolve) => originalSetTimeout(resolve, 0));
+    controller.abort();
+    const result = await started.promise;
+    assert.equal(result.aborted, true);
+    assert.equal(started.completions.length, 0);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+test("runModelStep: OpenAI 原生流 ID 保留 reasoning、text、function item metadata", async () => {
+  const stream = createControlledStream();
+  const started = startRunModelStep({ stream });
+  await stream.push({ type: "reasoning-start", id: "rs-1:0", providerMetadata: { openai: { itemId: "rs-1", reasoningEncryptedContent: "cipher" } } });
+  await stream.push({ type: "reasoning-delta", text: "summary", id: "rs-1:0" } as StreamChunk);
+  await stream.push({ type: "reasoning-end", id: "rs-1:0", providerMetadata: { openai: { itemId: "rs-1", reasoningEncryptedContent: "cipher" } } });
+  await stream.push({ type: "text-start", id: "msg-1", providerMetadata: { openai: { itemId: "msg-1", phase: "final_answer" } } });
+  await stream.push({ type: "text-delta", text: "answer", id: "msg-1" } as StreamChunk);
+  await stream.push({ type: "text-end", id: "msg-1", providerMetadata: { openai: { itemId: "msg-1", phase: "final_answer" } } });
+  await stream.push({ type: "tool-call", toolName: "read", toolCallId: "call-1", input: {}, providerMetadata: { openai: { itemId: "fc-1" } } } as StreamChunk);
+  await stream.finish();
+  await started.promise;
+  const parts = started.flushes.at(-1)?.parts as Array<Record<string, unknown>>;
+  assert.deepEqual(parts.map((part) => part.type), ["reasoning", "text", "tool_call"]);
+  assert.equal(parts[0]?.id, "rs-1:0");
+  assert.equal(parts[1]?.id, "msg-1");
+  assert.equal(parts[2]?.providerToolCallId, "call-1");
+  assert.equal((((parts[2]?.providerReplay as Record<string, unknown>).item) as Record<string, unknown>).itemId, "fc-1");
+});
+
+test("runModelStep: OpenAI EOF 无 response.completed 时已有输出被隔离替换", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  (globalThis as unknown as { setTimeout: typeof setTimeout }).setTimeout = ((handler: (...args: unknown[]) => void, _ms?: number, ...args: unknown[]) => originalSetTimeout(handler, 0, ...args)) as typeof setTimeout;
+  try {
+    const incomplete = createControlledStream();
+    const completed = createControlledStream();
+    const started = startRunModelStep({ streams: [incomplete, completed] });
+    await incomplete.push({ type: "reasoning-start", id: "rs-1:0", providerMetadata: { openai: { itemId: "rs-1", reasoningEncryptedContent: "cipher" } } });
+    await incomplete.push({ type: "text-delta", text: "partial text" });
+    await incomplete.push({ type: "tool-call", toolName: "read", toolCallId: "call-partial", input: { filePath: "README.md" } });
+    void incomplete.finish({ terminal: false });
+    while (started.replacements.length === 0) await new Promise((resolve) => originalSetTimeout(resolve, 0));
+    void completed.push({ type: "text-delta", text: "ok" });
+    void completed.finish();
+    await started.promise;
+    assert.equal(started.replacements.length, 1);
+    assert.equal(started.flushes.some((flush) => flush.parts.some((part) => part.type === "reasoning" && part.providerReplay != null)), true);
+    assert.equal(started.completions.length, 1);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+test("runModelStep: OpenAI response.incomplete 不会 completed", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  (globalThis as unknown as { setTimeout: typeof setTimeout }).setTimeout = ((handler: (...args: unknown[]) => void, _ms?: number, ...args: unknown[]) => originalSetTimeout(handler, 0, ...args)) as typeof setTimeout;
+  try {
+    const incomplete = createControlledStream();
+    const completed = createControlledStream();
+    const started = startRunModelStep({ streams: [incomplete, completed] });
+    void incomplete.push({ type: "text-delta", text: "partial" });
+    void incomplete.finish({ terminal: "incomplete" });
+    while (started.replacements.length === 0) await new Promise((resolve) => originalSetTimeout(resolve, 0));
+    void completed.push({ type: "text-delta", text: "ok" });
+    void completed.finish();
+    await started.promise;
+    assert.equal(started.replacements.length, 1);
+    assert.equal(started.completions.length, 1);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+test("runModelStep: OpenAI response.failed 与 unknown finish reason 均隔离已有输出", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  (globalThis as unknown as { setTimeout: typeof setTimeout }).setTimeout = ((handler: (...args: unknown[]) => void, _ms?: number, ...args: unknown[]) => originalSetTimeout(handler, 0, ...args)) as typeof setTimeout;
+  try {
+    const failureCases: Array<{
+      name: string;
+      emit: (stream: ReturnType<typeof createControlledStream>) => Promise<void>;
+    }> = [
+      {
+        name: "response.failed",
+        async emit(stream) {
+          void stream.push({ type: "text-delta", text: "partial failed" });
+          void stream.finish({ terminal: "failed" });
+        },
+      },
+      {
+        name: "unknown finish reason",
+        async emit(stream) {
+          await stream.push({ type: "text-delta", text: "partial unknown" });
+          await stream.push({ type: "finish", finishReason: "unknown" });
+          void stream.finish();
+        },
+      },
+      {
+        name: "abort chunk",
+        async emit(stream) {
+          await stream.push({ type: "text-delta", text: "partial abort" });
+          void stream.push({ type: "abort" }).catch(() => undefined);
+        },
+      },
+    ];
+
+    for (const failureCase of failureCases) {
+      const failed = createControlledStream();
+      const completed = createControlledStream();
+      const started = startRunModelStep({ streams: [failed, completed] });
+      await failureCase.emit(failed);
+      while (started.replacements.length === 0) await new Promise((resolve) => originalSetTimeout(resolve, 0));
+      void completed.push({ type: "text-delta", text: `recovered after ${failureCase.name}` });
+      void completed.finish();
+      await started.promise;
+      assert.equal(started.replacements.length, 1, failureCase.name);
+      assert.equal(started.completions.length, 1, failureCase.name);
+    }
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+test("runModelStep: OpenAI terminal failure is sticky across conflicting terminal events", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  (globalThis as unknown as { setTimeout: typeof setTimeout }).setTimeout = ((handler: (...args: unknown[]) => void, _ms?: number, ...args: unknown[]) => originalSetTimeout(handler, 0, ...args)) as typeof setTimeout;
+  try {
+    const cases: Array<{ name: string; terminals: Array<"completed" | "incomplete" | "failed"> }> = [
+      { name: "failed then completed", terminals: ["failed", "completed"] },
+      { name: "incomplete then completed", terminals: ["incomplete", "completed"] },
+      { name: "completed then failed", terminals: ["completed", "failed"] },
+    ];
+    for (const item of cases) {
+      const conflicted = createControlledStream();
+      const recovered = createControlledStream();
+      const started = startRunModelStep({ streams: [conflicted, recovered] });
+      await conflicted.push({ type: "text-delta", text: `partial ${item.name}` });
+      for (const terminal of item.terminals) {
+        await conflicted.push({ type: "raw", rawValue: { type: `response.${terminal}`, response: { output: [] } } });
+      }
+      void conflicted.finish({ terminal: false });
+      while (started.replacements.length === 0) await new Promise((resolve) => originalSetTimeout(resolve, 0));
+      await recovered.push({ type: "text-delta", text: "recovered" });
+      void recovered.finish();
+      await started.promise;
+      assert.equal(started.replacements.length, 1, item.name);
+      assert.equal(started.completions.length, 1, item.name);
+    }
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+test("runModelStep: repeated response.completed terminal is idempotent", async () => {
+  const stream = createControlledStream();
+  const started = startRunModelStep({ stream });
+  await stream.push({ type: "text-delta", text: "ok" });
+  await stream.push({ type: "raw", rawValue: { type: "response.completed", response: { output: [] } } });
+  await stream.push({ type: "raw", rawValue: { type: "response.completed", response: { output: [] } } });
+  await stream.finish({ terminal: false });
+  await started.promise;
+  assert.equal(started.replacements.length, 0);
+  assert.equal(started.completions.length, 1);
+});
+
+test("runModelStep: 非 OpenAI Provider 不要求 Responses terminal raw", async () => {
+  const stream = createControlledStream();
+  const harness = createRunnerHarness({ stream });
+  const profile = {
+    ...baseProfile(),
+    provider: { id: "anthropic", npm: "@ai-sdk/anthropic", options: { apiKey: "test-key", baseURL: "https://example.test" } },
+  };
+  const promise = (harness.runner as unknown as { runModelStep: (input: unknown) => Promise<unknown> }).runModelStep({
+    profile, run: baseRun(), context: baseContext(), step: 1,
+    signal: new AbortController().signal, recoveryContinuation: { messageId: null },
+    repeatedToolCallCounter: new Map(),
+  });
+  await stream.push({ type: "text-delta", text: "ok" });
+  await stream.finish({ terminal: false });
+  await promise;
+  assert.equal(harness.completions.length, 1);
 });

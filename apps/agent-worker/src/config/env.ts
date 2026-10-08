@@ -1,4 +1,7 @@
+import path from "node:path";
+
 export type WorkerEnv = {
+  dataDir: string;
   host: string;
   port: number;
   socketPath: string | null;
@@ -6,6 +9,7 @@ export type WorkerEnv = {
   internalToken: string;
   responseValidation: "strict" | "warn";
   concurrency: number;
+  internalRpcTimeoutMs: number;
   pidFilePath: string | null;
 };
 
@@ -17,7 +21,15 @@ function parsePositiveInt(raw: string, name: string) {
   return value;
 }
 
+function parseStrictPositiveInt(raw: string, name: string) {
+  if (!/^\d+$/.test(raw)) {
+    throw new Error(`invalid ${name}: ${raw}`);
+  }
+  return parsePositiveInt(raw, name);
+}
+
 export function loadWorkerEnv(processEnv: NodeJS.ProcessEnv): WorkerEnv {
+  const dataDir = path.resolve((processEnv.AWB_DATA_DIR || ".data").trim() || ".data");
   const host = (processEnv.AWB_AGENT_WORKER_HOST || "127.0.0.1").trim();
   const port = parsePositiveInt((processEnv.AWB_AGENT_WORKER_PORT || "4312").trim(), "AWB_AGENT_WORKER_PORT");
   const socketPathRaw = (processEnv.AWB_AGENT_WORKER_SOCKET || "").trim();
@@ -36,9 +48,14 @@ export function loadWorkerEnv(processEnv: NodeJS.ProcessEnv): WorkerEnv {
     (processEnv.AWB_AGENT_WORKER_CONCURRENCY || "2").trim(),
     "AWB_AGENT_WORKER_CONCURRENCY"
   );
+  const internalRpcTimeoutMs = parseStrictPositiveInt(
+    processEnv.AWB_AGENT_INTERNAL_RPC_TIMEOUT_MS?.trim() || "15000",
+    "AWB_AGENT_INTERNAL_RPC_TIMEOUT_MS"
+  );
   const pidFileRaw = (processEnv.AWB_AGENT_WORKER_PID_FILE || "").trim();
 
   return {
+    dataDir,
     host,
     port,
     socketPath: socketPathRaw || null,
@@ -46,6 +63,7 @@ export function loadWorkerEnv(processEnv: NodeJS.ProcessEnv): WorkerEnv {
     internalToken,
     responseValidation,
     concurrency,
+    internalRpcTimeoutMs,
     pidFilePath: pidFileRaw || null
   };
 }

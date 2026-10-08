@@ -5,6 +5,7 @@
     @created="refreshTerminals"
     @deleted="onDeleted"
     @terminal-exited="onTerminalExited"
+    @terminal-invalidated="onTerminalInvalidated"
     @minimize="minimizeSelf"
   />
 </template>
@@ -63,6 +64,11 @@ function minimizeSelf() {
 async function onTerminalExited() {
   await refreshTerminals();
   if (terminals.value.length === 0) minimizeSelf();
+}
+
+async function onTerminalInvalidated() {
+  const ok = await refreshTerminals();
+  if (ok) await ensureTerminalOnActivate();
 }
 
 async function onDeleted() {

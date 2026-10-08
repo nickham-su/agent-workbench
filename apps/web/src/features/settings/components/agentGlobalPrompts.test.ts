@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  isReservedBuiltinGlobalPromptCommand,
   normalizeAgentGlobalPromptItems,
   toAgentGlobalPromptsRequest
 } from "./agentGlobalPrompts";
@@ -61,6 +62,13 @@ test("normalizeAgentGlobalPromptItems 仅为带指令的普通条目保留展开
       prompt: "Prompt text"
     }
   ]);
+});
+
+test("全局提示词前端命令校验允许自定义 clear，但仍保留 compact", () => {
+  assert.equal(isReservedBuiltinGlobalPromptCommand("clear"), false);
+  assert.equal(isReservedBuiltinGlobalPromptCommand(" CLEAR "), false);
+  assert.equal(isReservedBuiltinGlobalPromptCommand("compact"), true);
+  assert.equal(isReservedBuiltinGlobalPromptCommand(" COMPACT "), true);
 });
 
 test("toAgentGlobalPromptsRequest 仅序列化有效指令的开启状态", () => {

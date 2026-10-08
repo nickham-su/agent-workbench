@@ -1,5 +1,5 @@
 import { pathToFileURL } from "node:url";
-import type { PluginRuntimeSnapshot } from "@agent-workbench/shared";
+import type { PluginRuntimeSnapshot } from "@agent-workbench/shared/internal-contracts/agent-api-session";
 import type { AgentApiClient, ExecutionProfile } from "../apiClient.js";
 import type { ToolExecutionContext, ToolListContext } from "../tools/types.js";
 import {

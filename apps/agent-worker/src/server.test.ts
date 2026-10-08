@@ -75,6 +75,7 @@ async function getFreePort() {
 async function createTestServer() {
   const runs: unknown[] = [];
   const cancelledSessions: string[] = [];
+  const waitedSessions: Array<{ sessionId: string; timeoutMs: number }> = [];
   const port = await getFreePort();
   const server = createWorkerServer({
     host: "127.0.0.1",
@@ -87,12 +88,16 @@ async function createTestServer() {
       },
       cancelSession(sessionId: string) {
         cancelledSessions.push(sessionId);
+      },
+      async cancelSessionAndWait(input: { sessionId: string; timeoutMs: number }) {
+        waitedSessions.push(input);
+        return true;
       }
     } as any
   });
   servers.push(server);
   await server.listen();
-  return { port, runs, cancelledSessions };
+  return { port, runs, cancelledSessions, waitedSessions };
 }
 
 test("normalizeWorkspaceRepoDirNames 兼容旧 payload 并过滤不安全目录名", () => {
@@ -176,16 +181,33 @@ test("worker 拒绝非法 enqueue payload 且不调用 Runner", async () => {
   assert.deepEqual(runs, []);
 });
 
-test("worker enqueue 接受旧 payload 并将缺失 repo 名称归一化为必有空数组", async () => {
+test("worker enqueue 接受旧 payload，并将缺失 optional 字段归一化", async () => {
   const { port, runs } = await createTestServer();
   const response = await postJson({ port, token: "test-token", body: validEnqueuePayload });
 
   assert.equal(response.statusCode, 202);
   assert.deepEqual(runs, [{
     ...validEnqueuePayload,
+    runKind: "user",
     inputText: undefined,
+    resumeAssistantMessageId: null,
     workspaceRepoDirNames: []
   }]);
+});
+
+test("worker enqueue 透传 resumeAssistantMessageId", async () => {
+  const { port, runs } = await createTestServer();
+  const response = await postJson({
+    port,
+    token: "test-token",
+    body: { ...validEnqueuePayload, resumeAssistantMessageId: "msg_recovered" }
+  });
+
+  assert.equal(response.statusCode, 202);
+  assert.equal(
+    (runs[0] as { resumeAssistantMessageId?: string | null }).resumeAssistantMessageId,
+    "msg_recovered"
+  );
 });
 
 test("worker enqueue 将 inputText:null 归一化为 undefined", async () => {
@@ -247,6 +269,30 @@ test("worker cancel 接受合法 payload", async () => {
   assert.equal(response.statusCode, 202);
   assert.deepEqual(response.body, { ok: true });
   assert.deepEqual(cancelledSessions, ["sess_test"]);
+});
+
+test("worker cancel-and-wait 验证 payload 并返回 runner idle 状态", async () => {
+  const { port, waitedSessions } = await createTestServer();
+  const invalid = await requestRaw({
+    port,
+    method: AgentWorkerEndpoints.cancelSessionAndWait.method,
+    path: AgentWorkerEndpoints.cancelSessionAndWait.path,
+    token: "test-token",
+    body: JSON.stringify({ sessionId: "sess_test", timeoutMs: 0 }),
+  });
+  assert.equal(invalid.statusCode, 400);
+  assert.deepEqual(invalid.body, { message: "invalid cancel and wait payload" });
+
+  const response = await requestRaw({
+    port,
+    method: AgentWorkerEndpoints.cancelSessionAndWait.method,
+    path: AgentWorkerEndpoints.cancelSessionAndWait.path,
+    token: "test-token",
+    body: JSON.stringify({ sessionId: "sess_test", timeoutMs: 123 }),
+  });
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(response.body, { ok: true, idle: true });
+  assert.deepEqual(waitedSessions, [{ sessionId: "sess_test", timeoutMs: 123 }]);
 });
 
 test("worker 未知路径返回 404 message-only 响应", async () => {

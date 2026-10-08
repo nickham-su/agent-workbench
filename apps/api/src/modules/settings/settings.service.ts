@@ -14,7 +14,6 @@ import type {
   AgentProviderNpm,
   AgentScope,
   AgentProvidersSettings,
-  AgentProviderOpenAiApiMode,
   AgentResolvedModel,
   AgentProvidersSettingsView,
   AgentPluginTools,
@@ -37,6 +36,15 @@ import type {
   UpdateGitGlobalIdentityRequest,
   UpdateNetworkSettingsRequest,
   UpdateSearchSettingsRequest
+} from "@agent-workbench/shared";
+import {
+  AiSdkCallSettingsError,
+  parseAiSdkCallSettings,
+  redactUnsafeAiSdkHeadersForRead,
+} from "@agent-workbench/shared/llm-ai-sdk-call-settings";
+import {
+  isReasoningProviderNpm,
+  sanitizeReasoningProviderOptions,
 } from "@agent-workbench/shared";
 import type { AppContext } from "../../app/context.js";
 import { HttpError } from "../../app/errors.js";
@@ -70,12 +78,15 @@ const AGENT_GLOBAL_PROMPT_MAX_BYTES = 32 * 1024;
 const AGENT_GLOBAL_PROMPT_COMMAND_MAX_LENGTH = 64;
 
 const GLOBAL_PROMPT_COMMAND_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
-const RESERVED_BUILTIN_SLASH_COMMANDS = new Set(["clear", "compact"]);
+const RESERVED_BUILTIN_SLASH_COMMANDS = new Set(["compact"]);
 
 // Node.js setTimeout 上限接近 2^31-1,超过后会出现不符合预期的行为。
 const RUNTIME_TIMEOUT_MS_MAX = 2_147_483_647;
 const RUNTIME_MODEL_REQUEST_MAX_RETRIES_DEFAULT = 5;
 const RUNTIME_MODEL_REQUEST_MAX_RETRIES_MAX = 100;
+const RUNTIME_MODEL_REQUEST_RETRY_BACKOFF_MAX_DEFAULT = 60_000;
+const RUNTIME_MODEL_REQUEST_RETRY_BACKOFF_MAX_MIN = 2_000;
+const RUNTIME_MODEL_REQUEST_RETRY_BACKOFF_MAX_MAX = 3_600_000;
 const MODEL_CONTEXT_WINDOW_TOKENS_MAX = 10_000_000;
 const RUNTIME_AUTO_COMPACT_THRESHOLD_DEFAULT = 80;
 const RUNTIME_AUTO_COMPACT_THRESHOLD_MIN = 50;
@@ -101,11 +112,6 @@ type ExecutionProfileResolved = {
   agent: AgentItem;
   provider: AgentProviderStored;
   model: AgentProviderStored["models"][number];
-  vision: {
-    source: "runtime_vision" | "agent_default_fallback";
-    provider: AgentProviderStored;
-    model: AgentProviderStored["models"][number];
-  } | null;
   compaction: {
     source: "runtime_compaction";
     provider: AgentProviderStored;
@@ -127,11 +133,12 @@ function fingerprintSecret(value: string | null | undefined) {
 }
 
 export type AgentExecutionSurface = "user" | "subtask";
+export type AgentListSurface = AgentExecutionSurface | "all";
 export type AgentViewWithResolvedModel = AgentItem & {
   resolvedModel: AgentResolvedModel | null;
 };
 
-type WorkspaceAgentEnablementInput = {
+export type WorkspaceAgentEnablementInput = {
   mode: "all" | "subset";
   enabledAgentIds: string[];
 };
@@ -194,8 +201,28 @@ function normalizeBaseURL(raw: unknown) {
   return value.endsWith("/") ? value.slice(0, -1) : value;
 }
 
-function normalizeProviderModelsUrl(baseURL: string) {
+function normalizeProviderModelsUrl(baseURL: string, npm: AgentProviderNpm) {
   const trimmed = normalizeBaseURL(baseURL);
+  if (npm === "@ai-sdk/moonshotai" || npm === "@ai-sdk/deepseek") {
+    // Model discovery uses the configured endpoint, not the SDK's default chat URL.
+    // A custom gateway may have a path prefix; never discard it or follow a redirect
+    // that might send the user's Bearer token to another host.
+    let endpoint: URL;
+    try {
+      endpoint = new URL(trimmed);
+    } catch {
+      throw new Error("invalid model discovery endpoint");
+    }
+    if (!(["http:", "https:"].includes(endpoint.protocol)) || !endpoint.hostname
+      || endpoint.username || endpoint.password || endpoint.search || endpoint.hash) {
+      throw new Error("invalid model discovery endpoint");
+    }
+    // Moonshot's public API is /v1/models; DeepSeek's public API is /models.
+    // Explicit /v1 on DeepSeek (or a gateway) is respected as a path prefix.
+    const path = endpoint.pathname.replace(/\/+$/, "");
+    endpoint.pathname = `${path}${npm === "@ai-sdk/moonshotai" && !path.endsWith("/v1") ? "/v1" : ""}/models`;
+    return endpoint.toString();
+  }
   if (trimmed.endsWith("/v1")) return `${trimmed}/models`;
   return `${trimmed}/v1/models`;
 }
@@ -231,20 +258,6 @@ function normalizeApiKeyInput(raw: unknown) {
 
 const DEFAULT_PROVIDER_NPM: AgentProviderNpm = "@ai-sdk/openai";
 
-const RESERVED_MODEL_OPTION_KEYS = new Set([
-  "model",
-  "system",
-  "prompt",
-  "messages",
-  "input",
-  "abortSignal",
-  "providerOptions",
-  "tools",
-  "toolChoice"
-]);
-
-const DEFAULT_OPENAI_API_MODE: AgentProviderOpenAiApiMode = "responses";
-
 function isSafeObjectKey(raw: string) {
   if (!raw) return false;
   return raw !== "__proto__" && raw !== "prototype" && raw !== "constructor";
@@ -258,42 +271,33 @@ function toRecordObject(raw: unknown) {
 function normalizeProviderNpmStored(raw: unknown): AgentProviderNpm {
   if (raw === "@ai-sdk/openai-compatible") return raw;
   if (raw === "@ai-sdk/anthropic") return raw;
+  if (raw === "@ai-sdk/moonshotai") return raw;
+  if (raw === "@ai-sdk/deepseek") return raw;
   return DEFAULT_PROVIDER_NPM;
 }
 
 function normalizeProviderNpmInput(raw: unknown): AgentProviderNpm {
-  if (raw === "@ai-sdk/openai" || raw === "@ai-sdk/openai-compatible" || raw === "@ai-sdk/anthropic") return raw;
+  if (raw === "@ai-sdk/openai" || raw === "@ai-sdk/openai-compatible" || raw === "@ai-sdk/anthropic"
+    || raw === "@ai-sdk/moonshotai" || raw === "@ai-sdk/deepseek") return raw;
   throw new HttpError(400, `Unsupported provider npm: ${String(raw)}`, "AGENT_PROVIDER_NPM_UNSUPPORTED");
 }
 
 function providerOptionsKeyByNpm(npm: AgentProviderNpm) {
   if (npm === "@ai-sdk/openai-compatible") return "openaiCompatible";
+  if (npm === "@ai-sdk/moonshotai") return "moonshotai";
+  if (npm === "@ai-sdk/deepseek") return "deepseek";
   return npm === "@ai-sdk/anthropic" ? "anthropic" : "openai";
 }
 
-function normalizeOpenAiApiModeStored(raw: unknown): AgentProviderOpenAiApiMode {
-  if (raw === "chatCompletions") return raw;
-  return DEFAULT_OPENAI_API_MODE;
-}
-
-function normalizeOpenAiApiModeInput(raw: unknown): AgentProviderOpenAiApiMode {
-  if (raw === undefined) return DEFAULT_OPENAI_API_MODE;
-  if (raw == null || raw === "") return DEFAULT_OPENAI_API_MODE;
-  if (raw === "responses" || raw === "chatCompletions") return raw;
-  throw new HttpError(400, "OpenAI provider apiMode is invalid", "AGENT_PROVIDER_OPENAI_API_MODE_INVALID");
-}
-
-function normalizeAiSdkOptions(raw: unknown) {
-  const source = toRecordObject(raw);
-  if (!source) return {};
-  const out: Record<string, unknown> = {};
-  for (const [rawKey, value] of Object.entries(source)) {
-    const key = rawKey.trim();
-    if (!isSafeObjectKey(key)) continue;
-    if (RESERVED_MODEL_OPTION_KEYS.has(key)) continue;
-    out[key] = value;
+function normalizeAiSdkOptionsForUpdate(raw: unknown, field: string) {
+  try {
+    return parseAiSdkCallSettings(raw);
+  } catch (error) {
+    if (error instanceof AiSdkCallSettingsError) {
+      throw new HttpError(400, `${field}: ${error.message}`, "AGENT_PROVIDER_AI_SDK_OPTIONS_INVALID");
+    }
+    throw error;
   }
-  return out;
 }
 
 function normalizeProviderOptionsByKey(raw: unknown) {
@@ -316,11 +320,23 @@ function normalizeProviderOptionsByKey(raw: unknown) {
   return out;
 }
 
-function normalizeProviderModelOptions(raw: unknown, providerNpm: AgentProviderNpm) {
+function normalizeAiSdkOptionsFromStored(raw: unknown) {
+  const source = toRecordObject(raw);
+  if (!source) return {};
+  const aiSdk: Record<string, unknown> = { ...source };
+  if (Object.hasOwn(source, "headers")) {
+    aiSdk.headers = redactUnsafeAiSdkHeadersForRead(source.headers);
+  }
+  return aiSdk;
+}
+
+function normalizeProviderModelOptions(raw: unknown, providerNpm: AgentProviderNpm, mode: "stored" | "update", field = "model.options.aiSdk") {
   const source = toRecordObject(raw);
   if (!source) return {};
 
-  const aiSdk = normalizeAiSdkOptions(source.aiSdk);
+  const aiSdk: Record<string, unknown> = mode === "update"
+    ? { ...normalizeAiSdkOptionsForUpdate(source.aiSdk, field) }
+    : normalizeAiSdkOptionsFromStored(source.aiSdk);
   const providerOptionsByKey = normalizeProviderOptionsByKey(source.providerOptionsByKey);
   const providerKey = providerOptionsKeyByNpm(providerNpm);
 
@@ -331,7 +347,8 @@ function normalizeProviderModelOptions(raw: unknown, providerNpm: AgentProviderN
     if (key === "aiSdk" || key === "providerOptionsByKey") continue;
     if (key === "maxOutputTokens") {
       if (aiSdk.maxOutputTokens === undefined) {
-        aiSdk.maxOutputTokens = value;
+        const parsed = mode === "update" ? normalizeAiSdkOptionsForUpdate({ maxOutputTokens: value }, `${field}.maxOutputTokens`) : { maxOutputTokens: value };
+        Object.assign(aiSdk, parsed);
       }
       continue;
     }
@@ -343,6 +360,11 @@ function normalizeProviderModelOptions(raw: unknown, providerNpm: AgentProviderN
       ...legacyProviderOptions,
       ...(providerOptionsByKey[providerKey] ?? {})
     };
+  }
+
+  // Stored legacy keys remain readable, but the next save removes all reserved keys.
+  if (mode === "update" && isReasoningProviderNpm(providerNpm)) {
+    providerOptionsByKey[providerKey] = sanitizeReasoningProviderOptions(providerOptionsByKey[providerKey]);
   }
 
   const out: Record<string, unknown> = {};
@@ -357,6 +379,35 @@ function normalizeRuntimeTimeoutMsFromStored(raw: unknown) {
   const v = Math.floor(n);
   if (v < 0) return 0;
   if (v > RUNTIME_TIMEOUT_MS_MAX) return 0;
+  return v;
+}
+
+function normalizeModelRequestRetryBackoffMaxFromStored(raw: unknown) {
+  const n = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(n)) return RUNTIME_MODEL_REQUEST_RETRY_BACKOFF_MAX_DEFAULT;
+  const v = Math.floor(n);
+  if (v !== n || v < RUNTIME_MODEL_REQUEST_RETRY_BACKOFF_MAX_MIN || v > RUNTIME_MODEL_REQUEST_RETRY_BACKOFF_MAX_MAX) {
+    return RUNTIME_MODEL_REQUEST_RETRY_BACKOFF_MAX_DEFAULT;
+  }
+  return v;
+}
+
+function normalizeModelRequestRetryBackoffMaxForUpdate(raw: unknown, field: string) {
+  const n = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(n)) {
+    throw new HttpError(400, `${field} must be a finite number`, "AGENT_RUNTIME_RETRY_BACKOFF_MAX_INVALID");
+  }
+  const v = Math.floor(n);
+  if (v !== n) {
+    throw new HttpError(400, `${field} must be an integer`, "AGENT_RUNTIME_RETRY_BACKOFF_MAX_INVALID");
+  }
+  if (v < RUNTIME_MODEL_REQUEST_RETRY_BACKOFF_MAX_MIN || v > RUNTIME_MODEL_REQUEST_RETRY_BACKOFF_MAX_MAX) {
+    throw new HttpError(
+      400,
+      `${field} must be between ${RUNTIME_MODEL_REQUEST_RETRY_BACKOFF_MAX_MIN} and ${RUNTIME_MODEL_REQUEST_RETRY_BACKOFF_MAX_MAX}`,
+      "AGENT_RUNTIME_RETRY_BACKOFF_MAX_INVALID"
+    );
+  }
   return v;
 }
 
@@ -531,7 +582,7 @@ function getAgentProvidersSettingsStored(ctx: AppContext) {
             providerModelId,
             name,
             contextWindowTokens: normalizeContextWindowTokensFromStored(model.contextWindowTokens),
-            options: normalizeProviderModelOptions(model.options, npm)
+            options: normalizeProviderModelOptions(model.options, npm, "stored")
           };
         })
         .filter((x): x is NonNullable<typeof x> => Boolean(x));
@@ -543,8 +594,7 @@ function getAgentProvidersSettingsStored(ctx: AppContext) {
           npm,
           options: {
             baseURL: normalizeBaseURL(optionsRaw.baseURL),
-            apiKey: normalizeApiKeyInput(optionsRaw.apiKey) ?? null,
-            ...(npm === "@ai-sdk/openai" ? { apiMode: normalizeOpenAiApiModeStored(optionsRaw.apiMode) } : {})
+            apiKey: normalizeApiKeyInput(optionsRaw.apiKey) ?? null
           },
           models
         };
@@ -579,8 +629,7 @@ function toAgentProvidersSettingsView(settings: AgentProvidersSettingsStored, up
       options: {
         baseURL: provider.options.baseURL,
         hasApiKey: Boolean(provider.options.apiKey),
-        apiKeyMasked: maskApiKey(provider.options.apiKey ?? null),
-        ...(provider.npm === "@ai-sdk/openai" ? { apiMode: normalizeOpenAiApiModeStored((provider.options as any).apiMode) } : {})
+        apiKeyMasked: maskApiKey(provider.options.apiKey ?? null)
       },
       models: provider.models
     })),
@@ -591,7 +640,7 @@ function toAgentProvidersSettingsView(settings: AgentProvidersSettingsStored, up
 function listConfiguredProviderModels(provider: AgentProviderStored) {
   const seen = new Set<string>();
   return provider.models
-    .map((item) => item.id.trim())
+    .map((item) => item.providerModelId?.trim() || item.id.trim())
     .filter((id) => {
       if (!id || seen.has(id)) return false;
       seen.add(id);
@@ -600,8 +649,22 @@ function listConfiguredProviderModels(provider: AgentProviderStored) {
     .map((id) => ({ id, label: id }));
 }
 
-function parseRemoteModelsItems(raw: unknown) {
+function mergeProviderModels(
+  remote: Array<{ id: string; label: string }>,
+  configured: Array<{ id: string; label: string }>
+) {
+  const seen = new Set<string>();
+  return [...remote, ...configured].filter(({ id }) => {
+    if (seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+}
+
+function parseRemoteModelsItems(raw: unknown, strict: boolean) {
   const payload = toRecordObject(raw);
+  // Keep legacy OpenAI/Anthropic parsing semantics; reject malformed new-provider directories.
+  if (strict && !Array.isArray(payload?.data)) throw new Error("invalid model list response");
   const data = Array.isArray(payload?.data) ? payload.data : [];
   const seen = new Set<string>();
   const items: Array<{ id: string; label: string }> = [];
@@ -611,6 +674,7 @@ function parseRemoteModelsItems(raw: unknown) {
     seen.add(id);
     items.push({ id, label: id });
   }
+  if (strict && data.length > 0 && items.length === 0) throw new Error("invalid model list response");
   return items;
 }
 
@@ -619,15 +683,16 @@ async function fetchRemoteProviderModels(provider: AgentProviderStored) {
   if (!apiKey) {
     throw new HttpError(400, `Provider '${provider.id}' apiKey is missing`, "AGENT_PROVIDER_API_KEY_MISSING");
   }
-  if (provider.npm !== "@ai-sdk/openai" && provider.npm !== "@ai-sdk/openai-compatible" && provider.npm !== "@ai-sdk/anthropic") {
+  if (provider.npm !== "@ai-sdk/openai" && provider.npm !== "@ai-sdk/openai-compatible"
+    && provider.npm !== "@ai-sdk/anthropic" && provider.npm !== "@ai-sdk/moonshotai" && provider.npm !== "@ai-sdk/deepseek") {
     throw new HttpError(400, `Unsupported provider npm: ${provider.npm}`, "AGENT_PROVIDER_MODELS_UNSUPPORTED_PROVIDER");
   }
 
-  const url = normalizeProviderModelsUrl(provider.options.baseURL);
+  const url = normalizeProviderModelsUrl(provider.options.baseURL, provider.npm);
   const headers: Record<string, string> = {
     Accept: "application/json"
   };
-  if (provider.npm === "@ai-sdk/openai" || provider.npm === "@ai-sdk/openai-compatible") {
+  if (provider.npm !== "@ai-sdk/anthropic") {
     headers.Authorization = `Bearer ${apiKey}`;
   } else {
     headers["x-api-key"] = apiKey;
@@ -637,13 +702,14 @@ async function fetchRemoteProviderModels(provider: AgentProviderStored) {
   const res = await fetch(url, {
     method: "GET",
     headers,
+    redirect: "error",
     signal: AbortSignal.timeout(PROVIDER_MODELS_REMOTE_TIMEOUT_MS)
   });
   if (!res.ok) {
     throw new Error(`models list request failed: ${res.status}`);
   }
   const payload = await res.json();
-  return parseRemoteModelsItems(payload);
+  return parseRemoteModelsItems(payload, provider.npm === "@ai-sdk/moonshotai" || provider.npm === "@ai-sdk/deepseek");
 }
 
 export async function getAgentProviderModels(
@@ -684,7 +750,7 @@ export async function getAgentProviderModels(
     const items = await fetchRemoteProviderModels(provider);
     const value: AgentProviderModelsListView = {
       providerId: provider.id,
-      items,
+      items: mergeProviderModels(items, listConfiguredProviderModels(provider)),
       source: "remote",
       cached: false,
       fetchedAt: now,
@@ -698,10 +764,10 @@ export async function getAgentProviderModels(
       {
         providerId: provider.id,
         providerNpm: provider.npm,
-        providerBaseURL: provider.options.baseURL,
+        // Neither the configured URL nor a fetch error message is safe to log:
+        // URL userinfo, query and fragment may carry credentials.
         errCode: err instanceof HttpError ? err.code : undefined,
-        errStatusCode: err instanceof HttpError ? err.statusCode : undefined,
-        errMessage: err instanceof Error ? err.message : String(err ?? "unknown")
+        errStatusCode: err instanceof HttpError ? err.statusCode : undefined
       },
       "agent provider models fetch failed, fallback to configured models"
     );
@@ -734,14 +800,14 @@ function normalizeAgentTools(raw: unknown): AgentToolName[] {
       item !== "subtask" &&
       item !== "scratchpad" &&
       item !== "todolist" &&
-      item !== "visual_analyze" &&
+      item !== "archive_read" &&
+      item !== "archive_search" &&
+      item !== "view_image" &&
       // Legacy baseline-only tool names are intentionally ignored.
       item !== "read" &&
-      item !== "archive_search" &&
-      item !== "archive_read" &&
       item !== "skill"
     ) continue;
-    if (item === "read" || item === "archive_search" || item === "archive_read" || item === "skill") {
+    if (item === "read" || item === "skill") {
       continue;
     }
     if (seen.has(item)) continue;
@@ -1171,18 +1237,10 @@ function getAgentRuntimeSettingsStored(ctx: AppContext) {
   const modelIdleTimeoutMs = normalizeRuntimeTimeoutMsFromStored(value?.modelIdleTimeoutMs);
   const modelTotalTimeoutMs = normalizeRuntimeTimeoutMsFromStored(value?.modelTotalTimeoutMs);
   const modelRequestMaxRetries = normalizeModelRequestMaxRetriesFromStored(value?.modelRequestMaxRetries);
+  const modelRequestRetryBackoffMaxMs = normalizeModelRequestRetryBackoffMaxFromStored(value?.modelRequestRetryBackoffMaxMs);
   const autoCompactThresholdPct = normalizeAutoCompactThresholdPctFromStored(value?.autoCompactThresholdPct);
   const maxSubtaskDepth = normalizeMaxSubtaskDepthFromStored(value?.maxSubtaskDepth);
   const sessionTerminalSoundEnabled = normalizeSessionTerminalSoundEnabledFromStored(value?.sessionTerminalSoundEnabled);
-  const visionModelRaw = (value?.visionModel ?? null) as { providerId?: unknown; modelId?: unknown } | null;
-  const visionProviderId = typeof visionModelRaw?.providerId === "string" ? visionModelRaw.providerId.trim() : "";
-  const visionModelId = typeof visionModelRaw?.modelId === "string" ? visionModelRaw.modelId.trim() : "";
-  const visionModel = visionProviderId && visionModelId
-    ? {
-        providerId: visionProviderId,
-        modelId: visionModelId
-      }
-    : null;
   const compactionModelRaw = (value?.compactionModel ?? null) as { providerId?: unknown; modelId?: unknown } | null;
   const compactionProviderId = typeof compactionModelRaw?.providerId === "string" ? compactionModelRaw.providerId.trim() : "";
   const compactionModelId = typeof compactionModelRaw?.modelId === "string" ? compactionModelRaw.modelId.trim() : "";
@@ -1194,11 +1252,11 @@ function getAgentRuntimeSettingsStored(ctx: AppContext) {
       modelIdleTimeoutMs,
       modelTotalTimeoutMs,
       modelRequestMaxRetries,
+      modelRequestRetryBackoffMaxMs,
       autoCompactThresholdPct,
       maxSubtaskDepth,
       sessionTerminalSoundEnabled,
-      visionModel,
-      compactionModel
+        compactionModel
     },
     updatedAt: row?.updatedAt ?? 0
   };
@@ -1339,10 +1397,10 @@ export function getAgentRuntimeSettings(ctx: AppContext): AgentRuntimeSettings {
     modelIdleTimeoutMs: loaded.settings.modelIdleTimeoutMs,
     modelTotalTimeoutMs: loaded.settings.modelTotalTimeoutMs,
     modelRequestMaxRetries: loaded.settings.modelRequestMaxRetries,
+    modelRequestRetryBackoffMaxMs: loaded.settings.modelRequestRetryBackoffMaxMs,
     autoCompactThresholdPct: loaded.settings.autoCompactThresholdPct,
     maxSubtaskDepth: loaded.settings.maxSubtaskDepth,
     sessionTerminalSoundEnabled: loaded.settings.sessionTerminalSoundEnabled,
-    visionModel: loaded.settings.visionModel,
     compactionModel: loaded.settings.compactionModel,
     updatedAt: loaded.updatedAt
   };
@@ -1391,9 +1449,6 @@ function assertProviderModelRenameNotReferenced(
         }
       }
 
-      if (runtimeSettings.visionModel?.providerId === provider.id && runtimeSettings.visionModel.modelId === oldId) {
-        referencedDetails.push(`runtime visionModel: ${provider.id}/${oldId}`);
-      }
       if (runtimeSettings.compactionModel?.providerId === provider.id && runtimeSettings.compactionModel.modelId === oldId) {
         referencedDetails.push(`runtime compactionModel: ${provider.id}/${oldId}`);
       }
@@ -1458,6 +1513,10 @@ export function updateAgentRuntimeSettings(
     (body as any).modelRequestMaxRetries !== undefined
       ? normalizeModelRequestMaxRetriesForUpdate((body as any).modelRequestMaxRetries, "modelRequestMaxRetries")
       : current.modelRequestMaxRetries;
+  const modelRequestRetryBackoffMaxMs =
+    (body as any).modelRequestRetryBackoffMaxMs !== undefined
+      ? normalizeModelRequestRetryBackoffMaxForUpdate((body as any).modelRequestRetryBackoffMaxMs, "modelRequestRetryBackoffMaxMs")
+      : current.modelRequestRetryBackoffMaxMs;
   const autoCompactThresholdPct =
     (body as any).autoCompactThresholdPct !== undefined
       ? normalizeAutoCompactThresholdPctForUpdate((body as any).autoCompactThresholdPct, "autoCompactThresholdPct")
@@ -1470,21 +1529,6 @@ export function updateAgentRuntimeSettings(
     (body as any).sessionTerminalSoundEnabled !== undefined
       ? normalizeSessionTerminalSoundEnabledForUpdate((body as any).sessionTerminalSoundEnabled, "sessionTerminalSoundEnabled")
       : current.sessionTerminalSoundEnabled;
-  const visionModel =
-    (body as any).visionModel !== undefined
-      ? (() => {
-          const raw = (body as any).visionModel;
-          if (raw == null) return null;
-          const providerId = typeof raw?.providerId === "string" ? raw.providerId.trim() : "";
-          const modelId = typeof raw?.modelId === "string" ? raw.modelId.trim() : "";
-          if (!providerId || !modelId) {
-            throw new HttpError(400, "visionModel.providerId/modelId is required", "AGENT_MODEL_REQUIRED");
-          }
-          const providersSettings = getAgentProvidersSettingsInternal(ctx);
-          resolveProviderModelOrThrow(providersSettings, providerId, modelId);
-          return { providerId, modelId };
-        })()
-      : current.visionModel;
   const compactionModel =
     (body as any).compactionModel !== undefined
       ? (() => {
@@ -1509,27 +1553,27 @@ export function updateAgentRuntimeSettings(
       modelIdleTimeoutMs,
       modelTotalTimeoutMs,
       modelRequestMaxRetries,
+      modelRequestRetryBackoffMaxMs,
       autoCompactThresholdPct,
       maxSubtaskDepth,
       sessionTerminalSoundEnabled,
-      visionModel,
-      compactionModel
+        compactionModel
     },
     updatedAt
   );
 
   logger.info(
-    { modelIdleTimeoutMs, modelTotalTimeoutMs, modelRequestMaxRetries, autoCompactThresholdPct, maxSubtaskDepth, sessionTerminalSoundEnabled, visionModel, compactionModel, updatedAt },
+    { modelIdleTimeoutMs, modelTotalTimeoutMs, modelRequestMaxRetries, modelRequestRetryBackoffMaxMs, autoCompactThresholdPct, maxSubtaskDepth, sessionTerminalSoundEnabled, compactionModel, updatedAt },
     "agent runtime settings updated"
   );
   return {
     modelIdleTimeoutMs,
     modelTotalTimeoutMs,
     modelRequestMaxRetries,
+    modelRequestRetryBackoffMaxMs,
     autoCompactThresholdPct,
     maxSubtaskDepth,
     sessionTerminalSoundEnabled,
-    visionModel,
     compactionModel,
     updatedAt
   };
@@ -1697,18 +1741,6 @@ export function updateAgentProvidersSettings(
     const optionsRaw = (provider.options ?? {}) as Record<string, unknown>;
     const apiKeyInput = normalizeApiKeyInput(optionsRaw.apiKey);
     const previous = currentById.get(id);
-    const previousApiModeRaw = previous?.npm === "@ai-sdk/openai"
-      ? (previous.options as Record<string, unknown>).apiMode
-      : undefined;
-    const openAiApiMode =
-      npm === "@ai-sdk/openai"
-        ? optionsRaw.apiMode === undefined
-          ? previousApiModeRaw === undefined
-            ? DEFAULT_OPENAI_API_MODE
-            : normalizeOpenAiApiModeStored(previousApiModeRaw)
-          : normalizeOpenAiApiModeInput(optionsRaw.apiMode)
-        : undefined;
-
     const apiKey = apiKeyInput === undefined ? previous?.options.apiKey ?? null : apiKeyInput;
 
     const modelsRaw = Array.isArray(provider.models) ? provider.models : [];
@@ -1727,7 +1759,7 @@ export function updateAgentProvidersSettings(
           providerModelId,
           name: modelName,
           contextWindowTokens,
-          options: normalizeProviderModelOptions(model.options, npm)
+          options: normalizeProviderModelOptions(model.options, npm, "update", `providers[${id}].models[${modelId}].options.aiSdk`)
         };
       });
 
@@ -1743,8 +1775,7 @@ export function updateAgentProvidersSettings(
       npm,
       options: {
         baseURL: normalizeBaseURL(optionsRaw.baseURL),
-        apiKey,
-        ...(npm === "@ai-sdk/openai" ? { apiMode: openAiApiMode } : {})
+        apiKey
       },
       models
 
@@ -1929,6 +1960,18 @@ export function listAvailableAgentsForSurface(
   return filterAgentsByWorkspaceEnablement({ agents: scoped, workspaceEnablement: options?.workspaceEnablement });
 }
 
+export function listAvailableAgentsForListSurface(
+  ctx: AppContext,
+  surface: AgentListSurface,
+  options?: { workspaceEnablement?: WorkspaceAgentEnablementInput | null }
+): AgentViewWithResolvedModel[] {
+  if (surface !== "all") return listAvailableAgentsForSurface(ctx, surface, options);
+  return filterAgentsByWorkspaceEnablement({
+    agents: getAgentSettings(ctx).agents,
+    workspaceEnablement: options?.workspaceEnablement
+  });
+}
+
 function resolveAgentForSurface(
   ctx: AppContext,
   surface: AgentExecutionSurface,
@@ -1963,6 +2006,8 @@ export function resolveExecutionProfile(ctx: AppContext, input: {
   surface: AgentExecutionSurface;
   requestedAgentId?: string | null;
   workspaceEnablement?: WorkspaceAgentEnablementInput | null;
+  /** Complete pair chosen for a new primary-session Run. */
+  modelOverride?: { providerId: string; modelId: string } | null;
   agentIdFromRun?: string | null;
   providerIdFromRun?: string | null;
   modelIdFromRun?: string | null;
@@ -1986,50 +2031,25 @@ export function resolveExecutionProfile(ctx: AppContext, input: {
     : resolveAgentForSurface(ctx, input.surface, input.requestedAgentId, input.workspaceEnablement);
 
   const agentDefault = agent.defaultModel;
-  const defaultProviderId = typeof agentDefault?.providerId === "string" ? agentDefault.providerId.trim() : "";
-  const defaultModelId = typeof agentDefault?.modelId === "string" ? agentDefault.modelId.trim() : "";
-  if (!defaultProviderId || !defaultModelId) {
+  const normalizePair = (value: { providerId?: string | null; modelId?: string | null } | null | undefined) => {
+    const providerId = typeof value?.providerId === "string" ? value.providerId.trim() : "";
+    const modelId = typeof value?.modelId === "string" ? value.modelId.trim() : "";
+    return providerId && modelId ? { providerId, modelId } : null;
+  };
+  const runSnapshot = normalizePair({ providerId: input.providerIdFromRun, modelId: input.modelIdFromRun });
+  const sessionOverride = normalizePair(input.modelOverride);
+  const defaultPair = normalizePair(agentDefault);
+  const selected = runSnapshot ?? sessionOverride ?? defaultPair;
+  if (!selected) {
     throw new HttpError(400, "Agent model is not configured", "AGENT_MODEL_NOT_CONFIGURED");
   }
 
-  const resolvedProviderId = [input.providerIdFromRun, defaultProviderId]
-    .map((item) => (typeof item === "string" ? item.trim() : ""))
-    .find((item) => item.length > 0);
-  const resolvedModelId = [input.modelIdFromRun, defaultModelId]
-    .map((item) => (typeof item === "string" ? item.trim() : ""))
-    .find((item) => item.length > 0);
-
-  if (!resolvedProviderId || !resolvedModelId) {
-    throw new HttpError(400, "Agent model is not configured", "AGENT_MODEL_NOT_CONFIGURED");
-  }
-
-  const { provider, model } = resolveProviderModelOrThrow(providersSettings, resolvedProviderId, resolvedModelId);
+  const { provider, model } = resolveProviderModelOrThrow(providersSettings, selected.providerId, selected.modelId);
   if (!provider.options.apiKey) {
     throw new HttpError(400, `Provider '${provider.id}' apiKey is missing`, "AGENT_PROVIDER_API_KEY_MISSING");
   }
 
   const runtimeSettings = getAgentRuntimeSettings(ctx);
-  const runtimeVisionProviderId = typeof runtimeSettings.visionModel?.providerId === "string" ? runtimeSettings.visionModel.providerId.trim() : "";
-  const runtimeVisionModelId = typeof runtimeSettings.visionModel?.modelId === "string" ? runtimeSettings.visionModel.modelId.trim() : "";
-  let vision: ExecutionProfileResolved["vision"] = null;
-  if (runtimeVisionProviderId && runtimeVisionModelId) {
-    const resolvedVision = resolveProviderModelOrThrow(providersSettings, runtimeVisionProviderId, runtimeVisionModelId);
-    if (!resolvedVision.provider.options.apiKey) {
-      throw new HttpError(400, `Provider '${resolvedVision.provider.id}' apiKey is missing`, "AGENT_PROVIDER_API_KEY_MISSING");
-    }
-    vision = {
-      source: "runtime_vision",
-      provider: resolvedVision.provider,
-      model: resolvedVision.model
-    };
-  } else {
-    vision = {
-      source: "agent_default_fallback",
-      provider,
-      model
-    };
-  }
-
   const runtimeCompactionProviderId = typeof runtimeSettings.compactionModel?.providerId === "string" ? runtimeSettings.compactionModel.providerId.trim() : "";
   const runtimeCompactionModelId = typeof runtimeSettings.compactionModel?.modelId === "string" ? runtimeSettings.compactionModel.modelId.trim() : "";
   let compaction: ExecutionProfileResolved["compaction"] = null;
@@ -2049,7 +2069,6 @@ export function resolveExecutionProfile(ctx: AppContext, input: {
     agent,
     provider,
     model,
-    vision,
     compaction
   } satisfies ExecutionProfileResolved;
 }

@@ -31,8 +31,7 @@ async function createPluginHostFixture() {
       preview: { enabled: false, runtime: null },
       credentialMasterKey: Buffer.alloc(32, 7), credentialMasterKeySource: "generated", credentialMasterKeyId: "testkey", credentialMasterKeyCreatedAt: createdAt,
       authToken: null, authCookieSecure: false, agentWorkerEnabled: false, agentWorkerHost: "127.0.0.1", agentWorkerPort: 0,
-      agentWorkerSocketPath: path.join(dataDir, "agent-worker.sock"), agentWorkerConcurrency: 0, agentInternalToken: internalToken,
-      agentWorkerResponseValidation: "strict", agentApiOrigin: "http://127.0.0.1:0", agentStartupRecoveryMode: "recover",
+      agentWorkerSocketPath: path.join(dataDir, "agent-worker.sock"), agentWorkerConcurrency: 0, agentInternalToken: internalToken, agentWorkerResponseValidation: "strict", agentApiOrigin: "http://127.0.0.1:0",
       agentPluginHostEnabled: true, agentPluginHostSocketPath: path.join(dataDir, "agent-plugin-host.sock"), agentPluginServicesEnabled: true
     });
     await app.ready();

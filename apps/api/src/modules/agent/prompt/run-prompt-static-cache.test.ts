@@ -34,3 +34,25 @@ test("RunPromptStaticCache preserves run key, Promise reuse, access expiry, and 
   assert.equal(cache.has("run-a"), false, "lifecycle invalidation clears only the requested run");
   assert.equal(cache.has("run-b"), true);
 });
+
+test("RunPromptStaticCache invalidation tombstones an in-flight assembly generation", async () => {
+  const cache = new RunPromptStaticCache<string>();
+  let resolve!: (value: string) => void;
+  const assembling = cache.getOrCreate("run", 1, () => new Promise<string>((done) => { resolve = done; }));
+  const generation = cache.generation("run");
+  cache.clear("run");
+  resolve("stale static prompt");
+  assert.equal(await assembling, "stale static prompt");
+  assert.equal(cache.has("run"), false);
+  assert.equal(cache.isCurrent("run", generation), false);
+});
+
+test("RunPromptStaticCache never stores a stale-generation request started before invalidation", async () => {
+  const cache = new RunPromptStaticCache<string>();
+  const generation = cache.generation("run");
+  cache.clear("run");
+  let created = 0;
+  assert.equal(await cache.getOrCreate("run", 1, async () => `static-${++created}`, generation), "static-1");
+  assert.equal(created, 1);
+  assert.equal(cache.has("run"), false);
+});

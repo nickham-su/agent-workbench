@@ -1,1206 +1,523 @@
-import { test, type TestContext } from "node:test";
-import type { FastifyInstance } from "fastify";
-import { applyPatchUiArtifactPath, writeUiArtifactPath } from "../../../infra/fs/paths.js";
-import { createRunRecord, getAgentSession, updateRunState } from "../agent.store.js";
-import { newSortableId } from "../../../utils/ids.js";
-import { createP4Fixture } from "./p4-fixture.helpers.js";
-import { createSession, createContextItemInternal, updateContextItemInternal, updateRunStateInternal } from "./context-writeback.helpers.js";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { test, type TestContext } from "node:test";
+import { createOpenAI } from "@ai-sdk/openai";
+import { streamText } from "ai";
+import { AgentApiEndpoints, viewImagePathPreview } from "@agent-workbench/shared/internal-contracts/agent-api";
+import { applyPatchUiArtifactPath, writeUiArtifactPath } from "../../../infra/fs/paths.js";
+import { newSortableId } from "../../../utils/ids.js";
+import { createAgentService } from "../agent.composition.js";
+import { getMessageSessionHead } from "../agent-message.store.js";
+import { createP4Fixture } from "./p4-fixture.helpers.js";
+import { appendMessageFixture, completeToolExecutionFixture, createAssistantFixture, createMessageRunFixture, createSession } from "./context-writeback.helpers.js";
+import { injectJson } from "../testkit/agent-testkit.js";
 
+type Fixture = Awaited<ReturnType<typeof createP4Fixture>>;
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-async function getMessagesContextInternal(params: {
-  app: FastifyInstance;
-  internalToken: string;
-  workspaceId: string;
-  sessionId: string;
-  appendMessage?: { role: "system" | "user"; content: string };
-}) {
-  const res = await params.app.inject({
-    method: "POST",
-    url: "/api/internal/agent/messages-context",
-    headers: {
-      "x-awb-agent-internal-token": params.internalToken
-    },
-    payload: {
-      workspaceId: params.workspaceId,
-      sessionId: params.sessionId,
-      ...(params.appendMessage ? { appendMessage: params.appendMessage } : {})
-    }
-  });
-  assert.equal(res.statusCode, 200, `get messages-context failed: ${res.body}`);
-  return res.json() as {
-    headItemId: number | null;
-    system: string;
-    messages: Array<{ role: string; content: unknown }>;
-  };
+function createTool(fixture: Fixture, sessionId: string, toolName: "apply_patch" | "write" | "view_image", input: Record<string, unknown>) {
+  const run = createMessageRunFixture({ fixture, sessionId });
+  const callPartId = newSortableId("part");
+  const executionId = newSortableId("exec");
+  const assistant = createAssistantFixture({ fixture, sessionId, runId: run.runId, parts: [{ id: callPartId, position: 0, type: "tool_call", toolName, input, providerToolCallId: newSortableId("call") }], executions: [{ id: executionId, callPartId, originSessionId: sessionId, originRunId: run.runId, status: "queued" }] });
+  return { ...run, ...assistant, executionId };
 }
 
-async function getContextItem(app: FastifyInstance, sessionId: string, itemId: number) {
-  const res = await app.inject({ method: "GET", url: `/api/agent/sessions/${sessionId}/context-items/${itemId}` });
-  assert.equal(res.statusCode, 200, `get context-item failed: ${res.body}`);
-  return res.json() as { id: number; status: string; output: Record<string, unknown> };
-}
-
-async function getPromptContextInternal(params: {
-  app: FastifyInstance;
-  internalToken: string;
-  workspaceId: string;
-  sessionId: string;
-  runId: string;
-}) {
-  const res = await params.app.inject({
-    method: "POST",
-    url: "/api/internal/agent/prompt-context",
-    headers: {
-      "x-awb-agent-internal-token": params.internalToken
-    },
-    payload: {
-      workspaceId: params.workspaceId,
-      sessionId: params.sessionId,
-      runId: params.runId
-    }
-  });
-  assert.equal(res.statusCode, 200, `get prompt-context failed: ${res.body}`);
-  return res.json() as {
-    system: string;
-    tools: Array<{ name: string; description?: string; inputSchema?: Record<string, unknown> }>;
-    uiLocale: "zh-CN" | "en-US" | null;
-    messages: Array<{ role: string; content: unknown }>;
-    pendingTools: Array<{ itemId: number; status: string; toolName: string }>;
-    externalSkillRoots: Array<{ sourceType: "workspace" | "repo"; repoId?: string; rootDir: string; rootPath: string }>;
-  };
-}
-
-test("agent internal: 禁止 append completed apply_patch(必须走 update 写 artifact)", async (t: TestContext) => {
+test("view_image 仅按授权的本 Run completed call 持久化路径，不从 preview 恢复图", async (t: TestContext) => {
   const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 });
   const session = await createSession(fixture.app, fixture.workspaceId);
-
-  const res = await fixture.app.inject({
-    method: "POST",
-    url: "/api/internal/agent/context-items",
-    headers: {
-      "x-awb-agent-internal-token": fixture.internalToken
-    },
-    payload: {
-      workspaceId: fixture.workspaceId,
-      sessionId: session.id,
-      runId: null,
-      turnId: null,
-      step: null,
-      prevId: null,
-      kind: "tool",
-      status: "completed",
-      output: {
-        type: "tool",
-        toolName: "apply_patch",
-        toolCallId: "call_apply_patch_1",
-        args: { patchText: "*** Begin Patch\n*** End Patch" },
-        result: { text: "ok", summary: { fileCount: 0, additions: 0, deletions: 0 }, files: [] },
-        text: "ok"
-      }
-    }
+  const tool = createTool(fixture, session.id, "view_image", { path: "repo/screenshot.png" });
+  const startedAt = Date.now();
+  const base = { workspaceId: fixture.workspaceId, sessionId: session.id, runId: tool.runId, toolExecutionId: tool.executionId };
+  const invalid = [
+    null, { type: "image_ref", path: "../outside.png" }, { type: "image_ref", path: "repo/a.png", data: "ZmFrZQ==" },
+    { type: "image_ref", path: "/absolute.png" }, [{ type: "image_ref", path: "repo/a.png" }]
+  ];
+  for (const structuredResult of invalid) {
+    const response = await updateToolExecutionFromWorker(fixture, {
+      ...base, status: "completed", resultPreview: "invalid", structuredResult, completedAt: startedAt, updatedAt: startedAt
+    });
+    assert.notEqual(response.statusCode, 200, "invalid image result must not be silently accepted");
+  }
+  assert.equal((await updateToolExecutionFromWorker(fixture, {
+    ...base, status: "running", structuredResult: { type: "image_ref", path: "repo/screenshot.png" }, updatedAt: startedAt
+  })).statusCode !== 200, true, "running status cannot persist media");
+  assert.equal((await updateToolExecutionFromWorker(fixture, { ...base, status: "running", startedAt, updatedAt: startedAt })).json().result, "updated");
+  const ref = { type: "image_ref", path: "repo/screenshot.png" };
+  const completed = { ...base, status: "completed", resultPreview: viewImagePathPreview(ref.path), structuredResult: ref, completedAt: startedAt + 1, updatedAt: startedAt + 1 };
+  for (const bad of [{ resultPreview: "spoofed-image-content" }, { resultTruncated: true }, { resultArtifactPath: "artifact.txt" }, { error: "bad" }]) {
+    assert.notEqual((await updateToolExecutionFromWorker(fixture, { ...completed, ...bad })).statusCode, 200);
+  }
+  const other = await createSession(fixture.app, fixture.workspaceId);
+  const crossSession = await updateToolExecutionFromWorker(fixture, { ...completed, sessionId: other.id });
+  assert.deepEqual(crossSession.json(), { result: "ignored" });
+  const crossRun = await updateToolExecutionFromWorker(fixture, { ...completed, runId: "run_forged" });
+  assert.deepEqual(crossRun.json(), { result: "ignored" });
+  const wrongCallPath = await updateToolExecutionFromWorker(fixture, {
+    ...completed, resultPreview: viewImagePathPreview("repo/other.png"), structuredResult: { type: "image_ref", path: "repo/other.png" }
   });
-  assert.equal(res.statusCode, 400);
+  assert.deepEqual(wrongCallPath.json(), { result: "ignored" }, "image must match its call input path");
+  const success = await updateToolExecutionFromWorker(fixture, completed);
+  assert.equal(success.statusCode, 200, success.body);
+  assert.deepEqual(success.json(), { result: "updated" });
+  assert.deepEqual((await updateToolExecutionFromWorker(fixture, completed)).json(), { result: "updated" }, "identical terminal replay is idempotent");
+  const row = fixture.db.prepare("select status, result_preview as preview, structured_result_json as structured from agent_tool_execution where id = ?")
+    .get(tool.executionId) as { status: string; preview: string; structured: string };
+  assert.equal(row.status, "completed");
+  assert.equal(row.preview, viewImagePathPreview(ref.path));
+  assert.deepEqual(JSON.parse(row.structured), ref);
+  assert.doesNotMatch(JSON.stringify(row), /ZmFrZQ==|spoofed-image-content/);
+  const sourceResponse = await injectJson(fixture.app, {
+    method: AgentApiEndpoints.getCompactionSource.method,
+    url: AgentApiEndpoints.getCompactionSource.path,
+    internalToken: fixture.internalToken,
+    payload: { workspaceId: fixture.workspaceId, sessionId: session.id, runId: tool.runId },
+  });
+  assert.equal(sourceResponse.statusCode, 200);
+  const source = sourceResponse.json();
+  const imageExecution = source.blocks.flatMap((block: { toolExecutions: unknown[] }) => block.toolExecutions)
+    .find((execution: { id: string }) => execution.id === tool.executionId);
+  assert.deepEqual(imageExecution.imageRef, ref);
+  assert.equal(imageExecution.originRunId, tool.runId);
+  assert.equal(JSON.stringify(source).includes("ZmFrZQ=="), false);
+  assert.equal(JSON.stringify(source).includes("structuredResultJson"), false);
+  assert.deepEqual((await updateToolExecutionFromWorker(fixture, {
+    ...completed, resultPreview: viewImagePathPreview("repo/other.png"),
+    structuredResult: { type: "image_ref", path: "repo/other.png" }
+  })).json(), { result: "ignored" });
+});
+
+test("view_image 失败和取消不能写入 image_ref，重复终态不改写先前结果", async (t: TestContext) => {
+  const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 });
+  for (const terminalStatus of ["failed", "cancelled"] as const) {
+    const session = await createSession(fixture.app, fixture.workspaceId);
+    const tool = createTool(fixture, session.id, "view_image", { path: "repo/image.png" });
+    const now = Date.now();
+    const base = { workspaceId: fixture.workspaceId, sessionId: session.id, runId: tool.runId, toolExecutionId: tool.executionId };
+    const start = await updateToolExecutionFromWorker(fixture, { ...base, status: "running", startedAt: now, updatedAt: now });
+    assert.deepEqual(start.json(), { result: "updated" });
+    const injection = await updateToolExecutionFromWorker(fixture, {
+      ...base, status: terminalStatus, structuredResult: { type: "image_ref", path: "repo/image.png" }, completedAt: now + 1, updatedAt: now + 1
+    });
+    assert.notEqual(injection.statusCode, 200);
+    const finish = await updateToolExecutionFromWorker(fixture, {
+      ...base, status: terminalStatus, resultPreview: "image could not be read", completedAt: now + 1, updatedAt: now + 1
+    });
+    assert.deepEqual(finish.json(), { result: "updated" });
+    assert.deepEqual((await updateToolExecutionFromWorker(fixture, {
+      ...base, status: "completed", resultPreview: viewImagePathPreview("repo/image.png"),
+      structuredResult: { type: "image_ref", path: "repo/image.png" }, completedAt: now + 2, updatedAt: now + 2
+    })).json(), { result: "ignored" });
+    const row = fixture.db.prepare("select status, structured_result_json as structured from agent_tool_execution where id = ?")
+      .get(tool.executionId) as { status: string; structured: string | null };
+    assert.equal(row.status, terminalStatus);
+    assert.equal(row.structured, null);
+  }
+});
+async function artifact(fixture: Fixture, sessionId: string, toolExecutionId: string, kind: "apply-patch-artifact" | "write-artifact") {
+  return fixture.app.inject({ method: "GET", url: `/api/agent/sessions/${sessionId}/tool-executions/${toolExecutionId}/${kind}?workspaceId=${encodeURIComponent(fixture.workspaceId)}` });
+}
+async function writeArtifact(fixture: Fixture, executionId: string, toolName: "apply_patch" | "write", content: Record<string, unknown>) {
+  const file = (toolName === "apply_patch" ? applyPatchUiArtifactPath : writeUiArtifactPath)(fixture.dataDir, fixture.workspaceId, executionId);
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, JSON.stringify({ ...content, toolExecutionId: executionId }), "utf8");
+  return file;
+}
+
+async function updateToolExecutionFromWorker(fixture: Fixture, payload: Record<string, unknown>) {
+  return injectJson(fixture.app, {
+    method: AgentApiEndpoints.updateToolExecution.method,
+    url: AgentApiEndpoints.updateToolExecution.path,
+    internalToken: fixture.internalToken,
+    payload,
+  });
+}
+
+test("artifact 以 ToolExecution 唯一寻址，同一 Message 的同名调用不会串读", async (t: TestContext) => {
+  const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const run = createMessageRunFixture({ fixture, sessionId: session.id });
+  const firstPart = newSortableId("part"); const secondPart = newSortableId("part");
+  const firstExecution = newSortableId("exec"); const secondExecution = newSortableId("exec");
+  createAssistantFixture({ fixture, sessionId: session.id, runId: run.runId, parts: [
+    { id: firstPart, position: 0, type: "tool_call", toolName: "apply_patch", input: { patchText: "first" }, providerToolCallId: newSortableId("call") },
+    { id: secondPart, position: 1, type: "tool_call", toolName: "apply_patch", input: { patchText: "second" }, providerToolCallId: newSortableId("call") },
+  ], executions: [
+    { id: firstExecution, callPartId: firstPart, originSessionId: session.id, originRunId: run.runId, status: "queued" },
+    { id: secondExecution, callPartId: secondPart, originSessionId: session.id, originRunId: run.runId, status: "queued" },
+  ] });
+  completeToolExecutionFixture({ fixture, sessionId: session.id, runId: run.runId, toolExecutionId: firstExecution });
+  completeToolExecutionFixture({ fixture, sessionId: session.id, runId: run.runId, toolExecutionId: secondExecution });
+  await writeArtifact(fixture, firstExecution, "apply_patch", { marker: "first" });
+  await writeArtifact(fixture, secondExecution, "apply_patch", { marker: "second" });
+  assert.equal((await artifact(fixture, session.id, firstExecution, "apply-patch-artifact")).json().marker, "first");
+  assert.equal((await artifact(fixture, session.id, secondExecution, "apply-patch-artifact")).json().marker, "second");
+  assert.equal((await artifact(fixture, session.id, firstExecution, "write-artifact")).statusCode, 404);
+  const other = await createSession(fixture.app, fixture.workspaceId);
+  assert.equal((await artifact(fixture, other.id, firstExecution, "apply-patch-artifact")).statusCode, 404);
+  const crossWorkspace = await fixture.app.inject({
+    method: "GET",
+    url: `/api/agent/sessions/${session.id}/tool-executions/${firstExecution}/apply-patch-artifact?workspaceId=other-workspace`,
+  });
+  assert.equal(crossWorkspace.statusCode, 404);
 });
 
 test("apply_patch artifact 文件缺失时返回 404", async (t: TestContext) => {
+  const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 }); const session = await createSession(fixture.app, fixture.workspaceId);
+  const tool = createTool(fixture, session.id, "apply_patch", { patchText: "x" }); completeToolExecutionFixture({ fixture, sessionId: session.id, runId: tool.runId, toolExecutionId: tool.executionId });
+  assert.equal((await artifact(fixture, session.id, tool.executionId, "apply-patch-artifact")).statusCode, 404);
+});
+
+test("Worker completed apply_patch 写回自动生成完整 artifact，并只保存 slim structured result", async (t: TestContext) => {
   const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 });
   const session = await createSession(fixture.app, fixture.workspaceId);
-  const runId = newSortableId("run");
-  const createdAt = Date.now();
+  const tool = createTool(fixture, session.id, "apply_patch", { patchText: "*** Update File: a.ts" });
+  const startedAt = Date.now();
+  const fullResult = {
+    text: "Applied 1 patch.",
+    summary: { fileCount: 1, additions: 1, deletions: 1 },
+    files: [{ type: "update", path: "a.ts", additions: 1, deletions: 1, before: "const a = 1;", after: "const a = 2;" }],
+  };
 
-  createRunRecord(fixture.db, {
-    runId,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    triggerItemId: 1,
-    agentId: "default",
-    providerId: "ppchat",
-    modelId: "gpt-5.2",
-    status: "running",
-    createdAt
+  const running = await updateToolExecutionFromWorker(fixture, {
+    workspaceId: fixture.workspaceId, sessionId: session.id, runId: tool.runId, toolExecutionId: tool.executionId,
+    status: "running", startedAt, updatedAt: startedAt,
   });
-
-  const toolItem = await createContextItemInternal({ fixture,
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    runId,
-    turnId: "turn_apply_patch",
-    step: 1,
-    prevId: null,
-    kind: "tool",
-    status: "queued",
-    output: {
-      type: "tool",
-      toolName: "apply_patch",
-      toolCallId: "call_apply_patch_1",
-      args: { patchText: "*** Begin Patch\n*** End Patch" },
-      text: "queued"
-    }
+  assert.equal(running.statusCode, 200, running.body);
+  const completed = await updateToolExecutionFromWorker(fixture, {
+    workspaceId: fixture.workspaceId, sessionId: session.id, runId: tool.runId, toolExecutionId: tool.executionId,
+    status: "completed", resultPreview: "Applied 1 patch.", structuredResult: fullResult,
+    completedAt: startedAt + 1, updatedAt: startedAt + 1,
   });
+  assert.equal(completed.statusCode, 200, completed.body);
+  assert.equal(completed.json().result, "updated");
 
-  await updateContextItemInternal({ fixture,
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    itemId: toolItem.item.id,
-    status: "completed",
-    output: {
-      type: "tool",
-      toolName: "apply_patch",
-      toolCallId: "call_apply_patch_1",
-      args: { patchText: "*** Begin Patch\n*** End Patch" },
-      result: {
-        text: "ok",
-        summary: { fileCount: 1, additions: 1, deletions: 0 },
-        files: [
-          {
-            type: "add",
-            path: "foo.ts",
-            before: "",
-            after: "console.log(1)\n",
-            additions: 1,
-            deletions: 0
-          }
-        ]
-      },
-      text: "ok"
-    }
+  const expectedSlim = {
+    text: "Applied 1 patch.",
+    summary: { fileCount: 1, additions: 1, deletions: 1 },
+    files: [{ type: "update", path: "a.ts", additions: 1, deletions: 1 }],
+  };
+  const detail = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions/${session.id}/tool-executions/${tool.executionId}?workspaceId=${encodeURIComponent(fixture.workspaceId)}` });
+  assert.equal(detail.statusCode, 200, detail.body);
+  assert.deepEqual(detail.json().structuredResult, expectedSlim);
+  const stored = fixture.db.prepare("select structured_result_json as value from agent_tool_execution where id = ?").get(tool.executionId) as { value: string };
+  assert.deepEqual(JSON.parse(stored.value), expectedSlim);
+
+  const artifactRes = await artifact(fixture, session.id, tool.executionId, "apply-patch-artifact");
+  assert.equal(artifactRes.statusCode, 200, artifactRes.body);
+  assert.deepEqual(artifactRes.json().files, fullResult.files);
+});
+
+test("artifact 先于最终 fence 写入，最终 ignored 时仅留下不可见孤儿", async (t: TestContext) => {
+  const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const tool = createTool(fixture, session.id, "apply_patch", { patchText: "*** Update File: a.ts" });
+  const startedAt = Date.now();
+  assert.equal((await updateToolExecutionFromWorker(fixture, {
+    workspaceId: fixture.workspaceId, sessionId: session.id, runId: tool.runId, toolExecutionId: tool.executionId,
+    status: "running", startedAt, updatedAt: startedAt,
+  })).statusCode, 200);
+  const service = createAgentService(fixture.ctx, fixture.app.log, null, {
+    beforeFinalToolExecutionUpdate: () => {
+      fixture.db.prepare(
+        "update session_run_state set status = 'idle', active_run_id = null where workspace_id = ? and session_id = ?",
+      ).run(fixture.workspaceId, session.id);
+    },
   });
-
-  const artifactPath = path.join(
-    fixture.dataDir,
-    "tmp",
-    "agent",
-    "ui-artifacts",
-    "apply_patch",
-    fixture.workspaceId,
-    "call_apply_patch_1.json"
-  );
-  await fs.rm(artifactPath, { force: true });
-
-  const artifactRes = await fixture.app.inject({
-    method: "GET",
-    url: `/api/agent/sessions/${session.id}/context-items/${toolItem.item.id}/apply-patch-artifact`
+  const result = await service.updateToolExecutionFromWorker({
+    workspaceId: fixture.workspaceId, sessionId: session.id, runId: tool.runId, toolExecutionId: tool.executionId,
+    status: "completed", structuredResult: { files: [{ path: "a.ts", before: "before", after: "after" }] },
+    completedAt: startedAt + 1, updatedAt: startedAt + 1,
   });
-  assert.equal(artifactRes.statusCode, 404);
+  assert.deepEqual(result, { result: "ignored" });
+  const file = applyPatchUiArtifactPath(fixture.dataDir, fixture.workspaceId, tool.executionId);
+  await fs.access(file);
+  assert.equal((await artifact(fixture, session.id, tool.executionId, "apply-patch-artifact")).statusCode, 404);
+});
+
+test("invalid apply_patch structuredResult 保持原样且不生成空 artifact", async (t: TestContext) => {
+  const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const tool = createTool(fixture, session.id, "apply_patch", { patchText: "*** Update File: a.ts" });
+  const startedAt = Date.now();
+  assert.equal((await updateToolExecutionFromWorker(fixture, {
+    workspaceId: fixture.workspaceId, sessionId: session.id, runId: tool.runId, toolExecutionId: tool.executionId,
+    status: "running", startedAt, updatedAt: startedAt,
+  })).statusCode, 200);
+  const invalidResult = { text: "result without files" };
+  const completed = await updateToolExecutionFromWorker(fixture, {
+    workspaceId: fixture.workspaceId, sessionId: session.id, runId: tool.runId, toolExecutionId: tool.executionId,
+    status: "completed", structuredResult: invalidResult, completedAt: startedAt + 1, updatedAt: startedAt + 1,
+  });
+  assert.equal(completed.statusCode, 200, completed.body);
+  const detail = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions/${session.id}/tool-executions/${tool.executionId}?workspaceId=${encodeURIComponent(fixture.workspaceId)}` });
+  assert.equal(detail.statusCode, 200, detail.body);
+  assert.deepEqual(detail.json().structuredResult, invalidResult);
+  assert.equal((await artifact(fixture, session.id, tool.executionId, "apply-patch-artifact")).statusCode, 404);
+});
+
+test("terminal apply_patch replay 不覆盖已生成 artifact", async (t: TestContext) => {
+  const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const tool = createTool(fixture, session.id, "apply_patch", { patchText: "*** Update File: a.ts" });
+  const startedAt = Date.now();
+  assert.equal((await updateToolExecutionFromWorker(fixture, {
+    workspaceId: fixture.workspaceId, sessionId: session.id, runId: tool.runId, toolExecutionId: tool.executionId,
+    status: "running", startedAt, updatedAt: startedAt,
+  })).statusCode, 200);
+  const original = { files: [{ path: "a.ts", additions: 1, deletions: 0, before: "before", after: "after" }] };
+  const completed = {
+    workspaceId: fixture.workspaceId, sessionId: session.id, runId: tool.runId, toolExecutionId: tool.executionId,
+    status: "completed" as const, structuredResult: original, completedAt: startedAt + 1, updatedAt: startedAt + 1,
+  };
+  assert.equal((await updateToolExecutionFromWorker(fixture, completed)).statusCode, 200);
+  const replay = await updateToolExecutionFromWorker(fixture, {
+    ...completed,
+    structuredResult: { files: [{ path: "a.ts", additions: 1, deletions: 0, before: "replayed-before", after: "after" }] },
+  });
+  assert.equal(replay.statusCode, 200, replay.body);
+  assert.equal(replay.json().result, "updated");
+  const artifactRes = await artifact(fixture, session.id, tool.executionId, "apply-patch-artifact");
+  assert.equal(artifactRes.statusCode, 200, artifactRes.body);
+  assert.equal(artifactRes.json().files[0].before, "before");
 });
 
 test("artifact Query 在 workspace artifact 目录为越界 symlink 时保持当前 400", async (t: TestContext) => {
-  const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 });
-  const session = await createSession(fixture.app, fixture.workspaceId);
-  const externalDir = path.join(fixture.dataDir, "outside-artifacts");
-  let prevId: number | null = null;
-
-  for (const entry of [
-    {
-      toolName: "apply_patch",
-      toolCallId: "call_apply_patch_symlink",
-      artifactPath: applyPatchUiArtifactPath,
-      suffix: "apply-patch-artifact"
-    },
-    {
-      toolName: "write",
-      toolCallId: "call_write_symlink",
-      artifactPath: writeUiArtifactPath,
-      suffix: "write-artifact"
-    }
-  ] as const) {
-    const item = await createContextItemInternal({ fixture,
-      app: fixture.app,
-      internalToken: fixture.internalToken,
-      workspaceId: fixture.workspaceId,
-      sessionId: session.id,
-      runId: null,
-      turnId: null,
-      step: null,
-      prevId,
-      kind: "tool",
-      status: "queued",
-      output: { type: "tool", toolName: entry.toolName, toolCallId: entry.toolCallId, text: "queued" }
-    });
-    prevId = item.item.id;
-    const artifactFile = entry.artifactPath(fixture.dataDir, fixture.workspaceId, entry.toolCallId);
-    const artifactDir = path.dirname(artifactFile);
-    await fs.mkdir(artifactDir, { recursive: true });
-    await fs.rm(artifactDir, { recursive: true, force: true });
-    await fs.mkdir(externalDir, { recursive: true });
-    await fs.writeFile(path.join(externalDir, path.basename(artifactFile)), "{}", "utf8");
-    await fs.symlink(externalDir, artifactDir, "dir");
-
-    const response = await fixture.app.inject({
-      method: "GET",
-      url: `/api/agent/sessions/${session.id}/context-items/${item.item.id}/${entry.suffix}`
-    });
-    assert.equal(response.statusCode, 400, response.body);
-    assert.match(response.body, /Invalid path/);
-    await fs.rm(artifactDir, { recursive: true, force: true });
-  }
+  const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 }); const session = await createSession(fixture.app, fixture.workspaceId);
+  const tool = createTool(fixture, session.id, "apply_patch", { patchText: "x" }); completeToolExecutionFixture({ fixture, sessionId: session.id, runId: tool.runId, toolExecutionId: tool.executionId });
+  const file = applyPatchUiArtifactPath(fixture.dataDir, fixture.workspaceId, tool.executionId); const dir = path.dirname(file); const outside = path.join(fixture.dataDir, "outside"); await fs.mkdir(outside, { recursive: true }); await fs.mkdir(path.dirname(dir), { recursive: true }); await fs.rm(dir, { recursive: true, force: true }); await fs.symlink(outside, dir, "dir");
+  assert.equal((await artifact(fixture, session.id, tool.executionId, "apply-patch-artifact")).statusCode, 400);
 });
 
-test("artifact 写入目录为越界 symlink 时仍以 slim result 完成 update", async (t: TestContext) => {
+test("artifact 写入失败不影响 apply_patch 的 completed 写回", async (t: TestContext) => {
   const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 });
   const session = await createSession(fixture.app, fixture.workspaceId);
-  const externalDir = path.join(fixture.dataDir, "outside-artifacts");
-  const previousLogLevel = fixture.app.log.level;
-  fixture.app.log.level = "fatal";
-  try {
-  const toolCallId = "call_write_write_symlink";
-  const toolItem = await createContextItemInternal({ fixture,
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    runId: null,
-    turnId: null,
-    step: null,
-    prevId: null,
-    kind: "tool",
-    status: "queued",
-    output: {
-      type: "tool",
-      toolName: "write",
-      toolCallId,
-      args: { filePath: "result.txt", content: "complete content" },
-      text: "queued"
-    }
+  const tool = createTool(fixture, session.id, "apply_patch", { patchText: "*** Update File: a.ts" });
+  const startedAt = Date.now();
+  assert.equal((await updateToolExecutionFromWorker(fixture, {
+    workspaceId: fixture.workspaceId, sessionId: session.id, runId: tool.runId, toolExecutionId: tool.executionId,
+    status: "running", startedAt, updatedAt: startedAt,
+  })).statusCode, 200);
+  const file = applyPatchUiArtifactPath(fixture.dataDir, fixture.workspaceId, tool.executionId);
+  const dir = path.dirname(file);
+  const outside = path.join(fixture.dataDir, "outside");
+  await fs.mkdir(outside, { recursive: true });
+  await fs.mkdir(path.dirname(dir), { recursive: true });
+  await fs.symlink(outside, dir, "dir");
+  const completed = await updateToolExecutionFromWorker(fixture, {
+    workspaceId: fixture.workspaceId, sessionId: session.id, runId: tool.runId, toolExecutionId: tool.executionId,
+    status: "completed", structuredResult: { files: [{ path: "a.ts", before: "before", after: "after" }] },
+    completedAt: startedAt + 1, updatedAt: startedAt + 1,
   });
-  const artifactFile = writeUiArtifactPath(fixture.dataDir, fixture.workspaceId, toolCallId);
-  const artifactDir = path.dirname(artifactFile);
-  await fs.mkdir(artifactDir, { recursive: true });
-  await fs.rm(artifactDir, { recursive: true, force: true });
-  await fs.mkdir(externalDir, { recursive: true });
-  await fs.symlink(externalDir, artifactDir, "dir");
+  assert.equal(completed.statusCode, 200, completed.body);
+  assert.equal(completed.json().result, "updated");
+  const detail = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions/${session.id}/tool-executions/${tool.executionId}?workspaceId=${encodeURIComponent(fixture.workspaceId)}` });
+  assert.equal(detail.statusCode, 200, detail.body);
+  assert.deepEqual(detail.json().structuredResult, {
+    text: "", summary: { fileCount: 1, additions: 0, deletions: 0 }, files: [{ type: "update", path: "a.ts", additions: 0, deletions: 0 }],
+  });
+});
 
-  const response = await fixture.app.inject({
-    method: "PATCH",
-    url: `/api/internal/agent/context-items/${toolItem.item.id}`,
-    headers: { "x-awb-agent-internal-token": fixture.internalToken },
-    payload: {
-      status: "completed",
-      output: {
-        type: "tool",
-        toolName: "write",
-        toolCallId,
-        args: { filePath: "result.txt", content: "complete content" },
-        result: {
-          text: "wrote result.txt",
-          filePath: "result.txt",
-          bytesWritten: 16,
-          existedBefore: false,
-          before: { available: true, text: "" },
-          after: { available: true, text: "complete content" }
-        },
-        text: "completed"
-      }
-    }
+test("Worker completed write 写回同样生成 artifact", async (t: TestContext) => {
+  const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const tool = createTool(fixture, session.id, "write", { filePath: "a.txt", content: "after" });
+  const startedAt = Date.now();
+  assert.equal((await updateToolExecutionFromWorker(fixture, {
+    workspaceId: fixture.workspaceId, sessionId: session.id, runId: tool.runId, toolExecutionId: tool.executionId,
+    status: "running", startedAt, updatedAt: startedAt,
+  })).statusCode, 200);
+  const completed = await updateToolExecutionFromWorker(fixture, {
+    workspaceId: fixture.workspaceId, sessionId: session.id, runId: tool.runId, toolExecutionId: tool.executionId,
+    status: "completed", structuredResult: {
+      filePath: "a.txt", bytesWritten: 5, existedBefore: true,
+      before: { available: true, text: "before", truncated: false, bytes: 6 },
+      after: { available: true, text: "after", truncated: false, bytes: 5 },
+    }, completedAt: startedAt + 1, updatedAt: startedAt + 1,
   });
-  assert.equal(response.statusCode, 200, response.body);
-  const output = (response.json() as { item: { output: { result: Record<string, unknown> } } }).item.output.result;
-  assert.equal(Object.hasOwn(output, "before"), false);
-  assert.equal(Object.hasOwn(output, "after"), false);
-  assert.equal(output.filePath, "result.txt");
-  assert.equal(await fs.lstat(artifactDir).then((st) => st.isSymbolicLink()), true);
-  await fs.rm(artifactDir, { recursive: true, force: true });
-  } finally {
-  fixture.app.log.level = previousLogLevel;
-  }
+  assert.equal(completed.statusCode, 200, completed.body);
+  const detail = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions/${session.id}/tool-executions/${tool.executionId}?workspaceId=${encodeURIComponent(fixture.workspaceId)}` });
+  assert.equal(detail.statusCode, 200, detail.body);
+  assert.deepEqual(detail.json().structuredResult, {
+    summary: "Wrote file a.txt", filePath: "a.txt", bytesWritten: 5, existedBefore: true,
+  });
+  const artifactRes = await artifact(fixture, session.id, tool.executionId, "write-artifact");
+  assert.equal(artifactRes.statusCode, 200, artifactRes.body);
+  assert.equal(artifactRes.json().after.text, "after");
+});
+
+test("invalid write structuredResult 保持原样且不生成空 artifact", async (t: TestContext) => {
+  const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  const tool = createTool(fixture, session.id, "write", { filePath: "a.txt", content: "after" });
+  const startedAt = Date.now();
+  assert.equal((await updateToolExecutionFromWorker(fixture, {
+    workspaceId: fixture.workspaceId, sessionId: session.id, runId: tool.runId, toolExecutionId: tool.executionId,
+    status: "running", startedAt, updatedAt: startedAt,
+  })).statusCode, 200);
+  const invalidResult = { summary: "missing path" };
+  const completed = await updateToolExecutionFromWorker(fixture, {
+    workspaceId: fixture.workspaceId, sessionId: session.id, runId: tool.runId, toolExecutionId: tool.executionId,
+    status: "completed", structuredResult: invalidResult, completedAt: startedAt + 1, updatedAt: startedAt + 1,
+  });
+  assert.equal(completed.statusCode, 200, completed.body);
+  const detail = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions/${session.id}/tool-executions/${tool.executionId}?workspaceId=${encodeURIComponent(fixture.workspaceId)}` });
+  assert.equal(detail.statusCode, 200, detail.body);
+  assert.deepEqual(detail.json().structuredResult, invalidResult);
+  assert.equal((await artifact(fixture, session.id, tool.executionId, "write-artifact")).statusCode, 404);
 });
 
 test("write completed 后保留完整 args、瘦身 result 并支持 artifact 拉取", async (t: TestContext) => {
-  const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 });
-  const session = await createSession(fixture.app, fixture.workspaceId);
-  const runId = newSortableId("run");
-  const createdAt = Date.now();
-
-  createRunRecord(fixture.db, {
-    runId,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    triggerItemId: 1,
-    agentId: "default",
-    providerId: "ppchat",
-    modelId: "gpt-5.2",
-    status: "running",
-    createdAt
-  });
-
-  const userItem = await createContextItemInternal({ fixture,
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    runId,
-    turnId: null,
-    step: null,
-    prevId: null,
-    kind: "user",
-    status: "completed",
-    output: {
-      type: "user_text",
-      text: "请写入文件"
-    }
-  });
-
-  const assistantItem = await createContextItemInternal({ fixture,
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    runId,
-    turnId: "turn_write",
-    step: 1,
-    prevId: userItem.item.id,
-    kind: "assistant",
-    status: "completed",
-    output: {
-      type: "assistant_text",
-      text: "开始写文件"
-    }
-  });
-
-  const writeContent = [
-    "# 完整历史写入内容",
-    "中文多行内容必须原样保留。",
-    "x".repeat(320),
-    "最后一行不能被截断。"
-  ].join("\n");
-  const writeBytes = Buffer.byteLength(writeContent, "utf8");
-
-  const toolItem = await createContextItemInternal({ fixture,
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    runId,
-    turnId: "turn_write",
-    step: 1,
-    prevId: assistantItem.item.id,
-    kind: "tool",
-    status: "queued",
-    output: {
-      type: "tool",
-      toolName: "write",
-      toolCallId: "call_write_1",
-      args: {
-        filePath: "foo.txt",
-        content: writeContent
-      },
-      text: "write queued"
-    }
-  });
-
-  updateRunState(fixture.db, {
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    status: "running",
-    activeRunId: runId,
-    activeAssistantItemId: null,
-    updatedAt: Date.now(),
-    appliedItemId: 0
-  });
-  await updateContextItemInternal({ fixture,
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    itemId: toolItem.item.id,
-    status: "completed",
-    output: {
-      type: "tool",
-      toolName: "write",
-      toolCallId: "call_write_1",
-      args: {
-        filePath: "foo.txt",
-        content: writeContent
-      },
-      result: {
-        summary: "Wrote file foo.txt",
-        filePath: "foo.txt",
-        bytesWritten: writeBytes,
-        existedBefore: false,
-        before: {
-          available: false,
-          truncated: false,
-          bytes: 0,
-          reason: "missing_file"
-        },
-        after: {
-          available: true,
-          text: writeContent,
-          truncated: false,
-          bytes: writeBytes
-        }
-      },
-      text: "ok: wrote file"
-    }
-  });
-
-  const storedTool = await getContextItem(fixture.app, session.id, toolItem.item.id);
-  const storedOutput = storedTool.output as { args?: Record<string, unknown>; result?: Record<string, unknown> };
-  const storedArgs = storedOutput.args || {};
-  assert.equal(storedArgs.filePath, "foo.txt");
-  assert.equal(storedArgs.content, writeContent, "write args should preserve complete content");
-  assert.equal(Object.prototype.hasOwnProperty.call(storedArgs, "contentBytes"), false);
-  assert.equal(Object.prototype.hasOwnProperty.call(storedArgs, "contentPreview"), false);
-  assert.equal(Object.prototype.hasOwnProperty.call(storedArgs, "contentTruncated"), false);
-
-  const storedResult = storedOutput.result || {};
-  assert.equal(Object.prototype.hasOwnProperty.call(storedResult, "before"), false, "write result should strip before");
-  assert.equal(Object.prototype.hasOwnProperty.call(storedResult, "after"), false, "write result should strip after");
-
-  const artifactRes = await fixture.app.inject({
-    method: "GET",
-    url: `/api/agent/sessions/${session.id}/context-items/${toolItem.item.id}/write-artifact`
-  });
-  assert.equal(artifactRes.statusCode, 200, `write artifact fetch failed: ${artifactRes.body}`);
-  const artifact = artifactRes.json() as { before?: Record<string, unknown>; after?: Record<string, unknown> };
-  assert.equal(artifact.before?.available, false);
-  assert.equal(artifact.after?.available, true);
-  assert.equal(typeof artifact.after?.text, "string");
-
-  const context = await getPromptContextInternal({
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    runId
-  });
-
-  const assistantWithToolCall = context.messages.find((message) => {
-    if (message.role !== "assistant" || !Array.isArray(message.content)) return false;
-    return message.content.some((part) => {
-      if (!part || typeof part !== "object") return false;
-      return (part as { type?: string; toolName?: string }).type === "tool-call" &&
-        (part as { toolName?: string }).toolName === "write";
-    });
-  });
-  assert.ok(assistantWithToolCall, "assistant message should include write tool-call part");
-
-  const toolCallPart = Array.isArray(assistantWithToolCall?.content)
-    ? assistantWithToolCall.content.find((part) => {
-        if (!part || typeof part !== "object") return false;
-        return (part as { type?: string; toolName?: string }).type === "tool-call" &&
-          (part as { toolName?: string }).toolName === "write";
-      })
-    : null;
-  const input = (toolCallPart as { input?: Record<string, unknown> } | null)?.input ?? {};
-  assert.equal(input.filePath, "foo.txt");
-  assert.equal(input.content, writeContent, "write tool-call input should preserve complete content");
-  assert.equal(Object.prototype.hasOwnProperty.call(input, "contentBytes"), false);
-  assert.equal(Object.prototype.hasOwnProperty.call(input, "contentPreview"), false);
-  assert.equal(Object.prototype.hasOwnProperty.call(input, "contentTruncated"), false);
-  assert.equal(artifact.after?.text, writeContent);
-
-  const messagesContext = await getMessagesContextInternal({
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id
-  });
-  const messagesAssistant = messagesContext.messages.find((message) => {
-    if (message.role !== "assistant" || !Array.isArray(message.content)) return false;
-    return message.content.some((part) => {
-      if (!part || typeof part !== "object") return false;
-      return (part as { type?: string; toolName?: string }).type === "tool-call" &&
-        (part as { toolName?: string }).toolName === "write";
-    });
-  });
-  const messagesToolCallPart = Array.isArray(messagesAssistant?.content)
-    ? messagesAssistant.content.find((part) => {
-        if (!part || typeof part !== "object") return false;
-        return (part as { type?: string; toolName?: string }).type === "tool-call" &&
-          (part as { toolName?: string }).toolName === "write";
-      })
-    : null;
-  const messagesInput = (messagesToolCallPart as { input?: Record<string, unknown> } | null)?.input ?? {};
-  assert.equal(messagesInput.content, writeContent, "messages-context should preserve complete write content");
-
-  const forkBoundary = await createContextItemInternal({ fixture,
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    runId,
-    turnId: null,
-    step: null,
-    prevId: toolItem.item.id,
-    kind: "user",
-    status: "completed",
-    output: {
-      type: "user_text",
-      text: "继续处理"
-    }
-  });
-  const forkRes = await fixture.app.inject({
-    method: "POST",
-    url: "/api/agent/sessions/fork",
-    payload: {
-      fromSessionId: session.id,
-      fromItemId: forkBoundary.item.id,
-      mode: "visible_only"
-    }
-  });
-  assert.equal(forkRes.statusCode, 201, `fork write session failed: ${forkRes.body}`);
-  const forked = forkRes.json() as { id: string };
-  const forkContext = await getMessagesContextInternal({
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
-    sessionId: forked.id
-  });
-  const forkedWriteAssistant = forkContext.messages.find((message) => {
-    if (message.role !== "assistant" || !Array.isArray(message.content)) return false;
-    return message.content.some((part) => {
-      if (!part || typeof part !== "object") return false;
-      return (part as { type?: string; toolName?: string }).type === "tool-call" &&
-        (part as { toolName?: string }).toolName === "write";
-    });
-  });
-  const forkedWritePart = Array.isArray(forkedWriteAssistant?.content)
-    ? forkedWriteAssistant.content.find((part) => {
-        if (!part || typeof part !== "object") return false;
-        return (part as { type?: string; toolName?: string }).type === "tool-call" &&
-          (part as { toolName?: string }).toolName === "write";
-      })
-    : null;
-  const forkedWriteInput = (forkedWritePart as { input?: Record<string, unknown> } | null)?.input ?? {};
-  assert.equal(forkedWriteInput.content, writeContent, "forked Prompt should preserve complete write content");
-
-  const legacyAssistantItem = await createContextItemInternal({ fixture,
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    runId,
-    turnId: "turn_write_legacy",
-    step: 2,
-    prevId: forkBoundary.item.id,
-    kind: "assistant",
-    status: "completed",
-    output: {
-      type: "assistant_text",
-      text: "处理旧 write 记录"
-    }
-  });
-  const legacyCompletedItem = await createContextItemInternal({ fixture,
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    runId,
-    turnId: "turn_write_legacy",
-    step: 2,
-    prevId: legacyAssistantItem.item.id,
-    kind: "tool",
-    status: "completed",
-    output: {
-      type: "tool",
-      toolName: "write",
-      toolCallId: "call_write_legacy",
-      args: {
-        filePath: "legacy.txt",
-        contentBytes: 123,
-        contentPreview: "legacy preview"
-      },
-      text: "legacy write completed"
-    }
-  });
-  await createContextItemInternal({ fixture,
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    runId,
-    turnId: "turn_write_legacy",
-    step: 2,
-    prevId: legacyCompletedItem.item.id,
-    kind: "tool",
-    status: "failed",
-    output: {
-      type: "tool",
-      toolName: "write",
-      toolCallId: "call_write_legacy_failed",
-      args: {
-        filePath: "legacy-failed.txt",
-        contentBytes: 456
-      },
-      text: "legacy write fallback text",
-      error: "legacy write failure"
-    }
-  });
-
-  const legacyContext = await getMessagesContextInternal({
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id
-  });
-  const legacyAssistant = legacyContext.messages.find((message) => {
-    if (message.role !== "assistant" || !Array.isArray(message.content)) return false;
-    return message.content.some((part) => {
-      if (!part || typeof part !== "object") return false;
-      return (part as { type?: string; text?: string }).type === "text" &&
-        String((part as { text?: string }).text || "").includes("Historical write input unavailable: legacy.txt");
-    });
-  });
-  assert.ok(legacyAssistant, "legacy metadata-only writes should degrade to text records");
-  const legacyParts = Array.isArray(legacyAssistant?.content) ? legacyAssistant.content : [];
-  const legacyText = legacyParts
-    .filter((part): part is { type: "text"; text: string } => !!part && typeof part === "object" && (part as { type?: string }).type === "text")
-    .map((part) => part.text)
-    .join("\n");
-  assert.ok(legacyText.includes("Historical write input unavailable: legacy.txt"));
-  assert.ok(legacyText.includes("legacy write completed"), "completed legacy result should remain in history");
-  assert.ok(legacyText.includes("Historical write input unavailable: legacy-failed.txt"));
-  assert.ok(legacyText.includes("legacy write failure"), "failed legacy error should remain in history");
-  const legacyWriteCalls = legacyParts.filter((part) => {
-    if (!part || typeof part !== "object") return false;
-    return (part as { type?: string; toolName?: string }).type === "tool-call" &&
-      (part as { toolName?: string }).toolName === "write";
-  });
-  assert.equal(legacyWriteCalls.length, 0, "legacy metadata-only writes must not become schema-invalid tool-calls");
-  const legacyToolResults = legacyContext.messages
-    .filter((message) => message.role === "tool" && Array.isArray(message.content))
-    .flatMap((message) => message.content)
-    .filter((part) => {
-      if (!part || typeof part !== "object") return false;
-      return (part as { type?: string; toolName?: string }).type === "tool-result" &&
-        (part as { toolName?: string }).toolName === "write";
-    });
-  assert.equal(legacyToolResults.length, 1, "only the complete write should retain a tool-result");
+  const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 }); const session = await createSession(fixture.app, fixture.workspaceId); const content = "完整内容";
+  const tool = createTool(fixture, session.id, "write", { filePath: "a.txt", content }); completeToolExecutionFixture({ fixture, sessionId: session.id, runId: tool.runId, toolExecutionId: tool.executionId, resultPreview: "written" }); await writeArtifact(fixture, tool.executionId, "write", { after: { text: content } });
+  const res = await artifact(fixture, session.id, tool.executionId, "write-artifact"); assert.equal(res.statusCode, 200); assert.equal(res.json().toolExecutionId, tool.executionId); assert.equal(res.json().after.text, content);
 });
 
-test("write artifact 文件缺失时返回 404", async (t: TestContext) => {
+test("write artifact 文件缺失时返回 404", async (t: TestContext) => { const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 }); const session = await createSession(fixture.app, fixture.workspaceId); const tool = createTool(fixture, session.id, "write", { filePath: "x", content: "x" }); completeToolExecutionFixture({ fixture, sessionId: session.id, runId: tool.runId, toolExecutionId: tool.executionId }); assert.equal((await artifact(fixture, session.id, tool.executionId, "write-artifact")).statusCode, 404); });
+test("write 在 cancel 终态会保留完整 args.content", async (t: TestContext) => { const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 }); const session = await createSession(fixture.app, fixture.workspaceId); const tool = createTool(fixture, session.id, "write", { filePath: "x", content: "cancel-content" }); completeToolExecutionFixture({ fixture, sessionId: session.id, runId: tool.runId, toolExecutionId: tool.executionId, status: "cancelled" }); await writeArtifact(fixture, tool.executionId, "write", { content: "cancel-content" }); const res = await artifact(fixture, session.id, tool.executionId, "write-artifact"); assert.equal(res.statusCode, 200); assert.equal(res.json().content, "cancel-content"); });
+test("write 在 failed 终态会保留完整 args.content", async (t: TestContext) => { const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 }); const session = await createSession(fixture.app, fixture.workspaceId); const tool = createTool(fixture, session.id, "write", { filePath: "x", content: "failed-content" }); completeToolExecutionFixture({ fixture, sessionId: session.id, runId: tool.runId, toolExecutionId: tool.executionId, status: "failed", error: "failure" }); await writeArtifact(fixture, tool.executionId, "write", { content: "failed-content" }); const res = await artifact(fixture, session.id, tool.executionId, "write-artifact"); assert.equal(res.statusCode, 200); assert.equal(res.json().content, "failed-content"); });
+test("agent tool 字符串结果保持原始字符串语义", async (t: TestContext) => { const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 }); const session = await createSession(fixture.app, fixture.workspaceId); const tool = createTool(fixture, session.id, "write", { filePath: "x", content: "x" }); completeToolExecutionFixture({ fixture, sessionId: session.id, runId: tool.runId, toolExecutionId: tool.executionId, resultPreview: "raw result" }); await writeArtifact(fixture, tool.executionId, "write", { result: "raw result" }); const res = await artifact(fixture, session.id, tool.executionId, "write-artifact"); assert.equal(res.json().result, "raw result"); });
+test("agent 兼容部分迁移数据: 缺失 execution artifact 返回 404", async (t: TestContext) => { const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 }); const session = await createSession(fixture.app, fixture.workspaceId); const missing = await artifact(fixture, session.id, newSortableId("exec"), "write-artifact"); assert.equal(missing.statusCode, 404); });
+test("agent 兼容早期拆分数据: 缺少 resultFormat 时保留结构化工具结果", async (t: TestContext) => { const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 }); const session = await createSession(fixture.app, fixture.workspaceId); const tool = createTool(fixture, session.id, "write", { filePath: "x", content: "x" }); completeToolExecutionFixture({ fixture, sessionId: session.id, runId: tool.runId, toolExecutionId: tool.executionId, structuredResult: { bytesWritten: 1 } }); await writeArtifact(fixture, tool.executionId, "write", { structuredResult: { bytesWritten: 1 } }); const res = await artifact(fixture, session.id, tool.executionId, "write-artifact"); assert.deepEqual(res.json().structuredResult, { bytesWritten: 1 }); });
+test("persisted view_image execution reaches a real Worker model request as media, never as persisted bytes", async (t: TestContext) => {
   const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 });
   const session = await createSession(fixture.app, fixture.workspaceId);
-  const runId = newSortableId("run");
-  const createdAt = Date.now();
-
-  createRunRecord(fixture.db, {
-    runId,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    triggerItemId: 1,
-    agentId: "default",
-    providerId: "ppchat",
-    modelId: "gpt-5.2",
-    status: "running",
-    createdAt
+  const relativePath = "screens/page.png";
+  const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x61]);
+  await fs.mkdir(path.join(fixture.workspacePath, "screens"), { recursive: true });
+  await fs.writeFile(path.join(fixture.workspacePath, relativePath), bytes);
+  const created = createTool(fixture, session.id, "view_image", { path: relativePath });
+  const { AgentRunner, executeToolForTest } = await import(new URL("../../../../../agent-worker/src/runtime/runner.ts", import.meta.url).href);
+  const profile = { model: { id: "gpt-4o-mini" }, provider: { npm: "@ai-sdk/openai", options: { apiKey: "fixture" } },
+    agent: { tools: ["view_image"], pluginTools: [], mcpServers: [] }, runtime: {} };
+  const run = { workspaceId: fixture.workspaceId, sessionId: session.id, runId: created.runId,
+    workspacePath: fixture.workspacePath, workspaceRepoDirNames: [], inputText: "look" };
+  const requests: Array<{ messages: Array<{ role: string; content: unknown }> }> = [];
+  const runner = new AgentRunner({
+    async updateToolExecution(payload: Record<string, unknown>) {
+      const response = await updateToolExecutionFromWorker(fixture, payload);
+      assert.equal(response.statusCode, 200, response.body);
+      return response.json();
+    },
+    async createStreamingAssistant() { return { result: "updated" }; },
+    async flushAssistantParts() { return { result: "updated" }; },
+    async completeAssistant() { return { result: "updated" }; },
+    async completeTerminalAssistant() { return { result: "updated" }; },
+  } as any, {} as any, { info() {}, warn() {}, error() {} }, 1, {
+    streamText: ((request: (typeof requests)[number]) => {
+      requests.push(request);
+      return { fullStream: (async function* () {
+        yield { type: "text-delta", text: "saw image" };
+        yield { type: "raw", rawValue: { type: "response.completed", response: { output: [] } } };
+        yield { type: "finish" };
+      })() };
+    }) as any,
   });
-
-  const toolItem = await createContextItemInternal({ fixture,
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    runId,
-    turnId: "turn_write",
-    step: 1,
-    prevId: null,
-    kind: "tool",
-    status: "queued",
-    output: {
-      type: "tool",
-      toolName: "write",
-      toolCallId: "call_write_1",
-      args: { filePath: "foo.txt", content: "hello" },
-      text: "queued"
-    }
-  });
-
-  await updateContextItemInternal({ fixture,
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    itemId: toolItem.item.id,
-    status: "completed",
-    output: {
-      type: "tool",
-      toolName: "write",
-      toolCallId: "call_write_1",
-      args: { filePath: "foo.txt", content: "hello" },
-      result: {
-        summary: "Wrote file foo.txt",
-        filePath: "foo.txt",
-        bytesWritten: 5,
-        existedBefore: false,
-        before: { available: false, truncated: false, bytes: 0, reason: "missing_file" },
-        after: { available: true, text: "hello", truncated: false, bytes: 5 }
-      },
-      text: "ok"
-    }
-  });
-
-  const artifactPath = path.join(
-    fixture.dataDir,
-    "tmp",
-    "agent",
-    "ui-artifacts",
-    "write",
-    fixture.workspaceId,
-    "call_write_1.json"
-  );
-  await fs.rm(artifactPath, { force: true });
-
-  const artifactRes = await fixture.app.inject({
-    method: "GET",
-    url: `/api/agent/sessions/${session.id}/context-items/${toolItem.item.id}/write-artifact`
-  });
-  assert.equal(artifactRes.statusCode, 404);
+  await executeToolForTest(runner, { profile, run, tool: {
+    toolExecutionId: created.executionId, callPartId: created.parts[0]!.id,
+    assistantMessageId: created.assistantMessageId, status: "queued", toolName: "view_image",
+    toolCallId: (created.parts[0] as { providerToolCallId: string }).providerToolCallId,
+    args: { path: relativePath },
+  }, parentSessionId: session.id, signal: new AbortController().signal, promptContext: { messages: [], tools: [] } });
+  const prompt = await fixture.app.inject({ method: "POST", url: AgentApiEndpoints.getPromptContext.path,
+    headers: { "x-awb-agent-internal-token": fixture.internalToken },
+    payload: { workspaceId: fixture.workspaceId, sessionId: session.id, runId: created.runId } });
+  assert.equal(prompt.statusCode, 200, prompt.body);
+  assert.match(prompt.body, /"type":"image_ref","path":"screens\/page\.png"/);
+  assert.doesNotMatch(prompt.body, /iVBOR/);
+  (runner as any).toolRegistry.listTools = async () => [];
+  await (runner as any).runModelStep({ profile, run, context: prompt.json(), step: 1,
+    signal: new AbortController().signal, repeatedToolCallCounter: new Map() });
+  assert.equal(requests.length, 1);
+  const tool = requests[0]!.messages.find((item) => item.role === "tool")!;
+  const result = (tool.content as Array<{ output: { type: string; value: Array<{ type: string; data: string }> } }>)[0]!;
+  assert.equal(result.output.type, "content");
+  assert.equal(result.output.value[0]?.type, "media");
+  assert.deepEqual(Buffer.from(result.output.value[0]!.data, "base64"), bytes);
+  const persisted = fixture.db.prepare("select structured_result_json as structuredResultJson from agent_tool_execution where id = ?")
+    .get(created.executionId) as { structuredResultJson: string };
+  assert.deepEqual(JSON.parse(persisted.structuredResultJson), { type: "image_ref", path: relativePath });
 });
 
-test("write 在 cancel 终态会保留完整 args.content", async (t: TestContext) => {
+test("真实压缩提交后同 Run 尾部工具图重读并进入 SDK；源文件丢失时请求前失败", async (t: TestContext) => {
   const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 });
   const session = await createSession(fixture.app, fixture.workspaceId);
-  const runId = newSortableId("run");
-
-  const toolItem = await createContextItemInternal({ fixture,
-    app: fixture.app,
+  appendMessageFixture({ fixture, sessionId: session.id, type: "user", text: "old prefix" });
+  const relativePath = "screens/retained.png";
+  const imagePath = path.join(fixture.workspacePath, relativePath);
+  const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x61]);
+  await fs.mkdir(path.dirname(imagePath), { recursive: true });
+  await fs.writeFile(imagePath, bytes);
+  const created = createTool(fixture, session.id, "view_image", { path: relativePath });
+  const { AgentRunner, executeToolForTest } = await import(new URL("../../../../../agent-worker/src/runtime/runner.ts", import.meta.url).href);
+  const profile = { model: { id: "gpt-4o-mini" }, provider: { npm: "@ai-sdk/openai", options: { apiKey: "fixture" } },
+    agent: { tools: ["view_image"], pluginTools: [], mcpServers: [] }, runtime: {} };
+  const run = { workspaceId: fixture.workspaceId, sessionId: session.id, runId: created.runId,
+    workspacePath: fixture.workspacePath, workspaceRepoDirNames: [], inputText: "look" };
+  const requests: Array<{ messages: Parameters<typeof streamText>[0]["messages"] }> = [];
+  const runner = new AgentRunner({
+    async updateToolExecution(payload: Record<string, unknown>) {
+      const response = await updateToolExecutionFromWorker(fixture, payload);
+      assert.equal(response.statusCode, 200, response.body);
+      return response.json();
+    },
+    async createStreamingAssistant() { return { result: "updated" }; },
+    async flushAssistantParts() { return { result: "updated" }; },
+    async completeAssistant() { return { result: "updated" }; },
+    async completeTerminalAssistant() { return { result: "updated" }; },
+  } as any, {} as any, { info() {}, warn() {}, error() {} }, 1, {
+    streamText: ((request: (typeof requests)[number]) => {
+      requests.push(request);
+      return { fullStream: (async function* () {
+        yield { type: "text-delta", text: "seen" };
+        yield { type: "raw", rawValue: { type: "response.completed", response: { output: [] } } };
+        yield { type: "finish" };
+      })() };
+    }) as any,
+  });
+  await executeToolForTest(runner, { profile, run, tool: {
+    toolExecutionId: created.executionId, callPartId: created.parts[0]!.id,
+    assistantMessageId: created.assistantMessageId, status: "queued", toolName: "view_image",
+    toolCallId: (created.parts[0] as { providerToolCallId: string }).providerToolCallId,
+    args: { path: relativePath },
+  }, parentSessionId: session.id, signal: new AbortController().signal, promptContext: { messages: [], tools: [] } });
+  const head = getMessageSessionHead(fixture.db, { workspaceId: fixture.workspaceId, sessionId: session.id })!;
+  const committed = await injectJson(fixture.app, {
+    method: AgentApiEndpoints.commitCompactionWithTerminalIntent.method,
+    url: AgentApiEndpoints.commitCompactionWithTerminalIntent.path,
     internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    runId,
-    turnId: "turn_write_cancel",
-    step: 1,
-    prevId: null,
-    kind: "tool",
-    status: "running",
-    output: {
-      type: "tool",
-      toolName: "write",
-      toolCallId: "call_write_cancel",
-      args: {
-        filePath: "cancel.txt",
-        content: "secret cancel payload"
-      }
-    }
+    payload: { workspaceId: fixture.workspaceId, sessionId: session.id, runId: created.runId,
+      messageId: newSortableId("msg"), textPartId: newSortableId("part"),
+      expectedHeadMessageId: head.headMessageId, expectedRevision: head.revision,
+      retainedFromMessageId: created.triggerMessageId, summaryText: "summary of old prefix", createdAt: Date.now() },
   });
-
-  await updateRunStateInternal({ fixture,
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    status: "running",
-    activeRunId: runId,
-    activeAssistantItemId: null,
-  });
-
-  const cancelRes = await fixture.app.inject({
-    method: "POST",
-    url: `/api/agent/sessions/${session.id}/cancel`,
-    payload: {
-      workspaceId: fixture.workspaceId
-    }
-  });
-  assert.equal(cancelRes.statusCode, 200, `cancel write run failed: ${cancelRes.body}`);
-
-  const cancelledItem = await getContextItem(fixture.app, session.id, toolItem.item.id);
-  assert.equal(cancelledItem.status, "cancelled");
-  const args = (cancelledItem.output as { args?: Record<string, unknown> }).args || {};
-  assert.equal(args.filePath, "cancel.txt");
-  assert.equal(args.content, "secret cancel payload");
-  assert.equal(Object.prototype.hasOwnProperty.call(args, "contentBytes"), false);
-});
-
-test("write 在 failed 终态会保留完整 args.content", async (t: TestContext) => {
-  const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 });
-  const session = await createSession(fixture.app, fixture.workspaceId);
-  const runId = newSortableId("run");
-  const writeContent = "失败时也必须保留完整写入意图\n".repeat(30);
-  createRunRecord(fixture.db, {
-    runId,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    triggerItemId: 1,
-    agentId: "default",
-    providerId: "ppchat",
-    modelId: "gpt-5.2",
-    status: "running",
-    createdAt: Date.now()
-  });
-  updateRunState(fixture.db, {
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    status: "running",
-    activeRunId: runId,
-    activeAssistantItemId: null,
-    updatedAt: Date.now(),
-    appliedItemId: 0
-  });
-
-  const toolItem = await createContextItemInternal({ fixture,
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    runId,
-    turnId: "turn_write_failed",
-    step: 1,
-    prevId: null,
-    kind: "tool",
-    status: "running",
-    output: {
-      type: "tool",
-      toolName: "write",
-      toolCallId: "call_write_failed",
-      args: {
-        filePath: "failed.txt",
-        content: writeContent
-      }
-    }
-  });
-
-  await updateContextItemInternal({ fixture,
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    itemId: toolItem.item.id,
-    status: "failed",
-    output: {
-      type: "tool",
-      toolName: "write",
-      toolCallId: "call_write_failed",
-      args: {
-        filePath: "failed.txt",
-        content: writeContent
-      },
-      text: "write failed",
-      error: "simulated failure"
-    }
-  });
-
-  const failedItem = await getContextItem(fixture.app, session.id, toolItem.item.id);
-  assert.equal(failedItem.status, "failed");
-  const args = (failedItem.output as { args?: Record<string, unknown> }).args || {};
-  assert.equal(args.filePath, "failed.txt");
-  assert.equal(args.content, writeContent);
-  assert.equal(Object.prototype.hasOwnProperty.call(args, "contentBytes"), false);
-});
-
-test("agent tool 字符串结果保持原始字符串语义", async (t: TestContext) => {
-  const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 });
-  const session = await createSession(fixture.app, fixture.workspaceId);
-  const runId = newSortableId("run");
-  const createdAt = Date.now();
-
-  createRunRecord(fixture.db, {
-    runId,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    triggerItemId: 1,
-    agentId: "default",
-    providerId: "ppchat",
-    modelId: "gpt-5.2",
-    status: "running",
-    createdAt
-  });
-
-  const userItem = await createContextItemInternal({ fixture,
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    runId,
-    turnId: null,
-    step: null,
-    prevId: null,
-    kind: "user",
-    status: "completed",
-    output: {
-      type: "user_text",
-      text: "测试字符串结果"
-    }
-  });
-
-  const assistantItem = await createContextItemInternal({ fixture,
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    runId,
-    turnId: "turn_string_result",
-    step: 1,
-    prevId: userItem.item.id,
-    kind: "assistant",
-    status: "completed",
-    output: {
-      type: "assistant_text",
-      text: "调用工具获取字符串"
-    }
-  });
-
-  const rawString = '{"ok":true}';
-  const toolItem = await createContextItemInternal({ fixture,
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    runId,
-    turnId: "turn_string_result",
-    step: 1,
-    prevId: assistantItem.item.id,
-    kind: "tool",
-    status: "completed",
-    output: {
-      type: "tool",
-      toolName: "bash",
-      toolCallId: "call_string_result",
-      args: {
-        command: "echo test"
-      },
-      result: rawString
-    }
-  });
-
-  const detail = await getContextItem(fixture.app, session.id, toolItem.item.id);
-  assert.equal(detail.output.type, "tool");
-  assert.equal(typeof detail.output.result, "string");
-  assert.equal(String(detail.output.result || ""), rawString);
-});
-
-test("agent 兼容部分迁移数据: tool_call_json 缺失时回退 legacy output", async (t: TestContext) => {
-  const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 });
-  const session = await createSession(fixture.app, fixture.workspaceId);
-  const runId = newSortableId("run");
-  const createdAt = Date.now();
-
-  createRunRecord(fixture.db, {
-    runId,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    triggerItemId: 1,
-    agentId: "default",
-    providerId: "ppchat",
-    modelId: "gpt-5.2",
-    status: "running",
-    createdAt
-  });
-
-  const userItem = await createContextItemInternal({ fixture,
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    runId,
-    turnId: null,
-    step: null,
-    prevId: null,
-    kind: "user",
-    status: "completed",
-    output: {
-      type: "user_text",
-      text: "请读取文件"
-    }
-  });
-
-  const assistantItem = await createContextItemInternal({ fixture,
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    runId,
-    turnId: "turn_legacy_fallback",
-    step: 1,
-    prevId: userItem.item.id,
-    kind: "assistant",
-    status: "completed",
-    output: {
-      type: "assistant_text",
-      text: "准备调用 read"
-    }
-  });
-
-  const legacyToolOutput = {
-    type: "tool",
-    toolName: "read",
-    toolCallId: "call_legacy_read",
-    args: {
-      filePath: "README.md"
-    }
+  assert.equal(committed.statusCode, 200, committed.body);
+  assert.equal(committed.json().result, "updated");
+  const getContext = async () => {
+    const response = await injectJson(fixture.app, { method: AgentApiEndpoints.getPromptContext.method,
+      url: AgentApiEndpoints.getPromptContext.path, internalToken: fixture.internalToken,
+      payload: { workspaceId: fixture.workspaceId, sessionId: session.id, runId: created.runId } });
+    assert.equal(response.statusCode, 200, response.body);
+    assert.match(response.body, /"type":"image_ref","path":"screens\/retained\.png"/);
+    assert.doesNotMatch(response.body, /iVBOR/);
+    return response.json();
   };
-
-  const toolItem = await createContextItemInternal({ fixture,
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    runId,
-    turnId: "turn_legacy_fallback",
-    step: 1,
-    prevId: assistantItem.item.id,
-    kind: "tool",
-    status: "queued",
-    output: legacyToolOutput
-  });
-
-  fixture.db
-    .prepare(
-      `
-        update agent_context_item
-        set tool_name = @toolName,
-            tool_call_id = null,
-            tool_call_json = null,
-            tool_result_json = null,
-            output_text = '',
-            output_json = @outputJson
-        where id = @id
-      `
-    )
-    .run({
-      id: toolItem.item.id,
-      toolName: "read",
-      outputJson: JSON.stringify(legacyToolOutput)
-    });
-
-  const detail = await getContextItem(fixture.app, session.id, toolItem.item.id);
-  assert.equal(detail.output.type, "tool");
-  assert.equal(String(detail.output.toolName || ""), "read");
-  assert.equal(String(detail.output.toolCallId || ""), "call_legacy_read");
-  assert.equal(String((detail.output.args as { filePath?: string } | undefined)?.filePath || ""), "README.md");
-
-  const promptContext = await getPromptContextInternal({
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    runId
-  });
-  assert.equal(promptContext.pendingTools.length, 1);
-});
-
-test("agent 兼容早期拆分数据: 缺少 resultFormat 时保留结构化工具结果", async (t: TestContext) => {
-  const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 });
-  const session = await createSession(fixture.app, fixture.workspaceId);
-  const runId = newSortableId("run");
-  const createdAt = Date.now();
-
-  createRunRecord(fixture.db, {
-    runId,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    triggerItemId: 1,
-    agentId: "default",
-    providerId: "ppchat",
-    modelId: "gpt-5.2",
-    status: "running",
-    createdAt
-  });
-
-  const userItem = await createContextItemInternal({ fixture,
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    runId,
-    turnId: null,
-    step: null,
-    prevId: null,
-    kind: "user",
-    status: "completed",
-    output: {
-      type: "user_text",
-      text: "测试结构化兼容"
-    }
-  });
-
-  const assistantItem = await createContextItemInternal({ fixture,
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    runId,
-    turnId: "turn_compat_result",
-    step: 1,
-    prevId: userItem.item.id,
-    kind: "assistant",
-    status: "completed",
-    output: {
-      type: "assistant_text",
-      text: "调用 todolist"
-    }
-  });
-
-  const structuredResult = {
-    summary: { total: 1, pending: 0, inProgress: 0, completed: 1, cancelled: 0 },
-    todos: [{ content: "完成兼容", status: "completed" }]
-  };
-
-  const toolItem = await createContextItemInternal({ fixture,
-    app: fixture.app,
-    internalToken: fixture.internalToken,
-    workspaceId: fixture.workspaceId,
-    sessionId: session.id,
-    runId,
-    turnId: "turn_compat_result",
-    step: 1,
-    prevId: assistantItem.item.id,
-    kind: "tool",
-    status: "completed",
-    output: {
-      type: "tool",
-      toolName: "todolist",
-      toolCallId: "call_compat_todolist",
-      args: {
-        todos: [{ content: "完成兼容", status: "completed" }]
-      },
-      result: structuredResult
-    }
-  });
-
-  fixture.db
-    .prepare(
-      `
-        update agent_context_item
-        set output_text = @outputText,
-            tool_result_json = @toolResultJson,
-            output_json = '{}'
-        where id = @id
-      `
-    )
-    .run({
-      id: toolItem.item.id,
-      outputText: JSON.stringify(structuredResult),
-      toolResultJson: JSON.stringify({ status: "completed" })
-    });
-
-  const detail = await getContextItem(fixture.app, session.id, toolItem.item.id);
-  assert.equal(detail.output.type, "tool");
-  assert.equal(typeof detail.output.result, "object");
-  assert.equal(
-    Array.isArray((detail.output.result as { todos?: unknown[] } | undefined)?.todos),
-    true,
-    "result should remain structured object"
-  );
-
-  const sessionAfterCompat = getAgentSession(fixture.db, session.id);
-  assert.ok(sessionAfterCompat, "compat session should exist");
-  assert.equal(sessionAfterCompat?.title, "it-session", "compat todolist without goal should not change session title");
+  (runner as any).toolRegistry.listTools = async () => [];
+  const execute = async () => (runner as any).runModelStep({ profile, run, context: await getContext(), step: 1,
+    signal: new AbortController().signal, repeatedToolCallCounter: new Map() });
+  await execute();
+  assert.equal(requests.length, 1);
+  let wire: Record<string, unknown> | undefined;
+  const model = createOpenAI({ apiKey: "fixture", fetch: async (_url, init) => {
+    wire = JSON.parse(String(init?.body));
+    return new Response("fixture failure", { status: 400, headers: { "content-type": "text/plain" } });
+  } }).responses("gpt-4o-mini");
+  const sdk = streamText({ model, messages: requests[0]!.messages!, maxRetries: 0, onError() {} });
+  try { for await (const _part of sdk.fullStream) { /* capture actual SDK request */ } } catch { /* mocked provider */ }
+  assert.ok(wire);
+  assert.match(JSON.stringify(wire), /input_image/);
+  assert.match(JSON.stringify(wire), new RegExp(bytes.toString("base64")));
+  await fs.rm(imagePath);
+  await assert.rejects(execute(), /cannot read a valid tool image/);
+  assert.equal(requests.length, 1, "missing source must fail before another SDK request");
 });

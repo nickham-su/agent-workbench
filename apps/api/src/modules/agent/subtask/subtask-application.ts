@@ -1,4 +1,4 @@
-import { AgentSubtaskErrorCode } from "@agent-workbench/shared/internal-contracts/agent-api";
+import { AgentSubtaskErrorCode, normalizeAgentSubtaskSource } from "@agent-workbench/shared/internal-contracts/agent-api";
 import type {
   AgentApiSubtaskPreforkPlanRequest,
   AgentApiSubtaskPreforkPlanResponse,
@@ -16,7 +16,9 @@ import type {
   SubtaskApplicationDependencies,
   SubtaskApplicationPort,
   SubtaskRunRecord,
+  SubtaskSession,
 } from "./subtask-ports.js";
+import { workspaceDeletingFence } from "../lifecycle/workspace-deleting-fence.js";
 
 const SUBTASK_PREFORK_SUMMARY_MAX_CHARS = 20_000;
 
@@ -95,13 +97,21 @@ export class SubtaskApplication implements SubtaskApplicationPort {
   async startSubtask(
     request: AgentApiSubtaskStartRequest,
   ): Promise<AgentApiSubtaskStartResponse> {
+    const source = normalizeAgentSubtaskSource(request);
+    if (!source.ok) throw new HttpError(400, source.message, source.code);
+    // A direct application call has no route hook to normalize the transport ID.
+    if (source.sourceSessionId !== undefined && request.session.mode === "fork") {
+      request = { ...request, session: { ...request.session, sourceSessionId: source.sourceSessionId } };
+    }
+    workspaceDeletingFence.assertWritable(request.workspaceId);
     const { parentRun, parentUiLocale, anchor } =
       this.dependencies.parentAnchorReader.resolve({
         workspaceId: request.workspaceId,
         parentSessionId: request.parentSessionId,
         parentRunId: request.parentRunId,
-        parentToolItemId: request.parentToolItemId,
+        parentToolExecutionId: request.parentToolExecutionId,
       });
+    const boundSourceSessionId = this.bindSource(source.sourceSessionId, anchor.toolInputJson);
 
     const description = request.description.trim().slice(0, 50);
     if (!description) {
@@ -168,7 +178,7 @@ export class SubtaskApplication implements SubtaskApplicationPort {
         workspaceId: request.workspaceId,
         parentSessionId: request.parentSessionId,
         parentRunId: request.parentRunId,
-        parentToolItemId: request.parentToolItemId,
+        parentToolExecutionId: request.parentToolExecutionId,
         agentId: resolvedAgentId,
         thresholdPct: meta.thresholdPct,
       });
@@ -186,20 +196,20 @@ export class SubtaskApplication implements SubtaskApplicationPort {
       }
     }
 
-    const existing = this.dependencies.lineagePersistence.findChildByParentTool(
+    const existing = this.dependencies.lineagePersistence.findChildByParentToolExecution(
       {
         workspaceId: request.workspaceId,
         parentRunId: parentRun.runId,
-        parentToolItemId: anchor.id,
+        parentToolExecutionId: anchor.toolExecutionId,
       },
     );
     if (existing) {
-      this.ensureExistingSessionMatches(request, existing);
+      const reusedSourceSessionId = this.ensureExistingSessionMatches(request, existing, boundSourceSessionId);
       const workspace = this.dependencies.workspaceReader.get(
         request.workspaceId,
       );
       if (!workspace) throw new HttpError(404, "workspace not found");
-      return this.toReusedResponse(existing, workspace.path);
+      return this.toReusedResponse(existing, workspace.path, reusedSourceSessionId);
     }
 
     if (parentRun.subtaskDepth == null) {
@@ -218,16 +228,16 @@ export class SubtaskApplication implements SubtaskApplicationPort {
       );
     }
 
-    const forkBoundaryItemId =
-      request.session.mode === "fork"
+    const forkBoundaryMessageId =
+      request.session.mode === "fork" && boundSourceSessionId === undefined
         ? this.dependencies.sessionMaterializer.resolveForkBoundary({
             workspaceId: request.workspaceId,
             sessionId: request.parentSessionId,
-            anchor,
+            assistantMessageId: anchor.assistantMessageId,
           })
         : null;
     const shouldUsePreforkSummary =
-      request.session.mode === "fork" && preforkSummaryText.length > 0;
+      request.session.mode === "fork" && boundSourceSessionId === undefined && preforkSummaryText.length > 0;
     if (
       request.session.mode !== "new" &&
       request.session.mode !== "fork" &&
@@ -244,15 +254,16 @@ export class SubtaskApplication implements SubtaskApplicationPort {
       await this.dependencies.sessionMaterializer.resolveForStart({
         workspaceId: request.workspaceId,
         parentSessionId: request.parentSessionId,
-        parentToolItemId: request.parentToolItemId,
+        parentToolExecutionId: request.parentToolExecutionId,
         session: request.session,
         subtaskTitleBase: description,
-        forkBoundaryItemId,
+        forkBoundaryMessageId,
         shouldUsePreforkSummary,
       });
 
     let workspacePath = "";
     try {
+      const createdSourceSessionId = this.sourceFromChildSession(session, request.workspaceId, boundSourceSessionId);
       const state = this.dependencies.parentRunStateReader.get(
         session.workspaceId,
         session.id,
@@ -282,43 +293,34 @@ export class SubtaskApplication implements SubtaskApplicationPort {
         );
 
       const runId = this.dependencies.ids.newId("run");
-      const seedItems: Array<{
-        kind: "system" | "user";
-        text: string;
-        attachToRun: boolean;
-      }> = [];
-      if (shouldUsePreforkSummary)
-        seedItems.push({
-          kind: "system",
-          text: preforkSummaryText,
-          attachToRun: false,
-        });
+      const systemTexts: string[] = [];
+      if (shouldUsePreforkSummary) systemTexts.push(preforkSummaryText);
       if (request.session.mode === "fork") {
-        seedItems.push({
-          kind: "system",
-          text: this.dependencies.forkGuardTextReader.get(parentUiLocale),
-          attachToRun: false,
-        });
+        systemTexts.push(this.dependencies.forkGuardTextReader.get(parentUiLocale));
       }
-      seedItems.push({ kind: "user", text: prompt, attachToRun: true });
-
+      workspaceDeletingFence.assertWritable(request.workspaceId);
       const activation = this.dependencies.childRunActivator.activate({
         workspaceId: session.workspaceId,
         sessionId: session.id,
         runId,
         parentRunId: parentRun.runId,
-        parentToolItemId: anchor.id,
+        parentToolExecutionId: anchor.toolExecutionId,
         subtaskDepth: childDepth,
         agentId: profile.agentId,
         providerId: profile.providerId,
         modelId: profile.modelId,
         uiLocale: parentUiLocale,
         createdAt: this.dependencies.clock.nowMs(),
-        seedItems: seedItems as Array<
-          | { kind: "system"; text: string; attachToRun: false }
-          | { kind: "user"; text: string; attachToRun: true }
-        >,
+        systemTexts,
+        prompt
       });
+      if (activation.kind === "parent-not-active") {
+        throw new HttpError(
+          409,
+          "parent run is no longer active",
+          AgentSubtaskErrorCode.ParentNotActive,
+        );
+      }
       if (activation.kind === "session-running") {
         throw new HttpError(
           409,
@@ -333,19 +335,29 @@ export class SubtaskApplication implements SubtaskApplicationPort {
         workspacePath,
         agentName: profile.agentName,
         reused: false,
+        ...(createdSourceSessionId !== undefined ? { sourceSessionId: createdSourceSessionId } : {}),
       };
     } catch (error) {
-      this.compensateNewSession(request.workspaceId, createdSessionId);
-      if (
-        this.dependencies.lineagePersistence.isParentToolUniqueConflict(error)
-      ) {
-        const winner =
-          this.dependencies.lineagePersistence.findChildByParentTool({
-            workspaceId: request.workspaceId,
-            parentRunId: parentRun.runId,
-            parentToolItemId: anchor.id,
-          });
-        if (winner) return this.toReusedResponse(winner, workspacePath);
+      this.compensateNewSession(session, createdSessionId, request.parentSessionId);
+      const winner = this.dependencies.lineagePersistence.findChildByParentToolExecution({
+        workspaceId: request.workspaceId,
+        parentRunId: parentRun.runId,
+        parentToolExecutionId: anchor.toolExecutionId,
+      });
+      if (winner) {
+        // A loser must re-check the durable call and winner, not just trust the
+        // first query or its independently captured source snapshot.
+        const latestAnchor = this.dependencies.parentAnchorReader.resolve({
+          workspaceId: request.workspaceId,
+          parentSessionId: request.parentSessionId,
+          parentRunId: request.parentRunId,
+          parentToolExecutionId: request.parentToolExecutionId,
+        });
+        const winnerSource = this.bindSource(source.sourceSessionId, latestAnchor.anchor.toolInputJson);
+        const reusedSource = this.ensureExistingSessionMatches(request, winner, winnerSource);
+        const workspace = this.dependencies.workspaceReader.get(request.workspaceId);
+        if (!workspace) throw new HttpError(404, "workspace not found");
+        return this.toReusedResponse(winner, workspace.path, reusedSource);
       }
       throw error;
     }
@@ -353,22 +365,11 @@ export class SubtaskApplication implements SubtaskApplicationPort {
 
   getResult(request: AgentApiSubtaskResultRequest): AgentApiSubtaskResultResponse {
     this.requireOwnedRun(request);
-    const items = this.dependencies.runQuery.listVisibleItemsByRun(request);
-
-    for (let index = items.length - 1; index >= 0; index -= 1) {
-      const item = items[index];
-      if (item?.kind === "assistant" && item.output.type === "assistant_text" && String(item.output.text || "").trim()) {
-        // Failed/cancelled runs may still expose their useful partial output.
-        return { resultText: item.output.text || "" };
-      }
-    }
-    for (let index = items.length - 1; index >= 0; index -= 1) {
-      const item = items[index];
-      if (item?.kind === "system" && item.output.type === "system_text" && String(item.output.text || "").trim()) {
-        return { resultText: item.output.text || "" };
-      }
-    }
-    return { resultText: "" };
+    const messages = this.dependencies.runQuery.listMessageTextsByRun(request);
+    const latestAssistant = messages.filter((message) => message.type === "assistant").at(-1);
+    if (latestAssistant) return { resultText: latestAssistant.text };
+    const latestSystem = messages.filter((message) => message.type === "system").at(-1);
+    return { resultText: latestSystem?.text ?? "" };
   }
 
   getStatus(request: AgentApiSubtaskStatusRequest): AgentApiSubtaskStatusResponse {
@@ -398,7 +399,7 @@ export class SubtaskApplication implements SubtaskApplicationPort {
         const eligibleForDeletion =
           candidate.createdAt < deleteBefore
           && candidate.forkedFromSessionId != null
-          && candidate.forkedFromItemId != null;
+          && candidate.forkedFromMessageId != null;
         if (!eligibleForDeletion) {
           result.retained += 1;
           this.dependencies.logger.warn(
@@ -442,9 +443,50 @@ export class SubtaskApplication implements SubtaskApplicationPort {
     return run;
   }
 
+  /** Bind validated transport semantics to fresh durable input, not a full call fingerprint. */
+  private bindSource(transportSourceSessionId: string | undefined, toolInputJson: string | null): string | undefined {
+    let input: unknown;
+    try {
+      if (typeof toolInputJson !== "string") throw new Error("missing tool input");
+      input = JSON.parse(toolInputJson);
+    } catch {
+      throw new HttpError(400, "invalid subtask anchor input", AgentSubtaskErrorCode.AnchorInvalid);
+    }
+    if (input === null || typeof input !== "object" || Array.isArray(input)) {
+      throw new HttpError(400, "invalid subtask anchor input", AgentSubtaskErrorCode.AnchorInvalid);
+    }
+    const persisted = normalizeAgentSubtaskSource(input);
+    if (!persisted.ok) {
+      throw new HttpError(400, "invalid subtask anchor input", AgentSubtaskErrorCode.AnchorInvalid);
+    }
+    if (persisted.sourceSessionId !== transportSourceSessionId) {
+      throw new HttpError(409, "subtask fork source does not match the original call", AgentSubtaskErrorCode.ForkSourceMismatch);
+    }
+    return persisted.sourceSessionId;
+  }
+
+  private sourceFromChildSession(
+    session: SubtaskSession,
+    workspaceId: string,
+    boundSourceSessionId: string | undefined,
+  ): string | undefined {
+    if (session.workspaceId !== workspaceId) {
+      throw new HttpError(400, "subtask session workspace mismatch", AgentSubtaskErrorCode.WorkspaceMismatch);
+    }
+    if (session.kind !== "subtask") {
+      throw new HttpError(400, "existing session must be subtask", AgentSubtaskErrorCode.KindMismatch);
+    }
+    if (boundSourceSessionId === undefined) return undefined;
+    if (session.forkedFromSessionId !== boundSourceSessionId) {
+      throw new HttpError(409, "subtask fork source does not match the original call", AgentSubtaskErrorCode.ForkSourceMismatch);
+    }
+    return session.forkedFromSessionId;
+  }
+
   private ensureExistingSessionMatches(
     request: AgentApiSubtaskStartRequest,
     existing: SubtaskRunRecord,
+    boundSourceSessionId: string | undefined,
   ) {
     if (
       request.session.mode === "existing" &&
@@ -456,11 +498,15 @@ export class SubtaskApplication implements SubtaskApplicationPort {
         AgentSubtaskErrorCode.ExistingSessionMismatch,
       );
     }
+    const session = this.dependencies.runQuery.findSession(existing.sessionId);
+    if (!session) throw new HttpError(404, "subtask session not found", AgentSubtaskErrorCode.SessionNotFound);
+    return this.sourceFromChildSession(session, request.workspaceId, boundSourceSessionId);
   }
 
   private toReusedResponse(
     existing: SubtaskRunRecord,
     workspacePath: string,
+    sourceSessionId?: string,
   ): AgentApiSubtaskStartResponse {
     return {
       sessionId: existing.sessionId,
@@ -471,21 +517,29 @@ export class SubtaskApplication implements SubtaskApplicationPort {
           existing.agentId,
         ) || existing.agentId,
       reused: true,
+      ...(sourceSessionId !== undefined ? { sourceSessionId } : {}),
     };
   }
 
   private compensateNewSession(
-    workspaceId: string,
+    session: SubtaskSession,
     createdSessionId: string | null,
+    expectedParentSessionId: string,
   ) {
-    if (!createdSessionId) return;
+    if (!createdSessionId || createdSessionId !== session.id) return;
     try {
-      this.dependencies.localCompensationPersistence.deleteNewSessionIfStillEmpty(
-        { workspaceId, sessionId: createdSessionId },
-      );
+      this.dependencies.localCompensationPersistence.deleteCreatedSessionIfStillSafe({
+        workspaceId: session.workspaceId,
+        createdSessionId,
+        expectedParentSessionId,
+        expectedForkedFromSessionId: session.forkedFromSessionId,
+        expectedForkedFromMessageId: session.forkedFromMessageId,
+        expectedHeadMessageId: session.headMessageId,
+        expectedContextRootMessageId: session.contextRootMessageId,
+      });
     } catch (error) {
       this.dependencies.logger.warn(
-        { error, workspaceId, sessionId: createdSessionId },
+        { error, workspaceId: session.workspaceId, sessionId: createdSessionId },
         "subtask local compensation failed",
       );
     }

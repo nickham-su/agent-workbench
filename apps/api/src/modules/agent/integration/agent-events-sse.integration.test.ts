@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createRunRecord } from "../agent.store.js";
+import { createMessageRunRecord } from "../agent-message.store.js";
+import { appendMessage, getMessageSessionHead, startMessageRun } from "../agent-message.store.js";
 import { newSortableId } from "../../../utils/ids.js";
 import { createAgentIntegrationFixture, createPrimarySession } from "../testkit/agent-integration-testkit.js";
 
@@ -52,11 +53,26 @@ test("internal events/sse 返回 run-complete 事件 chunk", async (t) => {
   })();
 
   const runId = newSortableId("run");
-  createRunRecord(fixture.db, {
+  const head = getMessageSessionHead(fixture.db, { workspaceId: fixture.workspaceId, sessionId: session.id });
+  assert.ok(head);
+  const triggerMessageId = newSortableId("msg");
+  appendMessage(fixture.db, {
+    id: triggerMessageId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    expectedHeadMessageId: head.headMessageId,
+    expectedRevision: head.revision,
+    type: "user",
+    status: "completed",
+    originRunId: null,
+    parts: [{ id: newSortableId("part"), position: 0, type: "text", text: "SSE trigger" }],
+    createdAt: Date.now()
+  });
+  createMessageRunRecord(fixture.db, {
     runId,
     workspaceId: fixture.workspaceId,
     sessionId: session.id,
-    triggerItemId: 1,
+    triggerMessageId,
     agentId: "default",
     providerId: "ppchat",
     modelId: "gpt-5.2",
@@ -64,6 +80,7 @@ test("internal events/sse 返回 run-complete 事件 chunk", async (t) => {
     status: "running",
     createdAt: Date.now()
   });
+  startMessageRun(fixture.db, { workspaceId: fixture.workspaceId, sessionId: session.id, runId, updatedAt: Date.now() });
 
   const readyStart = Date.now();
   while (!sseReady && Date.now() - readyStart < 3_000) {
@@ -74,18 +91,29 @@ test("internal events/sse 返回 run-complete 事件 chunk", async (t) => {
   }
 
   try {
-    const complete = await fixture.app.inject({
-    method: "POST",
-    url: "/api/internal/agent/run-complete",
-    headers: { "x-awb-agent-internal-token": fixture.internalToken },
-    payload: {
-      workspaceId: fixture.workspaceId,
-      sessionId: session.id,
-      runId,
-      status: "completed"
-    }
-  });
-    assert.equal(complete.statusCode, 200, `run-complete for sse failed: ${complete.body}`);
+    const updatedAt = Date.now();
+    const intent = await fixture.app.inject({
+      method: "POST",
+      url: "/api/internal/agent/runs/terminal-intent",
+      headers: { "x-awb-agent-internal-token": fixture.internalToken },
+      payload: {
+        workspaceId: fixture.workspaceId,
+        sessionId: session.id,
+        runId,
+        status: "completed",
+        code: "run_completed",
+        detail: null,
+        updatedAt,
+      },
+    });
+    assert.equal(intent.statusCode, 200, `terminal intent for sse failed: ${intent.body}`);
+    const converge = await fixture.app.inject({
+      method: "POST",
+      url: "/api/internal/agent/runs/converge-terminal",
+      headers: { "x-awb-agent-internal-token": fixture.internalToken },
+      payload: { workspaceId: fixture.workspaceId, sessionId: session.id, runId, updatedAt },
+    });
+    assert.equal(converge.statusCode, 200, `terminal convergence for sse failed: ${converge.body}`);
 
     const sseText = await ssePromise;
 

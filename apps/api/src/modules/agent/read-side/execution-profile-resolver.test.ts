@@ -12,7 +12,6 @@ test("ExecutionProfileResolver preserves run identity and resolves the primary s
         agent: { id: "resolved-agent", name: "Agent" },
         provider: { id: "resolved-provider", name: "Provider" },
         model: { id: "resolved-model", name: "Model" },
-        vision: { source: "runtime_vision" as const },
         compaction: null
       };
     },
@@ -45,7 +44,6 @@ test("ExecutionProfileResolver preserves run identity and resolves the primary s
     agent: { id: "resolved-agent", name: "Agent" },
     provider: { id: "resolved-provider", name: "Provider" },
     model: { id: "resolved-model", name: "Model" },
-    vision: { source: "runtime_vision" },
     compaction: null,
     runtime
   });
@@ -60,7 +58,6 @@ test("ExecutionProfileResolver resolves the subtask surface without querying own
         agent: { id: input.agentId },
         provider: { id: input.providerId },
         model: { id: input.modelId },
-        vision: null,
         compaction: null
       };
     },

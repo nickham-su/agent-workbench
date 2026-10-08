@@ -18,8 +18,10 @@ import {
   PluginToolRpcExecuteResponseSchema,
   PluginToolRpcListRequestSchema,
   PluginToolRpcListResponseSchema,
+  AgentSessionLastAssistantTextResponseSchema,
+  AgentSessionLatestTodolistResponseSchema,
   ErrorResponseSchema
-} from "@agent-workbench/shared";
+} from "@agent-workbench/shared/internal-contracts/agent-api-session";
 import { HttpError } from "../../../app/errors.js";
 import type { AgentPeripheralRouteDependencies } from "./agent-route-types.js";
 import { assertInternalToken, assertOnlyAllowedBodyKeys, assertPluginCaller, AGENT_PRIMARY_SESSION_CREATE_BODY_KEYS, AGENT_PRIMARY_SESSION_FORK_BODY_KEYS } from "./agent-route-auth.js";
@@ -239,6 +241,48 @@ export async function registerAgentPeripheralRoutes(app: FastifyInstance, depend
         runtime: dependencies.runtime
       });
       return reply.code(201).send(result);
+    }
+  );
+
+  app.get(
+    "/api/internal/agent/sessions/:sessionId/last-assistant-text",
+    {
+      schema: {
+        tags: ["agent"],
+        params: Type.Object({ sessionId: Type.String({ minLength: 1 }) }),
+        querystring: Type.Object({ workspaceId: Type.String({ minLength: 1 }) }, { additionalProperties: false }),
+        response: { 200: AgentSessionLastAssistantTextResponseSchema, 401: ErrorResponseSchema, 404: ErrorResponseSchema }
+      }
+    },
+    async (req) => {
+      assertInternalToken(req, dependencies.internalToken);
+      assertPluginCaller(req, "feishu");
+      const params = req.params as { sessionId: string };
+      const query = req.query as { workspaceId: string };
+      return dependencies.service.getLastAssistantText({ workspaceId: query.workspaceId, sessionId: params.sessionId });
+    }
+  );
+
+  app.get(
+    "/api/internal/agent/sessions/:sessionId/latest-todolist",
+    {
+      schema: {
+        tags: ["agent"],
+        params: Type.Object({ sessionId: Type.String({ minLength: 1 }) }),
+        querystring: Type.Object({ workspaceId: Type.String({ minLength: 1 }) }, { additionalProperties: false }),
+        response: { 200: AgentSessionLatestTodolistResponseSchema, 401: ErrorResponseSchema, 404: ErrorResponseSchema }
+      }
+    },
+    async (req) => {
+      assertInternalToken(req, dependencies.internalToken);
+      assertPluginCaller(req, "feishu");
+      const params = req.params as { sessionId: string };
+      const query = req.query as { workspaceId: string };
+      const runState = dependencies.service.getMessageRunState({ workspaceId: query.workspaceId, sessionId: params.sessionId });
+      return {
+        isRunning: runState.status === "running",
+        execution: dependencies.service.getLatestTodolistToolExecution({ workspaceId: query.workspaceId, sessionId: params.sessionId })
+      };
     }
   );
 

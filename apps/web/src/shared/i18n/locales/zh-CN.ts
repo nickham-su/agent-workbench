@@ -54,6 +54,7 @@ export default {
     tabs: {
       workspaces: "工作区",
       repos: "仓库",
+      dashboard: "数据看板",
       settings: "设置"
     }
   },
@@ -227,6 +228,7 @@ export default {
       files: "文件",
       search: "搜索",
       agent: "AI Agent",
+      scheduledTasks: "定时任务",
       editor: "编辑器"
     },
     dock: {
@@ -280,14 +282,57 @@ export default {
   },
   agent: {
     empty: "暂无会话,请新建一个 AI client",
+    runTerminal: {
+      run_completed: "运行已完成",
+      subtask_completed: "子任务已完成",
+      compaction_completed: "上下文压缩已完成",
+      compaction_not_needed: "当前上下文无需压缩",
+      compaction_no_progress: "压缩不会产生有效收益",
+      compaction_oversized_tail: "最新上下文过大，无法安全保留尾部",
+      compaction_media_requires_resend: "压缩需要重新发送媒体内容",
+      compaction_pending_tools: "请等待正在执行的工具完成后再压缩",
+      compaction_failed: "上下文压缩失败",
+      compaction_provider_unavailable: "摘要模型暂时不可用，请稍后重试",
+      compaction_conflict: "上下文在压缩期间发生变化，请在刷新后重试",
+      context_limit_recovery_exhausted: "上下文仍超出模型限制，请缩短内容或新建会话后重新发送关键内容",
+      context_limit_media_requires_resend: "上下文包含无法恢复的图片或媒体，请重新发送这些内容",
+      run_status_unavailable: "运行状态已不可恢复。",
+      run_cancelled: "运行已取消",
+      run_enqueue_failed: "运行未能启动",
+      run_failed: "运行失败",
+      run_provider_bad_request: "模型服务拒绝了请求，请检查模型 ID 和参数配置（HTTP 400）",
+      run_provider_unauthorized: "模型服务鉴权失败，请检查 Provider 凭证配置（HTTP 401）",
+      run_provider_not_found: "模型或服务地址不存在，请检查模型 ID 和端点配置（HTTP 404）",
+      run_provider_unsupported: "当前 SDK 不支持该模型请求参数，请检查模型与 Provider 配置",
+      run_startup_recovery_failed: "运行恢复失败",
+      subtask_failed: "子任务失败",
+    },
     actions: {
       newClient: "新建 client",
       creating: "创建中...",
       refresh: "刷新",
       minimize: "最小化",
-      closeClient: "关闭会话"
+      closeClient: "关闭会话",
+      setSessionTitle: "设置会话标题"
+    },
+    titleSetting: {
+      modalTitle: "设置会话标题",
+      inputLabel: "会话标题",
+      inputPlaceholder: "输入新的会话标题",
+      permanentNotice: "保存后将永久使用此标题，不再自动更新。",
+      save: "保存",
+      cancel: "取消",
+      rawTooLong: "输入过长，请缩短后再试。",
+      empty: "标题不能为空。",
+      tooLong: "标题长度不能超过 50 个字符。",
+      invalidCharacters: "标题包含不允许的控制字符。",
+      saveFailed: "保存标题失败"
     },
     client: {
+      tabStateLoading: "正在加载会话…",
+      tabStateLoadFailed: "加载会话失败，请重试。",
+      retryTabStateLoad: "重试",
+      tabStateUpdateFailed: "更新会话可见性失败",
       tabLabel: "会话 {index}",
       newTitle: "new session",
       cancel: "取消运行",
@@ -297,12 +342,43 @@ export default {
       welcome: "你好, 我可以协助你完成任务。",
       reachedTop: "已到最早",
       contextBoundary: "上下文边界",
-      inputPlaceholderIdle: "输入消息,Enter 发送,Shift+Enter 换行,Tab 切换 Agent",
+      inputPlaceholderIdle: "输入消息或粘贴图片，Enter 发送，Shift+Enter 换行，Tab 切换 Agent",
       inputPlaceholderRunning: "运行中,Esc 取消当前运行",
       inputPlaceholderNoAgent: "当前没有可用于用户会话的 Agent,请前往设置页调整范围或新增 Agent",
+      imagePreviewTitle: "图片预览",
+      imagePreviewPrevious: "上一张图片",
+      imagePreviewNext: "下一张图片",
+      imageCount: "{count} 张图片",
+      imageRemoveAll: "移除全部",
+      imagePreviewNotice: "图片仅在发送该消息时提供给模型，后续对话不会自动重新附带。如需模型再次查看，请重新发送图片。",
+      imagePreviewLoadFailed: "图片加载失败，当前不可用。",
+      imagePreviewUnavailable: "无法打开图片预览，请刷新页面后重试。",
+      imageSlashCommandBlocked: "带图片时不能使用 /compact，请先移除图片。",
+      imagePasteCount: "最多可添加 4 张图片。",
+      imagePasteType: "只支持 PNG、JPEG 或 WebP 图片。",
+      imagePasteEmpty: "不能添加空图片。",
+      imagePasteSize: "单张图片不能超过 10 MiB。",
+      imagePasteProcessing: "正在优化粘贴的图片…",
+      sendingMessage: "正在发送消息…",
+      sendingOneImage: "正在发送 1 张图片…",
+      sendingImages: "正在发送 {count} 张图片…",
+      sendingMessageAndOneImage: "正在发送消息和 1 张图片…",
+      sendingMessageAndImages: "正在发送消息和 {count} 张图片…",
+      imagePasteTotal: "图片总大小不能超过 20 MiB。",
       noAgentHint: "当前没有可用于用户会话的 Agent,请前往设置页调整范围或新增 Agent",
       goCreateAgent: "前往创建",
       chooseSession: "选择会话",
+      sessionUnavailable: '会话已不可用',
+      workspaceUnavailable: '工作区已不可用',
+      sessionLoadFailed: '会话加载失败，请重试',
+      sessionRestoreUnconfirmed: "会话打开可能已提交，恢复隐藏尚未确认。请稍后核实或手动关闭。",
+      retryTitleSync: '重试同步会话标题',
+      retrySessionSelection: '重试选择',
+      reloadTabs: "重新核实会话标签",
+      refreshSessionList: "刷新列表",
+      sessionListExpired: "列表已失效，请重新加载。",
+      sessionListFailed: "加载会话列表失败，请重试。",
+      loadMoreSessions: "加载更多",
       chooseSessionTitle: "选择要继续的会话",
       noSessionToChoose: "没有可选择的历史会话",
       sessionEmptyPreview: "(该会话暂无用户消息)",
@@ -312,6 +388,8 @@ export default {
       backToParent: "返回",
       copySessionId: "复制 Session ID",
       sessionIdCopied: "已复制 Session ID",
+      copyMessageId: "复制消息 ID",
+      messageIdCopied: "已复制消息 ID",
       copyCode: "复制代码",
       codeCopied: "代码已复制",
       parentSessionMissing: "未找到父会话",
@@ -324,6 +402,10 @@ export default {
       subtaskModeExisting: "续用会话",
       subtaskAgent: "Agent",
       subtaskSessionId: "Session ID",
+      subtaskSourceSessionId: "来源 Session ID",
+      copySourceSessionId: "复制来源 Session ID",
+      subtaskStartedAt: "开始时间",
+      subtaskDuration: "持续时间",
       todoListCardTitle: "任务清单",
       todoListSummary: "总计 {total}, 进行中 {inProgress}, 待办 {pending}, 已完成 {completed}, 已取消 {cancelled}",
       todoListGoal: "目标",
@@ -338,14 +420,16 @@ export default {
       applyPatchOmittedFiles: "还有 {count} 个文件未展示",
       fork: "从此处分叉",
       forked: "已从该消息创建新 client",
+      compactionSummary: "上下文已压缩",
       revert: "回退到此处",
-      revertTargetMissing: "未找到可回退的上一条事件",
       revertConfirmTitle: "确认回退到这条消息？",
       revertConfirmContent: "将回退到该消息之前,并把该条消息填入输入框。回退后,后续对话分支将暂时不可见。",
-      resetDraftWhileRunning: "当前会话仍在运行，请先等待结束或取消后再回退。",
-      revertConfirmTitleAssistant: "确认回退到这条 AI 消息？",
-      revertConfirmContentAssistant: "将回退到该条 AI 消息并保留该消息。回退后,后续对话分支将暂时不可见。",
       reverted: "已回退到选中消息",
+      reasoning: "推理过程",
+      resultPreviewTruncated: "工具结果预览已截断",
+      showDetails: "显示详情",
+      hideDetails: "收起详情",
+      openSubtask: "打开子任务",
       roles: {
         user: "我",
         assistant: "AI",
@@ -357,44 +441,40 @@ export default {
       slashCommandHintStrictOnly: "精确匹配",
       contextManagerTitle: "上下文管理",
       contextManagerTooltip: "管理上下文",
-      contextManagerHint: "选择要启用的上下文来源。保存后通常在新对话/新 run 中生效。",
+      contextManagerHint: "选择要启用的上下文来源。已保存的选择在新 run 中按当前文件重新判定；已启动的 run 不会自动刷新。",
       contextAgentsGroupTitle: "指令上下文（AGENTS.md）",
       contextAgentsEmpty: "未探测到候选 AGENTS.md",
-      contextAgentsSaved: "已保存 AGENTS.md 配置",
-      contextSkillsGroupTitle: "Skills（skill目录）",
+      contextSkillsGroupTitle: "Skills（逐项启停）",
       contextManagerSaved: "已保存上下文配置",
-      externalSkillRootsTitle: "skill目录",
-      externalSkillRootsHint: "选择要启用的skill目录。保存后在下次发送消息时生效。",
-      externalSkillRootsEmpty: "未探测到候选 skill目录",
-      externalSkillRootsSaved: "已保存 skill目录配置",
       agentEnablementTitle: "Agent 管理",
       agentEnablementHint: "选择当前工作区可用的 Agent。",
       agentEnablementTooltip: "管理 Agent",
-      externalSkillRootsTooltip: "管理当前工作区启用的 skill目录",
       agentEnablementEmpty: "暂无可配置 Agent",
       agentEnablementSaved: "已保存 Agent 启用配置",
       selectAll: "全选",
       selectNone: "全不选",
       agentDisabledInWorkspace: "当前工作区已禁用所选 Agent，请重新选择后再发送",
       agentNoAvailableInWorkspace: "当前工作区未启用任何可用 Agent，请先在配置中启用",
-      externalSkillRootsSourceWorkspace: "Workspace",
-      externalSkillRootsSourceRepo: "Repo",
-      externalSkillRootsMeta: "{count} 个skills",
       slashCommandHintNoMatch: "未找到匹配的指令: /{query}",
       modelEditTitle: "修改 Agent 模型",
-      modelEditHint: "将修改当前选中 Agent 的默认模型（全局生效，跨 workspace）。",
-      modelEditSaved: "已保存 Agent 默认模型",
+      modelEditHint: "仅修改当前会话中当前 Agent 的主模型，不影响全局默认和其他会话。",
+      modelEditSaved: "已更新当前会话模型",
+      modelEditReset: "重置为默认模型",
+      modelEditResetSaved: "已重置为当前全局默认模型",
       modelEditUnavailable: "模型信息不可用",
-      modelEditTooltip: "修改模型",
-      modelEditAgentMissing: "当前 Agent 不存在或已被删除",
+      modelEditTooltip: "当前会话模型",
+      modelEditSourceOverride: "本会话覆盖",
+      modelEditSourceDefault: "全局默认",
+      modelEditSourceUnavailable: "模型来源不可用",
+      modelEditOverrideUnavailable: "模型不可用 · 本会话覆盖",
+      modelEditDefaultUnavailable: "默认模型不可用 · 全局默认",
+      modelEditDefault: "全局默认：{model}",
+      modelEditEffective: "当前有效模型：{model}",
       promptCommandsLoadFailedHint: "提示词指令加载失败，将仅显示内置指令",
       inputCandidateNoMatch: "未找到匹配项: {query}",
       slashCommands: {
         compact: {
           summary: "手动压缩当前会话上下文"
-        },
-        clear: {
-          summary: "开始新任务并归档当前可见上下文"
         }
       }
     }
@@ -526,6 +606,8 @@ export default {
       blockedLine2: "可点击“接管连接”尝试强制接管（会踢掉旧连接）。",
       unauthorizedLine0: "[未授权] 当前会话已失效，请重新登录。",
       unauthorizedLine1: "详情：code={code} reason={reason} wasClean={wasClean}",
+      unavailableLine0: "[终端不可用] 该终端会话已结束或不存在，正在刷新终端列表。",
+      unavailableLine1: "详情：code={code} reason={reason} wasClean={wasClean}",
       disconnectedLine0: "[连接已断开] 连接已断开，将自动尝试重连。",
       disconnectedLine1: "详情：code={code} reason={reason} wasClean={wasClean}",
       disconnectedLine2: "若提示被占用，可点击“接管连接”。",
@@ -827,7 +909,7 @@ export default {
       saved: "已保存"
     },
     agentProviders: {
-      description: "管理 AI Provider 与模型。可新增/编辑 Provider，并在 Provider 下管理模型与默认模型。",
+      description: "管理 AI Provider 与模型。Moonshot/DeepSeek 可查询 API Key 可见的模型；查询不到时可直接输入完整的 Provider 模型ID。",
       saving: "正在保存...",
       empty: "暂无 Provider，请先新增",
       selectProviderHint: "请从左侧选择一个 Provider 查看模型",
@@ -865,7 +947,6 @@ export default {
         npmLabel: "Provider 类型",
         baseUrlLabel: "Base URL",
         apiKeyLabel: "API Key",
-        apiModeLabel: "API 模式",
         apiKeyPlaceholder: "输入 API Key（可留空）",
         apiKeyEditPlaceholder: "输入新 API Key（留空保持不变）",
         apiKeyCreateHelp: "创建时可先留空，后续再补充。",
@@ -890,10 +971,11 @@ export default {
         contextWindowTokensLabel: "上下文窗口 Token 上限",
         contextWindowTokensHelp: "该模型的上下文窗口上限,用于自动压缩阈值计算基数。必须为正整数。",
         aiSdkLabel: "AI SDK 通用参数 JSON",
-        aiSdkHelp: "写入 generateText 顶层参数, 例如 maxOutputTokens, temperature, topP。会屏蔽 model/system/prompt 等关键键。",
+        aiSdkHelp: "仅支持 maxOutputTokens、temperature、topP、topK、presencePenalty、frequencyPenalty、stopSequences、seed、headers、allowSystemInMessages。headers 只允许标准名称的普通自定义请求头，不允许 Authorization、API Key、Cookie、Host、Content-Length、Connection 等认证、凭证或传输控制头。历史配置中的此类值会被清除并显示固定安全提示；请删除对应 header 后重新保存。model/system/messages/tools/providerOptions 等关键键不可配置，未知字段保存时会明确拒绝。",
         aiSdkDocsLink: "AI SDK 文档",
         providerOptionsLabel: "Provider 参数 JSON (自动包装为 {key})",
         providerOptionsHelp: "仅填写当前 Provider 的子对象, 系统会自动包装到 providerOptions.{key}。",
+        reasoningOptionsHelp: "思考与历史推理由系统管理；此处的 thinking、reasoningHistory、reasoningEffort 设置不会生效。",
         providerDocsLink: "Provider 文档"
       },
       deleteProvider: {
@@ -1003,7 +1085,7 @@ export default {
         todolist: "Todo List",
         subtask: "Subtask",
         archiveSearch: "Archive Search",
-        visualAnalyze: "Visual Analyze",
+        viewImage: "View Image",
         archiveRead: "Archive Read",
         archiveTail: "Archive Tail"
       },
@@ -1069,8 +1151,8 @@ export default {
           help: "仅限制真实 subtask 工具调用链的最大嵌套层级，不限制 primary 会话上下文被 fork 的次数。每个 primary 会话的普通运行都从第 0 层开始；设为 1 时，仅允许 primary 运行创建第一层 subtask；范围 1-5。不限制同层数量、并发数或 token 消耗。"
         },
         modelTotalTimeoutMs: {
-          label: "单次请求超时（秒）",
-          help: "单次模型请求的总超时时间。达到后将中止该次请求并标记为失败。仅支持整数秒,0 表示关闭。"
+          label: "模型请求／压缩工作超时（秒）",
+          help: "主模型每次请求的总超时；手动或自动压缩时作为整次压缩工作的截止时间（含读取、摘要重试与提交）。到期停止摘要重试，自动压缩使当前对话运行失败；已发出但结果不明的提交不会被当作确定失败。仅支持整数秒，0 表示关闭。"
         },
         modelIdleTimeoutMs: {
           label: "请求空闲超时（秒）",
@@ -1078,17 +1160,16 @@ export default {
         },
         modelRequestMaxRetries: {
           label: "模型重试最大次数",
-          help: "仅在首包前失败时自动重试。0 表示不重试。"
+          help: "主模型请求和手动、自动压缩摘要调用失败后额外重试的最大次数，所有摘要调用错误均按此次数重试。0 表示不重试；取消和压缩工作截止时间不会等待重试。"
         },
-        visionModel: {
-          label: "视觉模型",
-          placeholder: "请选择视觉模型（可选）",
-          help: "全局默认视觉模型，供 visual_analyze 工具使用；未配置时回退到当前 agent 主模型。"
+        modelRequestRetryBackoffMaxMs: {
+          label: "模型重试退避上限（秒）",
+          help: "主模型请求及手动、自动压缩摘要重试时，指数退避等待时间的最大值。基础等待时间为 2 秒，范围 2-3600 秒；压缩摘要没有独立的总请求上限，重试次数和可关闭的总超时共同决定等待时长。"
         },
         compactionModel: {
           label: "压缩默认模型",
           placeholder: "请选择压缩默认模型（可选）",
-          help: "用于生成上下文压缩摘要；留空时使用当前 Agent 模型。若候选模型容量不足或不适用，将回退到当前 Agent 主模型。"
+          help: "用于生成手动和自动上下文压缩摘要；留空时使用当前 Agent 模型。设置后始终使用选定模型，不因请求失败切换模型或拆分摘要输入。"
         },
         sessionTerminalSoundEnabled: {
           label: "运行结束提示音",
@@ -1096,7 +1177,6 @@ export default {
         }
       },
       errors: {
-        visionModelInvalid: "视觉模型配置无效，请重新选择。",
         compactionModelInvalid: "压缩默认模型配置无效，请重新选择。"
       }
     },
@@ -1248,6 +1328,31 @@ export default {
       },
       resetSuccess: "已重置"
     }
+  },
+  dashboard: {
+    title: "数据看板", subtitle: "回看 Agent、模型、工具与 Worker 使用情况 · 所有统计仅保存在本机",
+    overview: "概览", agent: "Agent", model: "模型", worker: "Worker", refresh: "刷新",
+    range: "时间范围", custom: "自定义范围", preset_24h: "近 24 小时", preset_7d: "近 7 天", preset_30d: "近 30 天", preset_90d: "近 90 天", apply: "应用", from: "开始", to: "结束",
+    monitoringVolume: "监控数据量", agentDuration: "Agent 总时长", modelRequests: "模型请求", modelSuccessRate: "模型成功率", cacheHitRate: "缓存命中率",
+    unavailable: "不可用", partial: "数据不完整", available: "完整", snapshotAt: "快照时间", asOf: "统计截至",
+    emptyValue: "无可展示的统计值",
+    runScope: "Run 范围", all: "全部", main: "主任务", subtask: "子任务", trend: "趋势", distributionTitle: "分布", details: "明细", noData: "暂无可安全展示的数据",
+    runTerminalTitle: "Run 终态分布", terminalRunTotal: "已终结 Run", distributionTotal: "已观测总数", knownObserved: "已知观测", knownShare: "条形仅表示已知类别之间的相对比例",
+    inputOutputTokens: "输入 / 输出 Token",
+    requests: "请求数", successRate: "成功率", timeoutRate: "超时率", inputTokens: "输入 Token", outputTokens: "输出 Token", totalTokens: "总 Token",
+    liveSnapshot: "Worker 实时状态", running: "运行中", queued: "排队中", concurrency: "配置槽位", workerRestartCount: "重启次数", localFallbackNote: "本地降级运行（不占 Worker 槽位）", utilization: "利用率", localFallback: "本地降级", restarts: "重启", toolCallCount: "工具调用", unexpectedExits: "异常退出", restartAttempts: "重启尝试", restartSucceeded: "重启成功", restartFailed: "重启失败",
+    tokens: "Token", count: "计数", duration: "时长", ratio: "比率", timedOut: "超时", other: "其他", monitoringRun: "Run", monitoringSession: "会话", monitoringMessage: "消息", monitoringTool: "工具", monitoringExecution: "执行", monitoringModel: "模型", monitoringWorker: "Worker", chartLegend: "图例", chartNoSeriesSelected: "未选择显示的系列", chartSmoothLine: "平滑折线图", chartStackedBars: "堆叠柱状图", chartAllStatusTotal: "总请求数（全部状态合计）", chartShare: "占比", chartKnownShare: "已知类别占比", chartBucketDetails: "按时间桶查看明细", chartBucket: "时间桶", chartTotal: "总计", chartBuckets: "个时间桶",
+    agentRunMetrics: "Run", agentActivityMetrics: "消息与工具", agentCompactionMetrics: "压缩", modelRequestMetrics: "请求与时延", modelTokenMetrics: "Token", modelReportingMetrics: "报告覆盖",
+    lastReadyAt: "最近 Ready", trendSuffix: "趋势", comparisonContext: "比较", previousSameDuration: "前一等长时间段", domainAgentDuration: "Agent 时长", domainStatusSummary: "域状态摘要",
+    sections: "数据看板分区", rangeEnd: "范围结束", monitoringComposition: "最新监控数据构成", domain: "数据域", statusLabel: "状态", lastSucceededAt: "最后成功", runType: "Run 类型", messageType: "消息类型", toolStatus: "工具状态", toolDetails: "工具明细", byModel: "按模型", tokenCoverage: "Token 覆盖", restartRecords: "重启记录", occurredAt: "发生时间", event: "事件", restartStatus: "重启状态", toolName: "工具", calls: "调用", completed: "完成", failed: "失败", provider: "提供商", modelName: "模型", unknown: "未知", requestCount: "请求总数", primaryRunCount: "主任务数", subtaskRunCount: "子任务数", userMessageCount: "用户消息", assistantMessageCount: "助手消息", manualCompactionCount: "手动压缩", autoCompactionCount: "自动压缩", completedAverageDuration: "完成平均时长", cacheReadTokens: "缓存读取 Token", inputReportedCount: "输入已报告", outputReportedCount: "输出已报告", totalReportedCount: "总计已报告", totalDerivedCount: "总计推导", cacheComparableCount: "可比较缓存", timeoutKindBreakdown: "超时类型",
+    totalDuration: "总时长", runCount: "Run 数", toolSuccessRate: "工具成功率", inputTokenCoverage: "输入覆盖率", outputTokenCoverage: "输出覆盖率", totalTokenCoverage: "总计覆盖率", inputCacheCoverage: "缓存覆盖率",
+    distribution: { primary: "主任务", subtask: "子任务", other: "其他", user: "用户", assistant: "助手", runtime: "运行时", system: "系统", compaction: "压缩", completed: "完成", failed: "失败", cancelled: "取消", unknown: "未知" },
+    healthEvidenceTitle: "已知异常迹象", healthEvidenceDisabled: "该数据域当前已禁用", healthEvidenceGaps: "存在 {count} 个开放覆盖缺口", healthEvidenceMissingGeneration: "有 {count} 个预期槽位缺少活跃 Generation", healthEvidenceStaleCheckpoint: "有 {count} 个槽位的检查点已过期", healthEvidenceMissingCheckpoint: "有 {count} 个活跃 Generation 的检查点缺失", healthEvidenceUnknown: "状态异常，暂无更具体的诊断信息",
+    runStatus: { completed: "完成", failed: "失败", cancelled: "取消", interrupted: "中断", unknown: "未知" }, workerEvent: { unexpected_exit: "异常退出", restart_attempted: "尝试重启", restart_succeeded: "重启成功", restart_failed: "重启失败" }, restartStatusValue: { recovered: "已恢复", not_recovered: "未恢复", pending: "等待中", not_applicable: "不适用" },
+    status: { available: "完整", partial: "不完整", healthy: "健康", degraded: "降级", stale: "过期", unavailable: "不可用", disabled: "已禁用" },
+    error: {CUSTOM_RANGE_REQUIRED: "请选择完整的自定义时间范围。", CUSTOM_RANGE_INVALID: "自定义时间无效。", CUSTOM_RANGE_DST_AMBIGUOUS: "该时间在夏令时切换中出现两次。", CUSTOM_RANGE_DST_NONEXISTENT: "该时间在夏令时切换中不存在。", CUSTOM_RANGE_ORDER: "开始时间必须早于结束时间。", CUSTOM_RANGE_TOO_LARGE: "自定义范围不能超过 366 天。",  ANALYTICS_UNAVAILABLE: "Analytics 暂时不可用。", ANALYTICS_RANGE_TOO_LARGE: "所选时间范围过大。", ANALYTICS_RANGE_INVALID: "所选时间范围无效。", ANALYTICS_TIMEZONE_INVALID: "所选时区无效。", ANALYTICS_RANGE_NOT_READY: "该时间范围尚未就绪。", NETWORK_ERROR: "无法加载看板数据。" },
+
+    reason: { coverage_gap: "覆盖缺口", range_not_reconciled: "范围尚未对账", collector_degraded: "采集器降级", signal_loss: "信号丢失", dirty_hour: "小时数据刷新中", open_fact: "事实尚未关闭", configuration_changed: "配置已变化", domain_disabled: "域已禁用", domain_unavailable: "域不可用", no_safe_data: "没有安全数据", invalid_metric_state: "无效指标状态" }
   },
   editor: {
     placeholder: {

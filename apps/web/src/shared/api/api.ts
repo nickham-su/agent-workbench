@@ -35,13 +35,9 @@ import type {
   CreateWorkspaceRequest,
   AttachWorkspaceRepoRequest,
   ChangesResponse,
-  UpdateWorkspaceAgentsInstructionsSettingsRequest,
-  UpdateWorkspaceExternalSkillRootsSettingsRequest,
-  WorkspaceAgentsInstructionsDetectResponse,
-  WorkspaceAgentsInstructionsSettingsResponse,
-  WorkspaceExternalSkillRootsDetectResponse,
-  WorkspaceExternalSkillRootsSettingsResponse,
-  WorkspaceExternalSkillRootInput,
+  UpdateWorkspaceContextFilesSettingsRequest,
+  WorkspaceContextFilesDetectResponse,
+  WorkspaceContextFilesSettingsResponse,
   WorkspaceAgentEnablementDetectResponse,
   WorkspaceTopLevelSkillsResponse,
   WorkspaceAgentEnablementSettingsResponse,
@@ -85,22 +81,35 @@ import type {
   UpdateRepoRequest,
   UpdateWorkspaceRequest,
   WorkspaceDetail,
+  WorkspaceAgentSessionTabVisibilityMutation,
+  UpdateWorkspaceAgentSessionTabVisibilityRequest,
   SearchSettings,
   FileSearchRequest,
   FileSearchResponse,
+} from "@agent-workbench/shared";
+import type {
+  AgentCompactSessionRequest,
+  AgentCompactSessionResponse,
+  AgentMessage,
+  AgentMessageSessionRunState,
+  AgentRunStatusResponse,
+  AgentTimelineDeltaResponse,
+  AgentToolExecutionDetail,
+  AgentMessageControlResult,
+} from "@agent-workbench/shared";
+import type {
   AgentCreateSessionRequest,
   AgentForkSessionRequest,
   AgentRevertSessionRequest,
-  AgentClearSessionRequest,
-  AgentCompactSessionRequest,
-  AgentCompactSessionResponse,
+  AgentUpdateSessionTitleRequest,
   AgentSendMessageRequest,
   AgentSendMessageResponse,
-  AgentContextItemsResponse,
-  AgentContextItemRecord,
   AgentSessionRecord,
-  AgentSessionRunState,
-  AgentControlResult,
+  AgentTabsSnapshotResponse,
+  AgentContinuablePageResponse,
+  AgentSessionAgentModelState,
+  AgentSessionModelOverridesResponse,
+  UpdateAgentSessionModelOverrideRequest,
   AgentCancelSessionRequest,
   AgentProvidersSettingsView,
   AgentGlobalPromptSettings,
@@ -121,11 +130,13 @@ import type {
   AgentSettings,
   AgentSettingsView,
   UpdateAgentSettingsRequest
-} from "@agent-workbench/shared";
+} from "@agent-workbench/shared/internal-contracts/agent-api-session";
 import { emitUnauthorized } from "@/features/auth/unauthorized";
+import { serializeAgentTimelineQuery, type AgentTimelineQuery } from "./agentTimelineQuery.js";
 import { resetAuthStatus, setAuthed } from "@/features/auth/session";
 
 const client = axios.create({ baseURL: "/api" });
+export { client as apiClient };
 
 let lastUnauthorizedAt = 0;
 client.interceptors.response.use(
@@ -432,69 +443,18 @@ export async function detachWorkspaceRepo(workspaceId: string, repoId: string) {
   }
 }
 
-export async function detectWorkspaceAgentsInstructions(workspaceId: string) {
+export async function detectWorkspaceContextFiles(workspaceId: string) {
   try {
-    const res = await client.get<WorkspaceAgentsInstructionsDetectResponse>(`/workspaces/${workspaceId}/agents-instructions/detect`);
+    const res = await client.get<WorkspaceContextFilesDetectResponse>(`/workspaces/${workspaceId}/context-files/detect`);
     return res.data;
-  } catch (err) {
-    throw toApiError(err);
-  }
+  } catch (err) { throw toApiError(err); }
 }
 
-export async function getWorkspaceAgentsInstructionsSettings(workspaceId: string) {
+export async function updateWorkspaceContextFilesSettings(workspaceId: string, body: UpdateWorkspaceContextFilesSettingsRequest) {
   try {
-    const res = await client.get<WorkspaceAgentsInstructionsSettingsResponse>(`/workspaces/${workspaceId}/agents-instructions/settings`);
+    const res = await client.put<WorkspaceContextFilesSettingsResponse>(`/workspaces/${workspaceId}/context-files/settings`, body);
     return res.data;
-  } catch (err) {
-    throw toApiError(err);
-  }
-}
-
-export async function updateWorkspaceAgentsInstructionsSettings(
-  workspaceId: string,
-  body: UpdateWorkspaceAgentsInstructionsSettingsRequest
-) {
-  try {
-    const enabledSources = (body.enabledSources || []).map((it) => (it.sourceType === "workspace" ? { sourceType: "workspace" as const } : { sourceType: "repo" as const, repoId: it.repoId }));
-    const res = await client.put<WorkspaceAgentsInstructionsSettingsResponse>(`/workspaces/${workspaceId}/agents-instructions/settings`, {
-      enabledSources
-    });
-    return res.data;
-  } catch (err) {
-    throw toApiError(err);
-  }
-}
-
-export async function detectWorkspaceExternalSkillRoots(workspaceId: string) {
-  try {
-    const res = await client.get<WorkspaceExternalSkillRootsDetectResponse>(`/workspaces/${workspaceId}/external-skill-roots/detect`);
-    return res.data;
-  } catch (err) {
-    throw toApiError(err);
-  }
-}
-
-export async function getWorkspaceExternalSkillRootsSettings(workspaceId: string) {
-  try {
-    const res = await client.get<WorkspaceExternalSkillRootsSettingsResponse>(`/workspaces/${workspaceId}/external-skill-roots/settings`);
-    return res.data;
-  } catch (err) {
-    throw toApiError(err);
-  }
-}
-
-export async function updateWorkspaceExternalSkillRootsSettings(
-  workspaceId: string,
-  body: UpdateWorkspaceExternalSkillRootsSettingsRequest
-) {
-  try {
-    const res = await client.put<WorkspaceExternalSkillRootsSettingsResponse>(`/workspaces/${workspaceId}/external-skill-roots/settings`, {
-      enabledRoots: (body.enabledRoots || []).map((it: WorkspaceExternalSkillRootInput) => ({ sourceType: it.sourceType, repoId: it.repoId, rootDir: it.rootDir }))
-    });
-    return res.data;
-  } catch (err) {
-    throw toApiError(err);
-  }
+  } catch (err) { throw toApiError(err); }
 }
 
 export async function listWorkspaceTopLevelSkills(workspaceId: string) {
@@ -542,7 +502,7 @@ export async function updateWorkspaceAgentEnablementSettings(
   }
 }
 
-export async function listWorkspaceAvailableAgents(workspaceId: string, surface: "user" | "subtask" = "user") {
+export async function listWorkspaceAvailableAgents(workspaceId: string, surface: "user" | "subtask" | "all" = "user") {
   try {
     const res = await client.get<WorkspaceAvailableAgentsResponse>(`/workspaces/${workspaceId}/agents/available`, { params: { surface } });
     return res.data;
@@ -1096,9 +1056,90 @@ export async function updateAgentSettings(body: UpdateAgentSettingsRequest) {
   }
 }
 
-export async function listAgentSessions(workspaceId: string) {
+/** Metadata and visibility requests are bounded without affecting long-running APIs. */
+function toAgentReadError(err: unknown, code = "AGENT_METADATA_GET_TIMEOUT") {
+  if (axios.isAxiosError(err) && (err.code === "ECONNABORTED" || err.code === "ETIMEDOUT")) {
+    return new ApiError({ message: "Agent request timed out", code });
+  }
+  return toApiError(err);
+}
+
+export async function getAgentSessionRecord(workspaceId: string, sessionId: string, signal?: AbortSignal): Promise<AgentSessionRecord> {
   try {
-    const res = await client.get<AgentSessionRecord[]>("/agent/sessions", {
+    const res = await client.get<AgentSessionRecord>(`/agent/sessions/${encodeURIComponent(sessionId)}`, {
+      params: { workspaceId }, timeout: 15000, signal
+    });
+    return res.data;
+  } catch (err) {
+    throw toAgentReadError(err);
+  }
+}
+
+export async function getAgentTabsSnapshot(workspaceId: string, signal?: AbortSignal): Promise<AgentTabsSnapshotResponse> {
+  try {
+    const res = await client.get<AgentTabsSnapshotResponse>("/agent/sessions", {
+      params: { workspaceId, scope: "tabs" }, timeout: 15000, signal
+    });
+    return res.data;
+  } catch (err) { throw toAgentReadError(err); }
+}
+
+export async function getAgentContinuableSessions(workspaceId: string, options: { cursor?: string; limit?: number; signal?: AbortSignal } = {}): Promise<AgentContinuablePageResponse> {
+  try {
+    const res = await client.get<AgentContinuablePageResponse>("/agent/sessions", {
+      params: { workspaceId, scope: "continuable", limit: options.limit ?? 50, ...(options.cursor ? { cursor: options.cursor } : {}) },
+      timeout: 15000, signal: options.signal
+    });
+    return res.data;
+  } catch (err) { throw toAgentReadError(err); }
+}
+
+export async function setWorkspaceAgentSessionTabVisibility(
+  workspaceId: string,
+  sessionId: string,
+  body: UpdateWorkspaceAgentSessionTabVisibilityRequest
+): Promise<WorkspaceAgentSessionTabVisibilityMutation> {
+  try {
+    const res = await client.put<WorkspaceAgentSessionTabVisibilityMutation>(
+      `/workspaces/${encodeURIComponent(workspaceId)}/agent-tab-state/${encodeURIComponent(sessionId)}`,
+      body, { timeout: 15000 }
+    );
+    return res.data;
+  } catch (err) {
+    throw toAgentReadError(err, "AGENT_TAB_VISIBILITY_TIMEOUT");
+  }
+}
+
+/** Returns the persisted effective primary-model state for every editable Agent in one Session. */
+export async function listAgentSessionModelOverrides(sessionId: string, workspaceId: string) {
+  try {
+    const res = await client.get<AgentSessionModelOverridesResponse>(`/agent/sessions/${sessionId}/model-overrides`, {
+      params: { workspaceId }
+    });
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+/** Sets one Agent's primary-model override for the current Session only. */
+export async function updateAgentSessionModelOverride(
+  sessionId: string,
+  agentId: string,
+  body: UpdateAgentSessionModelOverrideRequest
+) {
+  try {
+    const res = await client.put<AgentSessionAgentModelState>(`/agent/sessions/${sessionId}/agents/${agentId}/model-override`, body);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+/** Clears one Agent's current-Session override and returns the resulting default-layer state. */
+export async function resetAgentSessionModelOverride(sessionId: string, agentId: string, workspaceId: string) {
+  try {
+    const res = await client.delete<AgentSessionAgentModelState>(`/agent/sessions/${sessionId}/agents/${agentId}/model-override`, {
       params: { workspaceId }
     });
     return res.data;
@@ -1116,27 +1157,56 @@ export async function createAgentSession(body: AgentCreateSessionRequest) {
   }
 }
 
-export async function getAgentContextItems(
-  sessionId: string,
-  query?:
-    | number
-    | {
-        afterId?: number;
-        tailLimit?: number;
-        beforeId?: number;
-        limit?: number;
-        expectedHeadItemId?: number;
-      }
-) {
+/** 手动设置 Session 标题；保存成功后该 Session 永久停止自动标题更新。 */
+export async function updateAgentSessionTitle(sessionId: string, body: AgentUpdateSessionTitleRequest) {
   try {
-    const params =
-      typeof query === "number"
-        ? { afterId: query }
-        : query && typeof query === "object"
-          ? query
-          : undefined;
-    const res = await client.get<AgentContextItemsResponse>(`/agent/sessions/${sessionId}/context-items`, {
-      params
+    const res = await client.put<AgentSessionRecord>(`/agent/sessions/${sessionId}/title`, body);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function getAgentTimeline(
+  sessionId: string,
+  query: AgentTimelineQuery,
+  options?: { signal?: AbortSignal },
+): Promise<AgentTimelineDeltaResponse> {
+  try {
+    const res = await client.get<AgentTimelineDeltaResponse>(
+      `/agent/sessions/${encodeURIComponent(sessionId)}/timeline`,
+      {
+        params: query,
+        paramsSerializer: { serialize: serializeAgentTimelineQuery },
+        ...(options?.signal ? { signal: options.signal } : {}),
+      },
+    );
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function getAgentToolExecutionDetail(
+  sessionId: string,
+  toolExecutionId: string,
+  workspaceId: string,
+): Promise<AgentToolExecutionDetail> {
+  try {
+    const res = await client.get<AgentToolExecutionDetail>(
+      `/agent/sessions/${encodeURIComponent(sessionId)}/tool-executions/${encodeURIComponent(toolExecutionId)}`,
+      { params: { workspaceId } },
+    );
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function getAgentRunState(sessionId: string, workspaceId?: string) {
+  try {
+    const res = await client.get<AgentMessageSessionRunState>(`/agent/sessions/${sessionId}/run-state`, {
+      params: workspaceId ? { workspaceId } : undefined,
     });
     return res.data;
   } catch (err) {
@@ -1144,18 +1214,16 @@ export async function getAgentContextItems(
   }
 }
 
-export async function getAgentContextItem(sessionId: string, itemId: number) {
+export async function getAgentRunStatus(params: {
+  workspaceId: string;
+  sessionId: string;
+  runId: string;
+}) {
   try {
-    const res = await client.get<AgentContextItemRecord>(`/agent/sessions/${sessionId}/context-items/${itemId}`);
-    return res.data;
-  } catch (err) {
-    throw toApiError(err);
-  }
-}
-
-export async function getAgentRunState(sessionId: string) {
-  try {
-    const res = await client.get<AgentSessionRunState>(`/agent/sessions/${sessionId}/run-state`);
+    const res = await client.get<AgentRunStatusResponse>(
+      `/agent/sessions/${encodeURIComponent(params.sessionId)}/runs/${encodeURIComponent(params.runId)}`,
+      { params: { workspaceId: params.workspaceId } },
+    );
     return res.data;
   } catch (err) {
     throw toApiError(err);
@@ -1171,6 +1239,25 @@ export async function sendAgentMessage(sessionId: string, body: AgentSendMessage
   }
 }
 
+export async function sendAgentMessageMultipart(sessionId: string, body: FormData) {
+  try {
+    // Do not set Content-Type: the browser must add the multipart boundary.
+    const res = await client.post<AgentSendMessageResponse>(`/agent/sessions/${sessionId}/messages`, body);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function getAgentAttachmentContent(sessionId: string, attachmentId: string, workspaceId: string) {
+  try {
+    const res = await client.get<Blob>(`/agent/sessions/${sessionId}/attachments/${attachmentId}/content`, { params: { workspaceId }, responseType: "blob" });
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
 export async function compactAgentSession(sessionId: string, body: AgentCompactSessionRequest) {
   try {
     const res = await client.post<AgentCompactSessionResponse>(`/agent/sessions/${sessionId}/compact`, body);
@@ -1180,18 +1267,9 @@ export async function compactAgentSession(sessionId: string, body: AgentCompactS
   }
 }
 
-export async function clearAgentSession(sessionId: string, body: AgentClearSessionRequest) {
-  try {
-    const res = await client.post<AgentControlResult>(`/agent/sessions/${sessionId}/clear`, body);
-    return res.data;
-  } catch (err) {
-    throw toApiError(err);
-  }
-}
-
 export async function cancelAgentSession(sessionId: string, body: AgentCancelSessionRequest) {
   try {
-    const res = await client.post<AgentControlResult>(`/agent/sessions/${sessionId}/cancel`, body);
+    const res = await client.post<AgentMessageControlResult>(`/agent/sessions/${sessionId}/cancel`, body);
     return res.data;
   } catch (err) {
     throw toApiError(err);
@@ -1209,7 +1287,7 @@ export async function forkAgentSession(body: AgentForkSessionRequest) {
 
 export async function revertAgentSession(sessionId: string, body: AgentRevertSessionRequest) {
   try {
-    const res = await client.post<AgentControlResult>(`/agent/sessions/${sessionId}/revert`, body);
+    const res = await client.post<AgentMessageControlResult>(`/agent/sessions/${sessionId}/revert`, body);
     return res.data;
   } catch (err) {
     throw toApiError(err);

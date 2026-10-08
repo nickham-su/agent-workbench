@@ -11,7 +11,8 @@ export const AgentApiSubtaskSessionSchema = Type.Union([
   }),
   Type.Object({
     mode: Type.Literal("fork"),
-    sessionId: Type.Optional(Type.String({ minLength: 1 }))
+    sessionId: Type.Optional(Type.String({ minLength: 1 })),
+    sourceSessionId: Type.Optional(Type.String({ minLength: 1 }))
   })
 ]);
 export type AgentApiSubtaskSession = Static<typeof AgentApiSubtaskSessionSchema>;
@@ -29,7 +30,7 @@ export const AgentApiSubtaskPreforkPlanRequestSchema = Type.Object({
   workspaceId: Type.String({ minLength: 1 }),
   parentSessionId: Type.String({ minLength: 1 }),
   parentRunId: Type.String({ minLength: 1 }),
-  parentToolItemId: Type.Number({ minimum: 1 }),
+  parentToolExecutionId: Type.String({ minLength: 1 }),
   agentId: Type.String({ minLength: 1 }),
   thresholdPct: Type.Optional(Type.Number())
 });
@@ -48,7 +49,7 @@ export const AgentApiSubtaskStartRequestSchema = Type.Object({
   workspaceId: Type.String({ minLength: 1 }),
   parentSessionId: Type.String({ minLength: 1 }),
   parentRunId: Type.String({ minLength: 1 }),
-  parentToolItemId: Type.Number({ minimum: 1 }),
+  parentToolExecutionId: Type.String({ minLength: 1 }),
   description: Type.String({ minLength: 1 }),
   prompt: Type.String({ minLength: 1 }),
   agentId: Type.String({ minLength: 1 }),
@@ -63,7 +64,8 @@ export const AgentApiSubtaskStartResponseSchema = Type.Object({
   runId: Type.String({ minLength: 1 }),
   workspacePath: Type.String({ minLength: 1 }),
   agentName: Type.String({ minLength: 1 }),
-  reused: Type.Boolean()
+  reused: Type.Boolean(),
+  sourceSessionId: Type.Optional(Type.String({ minLength: 1 }))
 });
 export type AgentApiSubtaskStartResponse = Static<typeof AgentApiSubtaskStartResponseSchema>;
 
@@ -117,7 +119,73 @@ export const AgentSubtaskErrorCode = {
   SessionIdNotAllowed: "AGENT_SUBTASK_SESSION_ID_NOT_ALLOWED",
   SessionModeInvalid: "AGENT_SUBTASK_SESSION_MODE_INVALID",
   SessionRunning: "AGENT_SUBTASK_SESSION_RUNNING",
+  SourceSessionNotAllowed: "AGENT_SUBTASK_SOURCE_SESSION_NOT_ALLOWED",
+  SourceSessionInvalid: "AGENT_SUBTASK_SOURCE_SESSION_INVALID",
+  ForkSourceUnavailable: "AGENT_SUBTASK_FORK_SOURCE_UNAVAILABLE",
+  ForkSourceNoStableContext: "AGENT_SUBTASK_FORK_SOURCE_NO_STABLE_CONTEXT",
+  ForkSourceContextInvalid: "AGENT_SUBTASK_FORK_SOURCE_CONTEXT_INVALID",
+  ForkSourceMismatch: "AGENT_SUBTASK_FORK_SOURCE_MISMATCH",
+  ParentNotActive: "AGENT_SUBTASK_PARENT_NOT_ACTIVE",
   PromptRequired: "AGENT_SUBTASK_PROMPT_REQUIRED",
   ForkBoundaryInvalid: "AGENT_SUBTASK_FORK_BOUNDARY_INVALID"
 } as const;
 export type AgentSubtaskErrorCode = (typeof AgentSubtaskErrorCode)[keyof typeof AgentSubtaskErrorCode];
+
+type AgentSubtaskSourceValidationCode =
+  | typeof AgentSubtaskErrorCode.SessionModeInvalid
+  | typeof AgentSubtaskErrorCode.SourceSessionNotAllowed
+  | typeof AgentSubtaskErrorCode.SourceSessionInvalid
+  | typeof AgentSubtaskErrorCode.PreforkNotAllowed;
+
+export type AgentSubtaskSourceValidationResult =
+  | { ok: true; sourceSessionId?: string }
+  | { ok: false; code: AgentSubtaskSourceValidationCode; message: string };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/** Detect presence before schema coercion/removal, including null or undefined values. */
+export function hasAgentSubtaskSource(input: unknown): boolean {
+  return isRecord(input) && isRecord(input.session) && Object.hasOwn(input.session, "sourceSessionId");
+}
+
+/**
+ * Validate only the new source semantics. Callers still own authentication and
+ * legacy request validation; requests without a source are intentionally untouched.
+ */
+export function normalizeAgentSubtaskSource(input: unknown): AgentSubtaskSourceValidationResult {
+  if (!isRecord(input) || !isRecord(input.session) || !Object.hasOwn(input.session, "sourceSessionId")) {
+    return { ok: true };
+  }
+  const session = input.session;
+  if (session.mode !== "new" && session.mode !== "existing" && session.mode !== "fork") {
+    return {
+      ok: false,
+      code: AgentSubtaskErrorCode.SessionModeInvalid,
+      message: "subtask session mode is invalid"
+    };
+  }
+  if (session.mode !== "fork") {
+    return {
+      ok: false,
+      code: AgentSubtaskErrorCode.SourceSessionNotAllowed,
+      message: "sourceSessionId is only allowed for fork mode"
+    };
+  }
+  if (typeof session.sourceSessionId !== "string" || !session.sourceSessionId.trim()) {
+    return {
+      ok: false,
+      code: AgentSubtaskErrorCode.SourceSessionInvalid,
+      message: "sourceSessionId must be a non-empty string"
+    };
+  }
+  if (Object.hasOwn(input, "preforkSummaryText") || Object.hasOwn(input, "preforkMeta")) {
+    return {
+      ok: false,
+      code: AgentSubtaskErrorCode.PreforkNotAllowed,
+      message: "prefork fields are not allowed with an explicit sourceSessionId"
+    };
+  }
+  return { ok: true, sourceSessionId: session.sourceSessionId.trim() };
+}

@@ -15,6 +15,7 @@ COPY apps/api/package.json apps/api/package.json
 COPY apps/agent-worker/package.json apps/agent-worker/package.json
 COPY apps/web/package.json apps/web/package.json
 COPY packages/shared/package.json packages/shared/package.json
+COPY packages/cli/package.json packages/cli/package.json
 COPY plugins/feishu/package.json plugins/feishu/package.json
 
 RUN npm ci
@@ -77,9 +78,15 @@ COPY --from=builder /app/apps/api /app/apps/api
 COPY --from=builder /app/apps/agent-worker /app/apps/agent-worker
 COPY --from=builder /app/apps/web /app/apps/web
 COPY --from=builder /app/packages/shared /app/packages/shared
+COPY --from=builder /app/packages/cli /app/packages/cli
 COPY --from=builder /app/plugins /app/plugins
 COPY --from=builder /app/skills /app/skills
 COPY --from=builder /app/prompts /app/prompts
+
+# 程序随镜像更新，不能放入持久化的 /home/dev 卷；用户目录只保存连接缓存。
+COPY --from=builder /app/packages/cli/dist/cli.cjs /opt/awb-cli/cli.cjs
+RUN chmod 0755 /opt/awb-cli/cli.cjs \
+  && ln -s /opt/awb-cli/cli.cjs /usr/local/bin/awb
 
 EXPOSE 4310 4311
 

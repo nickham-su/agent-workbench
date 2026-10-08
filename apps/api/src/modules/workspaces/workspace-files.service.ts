@@ -33,6 +33,7 @@ import { HttpError } from "../../app/errors.js";
 import { workspaceRoot } from "../../infra/fs/paths.js";
 import { withWorkspaceRepoLock } from "../../infra/locks/workspaceRepoLock.js";
 import { withWorkspaceLock } from "../../infra/locks/workspaceLock.js";
+import { workspaceLifecycleCoordinator } from "../../infra/locks/workspace-lifecycle-coordinator.js";
 import { getWorkspace, getWorkspaceRepoByDirName, listWorkspaceRepos } from "./workspace.store.js";
 import { getSearchSettings } from "../settings/settings.service.js";
 import { runFileSearch, SEARCH_FORCED_EXCLUDES } from "../files/file-search.js";
@@ -918,6 +919,7 @@ export async function writeWorkspaceFileText(ctx: AppContext, workspaceIdRaw: st
   const expected = (body as any).expected as FileVersion | undefined;
   if (!force && !expected) throw new HttpError(400, "Expected version required");
 
+  return workspaceLifecycleCoordinator.withMutation(scope.workspaceId, async () => {
   const domain = resolveWorkspaceDomain(rel, scope.repoDirNames);
   if (domain.kind === "repo") {
     if (!domain.rel) throw new HttpError(400, "Invalid path");
@@ -950,6 +952,7 @@ export async function writeWorkspaceFileText(ctx: AppContext, workspaceIdRaw: st
     });
     return res;
   });
+  });
 }
 
 export async function createWorkspaceFile(ctx: AppContext, workspaceIdRaw: string, bodyRaw: unknown): Promise<FileCreateResponse> {
@@ -958,6 +961,7 @@ export async function createWorkspaceFile(ctx: AppContext, workspaceIdRaw: strin
   const rel = typeof (body as any).path === "string" ? (body as any).path.trim() : "";
   assertValidPath(rel);
 
+  return workspaceLifecycleCoordinator.withMutation(scope.workspaceId, async () => {
   const domain = resolveWorkspaceDomain(rel, scope.repoDirNames);
   if (domain.kind === "repo") {
     if (!domain.rel) throw new HttpError(400, "Invalid path");
@@ -972,6 +976,7 @@ export async function createWorkspaceFile(ctx: AppContext, workspaceIdRaw: strin
   return withWorkspaceLock({ workspaceId: scope.workspaceId }, async () => {
     return createUnderRoot(scope.rootAbs, rel, typeof (body as any).content === "string" ? (body as any).content : "");
   });
+  });
 }
 
 export async function mkdirWorkspacePath(ctx: AppContext, workspaceIdRaw: string, bodyRaw: unknown): Promise<FileMkdirResponse> {
@@ -980,6 +985,7 @@ export async function mkdirWorkspacePath(ctx: AppContext, workspaceIdRaw: string
   const rel = typeof (body as any).path === "string" ? (body as any).path.trim() : "";
   assertValidPath(rel);
 
+  return workspaceLifecycleCoordinator.withMutation(scope.workspaceId, async () => {
   const domain = resolveWorkspaceDomain(rel, scope.repoDirNames);
   if (domain.kind === "repo") {
     if (!domain.rel) throw new HttpError(400, "Invalid path");
@@ -992,6 +998,7 @@ export async function mkdirWorkspacePath(ctx: AppContext, workspaceIdRaw: string
 
   return withWorkspaceLock({ workspaceId: scope.workspaceId }, async () => {
     return mkdirUnderRoot(scope.rootAbs, rel);
+  });
   });
 }
 
@@ -1008,6 +1015,7 @@ export async function renameWorkspacePath(ctx: AppContext, workspaceIdRaw: strin
     throw new HttpError(409, "Path is protected");
   }
 
+  return workspaceLifecycleCoordinator.withMutation(scope.workspaceId, async () => {
   const fromDomain = resolveWorkspaceDomain(from, scope.repoDirNames);
   const toDomain = resolveWorkspaceDomain(to, scope.repoDirNames);
   if (fromDomain.kind !== toDomain.kind) throw new HttpError(409, "Cross-root rename is not allowed");
@@ -1031,6 +1039,7 @@ export async function renameWorkspacePath(ctx: AppContext, workspaceIdRaw: strin
   return withWorkspaceLock({ workspaceId: scope.workspaceId }, async () => {
     return renameUnderRoot(scope.rootAbs, fromDomain.rel, toDomain.rel);
   });
+  });
 }
 
 export async function deleteWorkspacePath(ctx: AppContext, workspaceIdRaw: string, bodyRaw: unknown): Promise<FileDeleteResponse> {
@@ -1040,6 +1049,7 @@ export async function deleteWorkspacePath(ctx: AppContext, workspaceIdRaw: strin
   assertValidPath(rel);
   if (isProtectedRootPath(rel, scope.repoDirNames)) throw new HttpError(409, "Path is protected");
 
+  return workspaceLifecycleCoordinator.withMutation(scope.workspaceId, async () => {
   const domain = resolveWorkspaceDomain(rel, scope.repoDirNames);
   if (domain.kind === "repo") {
     if (!domain.rel) throw new HttpError(400, "Invalid path");
@@ -1053,6 +1063,7 @@ export async function deleteWorkspacePath(ctx: AppContext, workspaceIdRaw: strin
 
   return withWorkspaceLock({ workspaceId: scope.workspaceId }, async () => {
     return deleteUnderRoot(scope.rootAbs, rel, parseBool((body as any).recursive, true));
+  });
   });
 }
 

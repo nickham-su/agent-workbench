@@ -2,6 +2,7 @@ import type { FastifyBaseLogger } from "fastify";
 import { nowMs } from "../../utils/time.js";
 import { newSortableId } from "../../utils/ids.js";
 import type { AgentRuntimePort, AgentRuntimeRun, LocalAgentRuntimeExecutionPort } from "./agent.runtime-port.js";
+import type { LocalAnalyticsProducer } from "./analytics-local-producer.js";
 
 const DEFAULT_RUNTIME_CONCURRENCY = 2;
 
@@ -11,12 +12,14 @@ export class AgentRuntime implements AgentRuntimePort {
   private readonly queue: RuntimeQueuedRun[] = [];
   private readonly queuedRunIds = new Set<string>();
   private readonly runningSessions = new Set<string>();
+  private readonly activeRunIds = new Set<string>();
   private activeCount = 0;
 
   constructor(
     private readonly execution: LocalAgentRuntimeExecutionPort,
     private readonly logger: FastifyBaseLogger,
-    private readonly concurrency = DEFAULT_RUNTIME_CONCURRENCY
+    private readonly concurrency = DEFAULT_RUNTIME_CONCURRENCY,
+    private readonly analytics?: LocalAnalyticsProducer
   ) {}
 
   bootstrap() {
@@ -24,7 +27,7 @@ export class AgentRuntime implements AgentRuntimePort {
   }
 
   enqueueRun(run: RuntimeQueuedRun) {
-    if (this.queuedRunIds.has(run.runId)) return;
+    if (this.queuedRunIds.has(run.runId) || this.activeRunIds.has(run.runId)) return;
     this.queue.push(run);
     this.queuedRunIds.add(run.runId);
     this.pump();
@@ -37,6 +40,16 @@ export class AgentRuntime implements AgentRuntimePort {
       this.queuedRunIds.delete(item.runId);
       this.queue.splice(i, 1);
     }
+  }
+
+  async cancelSessionAndWait(input: { sessionId: string; timeoutMs: number }): Promise<boolean> {
+    this.cancelSession(input.sessionId);
+    const deadline = Date.now() + input.timeoutMs;
+    while (this.queue.some((run) => run.sessionId === input.sessionId) || this.runningSessions.has(input.sessionId)) {
+      if (Date.now() >= deadline) return false;
+      await new Promise<void>((resolve) => setTimeout(resolve, Math.min(10, Math.max(1, deadline - Date.now()))));
+    }
+    return true;
   }
 
   private pump() {
@@ -52,6 +65,7 @@ export class AgentRuntime implements AgentRuntimePort {
 
   private startRun(run: RuntimeQueuedRun) {
     this.activeCount += 1;
+    this.activeRunIds.add(run.runId);
     this.runningSessions.add(run.sessionId);
 
     void this.processRun(run)
@@ -60,6 +74,7 @@ export class AgentRuntime implements AgentRuntimePort {
       })
       .finally(() => {
         this.runningSessions.delete(run.sessionId);
+        this.activeRunIds.delete(run.runId);
         this.activeCount -= 1;
         this.pump();
       });
@@ -67,84 +82,77 @@ export class AgentRuntime implements AgentRuntimePort {
 
   private async processRun(run: RuntimeQueuedRun) {
     const ts = nowMs();
+    this.analytics?.emitExecution({ executionId: run.runId, runId: run.runId, runtimeKind: "api_local_fallback", runKind: run.runKind ?? "user", parentRunId: null, queuedAt: ts, startedAt: ts, endedAt: null, endTimeQuality: "unknown", endReason: null }, "execution_started");
+    let analyticsEndReason: "completed" | "failed" | "other" = "other";
     try {
       const ctx = await this.execution.getPromptContextForRun({
         workspaceId: run.workspaceId,
         sessionId: run.sessionId,
         runId: run.runId
       });
-
-      const turnId = newSortableId("turn");
-      const assistant = this.execution.appendContextItemFromWorker({
-        workspaceId: run.workspaceId,
-        sessionId: run.sessionId,
-        runId: run.runId,
-        turnId,
-        step: 1,
-        prevId: ctx.headItemId,
-        kind: "assistant",
-        status: "streaming",
-        output: {
-          type: "assistant_text",
-          text: ""
-        },
-        createdAt: ts
-      });
-      if (assistant.item == null) {
-        return;
+      // 本地回退运行时不具备 ToolExecution provider；恢复 continuation 不得越过 queued 工具。
+      // 真实 API-managed Worker 会先执行 queued 工具，随后才在模型 step 中消费 continuation。
+      if (ctx.pendingTools.length > 0) {
+        throw new Error("local fallback cannot recover pending ToolExecution");
       }
-
-      this.execution.updateRunStateFromWorker({
-        workspaceId: run.workspaceId,
-        sessionId: run.sessionId,
-        status: "running",
-        activeRunId: run.runId,
-        activeAssistantItemId: assistant.item.id,
-        updatedAt: ts
-      });
+      let assistantMessageId = run.resumeAssistantMessageId ?? null;
+      if (assistantMessageId) {
+        const claim = this.execution.resumeStreamingAssistantFromWorker({
+          workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId, messageId: assistantMessageId
+        });
+        if (claim.result !== "updated") return;
+      } else {
+        assistantMessageId = newSortableId("message");
+        this.execution.createStreamingAssistantFromWorker({
+          workspaceId: run.workspaceId,
+          sessionId: run.sessionId,
+          runId: run.runId,
+          messageId: assistantMessageId,
+          createdAt: ts
+        });
+      }
 
       const latestUser = [...ctx.messages].reverse().find((item) => item.role === "user")?.content ?? "";
       const text = latestUser ? `本地回退模式已收到: ${latestUser}` : "本地回退模式已执行。";
-      await this.execution.updateContextItemFromWorker({
-        itemId: assistant.item.id,
-        status: "completed",
-        output: {
-          type: "assistant_text",
-          text
-        },
-        updatedAt: nowMs()
-      });
-      this.execution.completeRunFromWorker({
+      this.execution.flushAssistantPartsFromWorker({
         workspaceId: run.workspaceId,
         sessionId: run.sessionId,
         runId: run.runId,
-        status: "completed",
+        messageId: assistantMessageId,
+        parts: [{ id: newSortableId("part"), position: 0, type: "text", text }],
         updatedAt: nowMs()
       });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      this.execution.appendContextItemFromWorker({
+      const completionCode = run.runKind === "subtask" ? "subtask_completed" : "run_completed";
+      this.execution.completeTerminalAssistantFromWorker({
         workspaceId: run.workspaceId,
         sessionId: run.sessionId,
         runId: run.runId,
-        turnId: null,
-        step: null,
-        prevId: this.execution.getSession(run.sessionId)?.headItemId ?? null,
-        kind: "system",
-        status: "completed",
-        output: {
-          type: "system_text",
-          text: `[run] ${message}`
-        },
-        createdAt: nowMs()
+        messageId: assistantMessageId,
+        responseTotalTokens: null,
+        intent: { status: "completed", code: completionCode, detail: null },
+        updatedAt: nowMs()
       });
-      this.execution.completeRunFromWorker({
+      this.execution.convergeRunTerminalFromWorker({ workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId, updatedAt: nowMs() });
+      analyticsEndReason = "completed";
+    } catch {
+      analyticsEndReason = "failed";
+      const failedCode = run.runKind === "manual_compaction"
+        ? "compaction_failed"
+        : run.runKind === "subtask"
+          ? "subtask_failed"
+          : "run_failed";
+      this.execution.persistRunTerminalIntentFromWorker({
         workspaceId: run.workspaceId,
         sessionId: run.sessionId,
         runId: run.runId,
-        status: "failed",
+        status: "failed", code: failedCode, detail: null,
         updatedAt: nowMs()
       });
+      this.execution.convergeRunTerminalFromWorker({ workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId, updatedAt: nowMs() });
+    } finally {
+      // Even an early resume-claim return must close the Analytics execution
+      // interval; Analytics remains observational and never changes the Run.
+      this.analytics?.emitExecution({ executionId: run.runId, runId: run.runId, runtimeKind: "api_local_fallback", runKind: run.runKind ?? "user", parentRunId: null, queuedAt: ts, startedAt: ts, endedAt: nowMs(), endTimeQuality: "observed", endReason: analyticsEndReason }, "execution_finished");
     }
   }
 }

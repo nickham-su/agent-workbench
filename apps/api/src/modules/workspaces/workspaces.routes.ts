@@ -1,49 +1,66 @@
 import { Type } from "@sinclair/typebox";
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { AppContext } from "../../app/context.js";
 import { ErrorResponseSchema } from "@agent-workbench/shared";
 import {
   AttachWorkspaceRepoRequestSchema,
   CreateWorkspaceRequestSchema,
+  UpdateWorkspaceAgentSessionTabVisibilityRequestSchema,
   UpdateWorkspaceRequestSchema,
+  WorkspaceAgentSessionTabStateParamsSchema,
+  WorkspaceAgentSessionTabVisibilityMutationSchema,
+  WorkspaceAgentTabStateSchema,
   WorkspaceDetailSchema
 } from "@agent-workbench/shared";
+import { HttpError } from "../../app/errors.js";
+import { AgentListAvailableAgentsResponseSchema } from "@agent-workbench/shared/internal-contracts/agent-api-session";
 import {
   attachRepoToWorkspace,
   createWorkspace,
-  detectWorkspaceExternalSkillRoots,
   deleteWorkspace,
-  detectWorkspaceAgentsInstructions,
   detachRepoFromWorkspace,
-  getWorkspaceAgentsInstructionsSettings,
+  getWorkspaceAgentTabState,
   getWorkspaceDetailById,
   getWorkspaceAgentEnablementSettings,
-  getWorkspaceExternalSkillRootsSettings,
   listWorkspaceDetails,
   detectWorkspaceAgentEnablement,
   filterAgentsByWorkspaceEnablement,
-  listWorkspaceTopLevelSkills,
-  updateWorkspaceAgentsInstructionsSettings,
-  updateWorkspaceExternalSkillRootsSettings,
+  setWorkspaceAgentSessionTabVisibility,
   updateWorkspaceAgentEnablementSettings,
   updateWorkspaceById
 } from "./workspace.service.js";
-import { listAvailableAgentsForSurface } from "../settings/settings.service.js";
+import { detectWorkspaceContextFiles, getWorkspaceContextFilesSettings, updateWorkspaceContextFilesSettings, listWorkspaceContextTopLevelSkills } from "./workspace-context.service.js";
+import { listAvailableAgentsForListSurface, type AgentListSurface } from "../settings/settings.service.js";
 import {
   WorkspaceAgentEnablementDetectResponseSchema,
   WorkspaceAgentEnablementSettingsResponseSchema,
   UpdateWorkspaceAgentEnablementSettingsRequestSchema,
-  UpdateWorkspaceExternalSkillRootsSettingsRequestSchema,
-  WorkspaceExternalSkillRootsDetectResponseSchema,
-  WorkspaceExternalSkillRootsSettingsResponseSchema,
-  AgentListAvailableAgentsResponseSchema,
-  WorkspaceAgentsInstructionsDetectResponseSchema,
-  WorkspaceAgentsInstructionsSettingsResponseSchema,
-  UpdateWorkspaceAgentsInstructionsSettingsRequestSchema,
-  WorkspaceTopLevelSkillsResponseSchema
+  WorkspaceTopLevelSkillsResponseSchema,
+  WorkspaceContextFilesDetectResponseSchema,
+  WorkspaceContextFilesSettingsResponseSchema,
+  UpdateWorkspaceContextFilesSettingsRequestSchema,
+  type UpdateWorkspaceContextFilesSettingsRequest
 } from "@agent-workbench/shared";
 import { nowMs } from "../../utils/time.js";
 import { touchWorkspaceLastUsedAt } from "./workspace.store.js";
+import { workspaceLifecycleCoordinator } from "../../infra/locks/workspace-lifecycle-coordinator.js";
+
+const AGENT_TAB_STATE_BODY_KEYS = new Set(["visible"]);
+
+async function assertOnlyAgentTabStateBodyKeys(req: FastifyRequest) {
+  const body = req.body;
+  if (body == null || typeof body !== "object" || Array.isArray(body)) return;
+  const tabStateBody = body as Record<string, unknown>;
+  for (const key of Object.keys(tabStateBody)) {
+    if (!AGENT_TAB_STATE_BODY_KEYS.has(key)) {
+      throw new HttpError(400, "request body contains unknown field", "WORKSPACE_AGENT_TAB_STATE_UNKNOWN_FIELD");
+    }
+  }
+  if (Object.hasOwn(tabStateBody, "visible") && typeof tabStateBody.visible !== "boolean") {
+    throw new HttpError(400, "visible must be a boolean");
+  }
+}
+
 export async function registerWorkspacesRoutes(app: FastifyInstance, ctx: AppContext) {
   const WorkspaceIdParamsSchema = Type.Object({ workspaceId: Type.String({ minLength: 1 }) });
 
@@ -53,6 +70,44 @@ export async function registerWorkspacesRoutes(app: FastifyInstance, ctx: AppCon
       schema: { tags: ["workspaces"], response: { 200: { type: "array", items: WorkspaceDetailSchema } } }
     },
     async () => listWorkspaceDetails(ctx)
+  );
+
+  app.get(
+    "/api/workspaces/:workspaceId/agent-tab-state",
+    {
+      schema: {
+        tags: ["workspaces"],
+        params: WorkspaceIdParamsSchema,
+        response: { 200: WorkspaceAgentTabStateSchema, 404: ErrorResponseSchema }
+      }
+    },
+    async (req) => {
+      const params = req.params as { workspaceId: string };
+      return getWorkspaceAgentTabState(ctx, params.workspaceId);
+    }
+  );
+
+  app.put(
+    "/api/workspaces/:workspaceId/agent-tab-state/:sessionId",
+    {
+      preValidation: assertOnlyAgentTabStateBodyKeys,
+      schema: {
+        tags: ["workspaces"],
+        params: WorkspaceAgentSessionTabStateParamsSchema,
+        body: UpdateWorkspaceAgentSessionTabVisibilityRequestSchema,
+        response: {
+          200: WorkspaceAgentSessionTabVisibilityMutationSchema,
+          400: ErrorResponseSchema,
+          404: ErrorResponseSchema,
+          409: ErrorResponseSchema
+        }
+      }
+    },
+    async (req) => {
+      const params = req.params as { workspaceId: string; sessionId: string };
+      const body = req.body as { visible: boolean };
+      return setWorkspaceAgentSessionTabVisibility(ctx, { ...params, visible: body.visible });
+    }
   );
 
   app.post(
@@ -86,9 +141,11 @@ export async function registerWorkspacesRoutes(app: FastifyInstance, ctx: AppCon
       const detail = await getWorkspaceDetailById(ctx, params.workspaceId);
       // “最近使用”以用户进入 workspace 页并拉取详情为准（不要求强一致）。
       try {
-        touchWorkspaceLastUsedAt(ctx.db, params.workspaceId, nowMs());
+        await workspaceLifecycleCoordinator.withMutation(params.workspaceId, async () => {
+          touchWorkspaceLastUsedAt(ctx.db, params.workspaceId, nowMs());
+        });
       } catch {
-        // ignore
+        // 详情读取不因 best-effort 元数据写失败而失败；deleting fence 仍阻止该写入。
       }
       return detail;
     }
@@ -155,97 +212,20 @@ export async function registerWorkspacesRoutes(app: FastifyInstance, ctx: AppCon
     }
   );
 
-  app.get(
-    "/api/workspaces/:workspaceId/agents-instructions/detect",
-    {
-      schema: {
-        tags: ["workspaces"],
-        params: WorkspaceIdParamsSchema,
-        response: { 200: WorkspaceAgentsInstructionsDetectResponseSchema, 404: ErrorResponseSchema }
-      }
-    },
-    async (req) => {
-      const params = req.params as { workspaceId: string };
-      return detectWorkspaceAgentsInstructions(ctx, app.log, params.workspaceId);
-    }
-  );
+  app.get("/api/workspaces/:workspaceId/context-files/detect", {
+    schema: { tags: ["workspaces"], params: WorkspaceIdParamsSchema,
+      response: { 200: WorkspaceContextFilesDetectResponseSchema, 404: ErrorResponseSchema, 409: ErrorResponseSchema } }
+  }, async (req) => detectWorkspaceContextFiles(ctx, (req.params as { workspaceId: string }).workspaceId));
 
-  app.get(
-    "/api/workspaces/:workspaceId/agents-instructions/settings",
-    {
-      schema: {
-        tags: ["workspaces"],
-        params: WorkspaceIdParamsSchema,
-        response: { 200: WorkspaceAgentsInstructionsSettingsResponseSchema, 404: ErrorResponseSchema }
-      }
-    },
-    async (req) => {
-      const params = req.params as { workspaceId: string };
-      return getWorkspaceAgentsInstructionsSettings(ctx, params.workspaceId);
-    }
-  );
+  app.get("/api/workspaces/:workspaceId/context-files/settings", {
+    schema: { tags: ["workspaces"], params: WorkspaceIdParamsSchema,
+      response: { 200: WorkspaceContextFilesSettingsResponseSchema, 404: ErrorResponseSchema } }
+  }, async (req) => getWorkspaceContextFilesSettings(ctx, (req.params as { workspaceId: string }).workspaceId));
 
-  app.put(
-    "/api/workspaces/:workspaceId/agents-instructions/settings",
-    {
-      schema: {
-        tags: ["workspaces"],
-        params: WorkspaceIdParamsSchema,
-        body: UpdateWorkspaceAgentsInstructionsSettingsRequestSchema,
-        response: { 200: WorkspaceAgentsInstructionsSettingsResponseSchema, 400: ErrorResponseSchema, 404: ErrorResponseSchema }
-      }
-    },
-    async (req) => {
-      const params = req.params as { workspaceId: string };
-      return updateWorkspaceAgentsInstructionsSettings(ctx, app.log, params.workspaceId, req.body as any);
-    }
-  );
-
-  app.get(
-    "/api/workspaces/:workspaceId/external-skill-roots/detect",
-    {
-      schema: {
-        tags: ["workspaces"],
-        params: WorkspaceIdParamsSchema,
-        response: { 200: WorkspaceExternalSkillRootsDetectResponseSchema, 404: ErrorResponseSchema }
-      }
-    },
-    async (req) => {
-      const params = req.params as { workspaceId: string };
-      return detectWorkspaceExternalSkillRoots(ctx, app.log, params.workspaceId);
-    }
-  );
-
-  app.get(
-    "/api/workspaces/:workspaceId/external-skill-roots/settings",
-    {
-      schema: {
-        tags: ["workspaces"],
-        params: WorkspaceIdParamsSchema,
-        response: { 200: WorkspaceExternalSkillRootsSettingsResponseSchema, 404: ErrorResponseSchema }
-      }
-    },
-    async (req) => {
-      const params = req.params as { workspaceId: string };
-      return getWorkspaceExternalSkillRootsSettings(ctx, params.workspaceId);
-    }
-  );
-
-  app.put(
-    "/api/workspaces/:workspaceId/external-skill-roots/settings",
-    {
-      schema: {
-        tags: ["workspaces"],
-        params: WorkspaceIdParamsSchema,
-        body: UpdateWorkspaceExternalSkillRootsSettingsRequestSchema,
-        response: { 200: WorkspaceExternalSkillRootsSettingsResponseSchema, 400: ErrorResponseSchema, 404: ErrorResponseSchema }
-      }
-    },
-    async (req) => {
-      const params = req.params as { workspaceId: string };
-      return updateWorkspaceExternalSkillRootsSettings(ctx, app.log, params.workspaceId, req.body as any);
-    }
-  );
+  app.put("/api/workspaces/:workspaceId/context-files/settings", {
+    schema: { tags: ["workspaces"], params: WorkspaceIdParamsSchema, body: UpdateWorkspaceContextFilesSettingsRequestSchema,
+      response: { 200: WorkspaceContextFilesSettingsResponseSchema, 400: ErrorResponseSchema, 404: ErrorResponseSchema, 409: ErrorResponseSchema } }
+  }, async (req) => updateWorkspaceContextFilesSettings(ctx, (req.params as { workspaceId: string }).workspaceId, req.body as UpdateWorkspaceContextFilesSettingsRequest));
 
   app.get(
     "/api/workspaces/:workspaceId/skills/top-level",
@@ -253,12 +233,12 @@ export async function registerWorkspacesRoutes(app: FastifyInstance, ctx: AppCon
       schema: {
         tags: ["workspaces"],
         params: WorkspaceIdParamsSchema,
-        response: { 200: WorkspaceTopLevelSkillsResponseSchema, 404: ErrorResponseSchema }
+        response: { 200: WorkspaceTopLevelSkillsResponseSchema, 404: ErrorResponseSchema, 409: ErrorResponseSchema }
       }
     },
     async (req) => {
       const params = req.params as { workspaceId: string };
-      return listWorkspaceTopLevelSkills(ctx, app.log, params.workspaceId);
+      return listWorkspaceContextTopLevelSkills(ctx, app.log, params.workspaceId);
     }
   );
 
@@ -314,16 +294,16 @@ export async function registerWorkspacesRoutes(app: FastifyInstance, ctx: AppCon
       schema: {
         tags: ["workspaces"],
         params: WorkspaceIdParamsSchema,
-        querystring: Type.Object({ surface: Type.Optional(Type.Union([Type.Literal("user"), Type.Literal("subtask")])) }),
+        querystring: Type.Object({ surface: Type.Optional(Type.Union([Type.Literal("user"), Type.Literal("subtask"), Type.Literal("all")])) }),
         response: { 200: AgentListAvailableAgentsResponseSchema, 404: ErrorResponseSchema }
       }
     },
     async (req) => {
       const params = req.params as { workspaceId: string };
       await getWorkspaceDetailById(ctx, params.workspaceId);
-      const query = req.query as { surface?: "user" | "subtask" };
-      const surface = query.surface === "subtask" ? "subtask" : "user";
-      const all = listAvailableAgentsForSurface(ctx, surface);
+      const query = req.query as { surface?: AgentListSurface };
+      const surface = query.surface ?? "user";
+      const all = listAvailableAgentsForListSurface(ctx, surface);
       const enabled = await getWorkspaceAgentEnablementSettings(ctx, params.workspaceId);
       const filtered = filterAgentsByWorkspaceEnablement({
         agents: all,

@@ -10,39 +10,39 @@ export type UiArtifactWriteResult =
 
 /** A narrow port for fixed apply_patch/write UI artifact I/O, not a general filesystem service. */
 export interface UiArtifactCapabilityPort {
-  writeApplyPatch(input: { workspaceId: string; toolCallId: string; createdAt: number; artifact: unknown }): Promise<UiArtifactWriteResult>;
-  writeWrite(input: { workspaceId: string; toolCallId: string; createdAt: number; artifact: unknown }): Promise<UiArtifactWriteResult>;
-  readApplyPatch(input: { workspaceId: string; toolCallId: string }): Promise<unknown>;
-  readWrite(input: { workspaceId: string; toolCallId: string }): Promise<unknown>;
+  writeApplyPatch(input: { workspaceId: string; toolExecutionId: string; createdAt: number; artifact: unknown }): Promise<UiArtifactWriteResult>;
+  writeWrite(input: { workspaceId: string; toolExecutionId: string; createdAt: number; artifact: unknown }): Promise<UiArtifactWriteResult>;
+  readApplyPatch(input: { workspaceId: string; toolExecutionId: string }): Promise<unknown>;
+  readWrite(input: { workspaceId: string; toolExecutionId: string }): Promise<unknown>;
 }
 
 export class UiArtifactCapability implements UiArtifactCapabilityPort {
   constructor(private readonly dataDir: string) {}
 
-  writeApplyPatch(input: { workspaceId: string; toolCallId: string; createdAt: number; artifact: unknown }) {
-    return this.writeJson(applyPatchUiArtifactPath(this.dataDir, input.workspaceId, input.toolCallId), {
+  writeApplyPatch(input: { workspaceId: string; toolExecutionId: string; createdAt: number; artifact: unknown }) {
+    return this.writeJson(applyPatchUiArtifactPath(this.dataDir, input.workspaceId, input.toolExecutionId), {
       ...toRecord(input.artifact),
       workspaceId: input.workspaceId,
-      toolCallId: input.toolCallId,
+      toolExecutionId: input.toolExecutionId,
       createdAt: input.createdAt
     });
   }
 
-  writeWrite(input: { workspaceId: string; toolCallId: string; createdAt: number; artifact: unknown }) {
-    return this.writeJson(writeUiArtifactPath(this.dataDir, input.workspaceId, input.toolCallId), {
+  writeWrite(input: { workspaceId: string; toolExecutionId: string; createdAt: number; artifact: unknown }) {
+    return this.writeJson(writeUiArtifactPath(this.dataDir, input.workspaceId, input.toolExecutionId), {
       ...toRecord(input.artifact),
       workspaceId: input.workspaceId,
-      toolCallId: input.toolCallId,
+      toolExecutionId: input.toolExecutionId,
       createdAt: input.createdAt
     });
   }
 
-  readApplyPatch(input: { workspaceId: string; toolCallId: string }) {
-    return this.readJson(applyPatchUiArtifactPath(this.dataDir, input.workspaceId, input.toolCallId), "apply_patch artifact not found");
+  readApplyPatch(input: { workspaceId: string; toolExecutionId: string }) {
+    return this.readJson(applyPatchUiArtifactPath(this.dataDir, input.workspaceId, input.toolExecutionId), "apply_patch artifact not found");
   }
 
-  readWrite(input: { workspaceId: string; toolCallId: string }) {
-    return this.readJson(writeUiArtifactPath(this.dataDir, input.workspaceId, input.toolCallId), "write artifact not found");
+  readWrite(input: { workspaceId: string; toolExecutionId: string }) {
+    return this.readJson(writeUiArtifactPath(this.dataDir, input.workspaceId, input.toolExecutionId), "write artifact not found");
   }
 
   private async writeJson(filePath: string, payload: unknown): Promise<UiArtifactWriteResult> {
@@ -60,7 +60,15 @@ export class UiArtifactCapability implements UiArtifactCapabilityPort {
     const fileAbs = path.resolve(filePath);
     if (!isUnderRoot(tmpAbs, fileAbs)) throw new HttpError(404, notFoundMessage);
     const st = await fs.lstat(fileAbs).catch(() => null);
-    if (!st || !st.isFile()) throw new HttpError(404, notFoundMessage);
+    if (!st) {
+      const parentReal = await fs.realpath(path.dirname(fileAbs)).catch(() => null);
+      const rootReal = await fs.realpath(tmpAbs).catch(() => null);
+      if (parentReal && rootReal && parentReal !== rootReal && !parentReal.startsWith(`${rootReal}${path.sep}`)) {
+        throw new HttpError(400, "Invalid path");
+      }
+      throw new HttpError(404, notFoundMessage);
+    }
+    if (!st.isFile()) throw new HttpError(404, notFoundMessage);
     await ensureRealPathUnderRoot(tmpAbs, fileAbs);
     let text = "";
     try {

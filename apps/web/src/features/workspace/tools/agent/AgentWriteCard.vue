@@ -1,37 +1,24 @@
 <template>
-  <div>
-    <div
-      class="flex items-center gap-2 min-w-0 flex-wrap w-full pl-2 pr-0 py-0.5 rounded cursor-pointer hover:bg-[var(--hover-bg)] transition-colors duration-100 font-mono text-[color:var(--text-secondary)]"
-      role="button"
-      tabindex="0"
-      @click="openInEditor"
-      @keydown.enter.prevent="openInEditor"
-      @keydown.space.prevent="openInEditor"
-    >
-      <span class="min-w-0 inline-flex items-baseline gap-0 max-w-full">
-        <span class="shrink-0">write(</span>
-        <span class="min-w-0 truncate" :title="summary.filePath">{{ summary.filePath }}</span>
-        <span class="shrink-0">)</span>
-        <span class="shrink-0 ml-1">[{{ summary.bytesWritten }} bytes]</span>
-      </span>
-      <span v-if="errorText" class="min-w-0 max-w-[30%] truncate text-red-500">
-        error: {{ errorText }}
-      </span>
-    </div>
-  </div>
+  <AgentToolCallRow
+    tool-name="write"
+    :input="input"
+    :execution="execution"
+    :now="now"
+    :interactive="canOpen"
+    :loading="opening"
+    @activate="openInEditor"
+  />
 </template>
 
 <script setup lang="ts">
+import type { AgentTimelineToolExecution } from "@agent-workbench/shared";
 import { message } from "ant-design-vue";
+import { computed, onBeforeUnmount, onBeforeUpdate, ref, watch } from "vue";
 import { useWorkspaceHost } from "@/features/workspace/host";
 import { inferLanguageFromPath } from "@/shared/monaco/languageUtils";
-
-type WriteDisplay = {
-  summary: string;
-  filePath: string;
-  bytesWritten: number;
-  existedBefore: boolean;
-};
+import AgentToolCallRow from "./AgentToolCallRow.vue";
+import { runAgentArtifactOpenRequest } from "./agentArtifactOpenController";
+import { createAgentArtifactRequestGuard } from "./agentArtifactRequestGuard";
 
 type WriteUiArtifactSide = {
   available: boolean;
@@ -48,10 +35,6 @@ type WriteUiArtifact = {
   toolCallId: string;
   createdAt: number;
   filePath: string;
-  summary: {
-    bytesWritten: number;
-    existedBefore: boolean;
-  };
   before: WriteUiArtifactSide;
   after: WriteUiArtifactSide;
 };
@@ -60,26 +43,57 @@ const props = defineProps<{
   workspaceId: string;
   toolId: string;
   sessionId: string;
-  itemId: number;
-  toolCallId?: string;
-  summary: WriteDisplay;
-  errorText?: string;
+  toolExecutionId?: string;
+  input: unknown;
+  execution: AgentTimelineToolExecution | null;
+  now: number;
 }>();
 
 const host = useWorkspaceHost(props.toolId);
+const opening = ref(false);
+const canOpen = computed(
+  () => !!props.toolExecutionId && props.execution?.status === "completed",
+);
 const artifactCache = new Map<string, Promise<WriteUiArtifact>>();
+const requestGuard = createAgentArtifactRequestGuard({
+  workspaceId: props.workspaceId,
+  sessionId: props.sessionId,
+  executionId: props.toolExecutionId || "",
+});
+watch(
+  () => [props.workspaceId, props.sessionId, props.toolExecutionId || ""] as const,
+  ([workspaceId, sessionId, executionId]) =>
+    requestGuard.update({ workspaceId, sessionId, executionId }),
+  { flush: "sync" },
+);
+onBeforeUpdate(() =>
+  requestGuard.update({
+    workspaceId: props.workspaceId,
+    sessionId: props.sessionId,
+    executionId: props.toolExecutionId || "",
+  }),
+);
+onBeforeUnmount(() => requestGuard.dispose());
 
 function cacheKey() {
-  return `${props.workspaceId}:${props.toolCallId || props.itemId}`;
+  return `${props.workspaceId}:${props.sessionId}:${props.toolExecutionId || ""}`;
 }
 
-async function fetchArtifact() {
+async function fetchArtifact(request: ReturnType<typeof requestGuard.begin>) {
   const key = cacheKey();
   const existing = artifactCache.get(key);
-  if (existing) return existing;
+  if (existing) {
+    try {
+      return await existing;
+    } finally {
+      request.finish();
+    }
+  }
+  const executionId = props.toolExecutionId;
+  if (!executionId) throw new Error("write execution unavailable");
   const promise = (async () => {
-    const url = `/api/agent/sessions/${encodeURIComponent(props.sessionId)}/context-items/${props.itemId}/write-artifact`;
-    const response = await fetch(url);
+    const url = `/api/agent/sessions/${encodeURIComponent(props.sessionId)}/tool-executions/${encodeURIComponent(executionId)}/write-artifact?workspaceId=${encodeURIComponent(props.workspaceId)}`;
+    const response = await fetch(url, { signal: request.signal });
     if (!response.ok) {
       const text = await response.text().catch(() => "");
       throw new Error(text || `http ${response.status}`);
@@ -89,65 +103,80 @@ async function fetchArtifact() {
   artifactCache.set(key, promise);
   try {
     return await promise;
-  } catch (err) {
+  } catch (error) {
     artifactCache.delete(key);
-    throw err;
+    throw error;
+  } finally {
+    request.finish();
   }
 }
 
 function explainUnavailable(side: WriteUiArtifactSide | undefined, label: string) {
   if (!side || side.available) return "";
-  const reason = typeof side.reason === "string" && side.reason.trim() ? side.reason.trim() : "unavailable";
+  const reason =
+    typeof side.reason === "string" && side.reason.trim()
+      ? side.reason.trim()
+      : "unavailable";
   return `${label} ${reason}`;
 }
 
 async function openInEditor() {
-  if (!props.toolCallId) {
-    message.error("missing toolCallId");
-    return;
-  }
+  if (!canOpen.value || opening.value) return;
+  opening.value = true;
   try {
-    const artifact = await fetchArtifact();
-    const language = inferLanguageFromPath(props.summary.filePath);
-    const beforeAvailable = artifact.before?.available === true;
-    const afterAvailable = artifact.after?.available === true;
-    const tabKey = `agent:write:${props.toolCallId}`;
-    if (!beforeAvailable && afterAvailable) {
-      host.call("editor", {
-        type: "editor.openPreview",
-        payload: {
-          path: props.summary.filePath,
-          text: artifact.after.text || "",
-          language,
-          title: props.summary.filePath,
-          tabKey,
-          source: "agent.write"
+    await runAgentArtifactOpenRequest({
+      guard: requestGuard,
+      fetchArtifact,
+      onArtifact: (artifact) => {
+        const filePath = String(artifact.filePath || "").trim();
+        if (!filePath) {
+          message.error("file unavailable");
+          return;
         }
-      });
-      return;
-    }
-    if (beforeAvailable && afterAvailable) {
-      host.call("editor", {
-        type: "editor.openDiff",
-        payload: {
-          original: artifact.before.text || "",
-          modified: artifact.after.text || "",
-          path: props.summary.filePath,
-          language,
-          title: props.summary.filePath,
-          tabKey,
-          source: "agent.write"
+        const language = inferLanguageFromPath(filePath);
+        const beforeAvailable = artifact.before?.available === true;
+        const afterAvailable = artifact.after?.available === true;
+        const tabKey = `agent:write:${props.toolExecutionId}`;
+        if (!beforeAvailable && afterAvailable) {
+          host.call("editor", {
+            type: "editor.openPreview",
+            payload: {
+              path: filePath,
+              text: artifact.after.text || "",
+              language,
+              title: filePath,
+              tabKey,
+              source: "agent.write",
+            },
+          });
+          return;
         }
-      });
-      return;
-    }
-    const reasons = [
-      explainUnavailable(artifact.before, "before"),
-      explainUnavailable(artifact.after, "after")
-    ].filter(Boolean);
-    message.error(reasons[0] || "diff unavailable");
-  } catch (err) {
-    message.error(err instanceof Error ? err.message : String(err));
+        if (beforeAvailable && afterAvailable) {
+          host.call("editor", {
+            type: "editor.openDiff",
+            payload: {
+              original: artifact.before.text || "",
+              modified: artifact.after.text || "",
+              path: filePath,
+              language,
+              title: filePath,
+              tabKey,
+              source: "agent.write",
+            },
+          });
+          return;
+        }
+        const reasons = [
+          explainUnavailable(artifact.before, "before"),
+          explainUnavailable(artifact.after, "after"),
+        ].filter(Boolean);
+        message.error(reasons[0] || "diff unavailable");
+      },
+      onError: (error) =>
+        message.error(error instanceof Error ? error.message : String(error)),
+    });
+  } finally {
+    opening.value = false;
   }
 }
 </script>

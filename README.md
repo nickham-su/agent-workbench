@@ -43,6 +43,10 @@ git clone https://github.com/nickham-su/agent-workbench.git
 docker compose up -d --build
 ```
 
+**Agent startup recovery**
+
+Startup recovery has no mode switch. Before the API listener starts, it only cleans temporary/orphan data. After `onListen`, it uses fenced recovery enqueue: only a Run that is still the Session's current active Run is enqueued again.
+
 **Verify env injection (optional)**
 
 ```bash
@@ -105,6 +109,7 @@ If you need to publish ports to LAN/public directly, use `AWB_PUBLISH_HOST=0.0.0
 | `AWB_HOST` | `.env.example`: `0.0.0.0`; `.env.dev.example`: `127.0.0.1`. API listen host (Docker usually binds all interfaces in-container; local dev defaults to loopback). |
 | `AWB_PORT` | `.env.example`: `4310`; `.env.dev.example`: `4310`. Web UI + API port. |
 | `AWB_FILE_MAX_BYTES` | `.env.example`: `1048576`; `.env.dev.example`: `1048576`. Max bytes for file preview/compare. |
+| `AWB_LOG_LEVEL` | API log level. One of `trace`, `debug`, `info` (default), `warn`, `error`, or `fatal`; restart the API after changing it. |
 | `AWB_APP_VERSION` | Optional override for `/api/health` version (empty by default). |
 | `AWB_SERVE_WEB` | `.env.example`: `1`; `.env.dev.example`: `0`. `1` = API serves built web assets (single-port mode); `0` = local dev usually uses Vite dev server. |
 | `AWB_WEB_DIST_DIR` | `.env.example`: `/app/apps/web/dist`; `.env.dev.example`: `apps/web/dist`. Web static asset directory when `AWB_SERVE_WEB=1`. |
@@ -115,9 +120,9 @@ If you need to publish ports to LAN/public directly, use `AWB_PUBLISH_HOST=0.0.0
 | `AWB_AGENT_WORKER_CONCURRENCY` | Worker concurrency: `.env.example` default `5`; `.env.dev.example` default `3`. Runs in the same session are still serialized. |
 | `AWB_AGENT_LOOP_MAX_STEPS` | Max loop steps per run (default `128`; `<=0` means unlimited). |
 | `AWB_AGENT_LOOP_REPEAT_TOOL_CALL_THRESHOLD` | Repeated tool-call threshold in loop (default `20`; `<=0` means unlimited). |
-| `AWB_AGENT_DEBUG_DUMP` | Debug dump switch (`1` to enable). Writes per-context logs under `<workspace>/.debug/agent_context_item_logs/`. |
+| `AWB_AGENT_DEBUG_DUMP` | Debug dump switch (`1` to enable). Writes one record per Agent Message under `<workspace>/.debug/agent_message_logs/`. |
 | `AWB_TOOL_ERROR_STORE_ENABLED` | Tool failure artifact switch (default `0`; only exact value `1` enables it). Writes complete parameters, results, and errors for non-cancelled tool failures under `<workspace>/.awb/agent/tool-errors/` for diagnostics. |
-| `AWB_AGENT_STARTUP_RECOVERY_MODE` | Startup recovery mode: `fail` (default, mark inflight runs failed) or `recover` (resume inflight runs). |
+| Startup recovery | No environment variable. Startup performs pre-listen cleanup, then fenced recovery enqueue after `onListen` for Runs that remain current and active. |
 | `AWB_AGENT_PLUGIN_HOST_ENABLED` | Plugin host process switch (default `0`, disabled). |
 | `AWB_AGENT_PLUGIN_HOST_DEV` | Plugin host dev mode switch (default `0`; `1` starts plugin host from source). |
 | `AWB_AGENT_PLUGIN_SERVICES_ENABLED` | Plugin services registry/call switch (default `0`, disabled). |

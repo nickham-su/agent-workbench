@@ -7,7 +7,7 @@ import {
   type ResolvedPreviewFile
 } from "./preview-file.service.js";
 import { type PreviewRuntime } from "./preview-runtime.js";
-import { assertSameOriginBrowserRequest, PreviewBrowserRequestForbiddenError } from "./preview-security.js";
+import { assertPreviewExchangeBrowserRequest, PreviewBrowserRequestForbiddenError } from "./preview-security.js";
 import {
   buildBootstrapHeaders,
   buildCommonPreviewHeaders,
@@ -151,7 +151,7 @@ export async function createPreviewApp(options: PreviewAppOptions): Promise<Fast
 
   app.post("/__awb/exchange", async (request, reply) => {
     try {
-      assertSameOriginBrowserRequest({
+      assertPreviewExchangeBrowserRequest({
         secFetchSite: requestHeader(request, "sec-fetch-site"),
         origin: requestHeader(request, "origin"),
         expectedOrigin: options.runtime.publicOrigin

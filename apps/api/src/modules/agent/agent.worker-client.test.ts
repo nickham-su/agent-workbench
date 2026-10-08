@@ -111,6 +111,30 @@ test("AgentWorkerClient sends workspace repo directory names with enqueue payloa
   assert.deepEqual(received, validRun);
 });
 
+test("AgentWorkerClient 仅将 Worker 明确 4xx enqueue 拒绝归类为永久失败", async () => {
+  await withTcpServer((_req, res) => {
+    res.statusCode = 422;
+    res.end(JSON.stringify({ message: "invalid request" }));
+  }, async (workerOrigin) => {
+    await assert.rejects(
+      () => createClient({ workerOrigin }).enqueueRun(validRun),
+      (error: unknown) => error instanceof Error && "code" in error && error.code === "AGENT_WORKER_ENQUEUE_REJECTED",
+    );
+  });
+});
+
+test("AgentWorkerClient 将 5xx enqueue 结果归类为未知而非永久拒绝", async () => {
+  await withTcpServer((_req, res) => {
+    res.statusCode = 503;
+    res.end(JSON.stringify({ message: "unavailable" }));
+  }, async (workerOrigin) => {
+    await assert.rejects(
+      () => createClient({ workerOrigin }).enqueueRun(validRun),
+      (error: unknown) => error instanceof Error && "code" in error && error.code === "AGENT_WORKER_ENQUEUE_UNKNOWN",
+    );
+  });
+});
+
 test("AgentWorkerClient validates cancel success response and sends shared endpoint", async () => {
   const requests: Array<{ method: string; path: string; body: unknown }> = [];
   await withTcpServer((req, res) => {
@@ -131,6 +155,28 @@ test("AgentWorkerClient validates cancel success response and sends shared endpo
     path: AgentWorkerEndpoints.cancelSession.path,
     body: { sessionId: "sess-a" }
   }]);
+});
+
+test("AgentWorkerClient cancel-and-wait 返回 worker idle 状态并保留不可达错误", async () => {
+  let received: unknown = null;
+  await withTcpServer((req, res) => {
+    let body = "";
+    req.setEncoding("utf8");
+    req.on("data", (chunk) => { body += chunk; });
+    req.on("end", () => {
+      received = { method: req.method, path: req.url, body: JSON.parse(body) };
+      res.statusCode = 200;
+      res.end(JSON.stringify({ ok: true, idle: false }));
+    });
+  }, async (workerOrigin) => {
+    const idle = await createClient({ workerOrigin }).cancelSessionAndWait({ sessionId: "sess-a", timeoutMs: 123 });
+    assert.equal(idle, false);
+  });
+  assert.deepEqual(received, {
+    method: AgentWorkerEndpoints.cancelSessionAndWait.method,
+    path: AgentWorkerEndpoints.cancelSessionAndWait.path,
+    body: { sessionId: "sess-a", timeoutMs: 123 },
+  });
 });
 
 test("AgentWorkerClient supports Unix Socket enqueue", async () => {
@@ -162,7 +208,7 @@ test("AgentWorkerClient supports Unix Socket enqueue", async () => {
 test("AgentWorkerClient strict mode maps enqueue response schema mismatch to unavailable", async () => {
   await withTcpServer(respondWithInvalidSuccess, async (workerOrigin) => {
     await assert.rejects(() => createClient({ workerOrigin }).enqueueRun(validRun), (error: unknown) => {
-      return error instanceof Error && error.message === "agent worker unavailable";
+      return error instanceof Error && "code" in error && error.code === "AGENT_WORKER_ENQUEUE_UNKNOWN";
     });
   });
 });
@@ -215,7 +261,7 @@ test("AgentWorkerClient warn mode does not bypass non-2xx failures", async () =>
   }, async (workerOrigin) => {
     const client = createClient({ workerOrigin, responseValidation: "warn", logger: spy.logger });
     await assert.rejects(() => client.enqueueRun(validRun), (error: unknown) => {
-      return error instanceof Error && error.message === "agent worker unavailable";
+      return error instanceof Error && "code" in error && error.code === "AGENT_WORKER_ENQUEUE_UNKNOWN";
     });
     await client.cancelSession("sess-a");
   });

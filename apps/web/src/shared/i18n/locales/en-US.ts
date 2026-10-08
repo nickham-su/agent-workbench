@@ -54,6 +54,7 @@ export default {
     tabs: {
       workspaces: "Workspaces",
       repos: "Repos",
+      dashboard: "Dashboard",
       settings: "Settings"
     }
   },
@@ -229,6 +230,7 @@ export default {
       files: "Files",
       search: "Search",
       agent: "AI Agent",
+      scheduledTasks: "Scheduled tasks",
       editor: "Editor"
     },
     dock: {
@@ -282,14 +284,57 @@ export default {
   },
   agent: {
     empty: "No sessions yet. Create an AI client to start.",
+    runTerminal: {
+      run_completed: "Run completed",
+      subtask_completed: "Subtask completed",
+      compaction_completed: "Context compaction completed",
+      compaction_not_needed: "The current context does not need compaction",
+      compaction_no_progress: "Compaction would not make useful progress",
+      compaction_oversized_tail: "The recent context is too large to retain safely",
+      compaction_media_requires_resend: "Compaction requires the media to be sent again",
+      compaction_pending_tools: "Wait for pending tools to finish before compacting",
+      compaction_failed: "Context compaction failed",
+      compaction_provider_unavailable: "The summary model is temporarily unavailable; try again later",
+      compaction_conflict: "The context changed during compaction; refresh and try again",
+      context_limit_recovery_exhausted: "The context still exceeds the model limit. Shorten it or start a new session, then resend the important content",
+      context_limit_media_requires_resend: "The context includes images or media that cannot be recovered. Send them again",
+      run_status_unavailable: "The saved run status is no longer available.",
+      run_cancelled: "Run cancelled",
+      run_enqueue_failed: "The run could not be started",
+      run_failed: "Run failed",
+      run_provider_bad_request: "The model service rejected this request. Check the model ID and settings (HTTP 400)",
+      run_provider_unauthorized: "Model service authentication failed. Check the Provider credentials (HTTP 401)",
+      run_provider_not_found: "Model or endpoint not found. Check the model ID and endpoint settings (HTTP 404)",
+      run_provider_unsupported: "This SDK does not support the model request parameters. Check the model and Provider settings",
+      run_startup_recovery_failed: "Run recovery failed",
+      subtask_failed: "Subtask failed",
+    },
     actions: {
       newClient: "New client",
       creating: "Creating...",
       refresh: "Refresh",
       minimize: "Minimize",
-      closeClient: "Close session"
+      closeClient: "Close session",
+      setSessionTitle: "Set session title"
+    },
+    titleSetting: {
+      modalTitle: "Set session title",
+      inputLabel: "Session title",
+      inputPlaceholder: "Enter a new session title",
+      permanentNotice: "After saving, this title will be kept permanently and no longer update automatically.",
+      save: "Save",
+      cancel: "Cancel",
+      rawTooLong: "Input is too long, please shorten it.",
+      empty: "Title must not be empty.",
+      tooLong: "Title must not exceed 50 characters.",
+      invalidCharacters: "Title contains disallowed control characters.",
+      saveFailed: "Failed to save title"
     },
     client: {
+      tabStateLoading: "Loading sessions…",
+      tabStateLoadFailed: "Failed to load sessions. Please try again.",
+      retryTabStateLoad: "Retry",
+      tabStateUpdateFailed: "Failed to update session visibility",
       tabLabel: "Session {index}",
       newTitle: "new session",
       cancel: "Cancel run",
@@ -299,12 +344,43 @@ export default {
       welcome: "Hi, I can help you get tasks done.",
       reachedTop: "Reached the beginning",
       contextBoundary: "Context boundary",
-      inputPlaceholderIdle: "Type a message, Enter to send, Shift+Enter for newline, Tab to switch agent",
+      inputPlaceholderIdle: "Type a message or paste an image, Enter to send, Shift+Enter for newline, Tab to switch agent",
       inputPlaceholderRunning: "Running, Esc to cancel current run",
       inputPlaceholderNoAgent: "No agent is available for user sessions. Update scope in settings or add a new agent.",
+      imagePreviewTitle: "Image preview",
+      imagePreviewPrevious: "Previous image",
+      imagePreviewNext: "Next image",
+      imageCount: "{count} images",
+      imageRemoveAll: "Remove all",
+      imagePreviewNotice: "Images are provided to the model only when this message is sent. They are not automatically attached to later turns. Send the images again if the model needs to view them.",
+      imagePreviewLoadFailed: "The image could not be loaded.",
+      imagePreviewUnavailable: "Unable to open the image preview. Refresh the page and try again.",
+      imageSlashCommandBlocked: "You cannot use /compact while images are attached. Remove the images first.",
+      imagePasteCount: "You can attach at most 4 images.",
+      imagePasteType: "Only PNG, JPEG, and WebP images are supported.",
+      imagePasteEmpty: "An empty image cannot be attached.",
+      imagePasteSize: "Each image must be 10 MiB or smaller.",
+      imagePasteProcessing: "Optimizing pasted images…",
+      sendingMessage: "Sending message…",
+      sendingOneImage: "Sending 1 image…",
+      sendingImages: "Sending {count} images…",
+      sendingMessageAndOneImage: "Sending message and 1 image…",
+      sendingMessageAndImages: "Sending message and {count} images…",
+      imagePasteTotal: "Attached images must not exceed 20 MiB in total.",
       noAgentHint: "No agent is available for user sessions. Update scope in settings or add a new agent.",
       goCreateAgent: "Create agent",
       chooseSession: "Choose session",
+      sessionUnavailable: 'Session is no longer available',
+      workspaceUnavailable: 'Workspace is no longer available',
+      sessionLoadFailed: 'Unable to load session. Please retry.',
+      sessionRestoreUnconfirmed: "Opening may have been saved; restoring the hidden state is unconfirmed. Check again or close the tab manually.",
+      retryTitleSync: 'Retry session title sync',
+      retrySessionSelection: 'Retry selection',
+      reloadTabs: "Reload tabs",
+      refreshSessionList: "Refresh list",
+      sessionListExpired: "The list has expired. Reload from the beginning.",
+      sessionListFailed: "Could not load sessions. Please retry.",
+      loadMoreSessions: "Load more",
       chooseSessionTitle: "Choose a session to continue",
       noSessionToChoose: "No previous session available",
       sessionEmptyPreview: "(No user messages in this session)",
@@ -314,6 +390,8 @@ export default {
       backToParent: "Back",
       copySessionId: "Copy session ID",
       sessionIdCopied: "Session ID copied",
+      copyMessageId: "Copy message ID",
+      messageIdCopied: "Message ID copied",
       copyCode: "Copy code",
       codeCopied: "Code copied",
       parentSessionMissing: "Parent session not found",
@@ -326,6 +404,10 @@ export default {
       subtaskModeExisting: "Reuse session",
       subtaskAgent: "Agent",
       subtaskSessionId: "Session ID",
+      subtaskSourceSessionId: "Source Session ID",
+      copySourceSessionId: "Copy source Session ID",
+      subtaskStartedAt: "Started",
+      subtaskDuration: "Duration",
       todoListCardTitle: "Todo list",
       todoListSummary: "Total {total}, in progress {inProgress}, pending {pending}, completed {completed}, cancelled {cancelled}",
       todoListGoal: "Goal",
@@ -340,14 +422,16 @@ export default {
       applyPatchOmittedFiles: "{count} more files are not shown",
       fork: "Fork from here",
       forked: "Created a new client from this message",
+      compactionSummary: "Context compacted",
       revert: "Revert to here",
-      revertTargetMissing: "No previous message found to revert to",
       revertConfirmTitle: "Revert to this message?",
       revertConfirmContent: "This will revert to before this message and put it back into the input box. Messages after this point will become hidden from current timeline.",
-      resetDraftWhileRunning: "This session is still running. Wait for it to finish or cancel it before reverting.",
-      revertConfirmTitleAssistant: "Revert to this assistant message?",
-      revertConfirmContentAssistant: "This will revert to this assistant message and keep it in the timeline. Messages after this point will become hidden from current timeline.",
       reverted: "Reverted to selected message",
+      reasoning: "Reasoning",
+      resultPreviewTruncated: "Tool result preview truncated",
+      showDetails: "Show details",
+      hideDetails: "Hide details",
+      openSubtask: "Open subtask",
       roles: {
         user: "You",
         assistant: "Assistant",
@@ -359,44 +443,40 @@ export default {
       slashCommandHintStrictOnly: "Exact match",
       contextManagerTitle: "Context Management",
       contextManagerTooltip: "Manage context",
-      contextManagerHint: "Choose context sources to enable. Changes usually take effect in a new conversation / new run.",
+      contextManagerHint: "Choose context sources to enable. Saved selections are evaluated against current files in a new run; an active run is not automatically refreshed.",
       contextAgentsGroupTitle: "Instruction Context (AGENTS.md)",
       contextAgentsEmpty: "No candidate AGENTS.md detected",
-      contextAgentsSaved: "AGENTS.md settings saved",
-      contextSkillsGroupTitle: "Skills (Skill Directories)",
+      contextSkillsGroupTitle: "Skills (individual selection)",
       contextManagerSaved: "Context settings saved",
-      externalSkillRootsTitle: "Skill Directories",
-      externalSkillRootsHint: "Choose skill directories to enable. Changes take effect the next time you send a message.",
-      externalSkillRootsEmpty: "No candidate skill directories were detected",
-      externalSkillRootsSaved: "Skill directories settings saved",
       agentEnablementTitle: "Agent Management",
       agentEnablementHint: "Choose which agents are available in this workspace.",
       agentEnablementTooltip: "Manage agents",
-      externalSkillRootsTooltip: "Manage enabled skill directories for this workspace",
       agentEnablementEmpty: "No agents available for configuration",
       agentEnablementSaved: "Agent enablement settings saved",
       selectAll: "Select all",
       selectNone: "Select none",
       agentDisabledInWorkspace: "The selected agent is disabled in this workspace. Please choose another one.",
       agentNoAvailableInWorkspace: "No agent is enabled in this workspace. Please enable at least one agent first.",
-      externalSkillRootsSourceWorkspace: "Workspace",
-      externalSkillRootsSourceRepo: "Repo",
-      externalSkillRootsMeta: "{count} skills",
       slashCommandHintNoMatch: "No matching command: /{query}",
       modelEditTitle: "Edit agent model",
-      modelEditHint: "This updates the selected agent's default model globally (across workspaces).",
-      modelEditSaved: "Agent default model saved",
+      modelEditHint: "This changes the current Agent's primary model for this Session only. It does not affect the global default or other Sessions.",
+      modelEditSaved: "Current Session model updated",
+      modelEditReset: "Reset to default model",
+      modelEditResetSaved: "Reset to the current global default model",
       modelEditUnavailable: "Model info unavailable",
-      modelEditTooltip: "Change model",
-      modelEditAgentMissing: "The current agent does not exist or was removed",
+      modelEditTooltip: "Current Session model",
+      modelEditSourceOverride: "Session override",
+      modelEditSourceDefault: "Global default",
+      modelEditSourceUnavailable: "Model source unavailable",
+      modelEditOverrideUnavailable: "Model unavailable · Session override",
+      modelEditDefaultUnavailable: "Default model unavailable · Global default",
+      modelEditDefault: "Global default: {model}",
+      modelEditEffective: "Current effective model: {model}",
       promptCommandsLoadFailedHint: "Failed to load prompt commands. Only builtin commands are available.",
       inputCandidateNoMatch: "No matching suggestion: {query}",
       slashCommands: {
         compact: {
           summary: "Compact the current session context"
-        },
-        clear: {
-          summary: "Start a new task and archive current visible context"
         }
       }
     }
@@ -528,6 +608,8 @@ export default {
       blockedLine2: "Click “Take over” to force takeover (disconnecting the other connection).",
       unauthorizedLine0: "[Unauthorized] Session expired. Please sign in again.",
       unauthorizedLine1: "Details: code={code} reason={reason} wasClean={wasClean}",
+      unavailableLine0: "[Terminal unavailable] Its session has exited or no longer exists. Refreshing the terminal list.",
+      unavailableLine1: "Details: code={code} reason={reason} wasClean={wasClean}",
       disconnectedLine0: "[Connection closed] Connection lost. Will retry automatically.",
       disconnectedLine1: "Details: code={code} reason={reason} wasClean={wasClean}",
       disconnectedLine2: "If occupied, click “Take over”.",
@@ -829,7 +911,7 @@ export default {
       saved: "Saved"
     },
     agentProviders: {
-      description: "Manage AI providers and models. Add or edit providers, then manage models under each provider.",
+      description: "Manage AI providers and models. Moonshot and DeepSeek can list models visible to the API key; if no models are shown, you can enter the full Provider model ID directly.",
       saving: "Saving...",
       empty: "No providers yet. Add one to start.",
       selectProviderHint: "Select a provider from the left to view its models.",
@@ -867,7 +949,6 @@ export default {
         npmLabel: "Provider Type",
         baseUrlLabel: "Base URL",
         apiKeyLabel: "API Key",
-        apiModeLabel: "API Mode",
         apiKeyPlaceholder: "Enter API key (optional)",
         apiKeyEditPlaceholder: "Enter new API key (leave blank to keep)",
         apiKeyCreateHelp: "You can leave it blank for now and fill it later.",
@@ -892,10 +973,11 @@ export default {
         contextWindowTokensLabel: "Context Window Tokens",
         contextWindowTokensHelp: "Context window limit for this model, used as the base of auto-compaction threshold calculation. Must be a positive integer.",
         aiSdkLabel: "AI SDK Shared Params JSON",
-        aiSdkHelp: "Mapped to generateText top-level options, e.g. maxOutputTokens, temperature, topP. Reserved keys like model/system/prompt are blocked.",
+        aiSdkHelp: "Supported keys: maxOutputTokens, temperature, topP, topK, presencePenalty, frequencyPenalty, stopSequences, seed, headers, allowSystemInMessages. headers only accepts ordinary custom request headers with standard field names; authentication, credential, and transport-control headers such as Authorization, API Key, Cookie, Host, Content-Length, and Connection are blocked. Values from legacy configurations are removed and replaced with a fixed safe notice; delete the affected header before saving again. Reserved keys such as model/system/messages/tools/providerOptions cannot be configured, and unknown keys are rejected on save.",
         aiSdkDocsLink: "AI SDK docs",
         providerOptionsLabel: "Provider Params JSON (auto wrapped as {key})",
         providerOptionsHelp: "Only provide the current provider sub-object. The system wraps it into providerOptions.{key} automatically.",
+        reasoningOptionsHelp: "Thinking and reasoning history are managed by the system. thinking, reasoningHistory, and reasoningEffort in this JSON are ignored.",
         providerDocsLink: "Provider docs"
       },
       deleteProvider: {
@@ -1005,7 +1087,7 @@ export default {
         todolist: "Todo List",
         subtask: "Subtask",
         archiveSearch: "Archive Search",
-        visualAnalyze: "Visual Analyze",
+        viewImage: "View Image",
         archiveRead: "Archive Read",
         archiveTail: "Archive Tail"
       },
@@ -1071,8 +1153,8 @@ export default {
           help: "Limits only a real subtask tool-call chain, not how many times primary-session context is forked. Every primary session starts ordinary runs at depth 0; at 1, a primary run can create only a first-level subtask. Range: 1-5. This does not limit sibling count, concurrency, or token usage."
         },
         modelTotalTimeoutMs: {
-          label: "Model total timeout (seconds)",
-          help: "Total timeout for a single model request. When reached, the request is aborted and the run fails. Integer seconds only; 0 disables."
+          label: "Model request / compaction timeout (seconds)",
+          help: "Total timeout for each main-model request; for manual or automatic compaction, the deadline for the entire compaction operation (including reads, summary retries, and commit). A deadline stops summary retries and fails the current conversation run during auto-compaction; an already-sent commit with an unknown outcome is not presumed absent. Integer seconds only; 0 disables."
         },
         modelIdleTimeoutMs: {
           label: "Model idle timeout (seconds)",
@@ -1080,17 +1162,16 @@ export default {
         },
         modelRequestMaxRetries: {
           label: "Model max retries",
-          help: "Automatically retries only when a request fails before receiving the first chunk. 0 disables retries."
+          help: "Maximum additional retries for failed primary model requests and manual/automatic context-compaction summary calls. All summary call errors use this limit. 0 disables retries; cancellation and the compaction work deadline stop retries immediately."
         },
-        visionModel: {
-          label: "Vision model",
-          placeholder: "Select a vision model (optional)",
-          help: "Global default vision model used by visual_analyze; falls back to the current agent primary model when unset."
+        modelRequestRetryBackoffMaxMs: {
+          label: "Model retry backoff maximum (seconds)",
+          help: "Maximum exponential backoff delay for primary model requests and manual/automatic compaction summary retries. The base delay is 2 seconds; range: 2-3600 seconds. Summaries have no separate total request cap; retry count and the optional total timeout determine how long a run may wait."
         },
         compactionModel: {
           label: "Default compaction model",
           placeholder: "Select a default compaction model (optional)",
-          help: "Used to generate context-compaction summaries; when unset, the current agent model is used. If the candidate model lacks capacity or is not suitable, the current agent primary model is used instead."
+          help: "Used for manual and automatic context-compaction summaries; when unset, the current agent model is used. A selected model is not replaced on request failure, and summary input is not split."
         },
         sessionTerminalSoundEnabled: {
           label: "Run completion sound",
@@ -1098,7 +1179,6 @@ export default {
         }
       },
       errors: {
-        visionModelInvalid: "Invalid vision model selection. Please reselect.",
         compactionModelInvalid: "Invalid default compaction model selection. Please reselect."
       }
     },
@@ -1250,6 +1330,31 @@ export default {
       },
       resetSuccess: "Reset completed"
     }
+  },
+  dashboard: {
+    title: "Analytics dashboard", subtitle: "Review Agent, model, tool, and Worker activity. All analytics stay local.",
+    overview: "Overview", agent: "Agent", model: "Models", worker: "Worker", refresh: "Refresh",
+    range: "Range", custom: "Custom range", preset_24h: "24 hours", preset_7d: "7 days", preset_30d: "30 days", preset_90d: "90 days", apply: "Apply", from: "From", to: "To",
+    monitoringVolume: "Monitoring volume", agentDuration: "Agent duration", modelRequests: "Model requests", modelSuccessRate: "Model success rate", cacheHitRate: "Cache hit rate",
+    unavailable: "Unavailable", partial: "Incomplete", available: "Complete", snapshotAt: "Snapshot", asOf: "As of",
+    emptyValue: "No value to display",
+    runScope: "Run scope", all: "All", main: "Main", subtask: "Subtask", trend: "Trend", distributionTitle: "Distribution", details: "Details", noData: "No safe data available",
+    runTerminalTitle: "Run terminal states", terminalRunTotal: "Terminated runs", distributionTotal: "Observed total", knownObserved: "Known observations", knownShare: "Bars show relative shares of known categories only",
+    inputOutputTokens: "Input / Output Tokens",
+    requests: "Requests", successRate: "Success rate", timeoutRate: "Timeout rate", inputTokens: "Input tokens", outputTokens: "Output tokens", totalTokens: "Total tokens",
+    liveSnapshot: "Worker live status", running: "Running", queued: "Queued", concurrency: "Configured slots", workerRestartCount: "Restart attempts", localFallbackNote: "Local fallback running (outside Worker slots)", utilization: "Utilization", localFallback: "Local fallback", restarts: "Restarts", toolCallCount: "Tool calls", unexpectedExits: "Unexpected exits", restartAttempts: "Restart attempts", restartSucceeded: "Restarts recovered", restartFailed: "Restart failures",
+    tokens: "Tokens", count: "Count", duration: "Duration", ratio: "Ratio", timedOut: "Timed out", other: "Other", monitoringRun: "Run", monitoringSession: "Session", monitoringMessage: "Message", monitoringTool: "Tool", monitoringExecution: "Execution", monitoringModel: "Model", monitoringWorker: "Worker", chartLegend: "Legend", chartNoSeriesSelected: "No series selected", chartSmoothLine: "smooth line chart", chartStackedBars: "stacked bar chart", chartAllStatusTotal: "Total requests (all statuses)", chartShare: "Share", chartKnownShare: "Share of known categories", chartBucketDetails: "Bucket details", chartBucket: "Time bucket", chartTotal: "Total", chartBuckets: "buckets",
+    agentRunMetrics: "Runs", agentActivityMetrics: "Messages and tools", agentCompactionMetrics: "Compaction", modelRequestMetrics: "Requests and latency", modelTokenMetrics: "Tokens", modelReportingMetrics: "Reporting coverage",
+    lastReadyAt: "Last ready", trendSuffix: " trend", comparisonContext: "Comparison", previousSameDuration: "Previous equal period", domainAgentDuration: "Agent duration", domainStatusSummary: "Domain status summary",
+    sections: "Dashboard sections", rangeEnd: "Range end", monitoringComposition: "Latest monitoring composition", domain: "Domain", statusLabel: "Status", lastSucceededAt: "Last succeeded", runType: "Run type", messageType: "Message type", toolStatus: "Tool status", toolDetails: "Tool details", byModel: "By model", tokenCoverage: "Token coverage", restartRecords: "Restart records", occurredAt: "Occurred at", event: "Event", restartStatus: "Restart status", toolName: "Tool", calls: "Calls", completed: "Completed", failed: "Failed", provider: "Provider", modelName: "Model", unknown: "Unknown", requestCount: "Request count", primaryRunCount: "Primary runs", subtaskRunCount: "Subtask runs", userMessageCount: "User messages", assistantMessageCount: "Assistant messages", manualCompactionCount: "Manual compactions", autoCompactionCount: "Auto compactions", completedAverageDuration: "Average completed duration", cacheReadTokens: "Cache read tokens", inputReportedCount: "Input reported", outputReportedCount: "Output reported", totalReportedCount: "Total reported", totalDerivedCount: "Total derived", cacheComparableCount: "Cache comparable", timeoutKindBreakdown: "Timeout kinds",
+    totalDuration: "Total duration", runCount: "Run count", toolSuccessRate: "Tool success rate", inputTokenCoverage: "Input coverage", outputTokenCoverage: "Output coverage", totalTokenCoverage: "Total coverage", inputCacheCoverage: "Cache coverage",
+    distribution: { primary: "Primary", subtask: "Subtask", other: "Other", user: "User", assistant: "Assistant", runtime: "Runtime", system: "System", compaction: "Compaction", completed: "Completed", failed: "Failed", cancelled: "Cancelled", unknown: "Unknown" },
+    healthEvidenceTitle: "Known indicators", healthEvidenceDisabled: "This domain is currently disabled", healthEvidenceGaps: "{count} open coverage gaps", healthEvidenceMissingGeneration: "{count} expected slots have no active generation", healthEvidenceStaleCheckpoint: "{count} slots have stale checkpoints", healthEvidenceMissingCheckpoint: "{count} active generations have no checkpoint", healthEvidenceUnknown: "Status is abnormal; no more specific diagnostic information is available",
+    runStatus: { completed: "Completed", failed: "Failed", cancelled: "Cancelled", interrupted: "Interrupted", unknown: "Unknown" }, workerEvent: { unexpected_exit: "Unexpected exit", restart_attempted: "Restart attempted", restart_succeeded: "Restart succeeded", restart_failed: "Restart failed" }, restartStatusValue: { recovered: "Recovered", not_recovered: "Not recovered", pending: "Pending", not_applicable: "Not applicable" },
+    status: { available: "Complete", partial: "Incomplete", healthy: "Healthy", degraded: "Degraded", stale: "Stale", unavailable: "Unavailable", disabled: "Disabled" },
+    error: {CUSTOM_RANGE_REQUIRED: "Choose both custom dates.", CUSTOM_RANGE_INVALID: "The custom date is invalid.", CUSTOM_RANGE_DST_AMBIGUOUS: "This time occurs twice because of daylight saving time.", CUSTOM_RANGE_DST_NONEXISTENT: "This time does not exist because of daylight saving time.", CUSTOM_RANGE_ORDER: "The start must be before the end.", CUSTOM_RANGE_TOO_LARGE: "Custom range cannot exceed 366 days.",  ANALYTICS_UNAVAILABLE: "Analytics is temporarily unavailable.", ANALYTICS_RANGE_TOO_LARGE: "The selected range is too large.", ANALYTICS_RANGE_INVALID: "The selected range is invalid.", ANALYTICS_TIMEZONE_INVALID: "The selected timezone is invalid.", ANALYTICS_RANGE_NOT_READY: "This range is not ready yet.", NETWORK_ERROR: "Unable to load dashboard data." },
+
+    reason: { coverage_gap: "Coverage gap", range_not_reconciled: "Range not reconciled", collector_degraded: "Collector degraded", signal_loss: "Signal loss", dirty_hour: "Hour is being refreshed", open_fact: "Open fact", configuration_changed: "Configuration changed", domain_disabled: "Domain disabled", domain_unavailable: "Domain unavailable", no_safe_data: "No safe data", invalid_metric_state: "Invalid metric state" }
   },
   editor: {
     placeholder: {

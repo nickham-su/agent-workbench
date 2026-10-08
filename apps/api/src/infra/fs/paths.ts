@@ -4,6 +4,25 @@ export function dbPath(dataDir: string) {
   return path.join(dataDir, "db.sqlite");
 }
 
+/** Isolated root owned exclusively by the Analytics child process. */
+export function analyticsDataRoot(dataDir: string) {
+  return path.join(dataDir, "analytics");
+}
+
+export function analyticsDbPath(dataDir: string) {
+  return path.join(analyticsDataRoot(dataDir), "analytics.sqlite");
+}
+
+/** API-owned ordering source for Analytics configuration control messages. */
+export function analyticsConfigSourcePath(dataDir: string) {
+  return path.join(analyticsDataRoot(dataDir), "config-source.json");
+}
+
+/** Reserved for producer-private Model Analytics outboxes. */
+export function analyticsModelOutboxRoot(dataDir: string) {
+  return path.join(analyticsDataRoot(dataDir), "model-outbox");
+}
+
 export function reposRoot(dataDir: string) {
   return path.join(dataDir, "repos");
 }
@@ -41,6 +60,14 @@ function safePathSegment(raw: string) {
   return value.length <= maxLen ? value : value.slice(0, maxLen);
 }
 
+export function applyPatchUiArtifactsWorkspaceDir(dataDir: string, workspaceId: string) {
+  return path.join(tmpRoot(dataDir), "agent", "ui-artifacts", "apply_patch", safePathSegment(workspaceId));
+}
+
+export function writeUiArtifactsWorkspaceDir(dataDir: string, workspaceId: string) {
+  return path.join(tmpRoot(dataDir), "agent", "ui-artifacts", "write", safePathSegment(workspaceId));
+}
+
 export function applyPatchUiArtifactPath(dataDir: string, workspaceId: string, toolCallId: string) {
   const ws = safePathSegment(workspaceId);
   const call = safePathSegment(toolCallId);
@@ -58,24 +85,6 @@ export function compactionSnippetPath(dataDir: string, workspaceId: string, sess
   const session = safePathSegment(sessionId);
   const id = safePathSegment(String(summaryItemId));
   return path.join(tmpRoot(dataDir), "agent", "compaction-snippets", ws, session, `${id}.txt`);
-}
-
-export function agentArchiveRoot(dataDir: string) {
-  return path.join(dataDir, "agent", "archive");
-}
-
-export function agentArchiveWorkspaceDir(dataDir: string, workspaceId: string) {
-  const ws = safePathSegment(workspaceId);
-  return path.join(agentArchiveRoot(dataDir), ws);
-}
-
-export function agentArchiveSessionDir(dataDir: string, workspaceId: string, sessionId: string) {
-  const session = safePathSegment(sessionId);
-  return path.join(agentArchiveWorkspaceDir(dataDir, workspaceId), session);
-}
-
-export function agentArchivePendingSidecarPath(dataDir: string, workspaceId: string, sessionId: string) {
-  return path.join(agentArchiveSessionDir(dataDir, workspaceId, sessionId), ".pending-reconcile.json");
 }
 
 export function sshRoot(dataDir: string) {

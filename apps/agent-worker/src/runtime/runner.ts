@@ -1,16 +1,45 @@
 import { randomBytes } from "node:crypto";
+import { constants as fsConstants } from "node:fs";
 import fs from "node:fs/promises";
+import { clearTimeout as clearNativeTimeout, setTimeout as setNativeTimeout } from "node:timers";
 import path from "node:path";
-import { APICallError, jsonSchema, streamText, tool } from "ai";
+import {
+  APICallError,
+  UnsupportedFunctionalityError,
+  jsonSchema,
+  streamText,
+  tool,
+  type LanguageModel,
+  type JSONValue,
+  type ModelMessage,
+  type StreamTextResult,
+  type TextStreamPart,
+  type ToolSet,
+} from "ai";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
+import { createMoonshotAI } from "@ai-sdk/moonshotai";
+import { createDeepSeek } from "@ai-sdk/deepseek";
+import { Value } from "@sinclair/typebox/value";
 import { generateSingleCallText } from "@agent-workbench/shared/llm-single-call";
-import { AgentApiClient, ApiConflictError, type ExecutionProfile, type PromptContext } from "./apiClient.js";
-import type { AgentUiLocale } from "@agent-workbench/shared";
-import { getPromptText } from "@agent-workbench/shared/prompts";
+import { parseAiSdkCallSettings } from "@agent-workbench/shared/llm-ai-sdk-call-settings";
+import { readSubtaskSourceSessionId } from "./subtaskSource.js";
+import { AgentApiClient, ApiConflictError, InternalRpcHttpError, InternalRpcInvalidResponseError, InternalRpcNetworkError, InternalRpcTimeoutError, type ExecutionProfile, type PromptContext } from "./apiClient.js";
 import { McpManager } from "./mcpManager.js";
-import { buildRetryMessages, chunkStartsVisibleOutput, shouldRetryAfterPartialText } from "./modelRetry.js";
+import { AnalyticsSignalProducer } from "./analyticsSignals.js";
+import {
+  AgentProviderReplayUpdateError,
+  assertAgentProviderReplayUpdateCompatible,
+  parseAgentProviderReplay,
+  serializeAgentProviderReplay,
+  type AgentProviderReplayEnvelope,
+  type AgentApiFlushAssistantPartsRequest,
+  type AgentApiPromptAttachmentRefPart,
+  AgentViewImageResultSchema,
+  AgentToolResultOutputSchema,
+  viewImagePathPreview,
+} from "@agent-workbench/shared/internal-contracts/agent-api";
 import { PluginRuntimeManager } from "./plugins/runtimeManager.js";
 import { ToolRegistry } from "./tools/registry.js";
 import { BuiltinToolProvider } from "./tools/providers/builtin.js";
@@ -20,7 +49,30 @@ import { McpToolProvider } from "./tools/providers/mcp.js";
 import type { ToolExecutionContext } from "./tools/types.js";
 import { isMcpToolName, isPluginToolName } from "./tools/types.js";
 import { createToolFailureCaptureIfEnabled, extractPartialToolResults, type ToolFailureCapture } from "./toolErrorCapture.js";
+import type { AgentAttachmentStorage } from "./agentAttachmentStorage.js";
 import { formatToolErrorStoreWarning } from "./toolErrorStore.js";
+import {
+  DefaultProviderConversationStateAdapterRegistry,
+} from "./providers/conversation-state/registry.js";
+import { finalOpenAiModel } from "./providers/openai-responses-replay.js";
+import type {
+  ProviderConversationStateAttempt,
+  ProviderConversationStateAdapterRegistry,
+  ProviderConversationStatePartUpdate,
+  ProviderConversationStateToolCallReplay,
+} from "./providers/conversation-state/types.js";
+import {
+  agentReplayProvenance,
+  sameAgentReplayProvenance,
+} from "@agent-workbench/shared/internal-contracts/agent-provider-provenance";
+import {
+  projectAssistantDebugRecord,
+  serializeAssistantDebugRecord,
+} from "./debug/project-assistant-debug-record.js";
+import { CompactionExecutor, CompactionNoticeFenceLostError } from "./compaction/executor.js";
+import { MODEL_RETRY_BACKOFF_BASE_MS, computeRetryBackoffMs, normalizeModelRequestMaxRetries, normalizeRetryBackoffMaxMs } from "./retry-backoff.js";
+import type { CompactionCasState, CompactionMode } from "./compaction/types.js";
+export { computeRetryBackoffMs, normalizeRetryBackoffMaxMs } from "./retry-backoff.js";
 
 function nowMs() {
   return Date.now();
@@ -32,23 +84,11 @@ function parseIntOrDefault(raw: string | undefined, fallback: number) {
   return parsed;
 }
 
-const DEBUG_DUMP_ENABLED = process.env.AWB_AGENT_DEBUG_DUMP === "1";
-const DEBUG_DUMP_RELATIVE_DIR = path.join(".debug", "agent_context_item_logs");
+const DEBUG_DUMP_RELATIVE_DIR = path.join(".debug", "agent_message_logs");
 const LOOP_MAX_STEPS = parseIntOrDefault(process.env.AWB_AGENT_LOOP_MAX_STEPS, 128);
 const LOOP_REPEAT_TOOL_CALL_THRESHOLD = parseIntOrDefault(process.env.AWB_AGENT_LOOP_REPEAT_TOOL_CALL_THRESHOLD, 20);
-// 运行参数优先从后端 Settings 下发;这里的 env 仅作为全局覆盖开关,方便临时排障。
-// 0 表示关闭。
-const ENV_TIMEOUT_MS_MAX = 2_147_483_647;
-const ENV_MODEL_IDLE_TIMEOUT_MS = Math.min(
-  ENV_TIMEOUT_MS_MAX,
-  Math.max(0, parseIntOrDefault(process.env.AWB_AGENT_MODEL_IDLE_TIMEOUT_MS, 0))
-);
-const ENV_MODEL_TOTAL_TIMEOUT_MS = Math.min(
-  ENV_TIMEOUT_MS_MAX,
-  Math.max(0, parseIntOrDefault(process.env.AWB_AGENT_MODEL_TOTAL_TIMEOUT_MS, 0))
-);
-const MODEL_RETRY_BACKOFF_BASE_MS = 2_000;
-const MODEL_RETRY_BACKOFF_MAX_MS = 60_000;
+const CONTROL_WRITE_RETRY_DELAY_MS = 100;
+const COMPACTION_NOTICE_TIMEOUT_MS = 1_000;
 const EMPTY_RESPONSE_COMPLETE_THRESHOLD = 6;
 const TOOL_OUTPUT_TEXT_MAX_CHARS = Math.max(1_000, parseIntOrDefault(process.env.AWB_TOOL_OUTPUT_TEXT_MAX_CHARS, 8_000));
 const TOOL_OUTPUT_TEXT_PREVIEW_CHARS = Math.max(
@@ -61,17 +101,6 @@ const TOOL_ARTIFACT_MAX_CHARS = Math.max(
 );
 const TOOL_OUTPUT_TEXT_UNTRUNCATED_NAMES = new Set(["subtask"]);
 const TOOL_PARALLEL_BATCH_LIMIT = 3;
-
-export function buildCompactionUserPrompt(input: { uiLocale: AgentUiLocale | null }) {
-  if (input.uiLocale === "zh-CN") {
-    return getPromptText("agent/compaction-user-prompt.zh-CN.txt");
-  }
-  return getPromptText("agent/compaction-user-prompt.en-US.txt");
-}
-const COMPACTION_TIMEOUT_MS = 600_000;
-
-const MANUAL_COMPACT_SENTINEL = "__awb_compact__";
-
 function newSortableId(prefix: string) {
   const ts = Date.now().toString(36).padStart(10, "0");
   const random = randomBytes(6).toString("hex");
@@ -86,12 +115,6 @@ function shouldStopForMaxSteps(step: number, maxSteps: number) {
   return maxSteps > 0 && step >= Math.max(maxSteps, EMPTY_RESPONSE_COMPLETE_THRESHOLD);
 }
 
-function computeRetryBackoffMs(attemptIndex: number) {
-  if (!Number.isFinite(attemptIndex) || attemptIndex < 0) return MODEL_RETRY_BACKOFF_BASE_MS;
-  const factor = 2 ** Math.floor(attemptIndex);
-  const delay = MODEL_RETRY_BACKOFF_BASE_MS * factor;
-  return Math.min(MODEL_RETRY_BACKOFF_MAX_MS, Math.max(MODEL_RETRY_BACKOFF_BASE_MS, delay));
-}
 
 function toErrorRecord(value: unknown) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -129,22 +152,6 @@ function collectErrorCodes(value: unknown, depth = 0): string[] {
   return codes;
 }
 
-function collectErrorText(value: unknown, depth = 0): string[] {
-  if (depth > 3) return [];
-  if (typeof value === "string") return [value];
-  if (value instanceof Error) {
-    return [value.message, ...collectErrorText((value as Error & { cause?: unknown }).cause, depth + 1)];
-  }
-  const record = toErrorRecord(value);
-  if (!record) return [];
-
-  const values: string[] = [];
-  for (const key of ["message", "responseBody", "body", "error", "data", "details", "cause"] as const) {
-    values.push(...collectErrorText(record[key], depth + 1));
-  }
-  return values;
-}
-
 const CONTEXT_LIMIT_ERROR_CODES = new Set([
   "context_length_exceeded",
   "context_limit_exceeded",
@@ -154,54 +161,56 @@ const CONTEXT_LIMIT_ERROR_CODES = new Set([
   "request_too_large"
 ]);
 
-function hasContextLimitText(text: string) {
-  const normalized = text.toLowerCase().replace(/[._-]+/g, " ");
-  return (
-    /\bcontext[\s_-]*(?:length|window|limit)\b/.test(normalized)
-    || /\b(?:prompt|input)\s+(?:is\s+)?too\s+(?:long|large)\b/.test(normalized)
-    || /\brequest\s+(?:is\s+)?too\s+large\b/.test(normalized)
-    || /\b(?:prompt|input)\b[\s\S]{0,80}\b(?:exceed(?:s|ed)?|maximum|max(?:imum)?|limit)\b/.test(normalized)
-    || /\b(?:exceed(?:s|ed)?|maximum|max(?:imum)?|limit)\b[\s\S]{0,80}\b(?:prompt|input)\b/.test(normalized)
-  );
-}
-
-function isContextLengthExceededError(err: unknown) {
-  const apiCallError = APICallError.isInstance(err) ? err : null;
-  const record = toErrorRecord(err);
+function safeErrorSummary(error: unknown) {
+  const source = toErrorRecord(error);
+  const apiCallError = APICallError.isInstance(error) ? error : null;
+  // Provider-controlled error names/codes can contain response text or credentials.
+  const knownNames = new Set(["Error", "APICallError", "AI_APICallError", "AbortError", "TimeoutError"]);
+  const name = error instanceof Error && knownNames.has(error.name) ? error.name : "Error";
+  const status = apiCallError?.statusCode
+    ?? (typeof source?.statusCode === "number" ? source.statusCode : null)
+    ?? (typeof source?.status === "number" ? source.status : null);
+  const safeStatus = typeof status === "number" && Number.isInteger(status) && status >= 100 && status <= 599 ? status : null;
   const codes = [
     ...collectErrorCodes(apiCallError?.data),
-    ...collectErrorCodes(record)
+    ...collectErrorCodes(source),
   ];
-  if (codes.some((code) => CONTEXT_LIMIT_ERROR_CODES.has(code))) return true;
-
-  const statusCode = apiCallError?.statusCode
-    ?? (typeof record?.statusCode === "number" ? record.statusCode : null)
-    ?? (typeof record?.status === "number" ? record.status : null);
-  if (statusCode != null && ![400, 413, 422].includes(statusCode)) return false;
-
-  return [
-    ...collectErrorText(apiCallError?.responseBody),
-    ...collectErrorText(apiCallError?.data),
-    ...collectErrorText(err)
-  ].some(hasContextLimitText);
+  const safeCodes = new Set([
+    ...CONTEXT_LIMIT_ERROR_CODES,
+    "invalid_request_error", "authentication_error", "permission_error",
+    "rate_limit_exceeded", "model_not_found", "invalid_api_key",
+  ]);
+  const safeCode = codes.find((code) => safeCodes.has(code));
+  const details = [
+    safeStatus == null ? null : `status=${safeStatus}`,
+    safeCode ? `code=${safeCode}` : null,
+  ].filter((value): value is string => value != null);
+  return details.length > 0 ? `${name} (${details.join(", ")})` : name;
 }
 
-function parseHttpStatusFromError(err: unknown) {
-  const message = err instanceof Error ? err.message : String(err || "");
-  const match = /^request failed:\s*(\d{3})\b/.exec(message);
-  if (!match) return null;
-  const status = Number(match[1]);
-  return Number.isFinite(status) ? status : null;
+/** Only trusted SDK error types and numeric HTTP statuses may become public terminal codes. */
+function providerFailureTerminalCode(error: unknown): import("@agent-workbench/shared").AgentTerminalResultCode | null {
+  if (UnsupportedFunctionalityError.isInstance(error)) return "run_provider_unsupported";
+  if (!APICallError.isInstance(error)) return null;
+  switch (error.statusCode) {
+    case 400: return "run_provider_bad_request";
+    case 401: return "run_provider_unauthorized";
+    case 404: return "run_provider_not_found";
+    default: return null;
+  }
 }
 
-function isRetryableCompactionError(err: unknown) {
-  if (isContextLengthExceededError(err)) return false;
-  if (err instanceof ApiConflictError) return false;
-  const status = parseHttpStatusFromError(err);
-  if (status == null) return true;
-  if (status === 408 || status === 429) return true;
-  if (status >= 500 && status <= 599) return true;
-  return false;
+function toolErrorMessage(error: unknown) {
+  if (error instanceof Error) return error.message || error.name || "Error";
+  return String(error || "Error");
+}
+
+class CompactionConflictError extends Error {
+  constructor(cause?: unknown) {
+    super("compaction conflicts with the current run state");
+    this.name = "CompactionConflictError";
+    if (cause !== undefined) (this as Error & { cause?: unknown }).cause = cause;
+  }
 }
 
 async function sleepMsWithAbort(ms: number, signal: AbortSignal) {
@@ -225,14 +234,30 @@ function buildSubtaskErrorText(params: {
   status: "failed" | "cancelled";
   error: string;
   subtaskSessionId?: string;
+  sourceSessionId?: string;
   subtaskResultText?: string;
 }) {
   return buildToolText({
     toolName: "subtask",
     status: params.status,
-    headers: [["subtask_session_id", params.subtaskSessionId]],
+    headers: [
+      ["subtask_session_id", params.subtaskSessionId],
+      ["source_session_id", params.sourceSessionId !== undefined ? JSON.stringify(params.sourceSessionId) : undefined]
+    ],
     body: typeof params.subtaskResultText === "string" ? `${params.error}\n\n${params.subtaskResultText}` : params.error
   });
+}
+
+function formatSubtaskStartError(error: unknown, args: Record<string, unknown>) {
+  const session = toRecordObject(args.session);
+  if (
+    error instanceof InternalRpcHttpError
+    && error.apiCode === "AGENT_SUBTASK_SESSION_NOT_FOUND"
+    && session?.mode === "existing"
+  ) {
+    return "指定的 existing 子任务会话不存在或已失效。请改用 session.mode=\"new\" 或 \"fork\"，或者提供当前工作区中有效的 subtask sessionId。\n\n错误码：AGENT_SUBTASK_SESSION_NOT_FOUND\nHTTP 状态：404";
+  }
+  return toolErrorMessage(error);
 }
 
 function normalizeToolText(raw: string) {
@@ -289,6 +314,13 @@ function buildToolSuccessText(params: {
 }) {
   const resultObj = toRecordObject(params.result);
 
+  if (params.toolName === "view_image") {
+    if (!Value.Check(AgentViewImageResultSchema, params.result)) {
+      throw new Error("invalid view_image result");
+    }
+    return viewImagePathPreview(params.result.path);
+  }
+
   if (params.toolName === "apply_patch") {
     const summary = toRecordObject(resultObj?.summary);
     const body = typeof resultObj?.text === "string" ? resultObj.text : "apply_patch completed";
@@ -323,10 +355,14 @@ function buildToolSuccessText(params: {
   if (params.toolName === "subtask") {
     const subtaskSessionId = typeof resultObj?.subtaskSessionId === "string" ? resultObj.subtaskSessionId.trim() : "";
     const resultText = typeof resultObj?.resultText === "string" ? resultObj.resultText : "Subtask finished successfully.";
+    const sourceSessionId = readSubtaskSourceSessionId(resultObj);
     return buildToolText({
       toolName: params.toolName,
       status: params.status,
-      headers: [["subtask_session_id", subtaskSessionId || undefined]],
+      headers: [
+        ["subtask_session_id", subtaskSessionId || undefined],
+        ["source_session_id", sourceSessionId !== undefined ? JSON.stringify(sourceSessionId) : undefined]
+      ],
       body: resultText
     });
   }
@@ -412,20 +448,6 @@ function buildToolSuccessText(params: {
     });
   }
 
-  if (params.toolName === "archive_search" || params.toolName === "archive_read") {
-    const noArchive = resultObj?.noArchive === true;
-    const body = noArchive
-      ? "No archive yet."
-      : typeof resultObj?.text === "string"
-        ? resultObj.text
-        : stringifyResult(params.result);
-    return buildToolText({
-      toolName: params.toolName,
-      status: params.status,
-      body
-    });
-  }
-
   if (params.toolName === "write") {
     const target = typeof params.args.filePath === "string" ? params.args.filePath : undefined;
     const body = typeof resultObj?.content === "string"
@@ -437,19 +459,6 @@ function buildToolSuccessText(params: {
       toolName: params.toolName,
       status: params.status,
       headers: [["target", target]],
-      body
-    });
-  }
-
-  if (params.toolName === "visual_analyze") {
-    const files = Array.isArray(resultObj?.files) ? resultObj.files.length : undefined;
-    const body = typeof resultObj?.text === "string"
-      ? resultObj.text
-      : stringifyResult(params.result);
-    return buildToolText({
-      toolName: params.toolName,
-      status: params.status,
-      headers: [["files", typeof files === "number" ? String(files) : undefined]],
       body
     });
   }
@@ -510,10 +519,13 @@ function safePathSegment(input: string) {
 
 async function finalizeToolText(params: {
   workspacePath: string;
-  itemId: number;
+  toolExecutionId: string;
   toolName: string;
-  toolCallId?: string;
   text: string;
+  /** 兼容既有对抗测试：在 rename 前注入路径替换。 */
+  beforeArtifactCommit?: () => Promise<void> | void;
+  /** 仅供对抗测试覆盖目录/目标在发布各阶段被替换的路径。 */
+  onArtifactWritePhase?: (phase: "before_rename" | "after_rename") => Promise<void> | void;
 }) {
   const normalized = normalizeToolText(params.text).trimEnd();
   if (TOOL_OUTPUT_TEXT_UNTRUNCATED_NAMES.has(params.toolName)) {
@@ -531,27 +543,15 @@ async function finalizeToolText(params: {
     };
   }
 
-  const toolSegment = safePathSegment(params.toolName);
-  const callSegment = typeof params.toolCallId === "string" && params.toolCallId.trim()
-    ? safePathSegment(params.toolCallId)
-    : "";
-  if (!callSegment) {
-    const preview = normalized.slice(0, TOOL_OUTPUT_TEXT_PREVIEW_CHARS).trimEnd();
-    const text = `${preview}\n\n[truncated]\nartifact: unavailable`.trim();
-    return {
-      text,
-      textTruncated: true as const,
-      textArtifactPath: undefined as string | undefined
-    };
-  }
+  if (!/^[A-Za-z0-9._-]{1,120}$/.test(params.toolExecutionId)) throw new Error("invalid tool execution id for artifact");
+  const executionSegment = params.toolExecutionId;
 
   const relativePath = path.join(
     ".awb",
     "agent",
     "artifacts",
-    "by_tool_call",
-    toolSegment,
-    `${callSegment}.txt`
+    "by_tool_execution",
+    `${executionSegment}.txt`
   );
   const workspaceResolvedPath = path.resolve(params.workspacePath);
   const fullPath = path.resolve(workspaceResolvedPath, relativePath);
@@ -561,7 +561,7 @@ async function finalizeToolText(params: {
 
   const workspaceRealPath = await fs.realpath(workspaceResolvedPath);
   let parentDirPath = workspaceResolvedPath;
-  for (const segment of [".awb", "agent", "artifacts", "by_tool_call", toolSegment]) {
+  for (const segment of [".awb", "agent", "artifacts", "by_tool_execution"]) {
     parentDirPath = path.join(parentDirPath, segment);
     const stat = await fs.lstat(parentDirPath).catch(() => null);
     if (!stat) {
@@ -595,7 +595,160 @@ async function finalizeToolText(params: {
     normalized.length <= TOOL_ARTIFACT_MAX_CHARS
       ? normalized
       : `${normalized.slice(0, TOOL_ARTIFACT_MAX_CHARS)}\n\n[truncated]`;
-  await fs.writeFile(fullPath, artifactBody, { encoding: "utf8" });
+  // 以已打开目录的 fd 路径创建临时文件、写入和 rename。所有检查均围绕
+  // 同一个目录 inode 与仍打开的文件 inode，防止 pathname/symlink 竞态导致
+  // 跟随外部目标或错误报告成功。平台无法提供安全 dirfd 路径时 fail-closed。
+  const parentDirectoryHandle = await fs.open(parentDirPath, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY);
+  let tempHandle: fs.FileHandle | null = null;
+  let tempPath: string | null = null;
+  let finalPath: string | null = null;
+  let published = false;
+  try {
+    const fdDirectoryPath = process.platform === "linux"
+      ? `/proc/self/fd/${parentDirectoryHandle.fd}`
+      : process.platform === "darwin"
+        ? `/dev/fd/${parentDirectoryHandle.fd}`
+        : null;
+    if (!fdDirectoryPath) {
+      throw new Error("secure artifact writes require directory fd path support");
+    }
+    const pinnedParentRealPath = await fs.realpath(fdDirectoryPath);
+    if (!isPathInside(workspaceRealPath, pinnedParentRealPath)) {
+      throw new Error("artifact parent directory is outside workspace");
+    }
+    const pinnedParentStat = await fs.stat(fdDirectoryPath);
+    const assertCurrentArtifactDirectory = async (phase: string) => {
+      const currentParentStat = await fs.stat(parentDirPath);
+      const currentParentRealPath = await fs.realpath(parentDirPath);
+      if (
+        currentParentStat.dev !== pinnedParentStat.dev
+        || currentParentStat.ino !== pinnedParentStat.ino
+        || !isPathInside(workspaceRealPath, currentParentRealPath)
+      ) {
+        throw new Error(`artifact parent directory changed during ${phase}`);
+      }
+    };
+
+    const tempName = `.${executionSegment}.${randomBytes(12).toString("hex")}.tmp`;
+    tempPath = path.join(fdDirectoryPath, tempName);
+    finalPath = path.join(fdDirectoryPath, `${executionSegment}.txt`);
+    tempHandle = await fs.open(
+      tempPath,
+      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW,
+      0o600,
+    );
+    await tempHandle.writeFile(artifactBody, { encoding: "utf8" });
+    await tempHandle.sync();
+
+    const tempStat = await tempHandle.stat();
+    if (!tempStat.isFile()) throw new Error("artifact temp path must be a regular file");
+    const tempPathStat = await fs.lstat(tempPath);
+    if (
+      tempPathStat.isSymbolicLink()
+      || !tempPathStat.isFile()
+      || tempPathStat.dev !== tempStat.dev
+      || tempPathStat.ino !== tempStat.ino
+    ) {
+      throw new Error("artifact temp path changed during write");
+    }
+    const assertTempPathStillOwned = async () => {
+      const stat = await fs.lstat(tempPath!);
+      if (
+        stat.isSymbolicLink()
+        || !stat.isFile()
+        || stat.dev !== tempStat.dev
+        || stat.ino !== tempStat.ino
+      ) {
+        throw new Error("artifact temp path changed before rename");
+      }
+    };
+    const removeOwnedPath = async (candidatePath: string, expected: { dev: number; ino: number }) => {
+      const stat = await fs.lstat(candidatePath).catch(() => null);
+      if (
+        !stat
+        || stat.isSymbolicLink()
+        || !stat.isFile()
+        || stat.dev !== expected.dev
+        || stat.ino !== expected.ino
+      ) {
+        return;
+      }
+      // unlink 不会解析 symlink；此前还已确认该目录项仍是本次 fd 创建的 inode。
+      await fs.unlink(candidatePath).catch(() => undefined);
+    };
+
+    await params.beforeArtifactCommit?.();
+    await params.onArtifactWritePhase?.("before_rename");
+    await assertTempPathStillOwned();
+    await assertCurrentArtifactDirectory("pre-rename verification");
+
+    // tempHandle 保持打开直到发布、inode、正文和正式读取路径均验证完成。
+    await fs.rename(tempPath, finalPath);
+    tempPath = null;
+    published = true;
+    try {
+      await params.onArtifactWritePhase?.("after_rename");
+      const finalFdStat = await fs.lstat(finalPath);
+      if (
+        finalFdStat.isSymbolicLink()
+        || !finalFdStat.isFile()
+        || finalFdStat.dev !== tempStat.dev
+        || finalFdStat.ino !== tempStat.ino
+      ) {
+        throw new Error("artifact final path changed during publish");
+      }
+      const formalReadHandle = await fs.open(finalPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+      try {
+        const formalReadStat = await formalReadHandle.stat();
+        if (
+          !formalReadStat.isFile()
+          || formalReadStat.dev !== tempStat.dev
+          || formalReadStat.ino !== tempStat.ino
+          || formalReadStat.size !== Buffer.byteLength(artifactBody, "utf8")
+        ) {
+          throw new Error("artifact final file does not match published inode");
+        }
+        const formalBody = await formalReadHandle.readFile({ encoding: "utf8" });
+        if (formalBody !== artifactBody) throw new Error("artifact final file content does not match publish body");
+      } finally {
+        await formalReadHandle.close();
+      }
+      await assertCurrentArtifactDirectory("post-publish verification");
+      const formalPathStat = await fs.lstat(fullPath);
+      if (
+        formalPathStat.isSymbolicLink()
+        || !formalPathStat.isFile()
+        || formalPathStat.dev !== tempStat.dev
+        || formalPathStat.ino !== tempStat.ino
+      ) {
+        throw new Error("artifact formal read path does not match published inode");
+      }
+    } catch (error) {
+      // fdDirectoryPath 仍锚定原目录。仅移除仍等于本次 temp fd 的目录项，绝不删除
+      // 被并发进程替换的未知文件；父目录移动/替换时绝不报告成功。
+      await removeOwnedPath(finalPath, tempStat);
+      published = false;
+      throw error;
+    }
+  } finally {
+    if (tempPath && tempHandle) {
+      const tempStat = await tempHandle.stat().catch(() => null);
+      if (tempStat) {
+        const current = await fs.lstat(tempPath).catch(() => null);
+        if (current?.isFile() && !current.isSymbolicLink() && current.dev === tempStat.dev && current.ino === tempStat.ino) {
+          await fs.unlink(tempPath).catch(() => undefined);
+        }
+      }
+    }
+    if (published && finalPath) {
+      // 成功路径保留 artifact；此分支只为明确 final 由本函数负责发布。
+    }
+    if (tempHandle) await tempHandle.close().catch(() => undefined);
+    await parentDirectoryHandle.close();
+  }
+  // 成功返回后，同 UID 的其他进程仍可任意修改 Workspace 文件；这是常规文件系统
+  // 权限模型无法在返回后继续防御的边界。返回前已验证正式读取路径指向本 Worker inode。
+
 
   const preview = normalized.slice(0, TOOL_OUTPUT_TEXT_PREVIEW_CHARS).trimEnd();
   const text = `${preview}\n\n[truncated]\nartifact: ${relativePath}`.trim();
@@ -610,14 +763,22 @@ type QueuedRun = {
   workspaceId: string;
   sessionId: string;
   runId: string;
+  runKind?: "user" | "manual_compaction" | "subtask";
   inputText?: string;
+  resumeAssistantMessageId?: string | null;
+  /** 恢复 continuation 只能在首次真实模型调用前消费一次。 */
+  recoveryContinuation?: { messageId: string | null };
   workspacePath: string;
   workspaceRepoDirNames: string[];
 };
 
+const STRUCTURED_RESULT_TOOL_NAMES = new Set(["apply_patch", "todolist", "subtask", "write", "scratchpad", "view_image"]);
+
 type PendingTool = {
-  itemId: number;
-  status: "queued" | "running" | "streaming" | "completed" | "failed" | "cancelled";
+  toolExecutionId: string;
+  callPartId: string;
+  assistantMessageId: string;
+  status: "queued" | "running" | "completed" | "failed" | "cancelled" | "unknown";
   toolName: string;
   toolCallId: string;
   args: Record<string, unknown>;
@@ -627,7 +788,33 @@ type ToolCall = {
   toolName: string;
   toolCallId: string;
   args: Record<string, unknown>;
+  callPartId: string;
 };
+
+type ProviderReplayFor<T extends AgentProviderReplayEnvelope["item"]["type"]> = AgentProviderReplayEnvelope & {
+  item: Extract<AgentProviderReplayEnvelope["item"], { type: T }>;
+};
+
+/** Provider stream 的有序转录状态；已切换类型的文本不可回填到早期 Part。 */
+type StreamingAssistantPart =
+  | { id: string; position: number; type: "text"; text: string; providerReplay?: ProviderReplayFor<"text"> }
+  | { id: string; position: number; type: "reasoning"; text: string; providerReplay?: ProviderReplayFor<"reasoning"> }
+  | {
+    id: string; position: number; type: "tool_call"; toolName: string;
+    input: Record<string, unknown>; providerToolCallId: string | null; toolCall: ToolCall;
+    providerReplay?: ProviderReplayFor<"function_call" | "tool_call">;
+  };
+
+type ProviderReplayPartUpdate = ProviderConversationStatePartUpdate;
+
+type RuntimeToolSet = ToolSet;
+type RuntimeStreamChunk = TextStreamPart<RuntimeToolSet>;
+type RuntimeStreamResult = Pick<StreamTextResult<RuntimeToolSet, never>,
+  "fullStream" | "reasoningText" | "usage" | "totalUsage" | "response">;
+type RuntimeStreamRequest = Parameters<typeof streamText<RuntimeToolSet>>[0];
+type RuntimeStreamText = (request: RuntimeStreamRequest) => RuntimeStreamResult;
+
+type ProviderToolCallReplay = ProviderConversationStateToolCallReplay;
 
 type ToolExecutionBatch = {
   mode: "parallel" | "serial";
@@ -636,38 +823,96 @@ type ToolExecutionBatch = {
 
 function isAbortLikeError(err: unknown, signal?: AbortSignal) {
   if (signal?.aborted) return true;
-  if (!err || typeof err !== "object") return false;
-  const name = typeof (err as any).name === "string" ? (err as any).name : "";
-  const code = typeof (err as any).code === "string" ? (err as any).code : "";
-  const message = typeof (err as any).message === "string" ? (err as any).message : "";
+  const record = toErrorRecord(err);
+  const error = err instanceof Error ? err : null;
+  const name = error?.name
+    || (typeof record?.name === "string" ? record.name : "");
+  const code = typeof record?.code === "string" ? record.code : "";
+  const message = error?.message
+    || (typeof record?.message === "string" ? record.message : "");
   return name === "AbortError"
     || code === "ABORT_ERR"
     || /\babort(ed)?\b/i.test(message)
     || /\babort(ed)?\b/i.test(name);
 }
 
+export class FencedWriteIgnoredError extends Error {
+  constructor(operation: string) {
+    super(`fenced write ignored: ${operation}`);
+    this.name = "FencedWriteIgnoredError";
+  }
+}
+
+export class FencedWriteMissingError extends Error {
+  constructor(operation: string) {
+    super(`fenced write missing: ${operation}`);
+    this.name = "FencedWriteMissingError";
+  }
+}
+
+export class ControlWritePermanentError extends Error {
+  constructor(readonly operation: string, cause: unknown) {
+    super(`control write permanently failed: ${operation}`);
+    this.name = "ControlWritePermanentError";
+    (this as Error & { cause?: unknown }).cause = cause;
+  }
+}
+
+// The terminal Assistant request may have committed its intent even if the
+// Worker never received the response. Do not infer a new terminal tuple.
+class TerminalAssistantOutcomeUncertainError extends Error {
+  constructor() {
+    super("terminal Assistant completion outcome uncertain");
+  }
+}
+
+export class ControlReadPermanentError extends Error {
+  constructor(readonly operation: string, cause: unknown) {
+    super(`control read permanently failed: ${operation}`);
+    this.name = "ControlReadPermanentError";
+    (this as Error & { cause?: unknown }).cause = cause;
+  }
+}
+
+class CompactionInputLimitError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CompactionInputLimitError";
+  }
+}
+
+function isRetryableControlWriteError(error: unknown) {
+  if (error instanceof InternalRpcTimeoutError || error instanceof InternalRpcNetworkError) return true;
+  if (!(error instanceof InternalRpcHttpError)) return false;
+  return error.status === 408 || error.status === 425 || error.status === 429 || error.status >= 500;
+}
+
+function isRetryableTerminalControlError(error: unknown) {
+  return error instanceof InternalRpcTimeoutError
+    || error instanceof InternalRpcNetworkError
+    || (error instanceof InternalRpcHttpError && [502, 503, 504].includes(error.status));
+}
+
+function assertFencedWriteUpdated(operation: string, response: { result: "updated" | "ignored" | "missing" } | undefined) {
+  // 真实 AgentApiClient 对 fenced response 做 schema 校验，生产路径只会得到三种合法结果。
+  // 兼容尚未迁移的测试替身：它们返回旧 writeback payload，但不代表真实 fenced 成功。
+  if (!response || typeof response.result !== "string") return;
+  if (response.result === "updated") return;
+  if (response.result === "ignored") throw new FencedWriteIgnoredError(operation);
+  throw new FencedWriteMissingError(operation);
+}
+
 const EMPTY_PROMPT_CONTEXT: PromptContext = {
-  headItemId: null,
+  headMessageId: null,
+  sessionRevision: 0,
   system: "",
   messages: [],
   tools: [],
   pendingTools: [],
   lastResponseTotalTokens: null,
   uiLocale: null,
-  externalSkillRoots: []
+  externalSkills: []
 };
-
-const RESERVED_MODEL_OPTION_KEYS = new Set([
-  "model",
-  "system",
-  "prompt",
-  "messages",
-  "input",
-  "abortSignal",
-  "providerOptions",
-  "tools",
-  "toolChoice"
-]);
 
 function isSafeObjectKey(raw: string) {
   if (!raw) return false;
@@ -679,24 +924,41 @@ function toRecordObject(raw: unknown) {
   return raw as Record<string, unknown>;
 }
 
+function toJsonValue(raw: unknown): JSONValue | undefined {
+  if (raw === null || typeof raw === "string" || typeof raw === "boolean") return raw;
+  if (typeof raw === "number") return Number.isFinite(raw) ? raw : undefined;
+  if (Array.isArray(raw)) {
+    const values: JSONValue[] = [];
+    for (const item of raw) {
+      const value = toJsonValue(item);
+      if (value === undefined) return undefined;
+      values.push(value);
+    }
+    return values;
+  }
+  const source = toRecordObject(raw);
+  if (!source) return undefined;
+  const result: Record<string, JSONValue> = {};
+  for (const [key, item] of Object.entries(source)) {
+    const value = toJsonValue(item);
+    if (value !== undefined) result[key] = value;
+  }
+  return result;
+}
+
 function providerOptionsKeyByNpm(npm: ExecutionProfile["provider"]["npm"]) {
   if (npm === "@ai-sdk/openai-compatible") return "openaiCompatible";
+  if (npm === "@ai-sdk/moonshotai") return "moonshotai";
+  if (npm === "@ai-sdk/deepseek") return "deepseek";
   return npm === "@ai-sdk/anthropic" ? "anthropic" : "openai";
 }
 
 function buildModelRuntimeOptions(profile: ExecutionProfile) {
   const source = toRecordObject(profile.model.options) ?? {};
-  const aiSdkSource = toRecordObject(source.aiSdk) ?? {};
-  const aiSdk: Record<string, unknown> = {};
-  for (const [rawKey, value] of Object.entries(aiSdkSource)) {
-    const key = rawKey.trim();
-    if (!isSafeObjectKey(key)) continue;
-    if (RESERVED_MODEL_OPTION_KEYS.has(key)) continue;
-    aiSdk[key] = value;
-  }
+  const aiSdk = parseAiSdkCallSettings(source.aiSdk);
 
   if (aiSdk.maxOutputTokens === undefined && source.maxOutputTokens !== undefined) {
-    aiSdk.maxOutputTokens = source.maxOutputTokens;
+    aiSdk.maxOutputTokens = parseAiSdkCallSettings({ maxOutputTokens: source.maxOutputTokens }).maxOutputTokens;
   }
 
   const providerOptionsByKey = toRecordObject(source.providerOptionsByKey) ?? {};
@@ -746,27 +1008,6 @@ function buildProviderOptionsWithPromptCacheKey(params: {
   };
 }
 
-function resolveOpenAiModelFactory(sdk: Record<string, unknown>, apiMode: "responses" | "chatCompletions") {
-  const responses = typeof sdk.responses === "function" ? (sdk.responses as (modelId: string) => unknown) : null;
-  const chat = typeof sdk.chat === "function" ? (sdk.chat as (modelId: string) => unknown) : null;
-  const chatCompletions =
-    typeof sdk.chatCompletions === "function" ? (sdk.chatCompletions as (modelId: string) => unknown) : null;
-
-  if (apiMode === "chatCompletions") {
-    if (chat) return chat;
-    if (chatCompletions) return chatCompletions;
-    throw new Error(`openai sdk does not expose chat/chatCompletions model factories for apiMode=${apiMode}`);
-  }
-
-  if (responses) return responses;
-  throw new Error(`openai sdk does not expose responses model factory for apiMode=${apiMode}`);
-}
-
-function normalizeOpenAiApiMode(raw: unknown): "responses" | "chatCompletions" {
-  if (raw === "responses" || raw === "chatCompletions") return raw;
-  return "responses";
-}
-
 function createLanguageModel(profile: ExecutionProfile) {
   const providerModelId =
     typeof profile.model.providerModelId === "string" && profile.model.providerModelId.trim()
@@ -778,18 +1019,33 @@ function createLanguageModel(profile: ExecutionProfile) {
       apiKey: profile.provider.options.apiKey,
       baseURL: profile.provider.options.baseURL
     });
-    const apiMode = normalizeOpenAiApiMode(profile.provider.options.apiMode);
-    const createModel = resolveOpenAiModelFactory(sdk as unknown as Record<string, unknown>, apiMode);
-    return createModel(providerModelId);
+    return sdk.responses(providerModelId);
   }
 
   if (profile.provider.npm === "@ai-sdk/openai-compatible") {
     const sdk = createOpenAICompatible({
       name: profile.provider.id,
       apiKey: profile.provider.options.apiKey,
+      includeUsage: true,
       baseURL: profile.provider.options.baseURL
     });
     return sdk.chatModel(providerModelId);
+  }
+
+  if (profile.provider.npm === "@ai-sdk/moonshotai") {
+    const sdk = createMoonshotAI({
+      apiKey: profile.provider.options.apiKey,
+      ...(profile.provider.options.baseURL?.trim() ? { baseURL: profile.provider.options.baseURL.trim() } : {})
+    });
+    return sdk.chatModel(providerModelId);
+  }
+
+  if (profile.provider.npm === "@ai-sdk/deepseek") {
+    const sdk = createDeepSeek({
+      apiKey: profile.provider.options.apiKey,
+      ...(profile.provider.options.baseURL?.trim() ? { baseURL: profile.provider.options.baseURL.trim() } : {})
+    });
+    return sdk.chat(providerModelId);
   }
 
   if (profile.provider.npm === "@ai-sdk/anthropic") {
@@ -804,11 +1060,14 @@ function createLanguageModel(profile: ExecutionProfile) {
 }
 
 function isSensitiveKey(rawKey: string) {
-  const key = rawKey.toLowerCase();
+  const key = rawKey.replace(/[_-]/g, "").toLowerCase();
   return (
     key === "authorization" ||
-    key === "api_key" ||
     key === "apikey" ||
+    key === "encryptedcontent" ||
+    key === "reasoningencryptedcontent" ||
+    key === "providerreplay" ||
+    key === "providerreplayjson" ||
     key.includes("token") ||
     key.includes("secret") ||
     key.includes("password")
@@ -819,8 +1078,19 @@ function sanitizeForDebugDump(value: unknown): unknown {
   if (Array.isArray(value)) {
     return value.map((item) => sanitizeForDebugDump(item));
   }
+  if (typeof value === "string") {
+    const parsed = parseJsonErrorValue(value);
+    if (parsed != null) return JSON.stringify(sanitizeForDebugDump(parsed));
+    return value
+      .replace(/("?(?:encrypted_content|encryptedContent|reasoningEncryptedContent|provider_replay_json|providerReplay)"?\s*[:=]\s*)"[^"\r\n]*"/gi, "$1\"***\"")
+      .replace(/((?:encrypted_content|encryptedContent|reasoningEncryptedContent|provider_replay_json|providerReplay)\s*[:=]\s*)[^,}\]\s]+/gi, "$1***");
+  }
   if (!value || typeof value !== "object") {
     return value;
+  }
+
+  if (value instanceof Error) {
+    return { name: value.name || "Error", summary: safeErrorSummary(value) };
   }
 
   const source = value as Record<string, unknown>;
@@ -839,19 +1109,40 @@ async function writeItemLog(params: {
   logger: Pick<Console, "warn">;
   workspacePath: string;
   kind: "assistant" | "tool";
-  itemId: number;
+  recordId?: string;
   payload: unknown;
+  force?: boolean;
 }) {
-  if (!DEBUG_DUMP_ENABLED) return;
+  if (process.env.AWB_AGENT_DEBUG_DUMP !== "1" && !params.force) return;
   const dirPath = path.join(params.workspacePath, DEBUG_DUMP_RELATIVE_DIR, params.kind);
-  const filePath = path.join(dirPath, `${params.itemId}.log`);
+  const filePath = path.join(dirPath, `${safePathSegment(params.recordId ?? "unknown")}.log`);
   try {
     await fs.mkdir(dirPath, { recursive: true });
-    await fs.writeFile(filePath, JSON.stringify(sanitizeForDebugDump(params.payload), null, 2), "utf8");
+    const payload = params.kind === "assistant"
+      ? serializeAssistantDebugRecord(params.payload)
+      : JSON.stringify(sanitizeForDebugDump(params.payload), null, 2);
+    await fs.writeFile(filePath, payload, "utf8");
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    params.logger.warn(`[agent-worker] write item log failed: ${message}`);
+    params.logger.warn(`[agent-worker] write item log failed: ${safeErrorSummary(err)}`);
   }
+}
+
+async function writeAssistantDebugRecord(params: {
+  logger: Pick<Console, "warn">;
+  workspacePath: string;
+  recordId?: string;
+  input: Parameters<typeof projectAssistantDebugRecord>[0];
+  force?: boolean;
+}) {
+  await writeItemLog({
+    logger: params.logger,
+    workspacePath: params.workspacePath,
+    kind: "assistant",
+    recordId: params.recordId,
+    payload: projectAssistantDebugRecord(params.input),
+    // 投影或写盘失败只能影响本地调试信息，绝不能改变 Provider 请求、flush 或完成语义。
+    force: params.force,
+  });
 }
 
 function normalizeToolName(raw: unknown, available: Set<string>): string | null {
@@ -878,39 +1169,187 @@ function isConcurrentExecutionTool(toolName: string) {
   return toolName === "bash" || toolName === "subtask";
 }
 
-function toNonNegativeInt(raw: unknown) {
-  const value = typeof raw === "number" ? raw : Number(raw);
-  if (!Number.isFinite(value) || value < 0) return null;
-  return Math.floor(value);
-}
-
 function extractTotalTokens(raw: unknown): number | null {
   if (raw == null) return null;
-  if (typeof raw === "number") return toNonNegativeInt(raw);
+  if (typeof raw === "number" || typeof raw === "string") return validTokenCount(raw);
   if (typeof raw !== "object" || Array.isArray(raw)) return null;
   const usage = raw as Record<string, unknown>;
 
   const direct =
-    toNonNegativeInt(usage.totalTokens) ??
-    toNonNegativeInt(usage.total_tokens) ??
-    toNonNegativeInt(usage.total);
+    validTokenCount(usage.totalTokens) ??
+    validTokenCount(usage.total_tokens) ??
+    validTokenCount(usage.total);
   if (direct != null) return direct;
 
   const input =
-    toNonNegativeInt(usage.inputTokens) ??
-    toNonNegativeInt(usage.promptTokens) ??
-    toNonNegativeInt(usage.input_tokens) ??
-    toNonNegativeInt(usage.prompt_tokens);
+    validTokenCount(usage.inputTokens) ??
+    validTokenCount(usage.promptTokens) ??
+    validTokenCount(usage.input_tokens) ??
+    validTokenCount(usage.prompt_tokens);
   const output =
-    toNonNegativeInt(usage.outputTokens) ??
-    toNonNegativeInt(usage.completionTokens) ??
-    toNonNegativeInt(usage.output_tokens) ??
-    toNonNegativeInt(usage.completion_tokens);
+    validTokenCount(usage.outputTokens) ??
+    validTokenCount(usage.completionTokens) ??
+    validTokenCount(usage.output_tokens) ??
+    validTokenCount(usage.completion_tokens);
   if (input != null && output != null) {
-    return input + output;
+    const total = input + output;
+    return Number.isSafeInteger(total) ? total : null;
   }
 
   return null;
+}
+
+type AnalyticsUsage = { inputTokens: number | null; outputTokens: number | null; totalTokens: number | null; totalSource: "reported" | "derived" | "unavailable"; cacheReadTokens: number | null; cacheInputTokens: number | null; cacheWriteTokens: number | null; cacheComparable: boolean; cacheWriteVerified: boolean };
+
+type CacheStep = { usage: unknown; providerMetadata: unknown };
+
+function cacheCount(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+/** OpenAI-style inputTokens includes cached input; Anthropic reports uncached input separately. */
+function cacheInputForStep(step: CacheStep, providerNpm: string, cacheRead: number | null): number | null {
+  const usage = asRecord(step.usage);
+  const input = cacheCount(usage?.inputTokens);
+  if (cacheRead === null || input === null || cacheCount(usage?.cachedInputTokens) !== cacheRead) return null;
+  if (providerNpm === "@ai-sdk/openai" || providerNpm === "@ai-sdk/openai-compatible" ||
+      providerNpm === "@ai-sdk/deepseek" || providerNpm === "@ai-sdk/moonshotai") {
+    return cacheRead <= input ? input : null;
+  }
+  if (providerNpm !== "@ai-sdk/anthropic") return null;
+  const anthropic = asRecord(asRecord(step.providerMetadata)?.anthropic);
+  const raw = asRecord(anthropic?.usage);
+  if (!raw || (raw.iterations != null && (!Array.isArray(raw.iterations) || raw.iterations.length > 0))) return null;
+  const uncached = cacheCount(raw.input_tokens);
+  const read = cacheCount(raw.cache_read_input_tokens);
+  const created = cacheCount(raw.cache_creation_input_tokens);
+  if (uncached !== input || read !== cacheRead || created === null) return null;
+  const total = uncached + read + created;
+  return Number.isSafeInteger(total) && cacheRead <= total ? total : null;
+}
+
+/** Model usage requires actual nonnegative integers; do not coerce null to 0. */
+function validTokenCount(raw: unknown): number | null {
+  // Retain decimal integer strings for providers that serialize token counts.
+  // Other Number() coercions (booleans, blanks, exponents, objects) are unsafe.
+  if (typeof raw === "string") {
+    const decimal = raw.trim();
+    if (!/^\d+$/.test(decimal)) return null;
+    raw = Number(decimal);
+  }
+  return typeof raw === "number" && Number.isSafeInteger(raw) && raw >= 0 ? raw : null;
+}
+
+function normalizeAnalyticsUsage(raw: unknown): AnalyticsUsage {
+  const unavailable: AnalyticsUsage = { inputTokens: null, outputTokens: null, totalTokens: null, totalSource: "unavailable", cacheReadTokens: null, cacheInputTokens: null, cacheWriteTokens: null, cacheComparable: false, cacheWriteVerified: false };
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return unavailable;
+  const usage = raw as Record<string, unknown>;
+  const input = validTokenCount(usage.inputTokens) ?? validTokenCount(usage.promptTokens) ?? validTokenCount(usage.input_tokens) ?? validTokenCount(usage.prompt_tokens);
+  const rawOutput = validTokenCount(usage.outputTokens) ?? validTokenCount(usage.completionTokens) ?? validTokenCount(usage.output_tokens) ?? validTokenCount(usage.completion_tokens);
+  const reported = validTokenCount(usage.totalTokens) ?? validTokenCount(usage.total_tokens) ?? validTokenCount(usage.total);
+  // The fact table rejects an inconsistent triple. Keep the reported total
+  // but omit the disputed component rather than fabricating a matching one.
+  const output = reported !== null && input !== null && rawOutput !== null && reported !== input + rawOutput ? null : rawOutput;
+  const details = (usage.inputTokenDetails ?? usage.prompt_tokens_details) as Record<string, unknown> | undefined;
+  const cacheRead = cacheCount(usage.cachedInputTokens) ?? cacheCount(usage.cacheReadTokens) ?? cacheCount(usage.cache_read_tokens) ?? cacheCount(details?.cacheReadTokens) ?? cacheCount(details?.cached_tokens);
+  const cacheWrite = cacheCount(usage.cacheWriteTokens) ?? cacheCount(usage.cache_write_tokens) ?? cacheCount(details?.cacheWriteTokens);
+  const derived = reported === null && input !== null && output !== null && Number.isSafeInteger(input + output);
+  return { inputTokens: input, outputTokens: output, totalTokens: reported ?? (derived ? input! + output! : null), totalSource: reported !== null ? "reported" : derived ? "derived" : "unavailable", cacheReadTokens: cacheRead, cacheInputTokens: null, cacheWriteTokens: cacheWrite, cacheComparable: false, cacheWriteVerified: cacheWrite !== null && Boolean(usage.cacheWriteVerified ?? usage.cache_write_verified) };
+}
+
+async function boundedUsageValue(value: unknown, timeoutMs = 100): Promise<unknown> {
+  if (!value || typeof (value as Promise<unknown>).then !== "function") return value;
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([value as Promise<unknown>, new Promise<undefined>((resolve) => {
+      const handle = setNativeTimeout(resolve, timeoutMs) as unknown as NodeJS.Timeout;
+      timer = handle;
+      handle.unref();
+    })]);
+  } finally {
+    if (timer) clearNativeTimeout(timer);
+  }
+}
+
+async function readStreamAnalyticsUsage(stream: unknown, step?: CacheStep, providerNpm?: string,
+  finishUsage?: AnalyticsUsage | null, multiStep = false): Promise<AnalyticsUsage> {
+  // In multi-step streams the SDK aggregate can treat unknown usage as zero,
+  // while stream.usage describes only the last step. Neither is a safe total.
+  if (multiStep) return normalizeAnalyticsUsage(null);
+  const streamObj = stream as Record<string, unknown>;
+  // Usage/totalUsage/response are provider aliases in many SDKs. Bound the
+  // whole observation round, rather than serially spending a timeout on each.
+  const candidates = await Promise.all(
+    [streamObj.usage, streamObj.totalUsage, streamObj.response].map(async (candidate) => await boundedUsageValue(candidate).catch(() => undefined))
+  );
+  const withCache = (usage: AnalyticsUsage): AnalyticsUsage => {
+    const stepUsage = step && normalizeAnalyticsUsage(step.usage);
+    const sameInput = !stepUsage || stepUsage.inputTokens === null || usage.inputTokens === null || stepUsage.inputTokens === usage.inputTokens;
+    const cacheRead = usage.cacheReadTokens ?? (sameInput ? stepUsage?.cacheReadTokens : null) ?? null;
+    const cacheInput = sameInput && step && providerNpm && stepUsage?.cacheReadTokens === cacheRead
+      ? cacheInputForStep(step, providerNpm, cacheRead) : null;
+    return { ...usage, cacheReadTokens: cacheRead, cacheInputTokens: cacheInput, cacheComparable: cacheInput !== null };
+  };
+  const partials: AnalyticsUsage[] = [];
+  const observedTotals: number[] = [];
+  let complete: AnalyticsUsage | null = null;
+  const consider = (usage: AnalyticsUsage) => {
+    if (usage.totalTokens !== null) {
+      observedTotals.push(usage.totalTokens);
+      complete ??= usage;
+    }
+    else if (usage.inputTokens !== null || usage.outputTokens !== null || usage.cacheReadTokens !== null || usage.cacheWriteTokens !== null) partials.push(usage);
+  };
+  for (const resolved of candidates) {
+    try {
+      consider(normalizeAnalyticsUsage(resolved));
+      if (resolved && typeof resolved === "object") {
+        const nested = resolved as Record<string, unknown>;
+        for (const raw of [nested.usage, nested.totalUsage]) {
+          consider(normalizeAnalyticsUsage(raw));
+        }
+      }
+    } catch { /* Analytics must not delay or fail the business attempt. */ }
+  }
+  if (finishUsage && finishUsage.totalTokens !== null) consider(finishUsage);
+  if (step) {
+    // The observed single finish-step is the same scope, but only use its
+    // total to check consistency; it is not an independent total fallback.
+    const stepTotal = normalizeAnalyticsUsage(step.usage).totalTokens;
+    if (stepTotal !== null) observedTotals.push(stepTotal);
+  }
+  // Never select an arbitrary complete source when same-scope totals disagree.
+  // Multi-step streams were already rejected above: their last-step usage
+  // cannot be compared with a whole-stream aggregate.
+  if (observedTotals.some((total) => total !== observedTotals[0])) return normalizeAnalyticsUsage(null);
+  if (complete && step) {
+    // With exactly one observed finish-step all aliases describe that step.
+    // Fill only absent fields from consistent candidates, never derive a
+    // missing total by combining partial sources or overwrite known fields.
+    partials.push(normalizeAnalyticsUsage(step.usage));
+    let selected: AnalyticsUsage = complete;
+    for (const part of partials) {
+      const fields = ["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens"] as const;
+      if (fields.some((field) => selected[field] !== null && part[field] !== null && selected[field] !== part[field])) continue;
+      const next: AnalyticsUsage = {
+        ...selected,
+        inputTokens: selected.inputTokens ?? part.inputTokens,
+        outputTokens: selected.outputTokens ?? part.outputTokens,
+        cacheReadTokens: selected.cacheReadTokens ?? part.cacheReadTokens,
+        cacheWriteTokens: selected.cacheWriteTokens ?? part.cacheWriteTokens,
+      };
+      if (next.inputTokens !== null && next.outputTokens !== null && next.totalTokens !== next.inputTokens + next.outputTokens) continue;
+      if (next.cacheWriteTokens !== null && next.cacheWriteTokens === part.cacheWriteTokens) next.cacheWriteVerified ||= part.cacheWriteVerified;
+      selected = next;
+    }
+    complete = selected;
+  }
+  // Without a proven single step, do not join different usage aliases.
+  return complete ? withCache(complete) : partials.length ? withCache(partials[0]!) : normalizeAnalyticsUsage(null);
 }
 
 async function readStreamTotalTokens(stream: unknown): Promise<number | null> {
@@ -920,19 +1359,20 @@ async function readStreamTotalTokens(stream: unknown): Promise<number | null> {
   if (streamObj.totalUsage !== undefined) candidates.push(streamObj.totalUsage);
   if (streamObj.response !== undefined) candidates.push(streamObj.response);
 
-  for (const candidate of candidates) {
+  const resolvedCandidates = await Promise.all(
+    candidates.map(async (candidate) => await boundedUsageValue(candidate).catch(() => undefined))
+  );
+  for (const resolved of resolvedCandidates) {
     try {
-      const resolved = candidate && typeof (candidate as Promise<unknown>).then === "function"
-        ? await (candidate as Promise<unknown>)
-        : candidate;
       const total = extractTotalTokens(resolved);
       if (total != null) return total;
 
       if (resolved && typeof resolved === "object" && !Array.isArray(resolved)) {
         const nested = resolved as Record<string, unknown>;
-        const usage = nested.usage ?? nested.totalUsage;
-        const nestedTotal = extractTotalTokens(usage);
-        if (nestedTotal != null) return nestedTotal;
+        for (const usage of [nested.usage, nested.totalUsage]) {
+          const nestedTotal = extractTotalTokens(usage);
+          if (nestedTotal != null) return nestedTotal;
+        }
       }
     } catch {
       // ignore usage parse failures
@@ -990,23 +1430,151 @@ export function buildToolSuccessTextForTest(params: { toolName: string; args: Re
   });
 }
 
+function isAttachmentRefPart(value: unknown): value is AgentApiPromptAttachmentRefPart {
+  if (!value || typeof value !== "object") return false;
+  const part = value as Record<string, unknown>;
+  return part.type === "attachment_ref"
+    && typeof part.workspaceId === "string"
+    && typeof part.attachmentId === "string"
+    && (part.mediaType === "image/png" || part.mediaType === "image/jpeg" || part.mediaType === "image/webp")
+    && typeof part.filename === "string"
+    && typeof part.path === "string";
+}
+
+export async function materializePromptAttachments(params: {
+  messages: PromptContext["messages"];
+  attachmentStorage: AgentAttachmentStorage | undefined;
+  run: Pick<QueuedRun, "workspaceId" | "workspacePath">;
+  providerNpm: string;
+}): Promise<ModelMessage[]> {
+  const messages: ModelMessage[] = [];
+  let totalImageBytes = 0;
+  const countImage = (bytes: Uint8Array) => {
+    if (bytes.byteLength < 1 || bytes.byteLength > WORKSPACE_IMAGE_MAX_BYTES) throw new Error("model image exceeds 10 MiB per-image budget");
+    totalImageBytes += bytes.byteLength;
+    if (totalImageBytes > 2 * WORKSPACE_IMAGE_MAX_BYTES) throw new Error("model images exceed 20 MiB combined budget");
+  };
+  const nativeToolMedia = params.providerNpm === "@ai-sdk/openai" || params.providerNpm === "@ai-sdk/anthropic";
+  let precedingAssistantCalls: string[] = [];
+  for (const message of params.messages) {
+    if (message.role === "assistant") {
+      precedingAssistantCalls = Array.isArray(message.content)
+        ? message.content.filter((part) => part.type === "tool-call").map((part) => part.toolCallId)
+        : [];
+      messages.push(message as ModelMessage);
+      continue;
+    }
+    if (message.role === "tool") {
+      const results = message.content;
+      const resultIds = results.map((result) => result.toolCallId);
+      if (resultIds.length !== precedingAssistantCalls.length
+        || resultIds.some((id, index) => id !== precedingAssistantCalls[index])) {
+        throw new Error("tool results do not match assistant call order");
+      }
+      precedingAssistantCalls = [];
+      const output: typeof results = [];
+      const deferredFiles: Array<{ type: "text"; text: string } | { type: "file"; data: Uint8Array; mediaType: "image/png" | "image/jpeg" | "image/webp"; filename: string }> = [];
+      for (const result of results) {
+        if (!Value.Check(AgentToolResultOutputSchema, result.output)) throw new Error("invalid tool result output");
+        const parts = Array.isArray(result.output) ? result.output : [result.output];
+        if (!parts.some((part) => part.type === "image_ref")) {
+          // The internal contract permits multiple text segments, but the AI SDK
+          // expects an output object rather than a bare array of segments.
+          output.push(Array.isArray(result.output)
+            ? { ...result, output: { type: "content", value: parts.map((part) => {
+              if (part.type !== "text") throw new Error("invalid text-only tool result");
+              return { type: "text" as const, text: part.value };
+            }) } } as unknown as typeof result
+            : result);
+          continue;
+        }
+        if (result.toolName !== "view_image") throw new Error("unexpected tool image reference");
+        const nativeParts: Array<{ type: "text"; text: string } | { type: "media"; data: string; mediaType: string }> = [];
+        const textParts: string[] = [];
+        for (const part of parts) {
+          if (part.type === "text") {
+            nativeParts.push({ type: "text", text: part.value });
+            textParts.push(part.value);
+          } else if (part.type === "image_ref") {
+            const image = await readWorkspaceImage({ workspacePath: params.run.workspacePath, path: part.path }).catch(() => {
+              throw new Error("cannot read a valid tool image in this Workspace");
+            });
+            countImage(image.bytes);
+            const label = `Image for toolCallId=${result.toolCallId}, path=${part.path}`;
+            if (nativeToolMedia) nativeParts.push({ type: "media", data: Buffer.from(image.bytes).toString("base64"), mediaType: image.mediaType });
+            else {
+              textParts.push(`${label} (image attached in the following user message)`);
+              deferredFiles.push({ type: "text", text: label }, { type: "file", data: image.bytes, mediaType: image.mediaType, filename: part.path.split("/").at(-1)! });
+            }
+          }
+        }
+        output.push({ ...result, output: nativeToolMedia
+          ? { type: "content", value: nativeParts }
+          : { type: "text", value: textParts.join("\n") } } as typeof result);
+      }
+      messages.push({ role: "tool", content: output } as ModelMessage);
+      if (deferredFiles.length > 0) messages.push({ role: "user", content: deferredFiles } as ModelMessage);
+      continue;
+    }
+    if (message.role !== "user" || !Array.isArray(message.content)) {
+      messages.push(message as ModelMessage);
+      continue;
+    }
+
+    const content: Extract<ModelMessage, { role: "user" }>["content"] = [];
+    for (const part of message.content) {
+      if (!isAttachmentRefPart(part)) {
+        if ((part as { type: string }).type === "attachment_ref") {
+          throw new Error("invalid user image reference");
+        }
+        content.push(part);
+        continue;
+      }
+      if (!params.attachmentStorage) throw new Error("attachment storage is unavailable");
+      const attachment = await params.attachmentStorage.read({
+        workspaceId: part.workspaceId,
+        runWorkspaceId: params.run.workspaceId,
+        workspacePath: params.run.workspacePath,
+        attachmentId: part.attachmentId,
+        path: part.path,
+        mediaType: part.mediaType
+      }).catch(() => {
+        throw new Error("cannot read a valid user image in this Workspace");
+      });
+      countImage(attachment.bytes);
+      content.push({
+        type: "file",
+        data: attachment.bytes,
+        mediaType: attachment.mediaType,
+        filename: part.filename
+      });
+    }
+    messages.push({ role: "user", content });
+  }
+  return messages;
+}
+
 type AgentRunnerDeps = {
-  streamText?: typeof streamText;
+  streamText?: RuntimeStreamText;
   nowMs?: () => number;
   warningNowMs?: () => number;
-};
-
-type StreamTextResultLike = {
-  fullStream: AsyncIterable<unknown>;
-  reasoningText?: PromiseLike<unknown>;
-  usage?: PromiseLike<unknown> | unknown;
-  totalUsage?: PromiseLike<unknown> | unknown;
-  response?: PromiseLike<unknown> | unknown;
+  attachmentStorage?: AgentAttachmentStorage;
+  /** 仅用于测试控制面固定短间隔重试，不影响 Provider 退避。 */
+  controlWriteSleep?: (ms: number, signal: AbortSignal) => Promise<boolean>;
+  /** Provider 专属适配器扩展点：reasoning/text metadata-only 更新。 */
+  providerReplayPartFromChunk?: (chunk: unknown) => ProviderReplayPartUpdate | null;
+  /** Provider 专属适配器扩展点：从真实 tool-call chunk 提取 function item metadata。 */
+  providerToolCallReplayFromChunk?: (chunk: unknown) => ProviderToolCallReplay | null;
+  /** 仅负责 Provider 私有状态协议解释；不参与工具、重试或控制面写入。 */
+  providerConversationStateAdapterRegistry?: ProviderConversationStateAdapterRegistry;
+  /** Optional, best-effort Analytics side channel. */
+  analyticsSignals?: AnalyticsSignalProducer;
 };
 
 export class AgentRunner {
   private readonly queue: QueuedRun[] = [];
   private readonly queuedRunIds = new Set<string>();
+  private readonly activeRunIds = new Set<string>();
   private readonly runningSessions = new Set<string>();
   private readonly controllers = new Map<string, AbortController>();
   private readonly pluginRuntimeManager: PluginRuntimeManager;
@@ -1016,9 +1584,15 @@ export class AgentRunner {
   private activeCount = 0;
   private readonly toolErrorWarningLimiter = new Map<string, { windowStartedAt: number; suppressed: number }>();
 
-  private readonly streamTextFn: typeof streamText;
+  private readonly streamTextFn: RuntimeStreamText;
   private readonly nowMsFn: () => number;
   private readonly warningNowMsFn: () => number;
+  private readonly attachmentStorage: AgentAttachmentStorage | undefined;
+  private readonly controlWriteSleepFn: (ms: number, signal: AbortSignal) => Promise<boolean>;
+  private readonly providerReplayPartFromChunkFn: ((chunk: unknown) => ProviderReplayPartUpdate | null) | undefined;
+  private readonly providerToolCallReplayFromChunkFn: ((chunk: unknown) => ProviderToolCallReplay | null) | undefined;
+  private readonly providerConversationStateAdapterRegistry: ProviderConversationStateAdapterRegistry;
+  private readonly analyticsSignals: AnalyticsSignalProducer | undefined;
 
   constructor(
     private readonly apiClient: AgentApiClient,
@@ -1027,9 +1601,16 @@ export class AgentRunner {
     private readonly concurrency: number,
     deps: AgentRunnerDeps = {}
   ) {
-    this.streamTextFn = deps.streamText ?? streamText;
+    this.streamTextFn = deps.streamText ?? streamText<RuntimeToolSet>;
     this.nowMsFn = deps.nowMs ?? nowMs;
     this.warningNowMsFn = deps.warningNowMs ?? nowMs;
+    this.attachmentStorage = deps.attachmentStorage;
+    this.controlWriteSleepFn = deps.controlWriteSleep ?? sleepMsWithAbort;
+    this.providerReplayPartFromChunkFn = deps.providerReplayPartFromChunk;
+    this.providerToolCallReplayFromChunkFn = deps.providerToolCallReplayFromChunk;
+    this.analyticsSignals = deps.analyticsSignals;
+    this.providerConversationStateAdapterRegistry = deps.providerConversationStateAdapterRegistry
+      ?? new DefaultProviderConversationStateAdapterRegistry();
     this.pluginRuntimeManager = new PluginRuntimeManager(this.logger);
     const pluginProvider = REMOTE_PLUGIN_TOOLS_ENABLED
       ? new RemotePluginToolProvider()
@@ -1037,8 +1618,77 @@ export class AgentRunner {
     this.toolRegistry = new ToolRegistry([new BuiltinToolProvider(), new McpToolProvider(this.mcpManager), pluginProvider]);
   }
 
+  private async retryControlRead<T>(
+    operation: string,
+    signal: AbortSignal,
+    read: () => Promise<T>,
+  ): Promise<T> {
+    while (true) {
+      if (signal.aborted) throw new FencedWriteIgnoredError(operation);
+      try {
+        return await read();
+      } catch (error) {
+        if (signal.aborted) throw error;
+        if (!isRetryableControlWriteError(error)) {
+          if (error instanceof ControlReadPermanentError) throw error;
+          throw new ControlReadPermanentError(operation, error);
+        }
+        const retry = await this.controlWriteSleepFn(CONTROL_WRITE_RETRY_DELAY_MS, signal);
+        if (!retry) throw new FencedWriteIgnoredError(operation);
+      }
+    }
+  }
+
+  private async retryControlWrite<T extends { result: "updated" | "ignored" | "missing" } | undefined>(
+    operation: string,
+    signal: AbortSignal,
+    write: () => Promise<T>,
+  ): Promise<T> {
+    while (true) {
+      if (signal.aborted) throw new FencedWriteIgnoredError(operation);
+      try {
+        const response = await write();
+        assertFencedWriteUpdated(operation, response);
+        return response;
+      } catch (error) {
+        if (signal.aborted) throw error;
+        if (!isRetryableControlWriteError(error)) {
+          if (error instanceof FencedWriteIgnoredError || error instanceof FencedWriteMissingError || error instanceof ControlWritePermanentError) throw error;
+          throw new ControlWritePermanentError(operation, error);
+        }
+        const retry = await this.controlWriteSleepFn(CONTROL_WRITE_RETRY_DELAY_MS, signal);
+        if (!retry) throw new FencedWriteIgnoredError(operation);
+      }
+    }
+  }
+
+  /** Retries an API operation whose request has an immutable idempotency key. */
+  private async retryIdempotentControlWrite<T>(
+    operation: string,
+    signal: AbortSignal,
+    write: () => Promise<T>,
+  ): Promise<T> {
+    while (true) {
+      if (signal.aborted) throw new FencedWriteIgnoredError(operation);
+      try {
+        return await write();
+      } catch (error) {
+        if (signal.aborted) throw error;
+        if (!isRetryableControlWriteError(error)) {
+          throw new ControlWritePermanentError(operation, error);
+        }
+        const retry = await this.controlWriteSleepFn(CONTROL_WRITE_RETRY_DELAY_MS, signal);
+        if (!retry) throw new FencedWriteIgnoredError(operation);
+      }
+    }
+  }
+
+  analyticsLiveSnapshot() {
+    return { snapshotAt: this.nowMsFn(), activeCount: this.activeCount, queueLength: this.queue.length, concurrency: this.concurrency, lastReadyAt: null, runnerMode: "agent_worker" as const, analyticsProducerGeneration: this.analyticsSignals?.producerGeneration ?? null };
+  }
+
   enqueueRun(run: QueuedRun) {
-    if (this.queuedRunIds.has(run.runId)) return;
+    if (this.queuedRunIds.has(run.runId) || this.activeRunIds.has(run.runId)) return;
     this.queue.push(run);
     this.queuedRunIds.add(run.runId);
     this.pump();
@@ -1112,6 +1762,32 @@ export class AgentRunner {
     this.abortSessionTree(sessionId);
   }
 
+  private collectSessionTree(sessionId: string, collected = new Set<string>()) {
+    if (collected.has(sessionId)) return collected;
+    collected.add(sessionId);
+    for (const childSessionId of this.nestedChildrenByParent.get(sessionId) ?? []) {
+      this.collectSessionTree(childSessionId, collected);
+    }
+    return collected;
+  }
+
+  private isSessionTreeIdle(sessionIds: ReadonlySet<string>) {
+    return !this.queue.some((run) => sessionIds.has(run.sessionId))
+      && ![...this.runningSessions].some((sessionId) => sessionIds.has(sessionId))
+      && ![...this.controllers.keys()].some((sessionId) => sessionIds.has(sessionId));
+  }
+
+  async cancelSessionAndWait(input: { sessionId: string; timeoutMs: number }): Promise<boolean> {
+    const sessionIds = this.collectSessionTree(input.sessionId);
+    this.cancelSession(input.sessionId);
+    const deadline = Date.now() + input.timeoutMs;
+    while (!this.isSessionTreeIdle(sessionIds)) {
+      if (Date.now() >= deadline) return false;
+      await new Promise<void>((resolve) => setTimeout(resolve, Math.min(10, Math.max(1, deadline - Date.now()))));
+    }
+    return true;
+  }
+
   private pump() {
     while (this.activeCount < this.concurrency) {
       const index = this.queue.findIndex((item) => !this.runningSessions.has(item.sessionId));
@@ -1125,6 +1801,7 @@ export class AgentRunner {
 
   private startRun(run: QueuedRun) {
     this.activeCount += 1;
+    this.activeRunIds.add(run.runId);
     this.runningSessions.add(run.sessionId);
     let controller: AbortController;
     try {
@@ -1132,20 +1809,22 @@ export class AgentRunner {
       this.registerController(run.sessionId, controller);
     } catch (err) {
       this.runningSessions.delete(run.sessionId);
+      this.activeRunIds.delete(run.runId);
       this.activeCount -= 1;
-      this.logger.error("worker startRun failed", err);
+      this.logger.error(`worker startRun failed: ${safeErrorSummary(err)}`);
       this.pump();
       return;
     }
 
     void this.processRun(run, controller.signal)
       .catch((err) => {
-        this.logger.error("worker run failed", err);
+        this.logger.error(`worker run failed: ${safeErrorSummary(err)}`);
       })
       .finally(() => {
         this.deleteControllerIfSame(run.sessionId, controller);
         this.unlinkNestedChild(run.sessionId);
         this.runningSessions.delete(run.sessionId);
+        this.activeRunIds.delete(run.runId);
         this.activeCount -= 1;
         this.pump();
       });
@@ -1251,15 +1930,29 @@ export class AgentRunner {
       toolCallId: tool.toolCallId,
       args: tool.args
     };
-    const writeback = async (role: string, input: { status: "running" | "completed" | "failed"; output: any }) => {
+    const writeback = async (role: string, input: {
+      status: "running" | "completed" | "failed";
+      output: { text?: string; result?: unknown; error?: string; textTruncated?: boolean; textArtifactPath?: string };
+    }) => {
       capture?.recordWritebackAttempt(role, input.output);
       try {
-        const response = await this.apiClient.updateContextItem({
-          itemId: tool.itemId,
+        const request = {
+          workspaceId: run.workspaceId,
+          sessionId: run.sessionId,
+          runId: run.runId,
+          toolExecutionId: tool.toolExecutionId,
           status: input.status,
-          output: input.output,
+          resultPreview: input.output.text,
+          structuredResult: STRUCTURED_RESULT_TOOL_NAMES.has(tool.toolName) ? input.output.result : undefined,
+          error: input.output.error,
+          resultTruncated: input.output.textTruncated,
+          resultArtifactPath: input.output.textArtifactPath,
+          ...(input.status === "running" ? { startedAt: nowMs() } : { completedAt: nowMs() }),
           updatedAt: nowMs()
-        });
+        };
+        const response = await this.retryControlWrite(`tool execution ${input.status}`, signal, async () =>
+          await this.apiClient.updateToolExecution(request)
+        );
         capture?.recordWritebackSuccess(role, response);
         return response;
       } catch (error) {
@@ -1310,8 +2003,10 @@ export class AgentRunner {
         profile,
         run,
         pendingTool: {
-          itemId: tool.itemId,
-          status: tool.status,
+          toolExecutionId: tool.toolExecutionId,
+          callPartId: tool.callPartId,
+          assistantMessageId: tool.assistantMessageId,
+          status: tool.status === "running" ? "running" : "queued",
           toolName: tool.toolName,
           toolCallId: tool.toolCallId,
           args: tool.args
@@ -1324,11 +2019,11 @@ export class AgentRunner {
           run: nestedRun,
           parentSignal: nestedSignal
         }),
-        updateToolItem: async ({ status, output }) => {
+        updateToolExecution: async ({ status, resultPreview, structuredResult }) => {
           if (status !== "running") {
             throw new Error("provider terminal tool writeback is not supported by tool error capture");
           }
-          await writeback("provider_running_update", { status, output });
+          await writeback("provider_running_update", { status, output: { text: resultPreview, result: structuredResult } });
         },
         nowMs,
         reportRunningOutput: async (patch) => {
@@ -1341,6 +2036,9 @@ export class AgentRunner {
       };
       capture?.recordProviderStarted();
       providerResult = await this.toolRegistry.execute(tool.toolName, tool.args, toolCtx);
+      if (tool.toolName === "view_image" && !Value.Check(AgentViewImageResultSchema, providerResult)) {
+        throw new Error("invalid view_image result");
+      }
       providerReturned = true;
       capture?.recordProviderResult(providerResult);
 
@@ -1359,16 +2057,18 @@ export class AgentRunner {
         textArtifactPath?: string;
       };
       try {
-        finalizedText = await finalizeToolText({
+        // A view_image preview is not an artifact or the authority for recovering
+        // media. Its path lives only in the validated structured result.
+        finalizedText = tool.toolName === "view_image"
+          ? { text: rawSuccessText, textTruncated: false }
+          : await finalizeToolText({
           workspacePath: run.workspacePath,
-          itemId: tool.itemId,
+          toolExecutionId: tool.toolExecutionId,
           toolName: tool.toolName,
-          toolCallId: tool.toolCallId,
           text: rawSuccessText
         });
       } catch (artifactErr) {
-        const message = artifactErr instanceof Error ? artifactErr.message : String(artifactErr);
-        this.logger.warn(`[agent-worker] persist tool artifact failed(item=${tool.itemId}, tool=${tool.toolName}): ${message}`);
+        this.logger.warn(`[agent-worker] persist tool artifact failed(execution=${tool.toolExecutionId}, tool=${tool.toolName}): ${safeErrorSummary(artifactErr)}`);
         const needsTruncate = rawSuccessText.length > TOOL_OUTPUT_TEXT_MAX_CHARS;
         const preview = rawSuccessText.slice(0, TOOL_OUTPUT_TEXT_PREVIEW_CHARS).trimEnd();
         finalizedText = {
@@ -1392,9 +2092,9 @@ export class AgentRunner {
         logger: this.logger,
         workspacePath: run.workspacePath,
         kind: "tool",
-        itemId: tool.itemId,
+        recordId: tool.toolExecutionId,
         payload: {
-          meta: { workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId, toolItemId: tool.itemId },
+          meta: { workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId, toolExecutionId: tool.toolExecutionId },
           request: { toolName: tool.toolName, toolCallId: tool.toolCallId, args: tool.args },
           status: "completed",
           response: providerResult
@@ -1403,6 +2103,13 @@ export class AgentRunner {
       return { paused: false as const };
     } catch (err) {
       if (isAbortLikeError(err, signal)) return { paused: false as const };
+      if (err instanceof FencedWriteIgnoredError || err instanceof FencedWriteMissingError) throw err;
+      if (err instanceof ControlWritePermanentError) {
+        if (phase === "running_writeback") capture?.recordEvent("running_writeback_failed", err);
+        else if (phase === "completed_output_build") capture?.recordEvent("completed_output_build_failed", err);
+        else capture?.recordEvent("completed_writeback_failed", err);
+        throw err;
+      }
       if (phase === "running_writeback") capture?.recordEvent("running_writeback_failed", err);
       else if (phase === "provider_execute") {
         capture?.recordEvent("provider_execute_rejected", err);
@@ -1410,19 +2117,25 @@ export class AgentRunner {
       } else if (phase === "completed_output_build") capture?.recordEvent("completed_output_build_failed", err);
       else capture?.recordEvent("completed_writeback_failed", err);
 
-      const error = err instanceof Error ? err.message : String(err);
-      const subtaskSessionId = err && typeof err === "object" ? String((err as any).subtaskSessionId || "").trim() : "";
-      const subtaskResultText = err && typeof err === "object" && typeof (err as any).subtaskResultText === "string"
-        ? (err as any).subtaskResultText as string
+      const error = tool.toolName === "subtask"
+        ? formatSubtaskStartError(err, tool.args)
+        : toolErrorMessage(err);
+      const errorRecord = toErrorRecord(err);
+      const subtaskSessionId = String(errorRecord?.subtaskSessionId || "").trim();
+      const subtaskResultText = typeof errorRecord?.subtaskResultText === "string"
+        ? errorRecord.subtaskResultText
         : undefined;
-      const isSubtaskWithResult = tool.toolName === "subtask" && (subtaskSessionId || typeof subtaskResultText === "string");
+      const sourceSessionId = tool.toolName === "subtask"
+        ? readSubtaskSourceSessionId(errorRecord)
+        : undefined;
+      const isSubtaskWithResult = tool.toolName === "subtask" && (subtaskSessionId || sourceSessionId !== undefined || typeof subtaskResultText === "string");
       const errorText = isSubtaskWithResult
-        ? buildSubtaskErrorText({ status: "failed", error, subtaskSessionId: subtaskSessionId || undefined, subtaskResultText })
+        ? buildSubtaskErrorText({ status: "failed", error, subtaskSessionId: subtaskSessionId || undefined, sourceSessionId, subtaskResultText })
         : buildToolErrorText({ toolName: tool.toolName, status: "failed", error });
       const failedOutput = {
         ...outputBase,
         text: errorText,
-        ...(isSubtaskWithResult ? { result: { ...(subtaskSessionId ? { subtaskSessionId } : {}), ...(typeof subtaskResultText === "string" ? { resultText: subtaskResultText } : {}) } } : {}),
+        ...(isSubtaskWithResult ? { result: { ...(subtaskSessionId ? { subtaskSessionId } : {}), ...(sourceSessionId !== undefined ? { sourceSessionId } : {}), ...(typeof subtaskResultText === "string" ? { resultText: subtaskResultText } : {}) } } : {}),
         error
       };
       try {
@@ -1435,9 +2148,9 @@ export class AgentRunner {
         logger: this.logger,
         workspacePath: run.workspacePath,
         kind: "tool",
-        itemId: tool.itemId,
+        recordId: tool.toolExecutionId,
         payload: {
-          meta: { workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId, toolItemId: tool.itemId },
+          meta: { workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId, toolExecutionId: tool.toolExecutionId },
           request: { toolName: tool.toolName, toolCallId: tool.toolCallId, args: tool.args },
           status: "failed",
           error
@@ -1462,7 +2175,7 @@ export class AgentRunner {
       workspaceId: params.run.workspaceId,
       sessionId: params.run.sessionId,
       runId: params.run.runId,
-      itemId: params.tool.itemId,
+      toolExecutionId: params.tool.toolExecutionId,
       toolCallId: params.tool.toolCallId,
       toolName: params.tool.toolName,
       toolSource: this.toolSourceForArtifact(params.tool.toolName)
@@ -1475,8 +2188,9 @@ export class AgentRunner {
         aborted = true;
         return { paused: false as const };
       }
+      if (err instanceof FencedWriteIgnoredError || err instanceof FencedWriteMissingError || err instanceof ControlWritePermanentError) throw err;
       capture?.recordEvent("runner_outer_unhandled", err);
-      const error = err instanceof Error ? err.message : String(err);
+      const error = toolErrorMessage(err);
       const output = {
         type: "tool" as const,
         toolName: params.tool.toolName,
@@ -1487,19 +2201,33 @@ export class AgentRunner {
       };
       try {
         capture?.recordWritebackAttempt("outer_failed", output);
-        const response = await this.apiClient.updateContextItem({ itemId: params.tool.itemId, status: "failed", output, updatedAt: nowMs() });
+        const request = {
+          workspaceId: params.run.workspaceId,
+          sessionId: params.run.sessionId,
+          runId: params.run.runId,
+          toolExecutionId: params.tool.toolExecutionId,
+          status: "failed" as const,
+          resultPreview: output.text,
+          error: output.error,
+          completedAt: nowMs(),
+          updatedAt: nowMs()
+        };
+        const response = await this.retryControlWrite("outer failed tool execution", params.signal, async () =>
+          await this.apiClient.updateToolExecution(request)
+        );
         capture?.recordWritebackSuccess("outer_failed", response);
       } catch (writebackError) {
         capture?.recordWritebackFailure("outer_failed", writebackError);
         capture?.recordEvent("outer_failed_writeback_failed", writebackError);
+        if (writebackError instanceof FencedWriteIgnoredError || writebackError instanceof FencedWriteMissingError || writebackError instanceof ControlWritePermanentError) throw writebackError;
       }
       await writeItemLog({
         logger: this.logger,
         workspacePath: params.run.workspacePath,
         kind: "tool",
-        itemId: params.tool.itemId,
+        recordId: params.tool.toolExecutionId,
         payload: {
-          meta: { workspaceId: params.run.workspaceId, sessionId: params.run.sessionId, runId: params.run.runId, toolItemId: params.tool.itemId },
+          meta: { workspaceId: params.run.workspaceId, sessionId: params.run.sessionId, runId: params.run.runId, toolExecutionId: params.tool.toolExecutionId },
           request: { toolName: params.tool.toolName, toolCallId: params.tool.toolCallId, args: params.tool.args },
           status: "failed",
           error
@@ -1534,6 +2262,10 @@ export class AgentRunner {
     const settled = await Promise.allSettled(
       params.batch.tools.map((tool) => this.executeToolSafely({ ...params, tool, availableToolNames: params.availableToolNames, parentSessionId: params.run.sessionId }))
     );
+    const rejected = settled.find((item): item is PromiseRejectedResult => item.status === "rejected");
+    if (rejected) {
+      throw rejected.reason;
+    }
     return { paused: settled.some((item) => item.status === "fulfilled" && item.value.paused) } as const;
   }
 
@@ -1585,7 +2317,7 @@ export class AgentRunner {
           workspaceId: params.run.workspaceId,
           sessionId: params.run.sessionId,
           runId: params.run.runId,
-          itemId: item.itemId,
+          toolExecutionId: item.toolExecutionId,
           toolCallId: artifactToolCallId,
           toolName: item.toolName,
           toolSource: this.toolSourceForArtifact(item.toolName)
@@ -1593,7 +2325,20 @@ export class AgentRunner {
         capture?.recordEvent("tool_disabled_pending_precheck", error, { output });
         try {
           capture?.recordWritebackAttempt("policy_failed", output);
-          const response = await this.apiClient.updateContextItem({ itemId: item.itemId, status: "failed", output, updatedAt: nowMs() });
+          const request = {
+            workspaceId: params.run.workspaceId,
+            sessionId: params.run.sessionId,
+            runId: params.run.runId,
+            toolExecutionId: item.toolExecutionId,
+            status: "failed" as const,
+            resultPreview: output.text,
+            error: output.error,
+            completedAt: nowMs(),
+            updatedAt: nowMs()
+          };
+          const response = await this.retryControlWrite("disabled pending tool execution", params.signal, async () =>
+            await this.apiClient.updateToolExecution(request)
+          );
           capture?.recordWritebackSuccess("policy_failed", response);
         } catch (writebackError) {
           capture?.recordWritebackFailure("policy_failed", writebackError);
@@ -1608,70 +2353,6 @@ export class AgentRunner {
         }
         continue;
       }
-      if (item.status === "running") {
-        flushSegment();
-        const outputBase = {
-          type: "tool" as const,
-          toolName: item.toolName,
-          toolCallId: item.toolCallId,
-          args: item.args
-        };
-        const error = "tool execution interrupted, mark failed and wait next step";
-        const output = {
-          ...outputBase,
-          text: buildToolErrorText({ toolName: item.toolName, status: "failed", error }),
-          error
-        };
-        const artifactToolCallId = String(item.toolCallId || "").trim();
-        const capture = artifactToolCallId ? createToolFailureCaptureIfEnabled({
-          workspacePath: params.run.workspacePath,
-          workspaceId: params.run.workspaceId,
-          sessionId: params.run.sessionId,
-          runId: params.run.runId,
-          itemId: item.itemId,
-          toolCallId: artifactToolCallId,
-          toolName: item.toolName,
-          toolSource: this.toolSourceForArtifact(item.toolName)
-        }, item.args, this.nowMsFn) : null;
-        capture?.recordEvent("running_item_recovered_as_failed", error, { output });
-        try {
-          capture?.recordWritebackAttempt("recovery_failed", output);
-          const response = await this.apiClient.updateContextItem({ itemId: item.itemId, status: "failed", output, updatedAt: nowMs() });
-          capture?.recordWritebackSuccess("recovery_failed", response);
-        } catch (writebackError) {
-          capture?.recordWritebackFailure("recovery_failed", writebackError);
-          capture?.recordEvent("failed_writeback_failed", writebackError);
-          throw writebackError;
-        } finally {
-          if (params.signal.aborted) capture?.discard();
-          if (capture?.hasEvents()) {
-            try { await this.warnToolErrorStore(await capture.publish(), params.run.workspacePath); }
-            catch (storeError) { await this.warnToolErrorStoreFailure({ operation: "publish", error: storeError, workspacePath: params.run.workspacePath }); }
-          }
-        }
-        await writeItemLog({
-          logger: this.logger,
-          workspacePath: params.run.workspacePath,
-          kind: "tool",
-          itemId: item.itemId,
-          payload: {
-            meta: {
-              workspaceId: params.run.workspaceId,
-              sessionId: params.run.sessionId,
-              runId: params.run.runId,
-              toolItemId: item.itemId
-            },
-            request: {
-              toolName: item.toolName,
-              toolCallId: item.toolCallId,
-              args: item.args
-            },
-            status: "failed",
-            error
-          }
-        });
-        continue;
-      }
       if (item.status !== "queued") {
         flushSegment();
         continue;
@@ -1682,7 +2363,9 @@ export class AgentRunner {
         continue;
       }
       segment.push({
-        itemId: item.itemId,
+        toolExecutionId: item.toolExecutionId,
+        callPartId: item.callPartId,
+        assistantMessageId: item.assistantMessageId,
         status: item.status,
         toolName: item.toolName,
         toolCallId,
@@ -1708,14 +2391,17 @@ export class AgentRunner {
       }
     }
 
-    await this.apiClient.updateRunState({
+    if (params.signal.aborted) return { paused: false as const };
+    const request = {
       workspaceId: params.run.workspaceId,
       sessionId: params.run.sessionId,
-      status: "running",
-      activeRunId: params.run.runId,
-      activeAssistantItemId: null,
+      runId: params.run.runId,
+      runNoticeText: "",
       updatedAt: nowMs()
-    });
+    };
+    await this.retryControlWrite("clear tool notice", params.signal, async () =>
+      await this.apiClient.updateRunNotice(request)
+    );
     return { paused: false as const };
   }
 
@@ -1734,38 +2420,111 @@ export class AgentRunner {
     return lastTotalTokens >= threshold;
   }
 
-  private selectCompactionModel(params: {
-    profile: ExecutionProfile;
-    context: PromptContext;
-  }) {
-    const primary = {
-      provider: params.profile.provider,
-      model: params.profile.model
-    };
-    const candidate = params.profile.compaction
-      ? {
-          provider: params.profile.compaction.provider,
-          model: params.profile.compaction.model
-        }
-      : null;
-    if (!candidate) return { profile: primary, isCandidate: false };
-
-    const lastTotalTokens = typeof params.context.lastResponseTotalTokens === "number"
-      && Number.isFinite(params.context.lastResponseTotalTokens)
-      ? Math.max(0, Math.floor(params.context.lastResponseTotalTokens))
-      : null;
-    const candidateContextWindow = Math.max(1, Math.floor(Number(candidate.model.contextWindowTokens || 0)));
-    if (lastTotalTokens == null || lastTotalTokens <= candidateContextWindow) {
-      return { profile: candidate, isCandidate: true };
+  /** Notices are advisory: one bounded RPC, never the retryControlWrite loop. */
+  private async tryUpdateCompactionNotice(
+    request: Parameters<AgentApiClient["updateRunNotice"]>[0],
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    if (signal.aborted) {
+      const error = new Error("compaction notice cancelled");
+      error.name = "AbortError";
+      throw error;
     }
-    return { profile: primary, isCandidate: false };
+    try {
+      const response = await this.apiClient.updateRunNotice(request, {
+        abortSignal: signal,
+        timeoutMs: COMPACTION_NOTICE_TIMEOUT_MS,
+      });
+      assertFencedWriteUpdated("compaction notice", response);
+      return true;
+    } catch (error) {
+      // Loss of the Run fence or cancellation is not an optional UI failure.
+      if (signal.aborted || error instanceof FencedWriteIgnoredError || error instanceof FencedWriteMissingError) throw error;
+      return false;
+    }
   }
 
-  private isSameCompactionModelProfile(
-    left: { provider: ExecutionProfile["provider"]; model: ExecutionProfile["model"] },
-    right: { provider: ExecutionProfile["provider"]; model: ExecutionProfile["model"] }
-  ) {
-    return left.provider.id === right.provider.id && left.model.id === right.model.id;
+  private async executeCompaction(params: {
+    mode: CompactionMode;
+    profile: ExecutionProfile;
+    run: QueuedRun;
+    signal: AbortSignal;
+    casState?: CompactionCasState;
+  }) {
+    // A timeout can lose the response after the notice was stored. Attempt a
+    // best-effort clear even if the preceding notice write was inconclusive.
+    let retryNoticeMayNeedClear = false;
+    let noticeExpectedRevision: number | undefined;
+    let noticeWritesDisabled = false;
+    const executor = new CompactionExecutor({
+      apiClient: this.apiClient,
+      nowMs: this.nowMsFn,
+      newId: newSortableId,
+      onSummaryRetry: async ({ expectedRevision, retryAttempt, maxRetries, delayMs, abortSignal }) => {
+        if (noticeWritesDisabled) return;
+        noticeExpectedRevision = expectedRevision;
+        const request = {
+          workspaceId: params.run.workspaceId,
+          sessionId: params.run.sessionId,
+          runId: params.run.runId,
+          runNoticeText: `正在压缩上下文，${Math.ceil(delayMs / 1_000)} 秒后重试（${retryAttempt}/${maxRetries}）`,
+          compactionExpectedRevision: expectedRevision,
+          updatedAt: this.nowMsFn(),
+        };
+        retryNoticeMayNeedClear = true;
+        try {
+          if (!await this.tryUpdateCompactionNotice(request, abortSignal)) {
+            noticeWritesDisabled = true;
+            this.logger.warn("[agent-worker] compaction retry notice unavailable; continuing summary retry");
+          }
+        } catch (error) {
+          if (error instanceof FencedWriteIgnoredError || error instanceof FencedWriteMissingError) throw new CompactionNoticeFenceLostError();
+          throw error;
+        }
+      },
+      generateSummary: async (input) => await this.generateSingleCallSummary({
+        profile: input.profile,
+        input: {
+          system: input.system,
+          // Summary requests intentionally have no sessionId: they must not inherit
+          // OpenAI Responses replay or main-turn prompt-cache state.
+          messages: input.messages,
+          timeoutMs: input.timeoutMs,
+          abortSignal: input.abortSignal,
+        },
+      }),
+    });
+    const result = await executor.execute({
+      mode: params.mode,
+      profile: params.profile,
+      workspaceId: params.run.workspaceId,
+      sessionId: params.run.sessionId,
+      runId: params.run.runId,
+      abortSignal: params.signal,
+      casState: params.casState,
+    });
+    // Manual runs become terminal; proactive runs may continue to the next
+    // model step. Normal model creation also clears the notice if this bounded
+    // best-effort cleanup cannot reach the control plane.
+    if (retryNoticeMayNeedClear && params.mode === "proactive" && !params.signal.aborted &&
+      (result.kind === "committed" || result.kind === "skipped" || result.kind === "blocked" || result.kind === "media_requires_resend" || result.kind === "unavailable")) {
+      const request = { workspaceId: params.run.workspaceId, sessionId: params.run.sessionId, runId: params.run.runId,
+        runNoticeText: "", compactionExpectedRevision: noticeExpectedRevision, updatedAt: this.nowMsFn() };
+      try {
+        if (!await this.tryUpdateCompactionNotice(request, params.signal)) {
+          this.logger.warn("[agent-worker] compaction retry notice cleanup unavailable");
+        }
+      } catch (error) {
+        if (params.signal.aborted) return result;
+        // Committing the summary is durable, but a stale Worker cannot proceed
+        // to a model request or select another terminal outcome for this Run.
+        // The processRun fence handler stops without attempting a failed terminal.
+        if (result.kind === "committed") this.logger.warn("[agent-worker] compaction committed; retry notice cleanup fence lost; stopping run");
+        if (error instanceof FencedWriteIgnoredError || error instanceof FencedWriteMissingError) throw new CompactionNoticeFenceLostError();
+        throw error;
+      }
+    }
+    return result;
   }
 
   protected async generateSingleCallSummary(params: {
@@ -1774,188 +2533,15 @@ export class AgentRunner {
       model: ExecutionProfile["model"];
     };
     input: {
-      messages: Array<{ role: string; content: unknown }>;
+      messages: ModelMessage[];
       system?: string;
       sessionId?: string;
-      timeoutMs: number;
+      timeoutMs: number | null;
       abortSignal: AbortSignal;
     };
   }) {
     // one-shot summary 若提供 sessionId，则共享主模型请求的 OpenAI 默认 promptCacheKey 策略。
-    return generateSingleCallText(params.profile, params.input);
-  }
-
-  protected async generateCompactionSummary(params: {
-    profile: ExecutionProfile;
-    context: PromptContext;
-    signal: AbortSignal;
-  }) {
-    const messagesContext = await this.apiClient.getMessagesContext({
-      workspaceId: params.profile.resolved.workspaceId,
-      sessionId: params.profile.resolved.sessionId,
-      appendMessage: {
-        role: "user",
-        content: buildCompactionUserPrompt({ uiLocale: params.context.uiLocale })
-      }
-    });
-    const primary = {
-      provider: params.profile.provider,
-      model: params.profile.model
-    };
-    const selected = this.selectCompactionModel({
-      profile: params.profile,
-      context: params.context
-    });
-    const generateSummary = async (profile: typeof primary) => await this.generateSingleCallSummary({
-      profile: {
-        provider: profile.provider,
-        model: profile.model
-      },
-      input: {
-        // compaction 是内部摘要任务，不继承执行态完整 system prompt；使用 messages-context 提供的 one-shot system。
-        system: messagesContext.system,
-        sessionId: params.profile.resolved.sessionId,
-        messages: messagesContext.messages,
-        timeoutMs: COMPACTION_TIMEOUT_MS,
-        abortSignal: params.signal
-      }
-    });
-
-    let response;
-    try {
-      response = await generateSummary(selected.profile);
-    } catch (err) {
-      if (
-        selected.isCandidate
-        && !params.signal.aborted
-        && !this.isSameCompactionModelProfile(selected.profile, primary)
-        && isContextLengthExceededError(err)
-      ) {
-        response = await generateSummary(primary);
-      } else {
-        throw err;
-      }
-    }
-    return String(response.text || "").trim();
-  }
-
-  private async compactContext(params: {
-    profile: ExecutionProfile;
-    run: QueuedRun;
-    context: PromptContext;
-    signal: AbortSignal;
-  }) {
-    const { profile, run, context, signal } = params;
-
-    const modelRequestMaxRetries = Math.max(0, Math.floor((profile as any).runtime?.modelRequestMaxRetries ?? 0));
-    const clearCompactionNotice = async () => {
-      try {
-        await this.apiClient.updateRunState({
-          workspaceId: run.workspaceId,
-          sessionId: run.sessionId,
-          status: "running",
-          activeRunId: run.runId,
-          activeAssistantItemId: null,
-          runNoticeText: "",
-          updatedAt: nowMs()
-        });
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        this.logger.warn(
-          `[agent-worker] clear compaction notice failed(session=${run.sessionId}, run=${run.runId}): ${message}`
-        );
-      }
-    };
-
-    const updateCompactionSuccessState = async () => {
-      try {
-        await this.apiClient.updateRunState({
-          workspaceId: run.workspaceId,
-          sessionId: run.sessionId,
-          status: "running",
-          activeRunId: run.runId,
-          activeAssistantItemId: null,
-          runNoticeText: "",
-          lastResponseTotalTokens: null,
-          updatedAt: nowMs()
-        });
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        this.logger.warn(
-          `[agent-worker] update run state after compaction success failed(session=${run.sessionId}, run=${run.runId}): ${message}`
-        );
-      }
-    };
-
-    let retryCount = 0;
-
-    while (!signal.aborted) {
-      const expectedHeadItemId = context.headItemId;
-      if (expectedHeadItemId == null) return false;
-
-      try {
-        const summaryText = await this.generateCompactionSummary({
-          profile,
-          context,
-          signal
-        });
-        if (!summaryText) {
-          await clearCompactionNotice();
-          return false;
-        }
-
-        const compacted = await this.apiClient.compactContext({
-          workspaceId: run.workspaceId,
-          sessionId: run.sessionId,
-          runId: run.runId,
-          expectedHeadItemId,
-          summaryText
-        });
-        if (!compacted.compacted) {
-          await clearCompactionNotice();
-          return false;
-        }
-
-        await updateCompactionSuccessState();
-        return true;
-      } catch (err) {
-        if (signal.aborted) return false;
-        const canRetry = retryCount < modelRequestMaxRetries && isRetryableCompactionError(err);
-        if (!canRetry) {
-          throw err;
-        }
-
-        const delayMs = computeRetryBackoffMs(retryCount);
-        const retryAttempt = retryCount + 1;
-        const message = err instanceof Error ? err.message : String(err);
-        const noticeText = `Compaction failed, retrying in ${Math.floor(delayMs / 1000)}s (${retryAttempt}/${modelRequestMaxRetries}): ${message}`;
-        this.logger.warn(
-          `[agent-worker] compaction retry scheduled(session=${run.sessionId}, run=${run.runId}, retry=${retryAttempt}/${modelRequestMaxRetries}): ${message}`
-        );
-        try {
-          await this.apiClient.updateRunState({
-            workspaceId: run.workspaceId,
-            sessionId: run.sessionId,
-            status: "running",
-            activeRunId: run.runId,
-            activeAssistantItemId: null,
-            runNoticeText: noticeText,
-            updatedAt: nowMs()
-          });
-        } catch (noticeErr) {
-          const noticeMessage = noticeErr instanceof Error ? noticeErr.message : String(noticeErr);
-          this.logger.warn(
-            `[agent-worker] update compaction retry notice failed(session=${run.sessionId}, run=${run.runId}, retry=${retryAttempt}/${modelRequestMaxRetries}): ${noticeMessage}`
-          );
-        }
-
-        retryCount = retryAttempt;
-        const continueRunning = await sleepMsWithAbort(delayMs, signal);
-        if (!continueRunning) return false;
-      }
-    }
-
-    return false;
+    return generateSingleCallText(params.profile, params.input, { disableSdkRetries: true });
   }
 
   private async runModelStep(params: {
@@ -1963,60 +2549,43 @@ export class AgentRunner {
     run: QueuedRun;
     context: PromptContext;
     step: number;
+    emptyResponseCount?: number;
     signal: AbortSignal;
+    recoveryContinuation?: { messageId: string | null };
     repeatedToolCallCounter: Map<string, number>;
   }) {
-    const { profile, run, context, step, signal, repeatedToolCallCounter } = params;
+    const { profile, run, context, step, emptyResponseCount = 0, signal, recoveryContinuation = { messageId: null }, repeatedToolCallCounter } = params;
+    if (context.pendingTools.length > 0) {
+      throw new Error("cannot invoke model while ToolExecution remains queued or running");
+    }
+    const conversationStateAdapter = this.providerConversationStateAdapterRegistry.resolve(profile);
     const model = createLanguageModel(profile);
     const runtimeOptions = buildModelRuntimeOptions(profile);
     const turnId = newSortableId("turn");
-
-    const modelIdleTimeoutMs =
-      ENV_MODEL_IDLE_TIMEOUT_MS > 0
-        ? ENV_MODEL_IDLE_TIMEOUT_MS
-        : Math.max(0, Math.floor((profile as any).runtime?.modelIdleTimeoutMs ?? 0));
-    const modelTotalTimeoutMs =
-      ENV_MODEL_TOTAL_TIMEOUT_MS > 0
-        ? ENV_MODEL_TOTAL_TIMEOUT_MS
-        : Math.max(0, Math.floor((profile as any).runtime?.modelTotalTimeoutMs ?? 0));
-    const modelRequestMaxRetries = Math.max(0, Math.floor((profile as any).runtime?.modelRequestMaxRetries ?? 0));
-
-    const assistant = await this.apiClient.createContextItem({
-      workspaceId: run.workspaceId,
-      sessionId: run.sessionId,
-      runId: run.runId,
-      turnId,
-      step,
-      prevId: context.headItemId,
-      kind: "assistant",
-      status: "streaming",
-        output: {
-          type: "assistant_text",
-          text: ""
-        },
-      createdAt: this.nowMsFn()
+    const preparedInvocation = conversationStateAdapter?.prepareInvocation({
+      profile,
+      messages: context.messages as ModelMessage[],
+      history: context.providerReplay,
+      providerOptions: runtimeOptions.providerOptions,
     });
-    if (assistant.item == null) {
-      return { aborted: true as const, assistantItemId: null };
-    }
-    const assistantItem = assistant.item;
+    const preparedProviderOptions = preparedInvocation?.providerOptions ?? runtimeOptions.providerOptions;
+    const includeRawChunks = preparedInvocation?.includeRawChunks === true;
+    // API keeps empty Assistant placeholders only to preserve replay ordinals. The Adapter
+    // consumes those indexes first; after recovery, no Provider may receive an empty Assistant.
+    const providerMessages = (preparedInvocation?.messages ?? context.messages).filter((message) =>
+      message.role !== "assistant" || message.content.length > 0);
 
-    await this.apiClient.updateRunState({
-      workspaceId: run.workspaceId,
-      sessionId: run.sessionId,
-      status: "running",
-      activeRunId: run.runId,
-      activeAssistantItemId: assistantItem.id,
-      runNoticeText: "",
-      updatedAt: this.nowMsFn()
-    });
+    const modelIdleTimeoutMs = Math.max(0, Math.floor(profile.runtime.modelIdleTimeoutMs));
+    const modelTotalTimeoutMs = Math.max(0, Math.floor(profile.runtime.modelTotalTimeoutMs));
+    const modelRequestMaxRetries = normalizeModelRequestMaxRetries(profile.runtime.modelRequestMaxRetries);
+    const modelRequestRetryBackoffMaxMs = normalizeRetryBackoffMaxMs(profile.runtime.modelRequestRetryBackoffMaxMs);
 
     const toolDefinitions = await this.toolRegistry.listTools({
       profile,
       promptContext: context,
       apiClient: this.apiClient
     });
-    const toolSet: Record<string, any> = {};
+    const toolSet: RuntimeToolSet = {};
     for (const item of toolDefinitions) {
       toolSet[item.name] = tool({
         description: item.description,
@@ -2027,42 +2596,267 @@ export class AgentRunner {
     // TODO(plugin-phase2): 若后续 provider 引入缓存/热更新，需要把该快照显式透传到执行阶段，而不是仅从 promptContext 重新推导。
     const availableToolNames = new Set<string>(Object.keys(toolSet));
 
-    const requestBase: Record<string, unknown> = {
+    const requestBase: RuntimeStreamRequest = {
       model,
       system: context.system || undefined,
-      messages: context.messages,
-      tools: toolSet
+      messages: [], // Media must be opened anew for each attempt, not stored in the shared request.
+      tools: toolSet,
+      ...runtimeOptions.aiSdk,
+      maxRetries: 0,
     };
-
-    if (Object.keys(runtimeOptions.aiSdk).length > 0) {
-      Object.assign(requestBase, runtimeOptions.aiSdk);
-    }
-    if (Object.keys(runtimeOptions.providerOptions).length > 0 || profile.provider.npm === "@ai-sdk/openai") {
-      requestBase.providerOptions = {
-        [runtimeOptions.providerKey]: buildProviderOptionsWithPromptCacheKey({
+    if (Object.keys(preparedProviderOptions).length > 0 || profile.provider.npm === "@ai-sdk/openai") {
+      const providerOptions = buildProviderOptionsWithPromptCacheKey({
           providerNpm: profile.provider.npm,
           sessionId: run.sessionId,
-          providerOptions: runtimeOptions.providerOptions
-        })
+          providerOptions: preparedProviderOptions
+        });
+      const jsonProviderOptions: Record<string, JSONValue> = {};
+      for (const [key, value] of Object.entries(providerOptions)) {
+        const jsonValue = toJsonValue(value);
+        if (jsonValue !== undefined) jsonProviderOptions[key] = jsonValue;
+      }
+      requestBase.providerOptions = {
+        [runtimeOptions.providerKey]: jsonProviderOptions,
       };
     }
     // 自定义重试策略由本文件控制,禁用 AI SDK 内建重试避免双重重试。
-    requestBase.maxRetries = 0;
+    if (includeRawChunks) requestBase.includeRawChunks = true;
+
+    // Preflight the first attempt before creating the Assistant item. Subsequent attempts
+    // reconstruct their media from disk after the Provider failure and retry delay.
+    let firstAttemptMessages: ModelMessage[] | null = await materializePromptAttachments({
+      messages: providerMessages as PromptContext["messages"],
+      attachmentStorage: this.attachmentStorage,
+      run,
+      providerNpm: profile.provider.npm,
+    });
+    let attemptDebugRequest = projectAssistantDebugRecord({ status: "running", request: { ...requestBase, messages: firstAttemptMessages } }).request;
+
+    let assistantMessageId: string;
+    if (recoveryContinuation.messageId) {
+      if (profile.provider.npm === "@ai-sdk/moonshotai" || profile.provider.npm === "@ai-sdk/deepseek") {
+        // Existing streaming Parts cannot currently be loaded and proved identical here.
+        // Atomically replace instead of mixing a new Attempt with an unknown partial output.
+        const newMessageId = newSortableId("message");
+        const replaced = await this.apiClient.replaceStreamingAssistant({
+          workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId,
+          oldMessageId: recoveryContinuation.messageId, newMessageId,
+          runNoticeText: "", retryCount: 0, nextRetryAt: null, createdAt: this.nowMsFn(),
+        });
+        assertFencedWriteUpdated("replace recovery streaming assistant", replaced);
+        recoveryContinuation.messageId = null;
+        assistantMessageId = newMessageId;
+      } else {
+      const resumedMessageId = recoveryContinuation.messageId;
+      const claim = await this.apiClient.resumeStreamingAssistant({
+        workspaceId: run.workspaceId,
+        sessionId: run.sessionId,
+        runId: run.runId,
+        messageId: resumedMessageId,
+      });
+      assertFencedWriteUpdated("resume streaming assistant", claim);
+      // 成功 claim 后该 continuation 已与本次模型 step 绑定，不能供后续 step 重复使用。
+      recoveryContinuation.messageId = null;
+      assistantMessageId = resumedMessageId;
+      }
+    } else {
+      assistantMessageId = newSortableId("message");
+      const request = {
+        workspaceId: run.workspaceId,
+        sessionId: run.sessionId,
+        runId: run.runId,
+        messageId: assistantMessageId,
+        createdAt: this.nowMsFn(),
+      };
+      await this.retryIdempotentControlWrite("create streaming assistant", signal, async () =>
+        await this.apiClient.createStreamingAssistant(request),
+      );
+    }
 
     const assistantStreamFlushIntervalMs = 1_000;
     const assistantStreamFlushCharsThreshold = 160;
-    let text = "";
-    let reasoningText = "";
-    const toolCalls: ToolCall[] = [];
+    let orderedParts: StreamingAssistantPart[] = [];
+    let streamPartVersion = 0;
+    let streamedCharsSinceLastFlush = 0;
+    let activeAttempt: ProviderConversationStateAttempt | undefined;
+    const attachPartReplay = (part: StreamingAssistantPart) => {
+      try {
+        const replay = activeAttempt?.createPartReplay?.({
+          id: part.id, type: part.type,
+          ...(part.type === "tool_call" && part.providerToolCallId ? { providerToolCallId: part.providerToolCallId } : {}),
+        });
+        if (!replay) return;
+        if (replay.item.type !== (part.type === "tool_call" && replay.provider.npm === "@ai-sdk/openai" ? "function_call" : part.type)) {
+          throw new AgentProviderReplayUpdateError("provider replay part type mismatch");
+        }
+        if (part.providerReplay && serializeAgentProviderReplay(part.providerReplay) !== serializeAgentProviderReplay(replay)) {
+          throw new AgentProviderReplayUpdateError("provider replay part identity mismatch");
+        }
+        if (part.providerReplay) return;
+        part.providerReplay = replay as StreamingAssistantPart["providerReplay"];
+        streamPartVersion += 1;
+      } catch {
+        // An Adapter or serializer may throw private metadata. Never leak its message or retry the model.
+        throw new AgentProviderReplayUpdateError("provider replay part materialization failed");
+      }
+    };
+    const textFromParts = () => orderedParts
+      .filter((part): part is Extract<StreamingAssistantPart, { type: "text" }> => part.type === "text")
+      .map((part) => part.text)
+      .join("");
+    const reasoningFromParts = () => orderedParts
+      .filter((part): part is Extract<StreamingAssistantPart, { type: "reasoning" }> => part.type === "reasoning")
+      .map((part) => part.text)
+      .join("");
+    const toolCallsFromParts = () => orderedParts
+      .filter((part): part is Extract<StreamingAssistantPart, { type: "tool_call" }> => part.type === "tool_call")
+      .map((part) => part.toolCall);
+    // SDK IDs identify the current stream block, not a globally unique DB Part. Some
+    // SDKs reuse reasoning-0 after text (and across requests). OpenAI keeps its item IDs.
+    const activeStreamParts = new Map<string, string>();
+    let lastStreamType: "text" | "reasoning" | null = null;
+    const localStreamPartId = (type: "text" | "reasoning", id: string, start = false) => {
+      if (!conversationStateAdapter?.scopeStreamPartIds || id.startsWith(`${assistantMessageId}:part:`)) return id;
+      if (id.startsWith(`${assistantMessageId}:stream:`)) return id;
+      if (lastStreamType !== type) activeStreamParts.clear();
+      lastStreamType = type;
+      const key = `${type}:${id}`;
+      if (start && activeStreamParts.has(key)) {
+        throw new AgentProviderReplayUpdateError("provider stream block was started twice without ending");
+      }
+      let partId = activeStreamParts.get(key);
+      if (!partId) {
+        partId = `${assistantMessageId}:stream:${orderedParts.length}`;
+        activeStreamParts.set(key, partId);
+      }
+      return partId;
+    };
+    const ensureStreamTextPart = (type: "text" | "reasoning", id: string) => {
+      const existing = orderedParts.find((part) => part.id === id);
+      if (existing) {
+        if (existing.type !== type) throw new AgentProviderReplayUpdateError("provider stream part id changed type");
+        attachPartReplay(existing);
+        return existing;
+      }
+      const part: Extract<StreamingAssistantPart, { type: typeof type }> = {
+        id,
+        position: orderedParts.length,
+        type,
+        text: "",
+      } as Extract<StreamingAssistantPart, { type: typeof type }>;
+      orderedParts.push(part);
+      attachPartReplay(part);
+      streamPartVersion += 1;
+      return part;
+    };
+    const appendStreamText = (type: "text" | "reasoning", delta: string, streamId?: string) => {
+      const last = orderedParts.at(-1);
+      const id = streamId
+        ? localStreamPartId(type, streamId)
+        : (last?.type === type ? last.id : `${assistantMessageId}:part:${orderedParts.length}`);
+      const part = ensureStreamTextPart(type, id);
+      if (orderedParts.at(-1)?.id !== part.id && delta) {
+        throw new AgentProviderReplayUpdateError("provider stream attempted to append text to an earlier part");
+      }
+      if (delta) {
+        part.text += delta;
+        streamPartVersion += 1;
+        streamedCharsSinceLastFlush += delta.length;
+      }
+    };
+    const upsertProviderReplayPart = (update: ProviderReplayPartUpdate) => {
+      const existing = update.type === "function_call"
+        ? orderedParts.find((part) => part.type === "tool_call" && part.providerToolCallId === update.providerToolCallId)
+        : orderedParts.find((part) => part.id === update.id);
+      if (existing) {
+        if (existing.type === "text" && update.type === "text") {
+          const replayChanged = existing.providerReplay == null
+            || serializeAgentProviderReplay(existing.providerReplay) !== serializeAgentProviderReplay(update.providerReplay);
+          if (existing.providerReplay && replayChanged) assertAgentProviderReplayUpdateCompatible(existing.providerReplay, update.providerReplay);
+          if (update.text != null && !update.text.startsWith(existing.text)) {
+            throw new Error("provider replay text must extend the existing cumulative text");
+          }
+          const textChanged = update.text != null && update.text !== existing.text;
+          if (!replayChanged && !textChanged) return;
+          if (update.text != null) existing.text = update.text;
+          existing.providerReplay = update.providerReplay;
+        } else if (existing.type === "reasoning" && update.type === "reasoning") {
+          const replayChanged = existing.providerReplay == null
+            || serializeAgentProviderReplay(existing.providerReplay) !== serializeAgentProviderReplay(update.providerReplay);
+          if (existing.providerReplay && replayChanged) assertAgentProviderReplayUpdateCompatible(existing.providerReplay, update.providerReplay);
+          if (update.text != null && !update.text.startsWith(existing.text)) {
+            throw new Error("provider replay text must extend the existing cumulative text");
+          }
+          const textChanged = update.text != null && update.text !== existing.text;
+          if (!replayChanged && !textChanged) return;
+          if (update.text != null) existing.text = update.text;
+          existing.providerReplay = update.providerReplay;
+        } else if (existing.type === "tool_call" && update.type === "function_call") {
+          if (existing.providerReplay) {
+            if (serializeAgentProviderReplay(existing.providerReplay) === serializeAgentProviderReplay(update.providerReplay)) return;
+            assertAgentProviderReplayUpdateCompatible(existing.providerReplay, update.providerReplay);
+          }
+          existing.providerReplay = update.providerReplay;
+        } else {
+          throw new Error("provider replay update does not match streaming part type");
+        }
+      } else if (update.type === "text") {
+        orderedParts.push({ id: update.id, position: orderedParts.length, type: "text", text: update.text ?? "", providerReplay: update.providerReplay });
+      } else if (update.type === "reasoning") {
+        orderedParts.push({ id: update.id, position: orderedParts.length, type: "reasoning", text: update.text ?? "", providerReplay: update.providerReplay });
+      } else {
+        throw new AgentProviderReplayUpdateError("function_call replay requires a matching tool_call call_id");
+      }
+      // metadata-only 也是原生 Provider 输出。版本推进使 flush 与 retry replacement
+      // 不再依赖可见文本长度。
+      streamPartVersion += 1;
+    };
+    const appendToolCall = (
+      toolName: string,
+      toolCallId: string,
+      args: Record<string, unknown>,
+      providerReplay?: ProviderReplayFor<"function_call" | "tool_call">,
+    ) => {
+      const existing = orderedParts.find((part) => part.type === "tool_call" && part.providerToolCallId === toolCallId);
+      if (existing?.type === "tool_call") {
+        attachPartReplay(existing);
+        const sameCall = existing.toolName === toolName && JSON.stringify(existing.input) === JSON.stringify(args);
+        if (!sameCall) {
+          throw new AgentProviderReplayUpdateError("tool-call call_id was reused with different name or input");
+        }
+        if (providerReplay) {
+          if (existing.providerReplay) {
+            if (serializeAgentProviderReplay(existing.providerReplay) === serializeAgentProviderReplay(providerReplay)) return;
+            assertAgentProviderReplayUpdateCompatible(existing.providerReplay, providerReplay);
+          }
+          existing.providerReplay = providerReplay;
+          streamPartVersion += 1;
+        }
+        return;
+      }
+      const callPartId = `${assistantMessageId}:part:${orderedParts.length}`;
+      const toolCall: ToolCall = { toolName, toolCallId, args, callPartId };
+      orderedParts.push({
+        id: callPartId,
+        position: orderedParts.length,
+        type: "tool_call",
+        toolName,
+        input: args,
+        providerToolCallId: toolCallId || null,
+        toolCall,
+        ...(providerReplay == null ? {} : { providerReplay }),
+      });
+      attachPartReplay(orderedParts.at(-1)!);
+      streamPartVersion += 1;
+    };
     const startedAt = this.nowMsFn();
     let responseTotalTokens: number | null = null;
 
-    await writeItemLog({
+    await writeAssistantDebugRecord({
       logger: this.logger,
       workspacePath: run.workspacePath,
-      kind: "assistant",
-      itemId: assistantItem.id,
-      payload: {
+      recordId: assistantMessageId,
+      input: {
         status: "running",
         startedAt,
         meta: {
@@ -2071,110 +2865,132 @@ export class AgentRunner {
           runId: run.runId,
           turnId,
           step,
-          itemId: assistantItem.id
+          messageId: assistantMessageId
         },
-        request: requestBase,
+        request: attemptDebugRequest,
         retryPolicy: {
           firstBackoffMs: MODEL_RETRY_BACKOFF_BASE_MS,
-          maxBackoffMs: MODEL_RETRY_BACKOFF_MAX_MS,
-          maxRetries: modelRequestMaxRetries
+          maxBackoffMs: modelRequestRetryBackoffMaxMs,
         }
       }
     });
 
     let retryCount = 0;
     let successfulStream: any = null;
-    let lastFlushedText = "";
-    let lastFlushedReasoningText = "";
+    let lastFlushedPartVersion = 0;
     let lastFlushAt = this.nowMsFn();
     let pendingFlush = false;
+    let retryNoticePendingClear = false;
 
-    const flushAssistant = async (status: "streaming" | "completed" | "failed", force = false) => {
-      if (
-        !force
-        && text === lastFlushedText
-        && reasoningText === lastFlushedReasoningText
-        && status === "streaming"
-      ) {
-        return;
-      }
-      await this.apiClient.updateContextItem({
-        itemId: assistantItem.id,
-        status,
-        output: {
-          type: "assistant_text",
-          text,
-          ...(reasoningText ? { reasoning: { text: reasoningText } } : {})
-        },
-        updatedAt: this.nowMsFn()
+    const clearRetryNoticeAfterSuccess = async () => {
+      if (!retryNoticePendingClear) return;
+      const request = {
+        workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId,
+        runNoticeText: "", retryCount: 0, nextRetryAt: null, updatedAt: this.nowMsFn()
+      };
+      await this.retryControlWrite("clear retry notice", signal, async () =>
+        await this.apiClient.updateRunNotice(request)
+      );
+      retryNoticePendingClear = false;
+    };
+
+    const flushAssistant = async (force = false, clearRetryNotice = true) => {
+      if (!force && streamPartVersion === lastFlushedPartVersion) return;
+      const parts: AgentApiFlushAssistantPartsRequest["parts"] = orderedParts.map((part) => {
+        if (part.type === "text") {
+          return {
+            id: part.id, position: part.position, type: "text" as const, text: part.text,
+            ...(part.providerReplay == null ? {} : { providerReplay: part.providerReplay }),
+          };
+        }
+        if (part.type === "reasoning") {
+          return {
+            id: part.id, position: part.position, type: "reasoning" as const, text: part.text,
+            ...(part.providerReplay == null ? {} : { providerReplay: part.providerReplay }),
+          };
+        }
+        return {
+          id: part.id,
+          position: part.position,
+          type: "tool_call" as const,
+          toolName: part.toolName,
+          input: part.input,
+          providerToolCallId: part.providerToolCallId,
+          ...(part.providerReplay == null ? {} : { providerReplay: part.providerReplay }),
+        };
       });
-      lastFlushedText = text;
-      lastFlushedReasoningText = reasoningText;
+      const request = {
+        workspaceId: run.workspaceId,
+        sessionId: run.sessionId,
+        runId: run.runId,
+        messageId: assistantMessageId,
+        parts,
+        updatedAt: this.nowMsFn()
+      };
+      await this.retryControlWrite("flush assistant parts", signal, async () =>
+        await this.apiClient.flushAssistantParts(request)
+      );
+      lastFlushedPartVersion = streamPartVersion;
+      streamedCharsSinceLastFlush = 0;
       lastFlushAt = this.nowMsFn();
       pendingFlush = false;
+      if (clearRetryNotice && (hasVisibleAssistantText(textFromParts()) || reasoningFromParts().length > 0 || toolCallsFromParts().length > 0)) {
+        await clearRetryNoticeAfterSuccess();
+      }
     };
 
     const maybeFlushAssistantStreaming = async (force = false) => {
       const now = this.nowMsFn();
-      const deltaChars = (text.length - lastFlushedText.length) + (reasoningText.length - lastFlushedReasoningText.length);
+      const deltaChars = streamedCharsSinceLastFlush;
       if (
         force
         || deltaChars >= assistantStreamFlushCharsThreshold
         || now - lastFlushAt >= assistantStreamFlushIntervalMs
       ) {
-        await flushAssistant("streaming", true);
+        await flushAssistant(true);
         return;
       }
       pendingFlush = true;
     };
 
-    const resetVisibleOutputForRetry = async () => {
-      const prevText = text;
-      const prevReasoningText = reasoningText;
-      const prevLastFlushedText = lastFlushedText;
-      const prevLastFlushedReasoningText = lastFlushedReasoningText;
-      const prevLastFlushAt = lastFlushAt;
-      const prevPendingFlush = pendingFlush;
-
-      text = "";
-      reasoningText = "";
-      try {
-        await flushAssistant("streaming", true);
-      } catch (err) {
-        text = prevText;
-        reasoningText = prevReasoningText;
-        lastFlushedText = prevLastFlushedText;
-        lastFlushedReasoningText = prevLastFlushedReasoningText;
-        lastFlushAt = prevLastFlushAt;
-        pendingFlush = prevPendingFlush;
-
-        const message = err instanceof Error ? err.message : String(err);
-        this.logger.warn(
-          `[agent-worker] reset visible output before retry failed(item=${assistantItem.id}, retry=${retryCount + 1}/${modelRequestMaxRetries}): ${message}`
-        );
-      }
+    const replaceAssistantForRetry = async (notice: { runNoticeText: string; retryCount: number; nextRetryAt: number | null }) => {
+      const oldMessageId = assistantMessageId;
+      const newMessageId = newSortableId("message");
+      const request = {
+        workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId,
+        oldMessageId, newMessageId, runNoticeText: notice.runNoticeText,
+        retryCount: notice.retryCount, nextRetryAt: notice.nextRetryAt, createdAt: this.nowMsFn()
+      };
+      await this.retryControlWrite("replace streaming assistant", signal, async () =>
+        await this.apiClient.replaceStreamingAssistant(request)
+      );
+      assistantMessageId = newMessageId;
+      orderedParts = [];
+      activeStreamParts.clear();
+      lastStreamType = null;
+      streamPartVersion = 0;
+      streamedCharsSinceLastFlush = 0;
+      responseTotalTokens = null;
+      lastFlushedPartVersion = 0;
+      lastFlushAt = this.nowMsFn();
+      pendingFlush = false;
+      retryNoticePendingClear = true;
     };
 
     while (true) {
       if (signal.aborted) {
-        return { aborted: true as const, assistantItemId: assistantItem.id };
+        return { aborted: true as const, assistantMessageId };
       }
-
-      if (retryCount > 0) {
-        try {
-          await this.apiClient.updateRunState({
-            workspaceId: run.workspaceId,
-            sessionId: run.sessionId,
-              status: "running",
-              activeRunId: run.runId,
-              activeAssistantItemId: assistantItem.id,
-              runNoticeText: "",
-              updatedAt: this.nowMsFn()
-            });
-          } catch {
-            // ignore notice clear failure
-        }
-      }
+      // Preparation errors are local failures: never enter the Provider retry catch below.
+      // The conversation-state adapter ran exactly once on the original assistant ordinals.
+      const materializedMessages = firstAttemptMessages ?? await materializePromptAttachments({
+        messages: providerMessages as PromptContext["messages"],
+        attachmentStorage: this.attachmentStorage,
+        run,
+        providerNpm: profile.provider.npm,
+      });
+      firstAttemptMessages = null;
+      attemptDebugRequest = projectAssistantDebugRecord({ status: "running", request: { ...requestBase, messages: materializedMessages } }).request;
 
       // 用独立 controller 承载“用户取消”和“空闲/总超时”中止。
       // 仅将“用户取消”(signal.aborted)视为 run cancelled。
@@ -2182,9 +2998,16 @@ export class AgentRunner {
       let idleTimedOut = false;
       let totalTimedOut = false;
       let lastChunkAt = this.nowMsFn();
-      // 只要本次请求已经开始产生可见输出(文本/tool-call),就不再自动重试。
-      // 这样可以避免重试导致的重复内容,以及工具重复执行带来的副作用。
-      let attemptStartedVisibleOutput = false;
+      const attemptStartPartVersion = streamPartVersion;
+      const attemptProducedOutput = () => streamPartVersion > attemptStartPartVersion;
+      const conversationStateAttempt = conversationStateAdapter && preparedInvocation
+        ? conversationStateAdapter.createAttempt(preparedInvocation.attemptContext) : undefined;
+      activeAttempt = conversationStateAttempt;
+      let attemptStream: RuntimeStreamResult | null = null;
+      let attemptResponseTotalTokens: number | null = null;
+      let attemptReachedTerminal = false;
+      let attemptSucceeded = false;
+      let attemptLocalFailure = false;
 
       const onOuterAbort = () => {
         requestController.abort();
@@ -2216,70 +3039,114 @@ export class AgentRunner {
         }, modelTotalTimeoutMs);
       }
 
-      const retryMessages = buildRetryMessages({
-        baseMessages: context.messages as Array<Record<string, unknown>>,
-        text,
-        toolCalls: toolCalls.length,
-        retryCount,
-        maxRetries: modelRequestMaxRetries
-      });
-      const request: Record<string, unknown> = {
+      const request = {
         ...requestBase,
         abortSignal: requestController.signal,
-        messages: retryMessages
-      };
+        messages: materializedMessages
+      } satisfies RuntimeStreamRequest;
 
+      const analyticsModelStartedAt = this.nowMsFn();
+      const analyticsAttemptNo = retryCount + 1;
+      const analyticsModelCallId = newSortableId("model");
+      let cacheStep: CacheStep | undefined;
+      let finishedSteps = 0;
+      let finishEvents = 0;
+      let analyticsFinishUsage: AnalyticsUsage | null = null;
       try {
-        const stream = this.streamTextFn(request as any) as StreamTextResultLike;
-        successfulStream = stream;
-        for await (const chunk of stream.fullStream as AsyncIterable<any>) {
+        const analyticsModelPayload = { modelCallId: analyticsModelCallId, runId: run.runId, executionId: run.runId, attemptNo: analyticsAttemptNo, providerId: profile.provider.id ?? "unknown", modelId: profile.model.id ?? "unknown", startedAt: analyticsModelStartedAt, endedAt: null, status: "running" as const, completionQuality: "unknown" as const, timeoutKind: null, inputTokens: null, cacheInputTokens: null, cacheWriteTokens: null, cacheComparable: false, cacheWriteVerified: false, failureKind: null };
+        this.analyticsSignals?.emitModel(analyticsModelPayload, "model_invoked", analyticsModelCallId);
+        const stream = this.streamTextFn(request);
+        attemptStream = stream;
+        successfulStream = attemptStream;
+        for await (const chunk of stream.fullStream) {
           if (requestController.signal.aborted) break;
-          if (!attemptStartedVisibleOutput && chunkStartsVisibleOutput(chunk, availableToolNames)) {
-            attemptStartedVisibleOutput = true;
-          }
           lastChunkAt = this.nowMsFn();
           if (!chunk || typeof chunk !== "object") continue;
+          if (chunk.type === "finish-step") {
+            finishedSteps++;
+            cacheStep = finishedSteps === 1 ? { usage: chunk.usage, providerMetadata: chunk.providerMetadata } : undefined;
+          }
+          const observedProtocolChunk = conversationStateAttempt?.observeChunk(chunk);
+          const providerReplayUpdate = this.providerReplayPartFromChunkFn?.(chunk)
+            ?? observedProtocolChunk?.partUpdate;
+          if (providerReplayUpdate && providerReplayUpdate.type !== "function_call") {
+            ensureStreamTextPart(providerReplayUpdate.type, providerReplayUpdate.id);
+            upsertProviderReplayPart(providerReplayUpdate);
+            await maybeFlushAssistantStreaming();
+          }
+          for (const terminalUpdate of observedProtocolChunk?.terminalPartUpdates ?? []) {
+            upsertProviderReplayPart(terminalUpdate);
+          }
+          if ((observedProtocolChunk?.terminalPartUpdates?.length ?? 0) > 0) {
+            await maybeFlushAssistantStreaming();
+          }
+          if (chunk.type === "text-start" || chunk.type === "reasoning-start") {
+            const type = chunk.type === "text-start" ? "text" : "reasoning";
+            ensureStreamTextPart(type, localStreamPartId(type, chunk.id, true));
+            await maybeFlushAssistantStreaming();
+            continue;
+          }
           if (chunk.type === "text-delta") {
-            const delta = String(chunk.text || "");
+            const delta = chunk.text;
             if (!delta) continue;
-            text += delta;
+            appendStreamText("text", delta, chunk.id);
             await maybeFlushAssistantStreaming();
             continue;
           }
           if (chunk.type === "reasoning-delta") {
-            const delta = String(chunk.text || chunk.delta || "");
+            const delta = chunk.text;
             if (!delta) continue;
-            reasoningText += delta;
+            appendStreamText("reasoning", delta, chunk.id);
             await maybeFlushAssistantStreaming();
             continue;
           }
+          if (chunk.type === "text-end" || chunk.type === "reasoning-end") {
+            if (conversationStateAdapter?.scopeStreamPartIds) {
+              activeStreamParts.delete(`${chunk.type === "text-end" ? "text" : "reasoning"}:${chunk.id}`);
+            }
+            continue;
+          }
           if (chunk.type === "tool-call") {
+            if (conversationStateAdapter?.scopeStreamPartIds) {
+              activeStreamParts.clear();
+              lastStreamType = null;
+            }
+            const toolCallReplay = this.providerToolCallReplayFromChunkFn?.(chunk)
+              ?? observedProtocolChunk?.toolCallReplay;
             const toolName = normalizeToolName(chunk.toolName, availableToolNames);
             if (!toolName) continue;
             const rawToolCallId = String(chunk.toolCallId || "").trim();
-            const toolCallId = rawToolCallId || `${turnId}_call_${toolCalls.length + 1}`;
+            const toolCallId = rawToolCallId || `${turnId}_call_${toolCallsFromParts().length + 1}`;
+            if (toolCallReplay && toolCallReplay.providerToolCallId !== toolCallId) {
+              throw new AgentProviderReplayUpdateError("function_call replay call_id does not match tool-call chunk");
+            }
             const args = normalizeToolArgs(chunk.input);
-            toolCalls.push({ toolName, toolCallId, args });
+            appendToolCall(toolName, toolCallId, args, toolCallReplay?.providerReplay);
+            await maybeFlushAssistantStreaming();
+            continue;
+          }
+          if (providerReplayUpdate?.type === "function_call") {
+            upsertProviderReplayPart(providerReplayUpdate);
+            await maybeFlushAssistantStreaming();
             continue;
           }
           if (chunk.type === "finish") {
-            responseTotalTokens =
-              extractTotalTokens((chunk as Record<string, unknown>).usage) ??
-              extractTotalTokens((chunk as Record<string, unknown>).totalUsage) ??
-              responseTotalTokens;
+            finishEvents++;
+            analyticsFinishUsage = normalizeAnalyticsUsage(chunk.totalUsage);
+            attemptResponseTotalTokens = extractTotalTokens(chunk.totalUsage) ?? attemptResponseTotalTokens;
             continue;
           }
           if (chunk.type === "error") {
-            const message = chunk.error instanceof Error ? chunk.error.message : String(chunk.error || "stream error");
-            throw new Error(message);
+            throw chunk.error instanceof Error ? chunk.error : new Error(String(chunk.error || "stream error"));
+          }
+          if (chunk.type === "abort") {
+            throw new Error("model stream aborted");
           }
         }
-        if (pendingFlush) {
-          await flushAssistant("streaming", true);
-        }
+        attemptReachedTerminal = true;
 
         if (signal.aborted) {
-          return { aborted: true as const, assistantItemId: assistantItem.id };
+          return { aborted: true as const, assistantMessageId };
         }
         if (totalTimedOut) {
           throw new Error(`model total timeout after ${modelTotalTimeoutMs}ms`);
@@ -2287,135 +3154,198 @@ export class AgentRunner {
         if (idleTimedOut) {
           throw new Error(`model idle timeout after ${modelIdleTimeoutMs}ms`);
         }
+        let protocolValidation: ReturnType<NonNullable<typeof conversationStateAttempt>["finalizeAttempt"]> | undefined;
+        try {
+          protocolValidation = conversationStateAttempt?.finalizeAttempt();
+        } catch {
+          throw new AgentProviderReplayUpdateError("provider protocol finalization failed");
+        }
+        if (protocolValidation && !protocolValidation.ok) {
+          // OpenAI Responses reports remote terminal failure/missing terminal through
+          // this hook. Preserve its established retry/replacement behavior; chat
+          // reasoning validation is a non-retryable local protocol invariant.
+          if (profile.provider.npm === "@ai-sdk/openai" && (
+            protocolValidation.code === "OPENAI_RESPONSES_TERMINAL_FAILURE"
+            || protocolValidation.code === "OPENAI_RESPONSES_UNKNOWN_FINISH_REASON"
+            || protocolValidation.code === "OPENAI_RESPONSES_COMPLETED_MISSING"
+          )) throw new Error(protocolValidation.message);
+          throw new AgentProviderReplayUpdateError(protocolValidation.message);
+        }
+        // Terminal metadata is already in orderedParts; do not persist the final batch
+        // until the provider protocol has accepted the completed stream.
+        if (pendingFlush) await flushAssistant(true);
+        // replay-only 必须基于本次 Assistant 已实际落地的 reasoning Part，而非 Attempt 观察到的原始 chunk。
+        // 严格 round-trip 校验避免 text/function identity 或未知工具 metadata 意外放开空 Assistant。
+        const hasPersistedOpenAiReasoningReplay = orderedParts.some((part) => {
+          if (part.type !== "reasoning" || part.providerReplay == null) return false;
+          try {
+            const replay = parseAgentProviderReplay(serializeAgentProviderReplay(part.providerReplay));
+            return replay?.item.type === "reasoning"
+              && replay.provider.npm === "@ai-sdk/openai"
+              && replay.provider.api === "responses"
+              && replay.provider.providerId === profile.provider.id
+              && replay.provider.model === finalOpenAiModel(profile);
+          } catch {
+            return false;
+          }
+        });
+        // 仅已通过当前协议终态校验且存在已落地兼容 reasoning replay 的 Adapter 可让空可见内容完成。
+        // terminal metadata 在此之前已进入 orderedParts 并经上方 flush 持久化。
+        const allowsReplayOnlyAssistant = protocolValidation?.ok === true
+          && hasPersistedOpenAiReasoningReplay;
+        try {
+          const finalReasoning = await successfulStream.reasoningText;
+          const finalReasoningText = typeof finalReasoning === "string"
+            ? finalReasoning
+            : "";
+          if (finalReasoningText && reasoningFromParts().length === 0) {
+            appendStreamText("reasoning", finalReasoningText);
+          }
+        } catch {
+          // 保留流式阶段已经获取的 reasoning；收尾读取失败不应覆盖有效输出。
+        }
+        const isNewReasoningProvider = profile.provider.npm === "@ai-sdk/moonshotai" || profile.provider.npm === "@ai-sdk/deepseek";
+        const identity = preparedInvocation?.attemptContext;
+        const hasTrustedReplayOnlyReasoning = protocolValidation?.ok === true
+          && protocolValidation.allowsReplayOnlyAssistant === true
+          && reasoningFromParts().trim().length > 0
+          && identity != null
+          && orderedParts.every((part) => {
+            if (!part.providerReplay) return false;
+            try {
+              const replay = parseAgentProviderReplay(serializeAgentProviderReplay(part.providerReplay));
+              if (!replay || !sameAgentReplayProvenance(agentReplayProvenance(replay), identity)) return false;
+              return replay.item.type === (part.type === "tool_call" ? "tool_call" : part.type);
+            } catch {
+              return false;
+            }
+          });
+        if (!hasVisibleAssistantText(textFromParts()) && reasoningFromParts().length === 0 && toolCallsFromParts().length === 0 && !allowsReplayOnlyAssistant) {
+          throw new Error("model stream completed without visible text or tool calls");
+        }
+        if (isNewReasoningProvider && !hasVisibleAssistantText(textFromParts()) && toolCallsFromParts().length === 0
+          && !hasTrustedReplayOnlyReasoning) {
+          throw new AgentProviderReplayUpdateError("reasoning-only assistant has no verified replay metadata");
+        }
+        if (attemptResponseTotalTokens == null && attemptStream) {
+          attemptResponseTotalTokens = await readStreamTotalTokens(attemptStream);
+        }
+        responseTotalTokens = attemptResponseTotalTokens;
+
+        // Includes late reasoning and terminal replay metadata; failure belongs to this
+        // model Attempt, not to a subsequently completed Assistant write.
+        await flushAssistant(true);
+        attemptSucceeded = true;
 
         break;
       } catch (err) {
         if (signal.aborted) {
-          return { aborted: true as const, assistantItemId: assistantItem.id };
+          await writeAssistantDebugRecord({
+            logger: this.logger,
+            workspacePath: run.workspacePath,
+            recordId: assistantMessageId,
+            input: {
+              status: "failed",
+              startedAt,
+              meta: { workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId, turnId, step, messageId: assistantMessageId, failureKind: "aborted" },
+              request: attemptDebugRequest,
+              error: err,
+            },
+          });
+          return { aborted: true as const, assistantMessageId };
+        }
+        if (err instanceof FencedWriteIgnoredError || err instanceof FencedWriteMissingError || err instanceof ControlWritePermanentError || err instanceof AgentProviderReplayUpdateError) {
+          attemptLocalFailure = true;
+          await writeAssistantDebugRecord({
+            logger: this.logger,
+            workspacePath: run.workspacePath,
+            recordId: assistantMessageId,
+            input: {
+              status: "failed",
+              startedAt,
+              meta: { workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId, turnId, step, messageId: assistantMessageId, failureKind: attemptReachedTerminal ? "assistant-finalization" : "invariant-or-control" },
+              request: attemptDebugRequest,
+              error: err,
+            },
+          });
+          throw err;
         }
         if (totalTimedOut) {
           err = new Error(`model total timeout after ${modelTotalTimeoutMs}ms`);
         } else if (idleTimedOut) {
           err = new Error(`model idle timeout after ${modelIdleTimeoutMs}ms`);
         }
-        const message = err instanceof Error ? err.message : String(err);
+        const message = safeErrorSummary(err);
 
-        const canRetry =
-          (!attemptStartedVisibleOutput && retryCount < modelRequestMaxRetries)
-          || shouldRetryAfterPartialText({ text, toolCalls: toolCalls.length, retryCount, maxRetries: modelRequestMaxRetries });
+        if (retryCount >= modelRequestMaxRetries) {
+          throw err;
+        }
 
-        if (canRetry) {
-          const delayMs = computeRetryBackoffMs(retryCount);
+        {
+          const delayMs = computeRetryBackoffMs(retryCount, modelRequestRetryBackoffMaxMs);
           const retryAttempt = retryCount + 1;
-          const noticeText = `Request failed, retrying in ${Math.floor(delayMs / 1000)}s (${retryAttempt}/${modelRequestMaxRetries}): ${message}`;
-          try {
-            await this.apiClient.updateRunState({
-              workspaceId: run.workspaceId,
-              sessionId: run.sessionId,
-              status: "running",
-              activeRunId: run.runId,
-              activeAssistantItemId: assistantItem.id,
+          const noticeText = `Request failed, retrying in ${Math.floor(delayMs / 1000)}s (attempt ${retryAttempt}): ${message}`;
+          const nextRetryAt = this.nowMsFn() + delayMs;
+          retryCount = retryAttempt;
+          if (attemptProducedOutput()) {
+            await flushAssistant(true, false);
+            await replaceAssistantForRetry({
               runNoticeText: noticeText,
-              updatedAt: this.nowMsFn()
+              retryCount: retryAttempt,
+              nextRetryAt
             });
-          } catch {
-            // ignore notice update failure
+          } else {
+            const request = {
+              workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId,
+              runNoticeText: noticeText, retryCount: retryAttempt, nextRetryAt, updatedAt: this.nowMsFn()
+            };
+            await this.retryControlWrite("update retry notice", signal, async () =>
+              await this.apiClient.updateRunNotice(request)
+            );
+            retryNoticePendingClear = true;
           }
 
-          await writeItemLog({
+          await writeAssistantDebugRecord({
             logger: this.logger,
             workspacePath: run.workspacePath,
-            kind: "assistant",
-            itemId: assistantItem.id,
-            payload: {
-              status: "retrying",
+            recordId: assistantMessageId,
+            input: {
+              status: "failed",
               meta: {
                 workspaceId: run.workspaceId,
                 sessionId: run.sessionId,
                 runId: run.runId,
                 turnId,
                 step,
-                itemId: assistantItem.id,
+                messageId: assistantMessageId,
                 retryAttempt,
-                maxRetries: modelRequestMaxRetries,
                 nextRetryInMs: delayMs
               },
-              response: {
-                error: message
-              }
+              request: attemptDebugRequest,
+              error: err,
             }
           });
 
-          retryCount = retryAttempt;
-          await resetVisibleOutputForRetry();
           const continueRunning = await sleepMsWithAbort(delayMs, signal);
           if (!continueRunning) {
-            return { aborted: true as const, assistantItemId: assistantItem.id };
+            return { aborted: true as const, assistantMessageId };
           }
           continue;
         }
-
-        const finalMessage = retryCount > 0 ? `failed after ${retryCount} retries: ${message}` : message;
-        try {
-          if (pendingFlush) {
-            await flushAssistant("streaming", true);
-          }
-          await this.apiClient.updateRunState({
-            workspaceId: run.workspaceId,
-            sessionId: run.sessionId,
-            status: "running",
-            activeRunId: run.runId,
-            activeAssistantItemId: assistantItem.id,
-            runNoticeText: "",
-            updatedAt: this.nowMsFn()
-          });
-        } catch {
-          // ignore notice clear failure
-        }
-        try {
-          await this.apiClient.updateContextItem({
-            itemId: assistantItem.id,
-            status: "failed",
-            output: {
-              type: "assistant_text",
-              text,
-              ...(reasoningText ? { reasoning: { text: reasoningText } } : {}),
-              error: finalMessage
-            },
-            updatedAt: this.nowMsFn()
-          });
-        } catch {
-          // 忽略更新失败，保持原始异常抛出
-        }
-        await writeItemLog({
-          logger: this.logger,
-          workspacePath: run.workspacePath,
-          kind: "assistant",
-          itemId: assistantItem.id,
-          payload: {
-            status: "failed",
-            startedAt,
-            finishedAt: this.nowMsFn(),
-            meta: {
-              workspaceId: run.workspaceId,
-              sessionId: run.sessionId,
-              runId: run.runId,
-              turnId,
-              step,
-              itemId: assistantItem.id,
-              retries: retryCount
-            },
-            request,
-            response: {
-              text,
-              reasoningText,
-              toolCalls,
-              error: finalMessage
-            }
-          }
-        });
-        throw new Error(finalMessage);
       } finally {
+        // Failed/retried streams may expose a never-settling usage promise.
+        // Never let an optional Analytics observation delay the retry path.
+        // Only a single finish-step pairs SDK usage with its provider metadata.
+        // A multi-step totalUsage must never be mixed with last-step metadata.
+        const analyticsUsage = attemptReachedTerminal && attemptStream
+          ? await readStreamAnalyticsUsage(attemptStream, finishedSteps === 1 ? cacheStep : undefined,
+            profile.provider.npm,
+            attemptSucceeded && !requestController.signal.aborted && finishedSteps === 1 && finishEvents === 1 ? analyticsFinishUsage : null,
+            finishedSteps > 1)
+          : normalizeAnalyticsUsage(null);
+        const analyticsAttemptStatus = requestController.signal.aborted ? (idleTimedOut || totalTimedOut ? "timed_out" : "cancelled") : (attemptSucceeded ? "completed" : "failed");
+        this.analyticsSignals?.emitModel({ modelCallId: analyticsModelCallId, runId: run.runId, executionId: run.runId, attemptNo: analyticsAttemptNo, providerId: profile.provider.id ?? "unknown", modelId: profile.model.id ?? "unknown", startedAt: analyticsModelStartedAt, endedAt: this.nowMsFn(), status: analyticsAttemptStatus, completionQuality: "observed", timeoutKind: idleTimedOut ? "idle" : totalTimedOut ? "total" : null, ...analyticsUsage, failureKind: analyticsAttemptStatus === "completed" ? null : analyticsAttemptStatus === "timed_out" ? "timeout" : analyticsAttemptStatus === "cancelled" ? "cancelled" : attemptLocalFailure ? "other" : "provider" }, "model_finished", analyticsModelCallId);
+
         if (idleTimer) clearInterval(idleTimer);
         if (totalTimer) clearTimeout(totalTimer);
         try {
@@ -2426,12 +3356,40 @@ export class AgentRunner {
       }
     }
 
-    if (responseTotalTokens == null && successfulStream) {
-      responseTotalTokens = await readStreamTotalTokens(successfulStream);
-    }
-
-    const recognizedCalls = toolCalls;
-      let prevId = assistantItem.id;
+    const recognizedCalls = toolCallsFromParts();
+    let terminalFailureLogged = false;
+    const writeTerminalFailure = async (failureKind: string, error: unknown) => {
+      if (terminalFailureLogged) return;
+      terminalFailureLogged = true;
+      await writeAssistantDebugRecord({
+        logger: this.logger,
+        workspacePath: run.workspacePath,
+        recordId: assistantMessageId,
+        input: {
+          status: "failed",
+          startedAt,
+          meta: {
+            workspaceId: run.workspaceId,
+            sessionId: run.sessionId,
+            runId: run.runId,
+            turnId,
+            step,
+            messageId: assistantMessageId,
+            failureKind,
+          },
+          request: attemptDebugRequest,
+          response: {
+            text: textFromParts(),
+            reasoningText: reasoningFromParts(),
+            toolCalls: recognizedCalls,
+          },
+          error,
+        },
+      });
+    };
+    let terminalAssistantCommitted = false;
+    try {
+      const executions: Array<{ id: string; callPartId: string; originSessionId: string; originRunId: string; status: "queued" }> = [];
       for (const call of recognizedCalls) {
         const signature = toolSignature(call.toolName, call.args);
         const count = (repeatedToolCallCounter.get(signature) ?? 0) + 1;
@@ -2440,72 +3398,63 @@ export class AgentRunner {
           throw new Error(`repeated tool call threshold exceeded: ${call.toolName}`);
         }
 
-        const toolItem = await this.apiClient.createContextItem({
-          workspaceId: run.workspaceId,
-          sessionId: run.sessionId,
-          runId: run.runId,
-          turnId,
-          step,
-          prevId,
-          kind: "tool",
-          status: "queued",
-          output: {
-            type: "tool",
-            toolName: call.toolName,
-            toolCallId: call.toolCallId,
-            args: call.args
-          },
-          createdAt: this.nowMsFn()
-        });
-        if (toolItem.item == null) {
-          return { aborted: true as const, assistantItemId: assistantItem.id };
-        }
-        const toolContextItem = toolItem.item;
-        prevId = toolContextItem.id;
-        await writeItemLog({
-          logger: this.logger,
-          workspacePath: run.workspacePath,
-          kind: "tool",
-          itemId: toolContextItem.id,
-          payload: {
-            status: "queued",
-            meta: {
-              workspaceId: run.workspaceId,
-              sessionId: run.sessionId,
-              runId: run.runId,
-              turnId,
-              step,
-              itemId: toolContextItem.id
-            },
-            request: {
-              toolName: call.toolName,
-              toolCallId: call.toolCallId,
-              args: call.args
-            }
-          }
+        executions.push({
+          id: newSortableId("tool-execution"),
+          callPartId: call.callPartId,
+          originSessionId: run.sessionId,
+          originRunId: run.runId,
+          status: "queued"
         });
       }
 
-      if (successfulStream) {
+      // 已在有效输出校验前读取收尾 reasoning，确保 reasoning-only 响应可正常完成。
+
+      const completeRequest = {
+        workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId,
+        messageId: assistantMessageId, executions,
+        responseTotalTokens, updatedAt: this.nowMsFn()
+      };
+      const hasVisibleText = hasVisibleAssistantText(textFromParts()) || reasoningFromParts().length > 0;
+      const terminalAssistant = executions.length === 0 && (hasVisibleText || emptyResponseCount + 1 >= EMPTY_RESPONSE_COMPLETE_THRESHOLD);
+      if (terminalAssistant) {
+        const code: "run_completed" | "subtask_completed" = run.runKind === "subtask" ? "subtask_completed" : "run_completed";
+        const terminalRequest = {
+          workspaceId: completeRequest.workspaceId,
+          sessionId: completeRequest.sessionId,
+          runId: completeRequest.runId,
+          messageId: completeRequest.messageId,
+          responseTotalTokens: completeRequest.responseTotalTokens,
+          intent: { status: "completed" as const, code, detail: null },
+          updatedAt: completeRequest.updatedAt,
+        };
+        let outcomeMayHaveCommitted = false;
         try {
-          const finalReasoning = await successfulStream.reasoningText;
-          const finalReasoningText = typeof finalReasoning === "string"
-            ? String(finalReasoning)
-            : "";
-          reasoningText = finalReasoningText || reasoningText;
-        } catch {
-          // best-effort: 保留流式阶段已累计的 reasoningText,不要因收尾读取失败打断整轮成功结果
+          await this.retryControlWrite("complete terminal assistant", signal, async () => {
+            try {
+              return await this.apiClient.completeTerminalAssistant(terminalRequest);
+            } catch (error) {
+              // Preserve uncertainty across retries. A later permanent error
+              // or cancellation cannot disprove an earlier lost response.
+              if (isRetryableControlWriteError(error) || error instanceof InternalRpcInvalidResponseError || signal.aborted) outcomeMayHaveCommitted = true;
+              throw error;
+            }
+          });
+        } catch (error) {
+          if (outcomeMayHaveCommitted) throw new TerminalAssistantOutcomeUncertainError();
+          throw error;
         }
+        terminalAssistantCommitted = true;
+      } else {
+        await this.retryControlWrite("complete assistant", signal, async () =>
+          await this.apiClient.completeAssistant(completeRequest)
+        );
       }
 
-      await flushAssistant("completed", true);
-
-      await writeItemLog({
+      await writeAssistantDebugRecord({
         logger: this.logger,
         workspacePath: run.workspacePath,
-        kind: "assistant",
-        itemId: assistantItem.id,
-        payload: {
+        recordId: assistantMessageId,
+        input: {
           status: "completed",
           startedAt,
           finishedAt: this.nowMsFn(),
@@ -2515,147 +3464,208 @@ export class AgentRunner {
             runId: run.runId,
             turnId,
             step,
-            itemId: assistantItem.id
+            messageId: assistantMessageId
           },
-          request: requestBase,
+          request: attemptDebugRequest,
           response: {
-            text,
-            reasoningText,
+            text: textFromParts(),
+            reasoningText: reasoningFromParts(),
             toolCalls: recognizedCalls,
             usage: responseTotalTokens == null ? null : { totalTokens: responseTotalTokens }
           }
         }
       });
-
-      await this.apiClient.updateRunState({
-        workspaceId: run.workspaceId,
-        sessionId: run.sessionId,
-        status: "running",
-        activeRunId: run.runId,
-        activeAssistantItemId: null,
-        lastResponseTotalTokens: responseTotalTokens,
-        runNoticeText: "",
-        updatedAt: this.nowMsFn()
-      });
+      await clearRetryNoticeAfterSuccess();
 
       return {
         aborted: false as const,
         toolCallCount: recognizedCalls.length,
-        assistantItemId: assistantItem.id,
-        hasVisibleText: hasVisibleAssistantText(text),
+        assistantMessageId,
+        terminalIntentPersisted: terminalAssistant,
+        hasVisibleText,
         availableToolNames: recognizedCalls.length > 0 ? availableToolNames : undefined
       };
+    } catch (err) {
+      if (terminalAssistantCommitted) {
+        // Debug/notice cleanup after the atomic commit must never replace the
+        // durable completed intent, even if cancellation interrupted cleanup.
+        this.logger.warn(`terminal Assistant post-commit cleanup failed: ${run.sessionId} ${run.runId}`);
+        return { aborted: false as const, toolCallCount: 0, assistantMessageId,
+          terminalIntentPersisted: true, hasVisibleText: hasVisibleAssistantText(textFromParts()) || reasoningFromParts().length > 0 };
+      }
+      await writeTerminalFailure("assistant-finalization", err);
+      throw err;
+    }
   }
 
   private async processRun(run: QueuedRun, signal: AbortSignal) {
-    let committedTerminalStatus: "completed" | "failed" | "cancelled" | null = null;
-    let terminalSubmission: Promise<void> | null = null;
-    let terminalSubmittingStatus: "completed" | "failed" | "cancelled" | null = null;
-    class TerminalStatusSubmitError extends Error {
-      constructor(
-        readonly status: "completed" | "failed" | "cancelled",
-        cause: unknown
-      ) {
-        super(`submit terminal status failed: ${status}`);
-        this.name = "TerminalStatusSubmitError";
-        (this as Error & { cause?: unknown }).cause = cause;
-      }
-    }
-    const finishOnce = async (status: "completed" | "failed" | "cancelled") => {
-      if (committedTerminalStatus) return;
-      if (terminalSubmission) return await terminalSubmission;
-      terminalSubmittingStatus = status;
-      terminalSubmission = (async () => {
-        try {
-          await this.apiClient.completeRun({
-            workspaceId: run.workspaceId,
-            sessionId: run.sessionId,
-            runId: run.runId,
-            status,
-            updatedAt: nowMs()
-          });
-          committedTerminalStatus = status;
-        } catch (err) {
-          throw new TerminalStatusSubmitError(status, err);
-        } finally {
-          terminalSubmission = null;
-          terminalSubmittingStatus = null;
-        }
-      })();
-      return await terminalSubmission;
+    const analyticsExecutionStartedAt = this.nowMsFn();
+    this.analyticsSignals?.emitExecution({ executionId: run.runId, runId: run.runId, runtimeKind: "agent_worker", runKind: run.runKind ?? "user", parentRunId: null, queuedAt: null, startedAt: analyticsExecutionStartedAt, endedAt: null, endTimeQuality: "unknown", endReason: null }, "execution_started");
+    type TerminalStatus = "completed" | "failed" | "cancelled";
+    type TerminalTuple = { status: TerminalStatus; code: import("@agent-workbench/shared").AgentTerminalResultCode; detail: null };
+    let terminalTuple: TerminalTuple | null = null;
+    let terminalIntentPersisted = false;
+    let terminalConverged = false;
+    let terminalDeadline: number | null = null;
+    let terminalIntentAttempts = 0;
+    let terminalConvergenceAttempts = 0;
+    const terminalCode = (status: TerminalStatus) => {
+      if (status === "cancelled") return "run_cancelled" as const;
+      if (run.runKind === "manual_compaction") return status === "completed" ? "compaction_completed" as const : "compaction_failed" as const;
+      if (run.runKind === "subtask") return status === "completed" ? "subtask_completed" as const : "subtask_failed" as const;
+      return status === "completed" ? "run_completed" as const : "run_failed" as const;
     };
-    const tryFinishOnce = async (status: "completed" | "failed" | "cancelled") => {
+    const finishOnce = async (requested: TerminalStatus | TerminalTuple, options: { intentAlreadyPersisted?: boolean } = {}) => {
+      if (terminalConverged) return;
+      const tuple = typeof requested === "string"
+        ? { status: requested, code: terminalCode(requested), detail: null } as TerminalTuple
+        : requested;
+      if (terminalTuple && (terminalTuple.status !== tuple.status || terminalTuple.code !== tuple.code || terminalTuple.detail !== tuple.detail)) {
+        throw new Error("terminal result conflicts with an already selected tuple");
+      }
+      terminalTuple ??= tuple;
+      terminalIntentPersisted ||= options.intentAlreadyPersisted === true;
+      terminalDeadline ??= this.nowMsFn() + 10_000;
+      const request = { workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId };
+      const retryPhase = async (phase: "intent" | "convergence") => {
+        const attempts = () => phase === "intent" ? terminalIntentAttempts : terminalConvergenceAttempts;
+        const incrementAttempts = () => {
+          if (phase === "intent") terminalIntentAttempts += 1;
+          else terminalConvergenceAttempts += 1;
+        };
+        while (attempts() < 3) {
+          const remaining = terminalDeadline! - this.nowMsFn();
+          if (remaining <= 0) break;
+          try {
+            incrementAttempts();
+            if (phase === "intent") {
+              await this.apiClient.persistRunTerminalIntent({
+                ...request,
+                ...terminalTuple!,
+                updatedAt: this.nowMsFn(),
+              }, { timeoutMs: remaining });
+            } else {
+              await this.apiClient.convergeRunTerminal({
+                ...request,
+                updatedAt: this.nowMsFn(),
+              }, { timeoutMs: remaining });
+            }
+            return;
+          } catch (err) {
+            if (!isRetryableTerminalControlError(err)) throw err;
+            if (attempts() >= 3 || terminalDeadline! - this.nowMsFn() <= 250) throw err;
+            await new Promise<void>((resolve) => setTimeout(resolve, 250));
+          }
+        }
+        throw new Error(`terminal ${phase} control budget exhausted`);
+      };
+      if (!terminalIntentPersisted) {
+        await retryPhase("intent");
+        terminalIntentPersisted = true;
+      }
+      await retryPhase("convergence");
+      terminalConverged = true;
+      this.analyticsSignals?.emitExecution({ executionId: run.runId, runId: run.runId, runtimeKind: "agent_worker", runKind: run.runKind ?? "user", parentRunId: null, queuedAt: null, startedAt: analyticsExecutionStartedAt, endedAt: this.nowMsFn(), endTimeQuality: "observed", endReason: terminalTuple!.status === "completed" ? "completed" : terminalTuple!.status === "cancelled" ? "cancelled" : "failed" }, "execution_finished");
+    };
+    const tryFinishOnce = async (status: TerminalStatus | TerminalTuple, options?: { intentAlreadyPersisted?: boolean }) => {
       try {
-        await finishOnce(status);
+        await finishOnce(status, options);
       } catch (err) {
-        const cause = err instanceof TerminalStatusSubmitError ? err.cause : err;
-        if (cause instanceof ApiConflictError) {
+        if (err instanceof ApiConflictError) {
           this.logger.warn(`run append conflict, stop run: ${run.sessionId} ${run.runId}`);
           return;
         }
         throw err;
       }
     };
+    const convergeExistingTerminalIntent = async () => {
+      // This endpoint never creates an intent: if the request was not committed
+      // and no cancellation won the race, it fails without selecting a tuple.
+      const deadline = this.nowMsFn() + 10_000;
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        const remaining = deadline - this.nowMsFn();
+        if (remaining <= 0) break;
+        try {
+          const result = await this.apiClient.convergeRunTerminal({
+            workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId,
+            updatedAt: this.nowMsFn(),
+          }, { timeoutMs: remaining });
+          this.analyticsSignals?.emitExecution({ executionId: run.runId, runId: run.runId, runtimeKind: "agent_worker", runKind: run.runKind ?? "user", parentRunId: null, queuedAt: null, startedAt: analyticsExecutionStartedAt, endedAt: this.nowMsFn(), endTimeQuality: "observed", endReason: result.finalStatus }, "execution_finished");
+          return;
+        } catch (error) {
+          if (!isRetryableTerminalControlError(error) || attempt === 3 || deadline - this.nowMsFn() <= 250) throw error;
+          await new Promise<void>((resolve) => setTimeout(resolve, 250));
+        }
+      }
+      throw new Error("existing terminal intent convergence budget exhausted");
+    };
+    let modelStepFailure: unknown = null;
     try {
-      const profile = await this.apiClient.getExecutionProfile({
+      await this.apiClient.markRunWorkInProgress({
+        workspaceId: run.workspaceId,
+        sessionId: run.sessionId,
+        runId: run.runId,
+        updatedAt: nowMs(),
+      });
+      let profile = await this.apiClient.getExecutionProfile({
         workspaceId: run.workspaceId,
         sessionId: run.sessionId,
         runId: run.runId
       });
 
-      await this.apiClient.updateRunState({
-        workspaceId: run.workspaceId,
-        sessionId: run.sessionId,
-        status: "running",
-        activeRunId: run.runId,
-        activeAssistantItemId: null,
-          runNoticeText: "",
-        updatedAt: nowMs()
-      });
-
       let step = 0;
       const repeatedToolCallCounter = new Map<string, number>();
+      const recoveryContinuation = run.recoveryContinuation ?? { messageId: run.resumeAssistantMessageId ?? null };
       let emptyResponseCount = 0;
 
       // 手动压缩: 仅执行一次 compaction,不进入正常 step 循环.
-      if (run.inputText === MANUAL_COMPACT_SENTINEL) {
-        const context = await this.apiClient.getPromptContext({
-          workspaceId: run.workspaceId,
-          sessionId: run.sessionId,
-          runId: run.runId
-        });
-        if (context.pendingTools.length > 0) {
-          await finishOnce("failed");
+      if (run.runKind === "manual_compaction") {
+        const compacted = await this.executeCompaction({ mode: "manual", profile, run, signal });
+        if (compacted.kind === "committed") {
+          await finishOnce("completed", { intentAlreadyPersisted: true });
           return;
         }
-
-        await this.apiClient.updateRunState({
-          workspaceId: run.workspaceId,
-          sessionId: run.sessionId,
-          status: "running",
-          activeRunId: run.runId,
-          activeAssistantItemId: null,
-              runNoticeText: "正在压缩上下文...",
-          updatedAt: nowMs()
-        });
-
-        await this.compactContext({
-          profile,
-          run,
-          context,
-          signal
-        });
+        if (compacted.kind === "failed" && compacted.reason === "commit_outcome_uncertain") {
+          this.logger.warn(`compaction commit outcome uncertain; stop run without selecting terminal tuple: ${run.sessionId} ${run.runId}`);
+          return;
+        }
         if (signal.aborted) {
           await finishOnce("cancelled");
           return;
         }
-        await finishOnce("completed");
+        if (compacted.kind === "skipped" && compacted.reason === "cas_conflict") throw new CompactionConflictError();
+        if (compacted.kind === "unavailable") {
+          await finishOnce({ status: "failed", code: "compaction_provider_unavailable", detail: null });
+          return;
+        }
+        if (compacted.kind === "skipped") {
+          await finishOnce({
+            status: "completed",
+            code: compacted.reason === "no_prefix" ? "compaction_not_needed"
+              : compacted.reason === "oversized_tail" ? "compaction_oversized_tail"
+              : "compaction_no_progress",
+            detail: null,
+          });
+          return;
+        }
+        if (compacted.kind === "blocked") {
+          await finishOnce({ status: "failed", code: "compaction_pending_tools", detail: null });
+          return;
+        }
+        if (compacted.kind === "media_requires_resend") {
+          await finishOnce({ status: "completed", code: "compaction_media_requires_resend", detail: null });
+          return;
+        }
+        await finishOnce({ status: "failed", code: "compaction_failed", detail: null });
         return;
       }
 
       let pendingToolNamesSnapshot: ReadonlySet<string> | undefined;
+      // A skip is consumed only by the next model step, even when refreshed
+      // pending tools must finish before that step can start.
+      let autoCompactionAttemptedForNextModelStep = false;
       while (!signal.aborted) {
-        const context = await this.apiClient.getPromptContext({
+        let context = await this.apiClient.getPromptContext({
           workspaceId: run.workspaceId,
           sessionId: run.sessionId,
           runId: run.runId
@@ -2679,38 +3689,42 @@ export class AgentRunner {
           continue;
         }
 
-        if (this.shouldAutoCompact({ context, model: profile.model, runtime: profile.runtime })) {
-          const compacted = await this.compactContext({
-            profile,
-            run,
-            context,
-            signal
-          });
-          if (compacted || signal.aborted) {
+        if (!autoCompactionAttemptedForNextModelStep && recoveryContinuation.messageId == null && this.shouldAutoCompact({ context, model: profile.model, runtime: profile.runtime })) {
+          const compacted = await this.executeCompaction({ mode: "proactive", profile, run, signal });
+          if (compacted.kind === "failed" && compacted.reason === "commit_outcome_uncertain") {
+            this.logger.warn(`compaction commit outcome uncertain; stop run without selecting terminal tuple: ${run.sessionId} ${run.runId}`);
+            return;
+          }
+          if ((compacted.kind === "failed" && compacted.reason !== "cancelled") || (compacted.kind === "unavailable" && compacted.reason === "deadline")) {
+            throw new Error(`proactive compaction failed: ${compacted.reason}`);
+          }
+          if (compacted.kind === "committed" || signal.aborted) {
             if (signal.aborted) await finishOnce("cancelled");
+            continue;
+          }
+          if (compacted.kind === "skipped" && compacted.reason === "profile_changed") {
+            profile = await this.apiClient.getExecutionProfile({
+              workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId,
+            });
+          }
+          // Even a normal skip may have observed a newer session revision than
+          // the prompt snapshot above. Refresh once before the model step, but
+          // do not re-enter auto-compaction until after that step.
+          autoCompactionAttemptedForNextModelStep = true;
+          context = await this.apiClient.getPromptContext({
+            workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId,
+          });
+          if (context.pendingTools.length > 0) {
+            const pendingResult = await this.executePendingTools({ profile, run, context, signal });
+            if (pendingResult.paused || signal.aborted) {
+              if (signal.aborted) await finishOnce("cancelled");
+              return;
+            }
             continue;
           }
         }
 
         if (shouldStopForMaxSteps(step, LOOP_MAX_STEPS)) {
-          const head = context.headItemId;
-          if (head != null) {
-            await this.apiClient.createContextItem({
-              workspaceId: run.workspaceId,
-              sessionId: run.sessionId,
-              runId: run.runId,
-              turnId: null,
-              step: null,
-              prevId: head,
-              kind: "system",
-              status: "completed",
-              output: {
-                type: "system_text",
-                text: "[run] max steps exceeded"
-              },
-              createdAt: nowMs()
-            });
-          }
           await finishOnce("failed");
           return;
         }
@@ -2721,9 +3735,24 @@ export class AgentRunner {
           run,
           context,
           step,
+          emptyResponseCount,
           signal,
+          recoveryContinuation,
           repeatedToolCallCounter
+        }).catch((err: unknown) => {
+          if (profile.provider.npm === "@ai-sdk/moonshotai" || profile.provider.npm === "@ai-sdk/deepseek") {
+            modelStepFailure = err;
+          }
+          throw err;
         });
+        autoCompactionAttemptedForNextModelStep = false;
+        // A terminal Assistant transaction already persisted the completed
+        // intent. A cancellation arriving after that commit cannot select a
+        // conflicting cancelled tuple, for either user or subtask runs.
+        if (result.terminalIntentPersisted === true) {
+          await finishOnce("completed", { intentAlreadyPersisted: true });
+          return;
+        }
         if (result.aborted || signal.aborted) {
           await finishOnce("cancelled");
           return;
@@ -2748,9 +3777,27 @@ export class AgentRunner {
         await finishOnce("cancelled");
       }
     } catch (err) {
+      if (terminalTuple) {
+        this.logger.error(`terminal control failed after tuple selection: ${run.sessionId} ${run.runId}`);
+        return;
+      }
+      if (err instanceof TerminalAssistantOutcomeUncertainError) {
+        // Neither an abort nor a failed replay proves the atomic completion
+        // did not commit. Resolve only a durable intent; never persist a guess.
+        try {
+          await convergeExistingTerminalIntent();
+        } catch {
+          this.logger.warn(`terminal Assistant outcome uncertain; stop without selecting terminal tuple: ${run.sessionId} ${run.runId}`);
+        }
+        return;
+      }
       if (isAbortLikeError(err, signal)) {
         this.logger.info(`run aborted: ${run.sessionId} ${run.runId}`);
         await tryFinishOnce("cancelled");
+        return;
+      }
+      if (err instanceof FencedWriteIgnoredError || err instanceof CompactionNoticeFenceLostError) {
+        this.logger.info(`run fenced write ignored, stop run: ${run.sessionId} ${run.runId}`);
         return;
       }
       if (err instanceof ApiConflictError) {
@@ -2758,14 +3805,16 @@ export class AgentRunner {
         return;
       }
 
-      const terminalSubmitError = err instanceof TerminalStatusSubmitError ? err : null;
-      const fallbackStatus = terminalSubmitError?.status ?? "failed";
-      const cause = terminalSubmitError?.cause ?? err;
-      const message = cause instanceof Error ? cause.message : String(cause);
+      const cause = err;
+      const failedTuple: TerminalTuple = err instanceof CompactionConflictError && (run.runKind === "user" || run.runKind === "manual_compaction")
+        ? { status: "failed", code: "compaction_conflict", detail: null }
+        : { status: "failed", code: (run.runKind ?? "user") === "user" && modelStepFailure === err
+          ? providerFailureTerminalCode(err) ?? terminalCode("failed")
+          : terminalCode("failed"), detail: null };
       try {
-        await tryFinishOnce(fallbackStatus);
+        await tryFinishOnce(failedTuple);
       } catch {
-        this.logger.error(`run failed and fallback append failed: ${run.sessionId} ${run.runId} ${message}`);
+        this.logger.error(`run failed and fallback append failed: ${run.sessionId} ${run.runId} ${safeErrorSummary(cause)}`);
       }
     }
   }
@@ -2775,6 +3824,7 @@ export type EnqueuePayload = {
   workspaceId: string;
   sessionId: string;
   runId: string;
+  runKind?: "user" | "manual_compaction" | "subtask";
   inputText?: string;
   workspacePath: string;
   workspaceRepoDirNames?: string[];
@@ -2847,12 +3897,50 @@ export function shouldStopForMaxStepsForTest(step: number, maxSteps: number) {
   return shouldStopForMaxSteps(step, maxSteps);
 }
 
+export function sanitizeForDebugDumpForTest(value: unknown) {
+  return sanitizeForDebugDump(value);
+}
+
+export function projectAssistantDebugRecordForTest(input: Parameters<typeof projectAssistantDebugRecord>[0]) {
+  return projectAssistantDebugRecord(input);
+}
+
+export function serializeAssistantDebugRecordForTest(input: Parameters<typeof projectAssistantDebugRecord>[0]) {
+  return serializeAssistantDebugRecord(projectAssistantDebugRecord(input));
+}
+
+export async function writeAssistantDebugRecordForTest(params: {
+  logger: Pick<Console, "warn">;
+  workspacePath: string;
+  recordId?: string;
+  input: Parameters<typeof projectAssistantDebugRecord>[0];
+}) {
+  await writeAssistantDebugRecord({ ...params, force: true });
+}
+
+export function safeErrorSummaryForTest(value: unknown) {
+  return safeErrorSummary(value);
+}
+
+export async function writeItemLogForTest(params: {
+  logger: Pick<Console, "warn">;
+  workspacePath: string;
+  kind: "assistant" | "tool";
+  recordId?: string;
+  payload: unknown;
+  force?: boolean;
+}) {
+  await writeItemLog({ ...params, force: true });
+}
+
 export async function finalizeToolTextForTest(params: {
   workspacePath: string;
-  itemId: number;
+  toolExecutionId: string;
   toolName: string;
-  toolCallId?: string;
   text: string;
+  beforeArtifactCommit?: () => Promise<void> | void;
+  onArtifactWritePhase?: (phase: "before_rename" | "after_rename") => Promise<void> | void;
 }) {
   return finalizeToolText(params);
 }
+import { readWorkspaceImage, WORKSPACE_IMAGE_MAX_BYTES } from "./workspaceImageReader.js";

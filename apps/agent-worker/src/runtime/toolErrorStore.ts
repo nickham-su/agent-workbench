@@ -17,7 +17,7 @@ export type ToolErrorArtifactIdentity = {
   workspaceId: string;
   sessionId: string;
   runId: string;
-  itemId: number;
+  toolExecutionId: string;
   toolCallId: string;
 };
 
@@ -77,11 +77,9 @@ function errorCode(error: unknown) {
 }
 
 function assertIdentity(identity: ToolErrorArtifactIdentity) {
-  if (!Number.isSafeInteger(identity.itemId) || identity.itemId <= 0) {
-    throw new Error("tool error artifact itemId must be a positive safe integer");
-  }
-  for (const value of [identity.workspaceId, identity.sessionId, identity.runId, identity.toolCallId]) {
+  for (const value of [identity.workspaceId, identity.sessionId, identity.runId, identity.toolExecutionId, identity.toolCallId]) {
     if (typeof value !== "string") throw new Error("tool error artifact identity values must be strings");
+    if (!value.trim()) throw new Error("tool error artifact identity values must be non-empty strings");
   }
 }
 
@@ -103,7 +101,7 @@ export function isFailureKind(value: unknown): value is FailureKind {
 export function buildToolErrorArtifactRelativePath(identity: ToolErrorArtifactIdentity, failureKind: FailureKind) {
   assertIdentity(identity);
   if (!isFailureKind(failureKind)) throw new Error("invalid tool error artifact failureKind");
-  const baseName = `${identity.itemId}-${safePathSegment(identity.toolCallId)}.${failureKind}.json`;
+  const baseName = `${safePathSegment(identity.toolExecutionId)}-${safePathSegment(identity.toolCallId)}.${failureKind}.json`;
   return path.join(
     ".awb",
     "agent",
@@ -126,7 +124,7 @@ function identityMatches(value: unknown, identity: ToolErrorArtifactIdentity, fa
     && existing.workspaceId === identity.workspaceId
     && existing.sessionId === identity.sessionId
     && existing.runId === identity.runId
-    && existing.itemId === identity.itemId
+    && existing.toolExecutionId === identity.toolExecutionId
     && existing.toolCallId === identity.toolCallId;
 }
 

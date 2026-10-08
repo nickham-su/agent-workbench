@@ -5,6 +5,7 @@ export type ExecResult = {
   code: number | null;
   stdout: string;
   stderr: string;
+  timedOut: boolean;
 };
 
 export async function runTmux(
@@ -28,7 +29,9 @@ export async function runTmux(
 
     let stdout = "";
     let stderr = "";
+    let timedOut = false;
     const timer = setTimeout(() => {
+      timedOut = true;
       child.kill("SIGKILL");
     }, timeoutMs);
 
@@ -47,10 +50,10 @@ export async function runTmux(
       stderr += chunk.toString("utf-8");
     });
     child.on("error", (err) => {
-      settle({ ok: false, code: null, stdout, stderr: (stderr || "") + String(err instanceof Error ? err.message : err) });
+      settle({ ok: false, code: null, stdout, stderr: (stderr || "") + String(err instanceof Error ? err.message : err), timedOut });
     });
     child.on("close", (code) => {
-      settle({ ok: code === 0, code, stdout, stderr });
+      settle({ ok: code === 0 && !timedOut, code, stdout, stderr, timedOut });
     });
   });
 }

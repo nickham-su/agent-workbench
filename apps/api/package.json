@@ -7,8 +7,13 @@
     "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.json",
     "start": "node dist/main.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test:integration": "tsx --test src/modules/agent/integration/*.test.ts",
-    "test:integration:worker": "tsx --test src/modules/agent/agent.worker.integration.test.ts"
+    "test": "npm run test:all",
+    "test:all": "node scripts/verify-test-gate.mjs && npm run test:unit && npm run test:integration && npm run test:integration:worker",
+    "test:unit": "node scripts/run-tests.mjs unit",
+    "test:integration": "node scripts/run-tests.mjs integration",
+    "test:integration:worker": "node scripts/run-tests.mjs worker",
+    "test:session-model": "npm run test:unit",
+    "test:session-title": "tsx --test src/modules/agent/session/session-title.test.ts src/modules/agent/session/session-title.store.test.ts src/modules/agent/integration/agent-session-title.integration.test.ts"
   },
   "dependencies": {
     "@agent-workbench/shared": "*",

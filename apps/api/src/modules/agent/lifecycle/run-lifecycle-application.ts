@@ -1,6 +1,12 @@
 import { HttpError } from "../../../app/errors.js";
-import type { AgentCancelSessionRequest } from "@agent-workbench/shared";
-import type { AgentApiRunCompleteRequest, AgentApiRunStateRequest } from "@agent-workbench/shared/internal-contracts/agent-api";
+import { AgentAttachmentCommitError } from "../attachments/agent-attachment-storage.js";
+import { workspaceDeletingFence } from "./workspace-deleting-fence.js";
+import type { AgentCancelSessionRequest } from "@agent-workbench/shared/internal-contracts/agent-api-session";
+import type {
+  AgentApiConvergeRunTerminalRequest,
+  AgentApiMarkRunWorkInProgressRequest,
+  AgentApiPersistTerminalIntentRequest,
+} from "@agent-workbench/shared/internal-contracts/agent-api";
 import type {
   CancelSessionCascadeResult,
   CancelSessionCommand,
@@ -16,96 +22,339 @@ import type {
  * worker writeback and DB-first cancellation; P5 owns startup recovery.
  */
 export class RunLifecycleApplication {
+  private readonly reconciliationTimers = new Map<string, NodeJS.Timeout>();
+  private readonly reconciliationAttempts = new Map<string, number>();
+  private closed = false;
+
   constructor(private readonly dependencies: RunLifecycleApplicationDependencies) {}
 
-  async startUserRun(command: StartUserRunCommand) {
-    const createdAt = this.dependencies.clock.nowMs();
-    const activation = this.dependencies.persistence.activateUserRun({
-      workspaceId: command.workspaceId,
-      sessionId: command.sessionId,
-      clientRequestId: command.clientRequestId,
-      text: command.text,
-      runId: this.dependencies.ids.newId("run"),
-      agentId: command.agentId,
-      providerId: command.providerId,
-      modelId: command.modelId,
-      uiLocale: command.uiLocale,
-      createdAt
-    });
+  dispose() {
+    this.closed = true;
+    for (const timer of this.reconciliationTimers.values()) clearTimeout(timer);
+    this.reconciliationTimers.clear();
+    this.reconciliationAttempts.clear();
+  }
 
+  private isDefinitiveEnqueueFailure(error: unknown) {
+    return error instanceof HttpError && error.code === "AGENT_WORKER_ENQUEUE_REJECTED";
+  }
+
+  private clearEnqueueReconciliation(runId: string) {
+    const timer = this.reconciliationTimers.get(runId);
+    if (timer) clearTimeout(timer);
+    this.reconciliationTimers.delete(runId);
+    this.reconciliationAttempts.delete(runId);
+  }
+
+  private isWorkspaceDeletingError(error: unknown) {
+    return error instanceof HttpError && error.code === "WORKSPACE_DELETING";
+  }
+
+  private async enqueueOnce(params: {
+    runtime: Pick<StartUserRunCommand["runtime"], "enqueueRun">;
+    run: import("./run-lifecycle-ports.js").AgentRuntimeRun;
+  }) {
+    await this.dependencies.runtimeHandoffCoordinator.runExclusive(
+      params.run.sessionId,
+      async () => {
+        // The coordinator only serializes one bounded RPC handoff. Backoff is
+        // scheduled outside it, so cancellation never waits behind retry sleep.
+        workspaceDeletingFence.assertWritable(params.run.workspaceId);
+        if (!this.dependencies.persistence.canEnqueueUserRunIfCurrent(params.run)) {
+          throw new HttpError(409, "run is no longer active", "RUN_NOT_ACTIVE");
+        }
+        await params.runtime.enqueueRun(params.run);
+      },
+    );
+  }
+
+  private scheduleEnqueueReconciliation(params: {
+    runtime: Pick<StartUserRunCommand["runtime"], "enqueueRun">;
+    run: import("./run-lifecycle-ports.js").AgentRuntimeRun;
+  }) {
+    const { run } = params;
+    if (this.closed) return;
+    if (this.reconciliationTimers.has(run.runId)) return;
+    const attempt = this.reconciliationAttempts.get(run.runId) ?? 0;
+    const delayMs = Math.min(5_000, 250 * 2 ** Math.min(attempt, 5));
+    const timer = setTimeout(() => {
+      this.reconciliationTimers.delete(run.runId);
+      if (this.closed) return;
+      void this.enqueueOnce(params)
+        .then(() => {
+          this.clearEnqueueReconciliation(run.runId);
+        })
+        .catch((error) => {
+          if (this.closed) return;
+          if (error instanceof HttpError && (error.code === "RUN_NOT_ACTIVE" || error.code === "WORKSPACE_DELETING")) {
+            this.clearEnqueueReconciliation(run.runId);
+            return;
+          }
+          if (this.isDefinitiveEnqueueFailure(error)) {
+            this.clearEnqueueReconciliation(run.runId);
+            const settlement = this.failRunAfterEnqueueFailure({
+              workspaceId: run.workspaceId,
+              sessionId: run.sessionId,
+              runId: run.runId,
+              updatedAt: this.dependencies.clock.nowMs(),
+            });
+            this.dependencies.logger.warn(
+              { err: error, runId: run.runId, sessionId: run.sessionId, settlement },
+              "agent enqueue reconciliation permanently rejected",
+            );
+            return;
+          }
+          this.reconciliationAttempts.set(run.runId, attempt + 1);
+          this.dependencies.logger.warn(
+            { err: error, runId: run.runId, sessionId: run.sessionId, delayMs },
+            "agent enqueue reconciliation will retry",
+          );
+          this.scheduleEnqueueReconciliation(params);
+        });
+    }, delayMs);
+    timer.unref?.();
+    this.reconciliationTimers.set(run.runId, timer);
+  }
+
+  /** Reuses the same fenced, idempotent runtime handoff for every activated Run kind. */
+  async enqueueActivatedRunOrReconcile(params: {
+    runtime: Pick<StartUserRunCommand["runtime"], "enqueueRun">;
+    run: import("./run-lifecycle-ports.js").AgentRuntimeRun;
+  }) {
+    if (this.closed) throw new HttpError(503, "agent lifecycle is stopping", "AGENT_LIFECYCLE_STOPPING");
+    await this.handoffOrSchedule(params);
+  }
+
+  private async handoffOrSchedule(params: {
+    runtime: Pick<StartUserRunCommand["runtime"], "enqueueRun">;
+    run: import("./run-lifecycle-ports.js").AgentRuntimeRun;
+  }) {
+    try {
+      await this.enqueueOnce(params);
+      this.clearEnqueueReconciliation(params.run.runId);
+    } catch (error) {
+      if (this.isWorkspaceDeletingError(error)) {
+        // Deletion owns terminal convergence. This is deterministic: an RPC
+        // could not have started because the fenced handoff checks first.
+        this.clearEnqueueReconciliation(params.run.runId);
+        throw error;
+      }
+      if (this.isDefinitiveEnqueueFailure(error)) {
+        this.failRunAfterEnqueueFailure({
+          workspaceId: params.run.workspaceId,
+          sessionId: params.run.sessionId,
+          runId: params.run.runId,
+          updatedAt: this.dependencies.clock.nowMs(),
+        });
+        throw error;
+      }
+      // A timeout/connection error cannot prove the worker did not accept the
+      // idempotent runId. Keep the durable run active and reconcile it.
+      if (error instanceof HttpError && error.code === "RUN_NOT_ACTIVE") {
+        throw error;
+      }
+      if (!this.closed) this.scheduleEnqueueReconciliation(params);
+      throw new HttpError(503, "agent run enqueue status is unknown", "AGENT_WORKER_ENQUEUE_UNKNOWN");
+    }
+  }
+
+  async startUserRun(command: StartUserRunCommand) {
+    workspaceDeletingFence.assertWritable(command.workspaceId);
+    const createdAt = this.dependencies.clock.nowMs();
+    const committer = this.dependencies.attachmentCommitter;
+    const images = command.images ?? [];
+    const prepared: Array<{ image: (typeof images)[number]; publication: Awaited<ReturnType<NonNullable<typeof committer>["prepare"]>> }> = [];
+    const committedImages: Array<{ image: (typeof images)[number]; owned: { dev: number; ino: number } }> = [];
+    let failedCommitImage: (typeof images)[number] | undefined;
+    const removeFinals = async () => {
+      if (!committer) return [];
+      const results = await Promise.allSettled(committedImages.map(({ image, owned }) =>
+        committer.removeFinal({ workspaceId: command.workspaceId, image, owned })));
+      return committedImages.filter((_, index) => results[index]?.status === "rejected").map(({ image }) => image.attachmentId);
+    };
+    const removeTemps = async () => {
+      if (!committer) return 0;
+      const results = await Promise.allSettled(images.map((image) => committer.removeTemp({ tempId: image.tempId })));
+      return results.filter((result) => result.status === "rejected").length;
+    };
+    const runId = this.dependencies.ids.newId("run");
+    const warnPending = (pendingFinalAttachmentIds: string[], pendingTemps: number) => {
+      if (!pendingFinalAttachmentIds.length && !pendingTemps) return;
+      // Never log the thrown error: filesystem errors may contain private absolute paths.
+      this.dependencies.logger.warn({ workspaceId: command.workspaceId, runId, pendingFinals: pendingFinalAttachmentIds.length,
+        pendingFinalAttachmentIds, pendingTemps,
+        attachmentDirectory: ".awb/agent/attachments" }, "agent run attachment cleanup pending; inspect retained files manually");
+    };
+    const cleanupUnactivatedFiles = async (failedCommit?: unknown) => {
+      const [pendingFinalAttachmentIds, failedTemps] = await Promise.all([removeFinals(), removeTemps()]);
+      if (failedCommit instanceof AgentAttachmentCommitError && failedCommit.finalCleanupPending && failedCommitImage) {
+        pendingFinalAttachmentIds.push(failedCommitImage.attachmentId);
+      }
+      // removeTemp retries the failed commit's source (including its private slot).
+      // Report only cleanup still pending after that retry, not its earlier failure.
+      const pendingTemps = failedTemps;
+      warnPending(pendingFinalAttachmentIds, pendingTemps);
+    };
+
+    if (images.length > 0 && !committer) {
+      throw new Error("agent attachment committer is not configured");
+    }
+    let activation;
+    try {
+      for (const image of images) {
+        prepared.push({ image, publication: await committer!.prepare({ workspaceId: command.workspaceId, image }) });
+      }
+      workspaceDeletingFence.assertWritable(command.workspaceId);
+      activation = this.dependencies.persistence.activateUserRun({
+        workspaceId: command.workspaceId,
+        sessionId: command.sessionId,
+        clientRequestId: command.clientRequestId,
+        text: command.text,
+        images,
+        runId,
+        agentId: command.agentId,
+        providerId: command.providerId,
+        modelId: command.modelId,
+        uiLocale: command.uiLocale,
+        createdAt,
+        expectedHistoricalFork: command.expectedHistoricalFork,
+        expectedSessionTitle: command.expectedSessionTitle,
+      }, () => {
+        // No await: SQLite checks and all publication share the write transaction.
+        // Reject predictable destination conflicts before publishing any image.
+        for (const { publication } of prepared) publication.checkAvailable();
+        for (const { image, publication } of prepared) {
+          try {
+            const owned = publication.publish();
+            committedImages.push({ image, owned });
+          } catch (error) {
+            failedCommitImage = image;
+            throw error;
+          }
+        }
+      });
+    } catch (error) {
+      await Promise.all(prepared.map(({ publication }) => publication.close()));
+      await cleanupUnactivatedFiles(error);
+      throw error;
+    }
+    await Promise.all(prepared.map(({ publication }) => publication.close()));
+
+    if (activation.kind === "session-running") {
+      await cleanupUnactivatedFiles();
+      throw new HttpError(409, "session is running", "SESSION_RUNNING");
+    }
     if (activation.kind === "deduplicated") {
+      await cleanupUnactivatedFiles();
       return {
         sessionId: command.sessionId,
-        messageItemId: activation.messageItemId,
+        messageId: activation.messageId,
         runId: activation.runId,
-        deduplicated: true
+        deduplicated: true,
       };
     }
-    if (activation.kind === "session-running") {
-      throw new HttpError(409, "session is running");
-    }
+
+    // Final is now committed in SQLite; source temp removal is best-effort and
+    // must never roll back a visible Run or touch the mutable Workspace final.
+    warnPending([], await removeTemps());
 
     const runContext = this.dependencies.workspaceRunContextReader.get(command.workspaceId);
     if (!runContext) throw new HttpError(404, "workspace not found");
-
     try {
-      await command.runtime.enqueueRun({
-        workspaceId: command.workspaceId,
-        sessionId: command.sessionId,
-        runId: activation.runId,
-        inputText: command.inputText,
-        ...runContext
+      await this.enqueueActivatedRunOrReconcile({
+        runtime: command.runtime,
+        run: {
+          workspaceId: command.workspaceId,
+          sessionId: command.sessionId,
+          runId: activation.runId,
+          inputText: command.inputText,
+          ...runContext,
+        },
       });
-    } catch (error) {
-      this.failRunAfterEnqueueFailure({
-        workspaceId: command.workspaceId,
-        sessionId: command.sessionId,
-        runId: activation.runId,
-        updatedAt: this.dependencies.clock.nowMs()
-      });
-      throw error;
-    }
+    } catch (error) { throw error; }
 
     return {
       sessionId: command.sessionId,
-      messageItemId: activation.messageItemId,
+      messageId: activation.messageId,
       runId: activation.runId,
       deduplicated: false
     };
   }
 
   failRunAfterEnqueueFailure(params: { workspaceId: string; sessionId: string; runId: string; updatedAt?: number }): EnqueueFailureSettlement {
+    const updatedAt = params.updatedAt ?? this.dependencies.clock.nowMs();
     const settlement = this.dependencies.persistence.failRunAfterEnqueueFailureIfCurrent({
       ...params,
-      updatedAt: params.updatedAt ?? this.dependencies.clock.nowMs()
+      updatedAt,
     });
-    if (settlement === "failed-and-idled" || settlement === "run-failed-state-not-current") {
-      this.dependencies.promptStaticCacheInvalidator.clear(params.runId);
+    if (settlement === "intent-persisted") {
+      this.convergeRunTerminal({
+        workspaceId: params.workspaceId,
+        sessionId: params.sessionId,
+        runId: params.runId,
+        updatedAt,
+      });
+      return "failed-and-idled";
     }
     return settlement;
   }
 
-  updateRunStateFromWorker(params: AgentApiRunStateRequest) {
-    this.dependencies.persistence.updateRunStateFromWorker({
-      ...params,
-      updatedAt: params.updatedAt ?? this.dependencies.clock.nowMs()
-    });
+  markRunWorkInProgress(params: AgentApiMarkRunWorkInProgressRequest) {
+    return this.dependencies.persistence.markRunWorkInProgress(params);
   }
 
-  completeRunFromWorker(params: AgentApiRunCompleteRequest) {
-    const updatedAt = params.updatedAt ?? this.dependencies.clock.nowMs();
-    const completed = this.dependencies.persistence.completeRunFromWorker({ ...params, updatedAt });
-    if (!completed) return;
+  persistRunTerminalIntent(params: AgentApiPersistTerminalIntentRequest) {
+    return this.dependencies.persistence.persistRunTerminalIntent(params);
+  }
 
+  /** Workspace deletion reuses the ordinary terminal intent/convergence authority. */
+  settleWorkspaceRunsForDeletion(workspaceId: string) {
+    const settledSessionIds: string[] = [];
+    for (const candidate of this.dependencies.persistence.listWorkspaceRunningRunCandidates(workspaceId)) {
+      const updatedAt = this.dependencies.clock.nowMs();
+      if (candidate.executionPhase !== "terminal_intent_persisted") {
+        this.persistRunTerminalIntent({
+          workspaceId: candidate.workspaceId,
+          sessionId: candidate.sessionId,
+          runId: candidate.runId,
+          status: "cancelled",
+          code: "run_cancelled",
+          detail: null,
+          updatedAt,
+        });
+      }
+      this.convergeRunTerminal({
+        workspaceId: candidate.workspaceId,
+        sessionId: candidate.sessionId,
+        runId: candidate.runId,
+        updatedAt,
+      });
+      if (!settledSessionIds.includes(candidate.sessionId)) settledSessionIds.push(candidate.sessionId);
+    }
+    return settledSessionIds;
+  }
+
+  convergeRunTerminal(params: AgentApiConvergeRunTerminalRequest) {
+    const result = this.dependencies.persistence.convergeRunTerminal(params);
     this.dependencies.promptStaticCacheInvalidator.clear(params.runId);
-    this.dependencies.runCompletedEventPublisher.publishRunCompleted({
-      eventId: this.dependencies.ids.newId("evt"),
-      occurredAt: updatedAt,
-      workspaceId: params.workspaceId,
-      sessionId: params.sessionId,
-      runId: params.runId,
-      finalStatus: params.status
-    });
+    if (result.kind === "transitioned") {
+      try {
+        this.dependencies.runCompletedEventPublisher.publishRunCompleted({
+          eventId: this.dependencies.ids.newId("evt"),
+          occurredAt: params.updatedAt,
+          workspaceId: params.workspaceId,
+          sessionId: params.sessionId,
+          runId: params.runId,
+          finalStatus: result.finalStatus,
+        });
+      } catch (err) {
+        this.dependencies.logger.error(
+          { err, workspaceId: params.workspaceId, sessionId: params.sessionId, runId: params.runId },
+          "agent terminal convergence event publish failed",
+        );
+      }
+    }
+    return result;
   }
 
   cancelSessionCascade(sessionId: string, body: AgentCancelSessionRequest): CancelSessionCascadeResult {
@@ -119,7 +368,13 @@ export class RunLifecycleApplication {
       updatedAt: this.dependencies.clock.nowMs(),
       listActiveChildSessionIds: (params) => this.dependencies.activeSubtaskChildQuery.listByParentRun(params)
     });
-    for (const runId of result.cancelledRunIds) this.dependencies.promptStaticCacheInvalidator.clear(runId);
+    const updatedAt = this.dependencies.clock.nowMs();
+    for (const terminalIntent of result.terminalIntents ?? []) {
+      this.convergeRunTerminal({
+        ...terminalIntent,
+        updatedAt,
+      });
+    }
     return {
       result: { ok: true, session: root.session, runState: this.dependencies.runStateReader.get(result.rootSessionId) },
       runtimeCancelSessionIds: result.runtimeCancelSessionIds
@@ -127,107 +382,78 @@ export class RunLifecycleApplication {
   }
 
   async cancelSession(command: CancelSessionCommand) {
-    const result = this.cancelSessionCascade(command.sessionId, { workspaceId: command.workspaceId });
-    const settled = await Promise.allSettled(result.runtimeCancelSessionIds.map((sessionId) => command.runtime.cancelSession(sessionId)));
-    for (let index = 0; index < settled.length; index += 1) {
-      const outcome = settled[index];
-      if (!outcome || outcome.status !== "rejected") continue;
-      this.dependencies.logger.warn(
-        { err: outcome.reason, rootSessionId: command.sessionId, targetSessionId: result.runtimeCancelSessionIds[index] },
-        "agent cancel runtime session failed"
-      );
-    }
-    return result.result;
+    const snapshot = this.dependencies.persistence.getCancelSessionSnapshot(command.sessionId);
+    if (!snapshot) throw new HttpError(404, "session not found");
+    if (snapshot.workspaceId !== command.workspaceId) throw new HttpError(400, "workspaceId mismatch");
+    const cancelInput = {
+      workspaceId: snapshot.workspaceId,
+      rootSessionId: snapshot.sessionId,
+      updatedAt: this.dependencies.clock.nowMs(),
+      listActiveChildSessionIds: (params: { workspaceId: string; sessionId: string; runId: string }) =>
+        this.dependencies.activeSubtaskChildQuery.listByParentRun(params),
+    };
+    const lockedSessionIds = this.dependencies.persistence.listActiveSessionIdsForCancel(cancelInput);
+    return await this.dependencies.runtimeHandoffCoordinator.runExclusiveMany(
+      [snapshot.sessionId, ...lockedSessionIds],
+      async () => {
+        const result = this.cancelSessionCascade(command.sessionId, { workspaceId: command.workspaceId });
+        const settled = await Promise.allSettled(result.runtimeCancelSessionIds.map((sessionId) => command.runtime.cancelSession(sessionId)));
+        for (let index = 0; index < settled.length; index += 1) {
+          const outcome = settled[index];
+          if (!outcome || outcome.status !== "rejected") continue;
+          this.dependencies.logger.warn(
+            { err: outcome.reason, rootSessionId: command.sessionId, targetSessionId: result.runtimeCancelSessionIds[index] },
+            "agent cancel runtime session failed"
+          );
+        }
+        return result.result;
+      },
+    );
   }
 
   async recoverRunsOnStartup(command: RecoverRunsOnStartupCommand) {
     for (const candidate of this.dependencies.persistence.listRecoverableRunCandidates()) {
+      if (workspaceDeletingFence.isDeleting(candidate.workspaceId)) {
+        this.dependencies.logger.debug?.(
+          { workspaceId: candidate.workspaceId, sessionId: candidate.sessionId, runId: candidate.runId },
+          "startup recovery skipped run in deleting workspace",
+        );
+        continue;
+      }
       if (!this.dependencies.persistence.isRecoverableRunCandidate(candidate)) continue;
-      const runContext = this.dependencies.workspaceRunContextReader.get(candidate.workspaceId);
-      if (!runContext) continue;
-      const inputText = candidate.triggerItemId == null
-        ? ""
-        : this.dependencies.triggerInputReader.getUserText(candidate.triggerItemId) ?? "";
-
       await command.beforeFinalCheck?.(candidate);
+      // Cancellation may have converged while the caller held the final-check
+      // seam. Re-read so an already-terminal Run never receives a new tuple.
       if (!this.dependencies.persistence.isRecoverableRunCandidate(candidate)) continue;
       try {
-        await command.runtime.enqueueRun({
-          workspaceId: candidate.workspaceId,
-          sessionId: candidate.sessionId,
-          runId: candidate.runId,
-          inputText,
-          ...runContext
+        await this.dependencies.runtimeHandoffCoordinator.runExclusive(candidate.sessionId, async () => {
+          workspaceDeletingFence.assertWritable(candidate.workspaceId);
+          const updatedAt = this.dependencies.clock.nowMs();
+          if (candidate.executionPhase !== "terminal_intent_persisted") {
+            this.persistRunTerminalIntent({
+              workspaceId: candidate.workspaceId,
+              sessionId: candidate.sessionId,
+              runId: candidate.runId,
+              status: "failed",
+              code: "run_startup_recovery_failed",
+              detail: null,
+              updatedAt,
+            });
+          }
+          this.convergeRunTerminal({
+            workspaceId: candidate.workspaceId,
+            sessionId: candidate.sessionId,
+            runId: candidate.runId,
+            updatedAt,
+          });
         });
-      } catch (err) {
-        this.dependencies.logger.warn(
-          { err, sessionId: candidate.sessionId, runId: candidate.runId },
-          "startup recovery mode=recover: enqueue run failed"
+      } catch (error) {
+        if (!this.isWorkspaceDeletingError(error)) throw error;
+        this.dependencies.logger.debug?.(
+          { workspaceId: candidate.workspaceId, sessionId: candidate.sessionId, runId: candidate.runId },
+          "startup recovery skipped run after deletion fence won",
         );
       }
-    }
-  }
-
-  failRunsOnStartup() {
-    const updatedAt = this.dependencies.clock.nowMs();
-    try {
-      const candidates = this.dependencies.persistence.listRecoverableRunCandidates();
-      for (const candidate of candidates) {
-        let contextItemChanges = 0;
-        let runRecordChanges = 0;
-        let runStateChanges = 0;
-        try {
-          contextItemChanges = this.dependencies.persistence.failNonTerminalContextItemsForRecovery({ ...candidate, updatedAt });
-        } catch (err) {
-          this.dependencies.logger.warn({ err, runId: candidate.runId }, "fail context items failed on startup recovery");
-        }
-        try {
-          runRecordChanges = this.dependencies.persistence.failRunRecordForRecovery({ ...candidate, updatedAt });
-          if (runRecordChanges === 0) {
-            this.dependencies.logger.debug?.({ runId: candidate.runId }, "startup recovery: skip failing run record (already terminal or missing)");
-          }
-        } catch (err) {
-          this.dependencies.logger.warn({ err, runId: candidate.runId }, "fail run record failed on startup recovery");
-        }
-        try {
-          runStateChanges = this.dependencies.persistence.reclaimRunStateForRecovery({ ...candidate, updatedAt });
-          if (runStateChanges === 0) {
-            this.dependencies.logger.warn(candidate, "startup recovery: skip resetting run-state (active run changed or already idle)");
-          }
-        } catch (err) {
-          this.dependencies.logger.warn({ err, ...candidate }, "set run-state idle failed on startup recovery");
-        }
-        if (runStateChanges > 0 && (contextItemChanges > 0 || runRecordChanges > 0)) {
-          const text = runRecordChanges > 0
-            ? "[run] marked failed on server restart (startup recovery mode: fail)"
-            : "[run] cleaned up inflight context on server restart (startup recovery mode: fail)";
-          try {
-            this.dependencies.persistence.appendRecoveryFailureNotice({ ...candidate, text, createdAt: updatedAt });
-          } catch (err) {
-            if (!this.dependencies.isContextAppendConflict(err)) {
-              this.dependencies.logger.warn({ err, sessionId: candidate.sessionId, runId: candidate.runId }, "append startup termination notice failed");
-            }
-          }
-        }
-      }
-
-      const dirtySessions = this.dependencies.persistence.listInFlightSessionsWithoutActiveRunId();
-      for (const session of dirtySessions) {
-        try {
-          const changes = this.dependencies.persistence.reclaimDirtyRunStateForRecovery({ ...session, updatedAt });
-          if (changes > 0) this.dependencies.logger.warn(session, "startup recovery: reset in-flight session without active runId to idle");
-        } catch (err) {
-          this.dependencies.logger.warn({ err, ...session }, "startup recovery: reset in-flight session without active runId failed");
-        }
-      }
-      if (candidates.length > 0 || dirtySessions.length > 0) {
-        this.dependencies.logger.warn(
-          { runs: candidates.length, sessionsWithoutActiveRunId: dirtySessions.length },
-          "startup recovery mode=fail: terminated inflight state"
-        );
-      }
-    } catch (err) {
-      this.dependencies.logger.error({ err }, "startup recovery mode=fail: unexpected error");
     }
   }
 }

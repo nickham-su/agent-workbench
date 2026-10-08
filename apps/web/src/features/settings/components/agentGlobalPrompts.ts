@@ -4,9 +4,15 @@ import type {
 } from "@agent-workbench/shared";
 
 export const RESERVED_GLOBAL_SYSTEM_PROMPT_ID = "global_system_prompt";
+const RESERVED_BUILTIN_GLOBAL_PROMPT_COMMANDS = new Set(["compact"]);
 
 export function isReservedAgentGlobalPromptItem(id: string) {
   return id.trim() === RESERVED_GLOBAL_SYSTEM_PROMPT_ID;
+}
+
+/** 前端设置校验仅保留当前真实内建 slash command 的命名空间。 */
+export function isReservedBuiltinGlobalPromptCommand(command: string) {
+  return RESERVED_BUILTIN_GLOBAL_PROMPT_COMMANDS.has(command.trim().toLowerCase());
 }
 
 export function normalizeAgentGlobalPromptItems(raw: unknown): AgentGlobalPromptItem[] {

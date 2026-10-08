@@ -1,31 +1,13 @@
 import { Type } from "@sinclair/typebox";
 import type { Static } from "@sinclair/typebox";
-import { PluginToolCanonicalNameSchema } from "./plugin.js";
 import { AgentItemViewSchema } from "./settings.js";
+import { WorkspaceAgentTabStateSchema } from "./workspaces.js";
+import { AgentContextToolNameSchema, AgentImageMediaTypeSchema, AgentMcpToolNameSchema, AgentSessionKindSchema } from "./agent-primitives.js";
+export { AgentContextToolNameSchema, AgentImageMediaTypeSchema, AgentMcpToolNameSchema, AgentSessionKindSchema } from "./agent-primitives.js";
+export type { AgentContextToolName, AgentImageMediaType, AgentSessionKind } from "./agent-primitives.js";
 
 export const AgentUiLocaleSchema = Type.Union([Type.Literal("zh-CN"), Type.Literal("en-US")]);
 export type AgentUiLocale = Static<typeof AgentUiLocaleSchema>;
-
-export const AgentSessionKindSchema = Type.Union([Type.Literal("primary"), Type.Literal("subtask")]);
-export type AgentSessionKind = Static<typeof AgentSessionKindSchema>;
-
-export const AgentMcpToolNameSchema = Type.String({ pattern: "^mcp_[A-Za-z0-9_-]+_[A-Za-z0-9_-]+$" });
-export const AgentContextToolNameSchema = Type.Union([
-  Type.Literal("bash"),
-  Type.Literal("read"),
-  Type.Literal("write"),
-  Type.Literal("apply_patch"),
-  Type.Literal("scratchpad"),
-  Type.Literal("todolist"),
-  Type.Literal("subtask"),
-  Type.Literal("archive_search"),
-  Type.Literal("skill"),
-  Type.Literal("archive_read"),
-  Type.Literal("visual_analyze"),
-  AgentMcpToolNameSchema,
-  PluginToolCanonicalNameSchema
-]);
-export type AgentContextToolName = Static<typeof AgentContextToolNameSchema>;
 
 export const AgentRunStatusSchema = Type.Union([
   Type.Literal("idle"),
@@ -33,66 +15,111 @@ export const AgentRunStatusSchema = Type.Union([
 ]);
 export type AgentRunStatus = Static<typeof AgentRunStatusSchema>;
 
-export const AgentContextItemKindSchema = Type.Union([
+/** Run 的持久化语义；恢复时不得由输入文本或触发消息猜测。 */
+export const AgentRunKindSchema = Type.Union([
   Type.Literal("user"),
-  Type.Literal("assistant"),
-  Type.Literal("tool"),
-  Type.Literal("system")
+  Type.Literal("manual_compaction"),
+  Type.Literal("subtask"),
 ]);
-export type AgentContextItemKind = Static<typeof AgentContextItemKindSchema>;
+export type AgentRunKind = Static<typeof AgentRunKindSchema>;
 
-export const AgentContextItemStatusSchema = Type.Union([
-  Type.Literal("streaming"),
-  Type.Literal("queued"),
-  Type.Literal("running"),
+export const AgentRunExecutionPhaseSchema = Type.Union([
+  Type.Literal("work_pending"),
+  Type.Literal("work_in_progress"),
+  Type.Literal("terminal_intent_persisted"),
+  Type.Literal("terminal")
+]);
+export type AgentRunExecutionPhase = Static<typeof AgentRunExecutionPhaseSchema>;
+
+export const AgentTerminalRunStatusSchema = Type.Union([
   Type.Literal("completed"),
   Type.Literal("failed"),
   Type.Literal("cancelled")
 ]);
-export type AgentContextItemStatus = Static<typeof AgentContextItemStatusSchema>;
+export type AgentTerminalRunStatus = Static<typeof AgentTerminalRunStatusSchema>;
 
-export const AgentUserTextOutputSchema = Type.Object({
-  type: Type.Literal("user_text"),
-  text: Type.String()
-});
-
-export const AgentAssistantReasoningSchema = Type.Object({
-  text: Type.String()
-});
-
-export const AgentAssistantTextOutputSchema = Type.Object({
-  type: Type.Literal("assistant_text"),
-  text: Type.String(),
-  reasoning: Type.Optional(AgentAssistantReasoningSchema),
-  error: Type.Optional(Type.String())
-});
-
-export type AgentAssistantReasoning = Static<typeof AgentAssistantReasoningSchema>;
-
-export const AgentToolOutputSchema = Type.Object({
-  type: Type.Literal("tool"),
-  toolName: AgentContextToolNameSchema,
-  toolCallId: Type.Optional(Type.String({ minLength: 1 })),
-  args: Type.Optional(Type.Any()),
-  text: Type.Optional(Type.String()),
-  textTruncated: Type.Optional(Type.Boolean()),
-  textArtifactPath: Type.Optional(Type.String({ minLength: 1 })),
-  result: Type.Optional(Type.Any()),
-  error: Type.Optional(Type.String())
-});
-
-export const AgentSystemTextOutputSchema = Type.Object({
-  type: Type.Literal("system_text"),
-  text: Type.String()
-});
-
-export const AgentContextItemOutputSchema = Type.Union([
-  AgentUserTextOutputSchema,
-  AgentAssistantTextOutputSchema,
-  AgentToolOutputSchema,
-  AgentSystemTextOutputSchema
+export const AgentTerminalResultCodeSchema = Type.Union([
+  Type.Literal("run_completed"),
+  Type.Literal("subtask_completed"),
+  Type.Literal("compaction_completed"),
+  Type.Literal("compaction_not_needed"),
+  Type.Literal("compaction_no_progress"),
+  Type.Literal("compaction_oversized_tail"),
+  Type.Literal("compaction_media_requires_resend"),
+  Type.Literal("compaction_pending_tools"),
+  Type.Literal("compaction_failed"),
+  Type.Literal("compaction_provider_unavailable"),
+  Type.Literal("compaction_conflict"),
+  Type.Literal("context_limit_recovery_exhausted"),
+  Type.Literal("context_limit_media_requires_resend"),
+  Type.Literal("run_cancelled"),
+  Type.Literal("run_enqueue_failed"),
+  Type.Literal("run_failed"),
+  Type.Literal("run_provider_bad_request"),
+  Type.Literal("run_provider_unauthorized"),
+  Type.Literal("run_provider_not_found"),
+  Type.Literal("run_provider_unsupported"),
+  Type.Literal("run_startup_recovery_failed"),
+  Type.Literal("subtask_failed")
 ]);
-export type AgentContextItemOutput = Static<typeof AgentContextItemOutputSchema>;
+export type AgentTerminalResultCode = Static<typeof AgentTerminalResultCodeSchema>;
+
+/** 终态码的唯一业务登记表；持久化与内部控制面均应复用此处校验组合。 */
+export const AGENT_TERMINAL_CODE_REGISTRY = {
+  user: {
+    completed: ["run_completed"],
+    failed: ["context_limit_recovery_exhausted", "context_limit_media_requires_resend", "compaction_conflict", "run_enqueue_failed", "run_failed", "run_provider_bad_request", "run_provider_unauthorized", "run_provider_not_found", "run_provider_unsupported", "run_startup_recovery_failed"],
+    cancelled: ["run_cancelled"]
+  },
+  subtask: {
+    completed: ["subtask_completed"],
+    failed: ["subtask_failed", "run_enqueue_failed", "run_startup_recovery_failed"],
+    cancelled: ["run_cancelled"]
+  },
+  manual_compaction: {
+    completed: ["compaction_completed", "compaction_not_needed", "compaction_no_progress", "compaction_oversized_tail", "compaction_media_requires_resend"],
+    failed: ["compaction_pending_tools", "compaction_failed", "compaction_provider_unavailable", "compaction_conflict", "run_enqueue_failed", "run_startup_recovery_failed"],
+    cancelled: ["run_cancelled"]
+  }
+} as const satisfies Record<AgentRunKind, Record<AgentTerminalRunStatus, readonly AgentTerminalResultCode[]>>;
+
+export function isAgentTerminalCodeAllowed(
+  runKind: AgentRunKind,
+  status: AgentTerminalRunStatus,
+  code: AgentTerminalResultCode
+) {
+  return (AGENT_TERMINAL_CODE_REGISTRY[runKind][status] as readonly string[]).includes(code);
+}
+
+/** 浏览器刷新恢复所需的最小公开 Run 投影，不包含 prompt、provider 或 artifact。 */
+const AgentRunStatusRecordFields = {
+  workspaceId: Type.String({ minLength: 1 }),
+  sessionId: Type.String({ minLength: 1 }),
+  runId: Type.String({ minLength: 1 }),
+  runKind: AgentRunKindSchema,
+  updatedAt: Type.Number(),
+};
+
+export const AgentRunStatusResponseSchema = Type.Union([
+  Type.Object({
+    ...AgentRunStatusRecordFields,
+    status: Type.Literal("running"),
+    code: Type.Null(),
+    detail: Type.Null(),
+  }, { additionalProperties: false }),
+  Type.Object({
+    ...AgentRunStatusRecordFields,
+    status: AgentTerminalRunStatusSchema,
+    code: AgentTerminalResultCodeSchema,
+    detail: Type.Null(),
+  }, { additionalProperties: false }),
+], { $id: "AgentRunStatusResponse" });
+export type AgentRunStatusResponse = Static<typeof AgentRunStatusResponseSchema>;
+
+export const AgentRunStatusQuerySchema = Type.Object({
+  workspaceId: Type.String({ minLength: 1 }),
+}, { additionalProperties: false });
+export type AgentRunStatusQuery = Static<typeof AgentRunStatusQuerySchema>;
 
 export const AgentSessionRecordSchema = Type.Object({
   id: Type.String({ minLength: 1 }),
@@ -100,176 +127,102 @@ export const AgentSessionRecordSchema = Type.Object({
   title: Type.String({ minLength: 1 }),
   kind: AgentSessionKindSchema,
   forkedFromSessionId: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
-  forkedFromItemId: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
-  headItemId: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
+  forkedFromMessageId: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
+  headMessageId: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
+  contextRootMessageId: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
+  revision: Type.Integer({ minimum: 0 }),
   createdAt: Type.Number(),
   updatedAt: Type.Number()
 });
 export type AgentSessionRecord = Static<typeof AgentSessionRecordSchema>;
 
-export const AgentContextItemRecordSchema = Type.Object({
-  id: Type.Number({ minimum: 1 }),
+export const AgentTabsSnapshotResponseSchema = Type.Object({
+  scope: Type.Literal("tabs"),
+  items: Type.Array(AgentSessionRecordSchema),
+  tabState: WorkspaceAgentTabStateSchema
+}, { additionalProperties: false });
+export type AgentTabsSnapshotResponse = Static<typeof AgentTabsSnapshotResponseSchema>;
+export const AgentContinuablePageResponseSchema = Type.Object({
+  scope: Type.Literal("continuable"),
+  items: Type.Array(AgentSessionRecordSchema),
+  nextCursor: Type.Union([Type.String({ minLength: 1 }), Type.Null()])
+}, { additionalProperties: false });
+export type AgentContinuablePageResponse = Static<typeof AgentContinuablePageResponseSchema>;
+export const AgentSessionListResponseSchema = Type.Union([AgentTabsSnapshotResponseSchema, AgentContinuablePageResponseSchema]);
+export type AgentSessionListResponse = Static<typeof AgentSessionListResponseSchema>;
+
+/** Configuration source for a session's effective Agent primary model. */
+export const AgentSessionModelSourceSchema = Type.Union([
+  Type.Literal("session_override"),
+  Type.Literal("agent_default")
+]);
+export type AgentSessionModelSource = Static<typeof AgentSessionModelSourceSchema>;
+
+export const AgentSessionModelStatusSchema = Type.Union([
+  Type.Literal("ready"),
+  Type.Literal("invalid"),
+  Type.Literal("missing")
+]);
+export type AgentSessionModelStatus = Static<typeof AgentSessionModelStatusSchema>;
+
+export const AgentSessionModelRefSchema = Type.Object({
+  providerId: Type.String({ minLength: 1 }),
+  modelId: Type.String({ minLength: 1 })
+}, { additionalProperties: false });
+export type AgentSessionModelRef = Static<typeof AgentSessionModelRefSchema>;
+
+export const AgentSessionModelOverrideSchema = Type.Object({
+  ...AgentSessionModelRefSchema.properties,
+  updatedAt: Type.Number({ exclusiveMinimum: 0 })
+}, { additionalProperties: false });
+export type AgentSessionModelOverride = Static<typeof AgentSessionModelOverrideSchema>;
+
+export const AgentSessionEffectiveModelSchema = Type.Object({
+  ...AgentSessionModelRefSchema.properties,
+  providerName: Type.String({ minLength: 1 }),
+  modelName: Type.String({ minLength: 1 }),
+  contextWindowTokens: Type.Number({ minimum: 1 })
+}, { additionalProperties: false });
+export type AgentSessionEffectiveModel = Static<typeof AgentSessionEffectiveModelSchema>;
+
+/**
+ * Read-side projection for one (sessionId, agentId) primary-model setting.
+ * `source` describes the configuration layer only; consumers must use
+ * `status` and `reasonCode` to determine whether the model is executable.
+ */
+export const AgentSessionAgentModelStateSchema = Type.Object({
+  sessionId: Type.String({ minLength: 1 }),
+  agentId: Type.String({ minLength: 1 }),
+  agentName: Type.String({ minLength: 1 }),
+  editable: Type.Boolean(),
+  agentDefaultModel: Type.Union([AgentSessionModelRefSchema, Type.Null()]),
+  override: Type.Union([AgentSessionModelOverrideSchema, Type.Null()]),
+  effectiveModel: Type.Union([AgentSessionEffectiveModelSchema, Type.Null()]),
+  source: AgentSessionModelSourceSchema,
+  status: AgentSessionModelStatusSchema,
+  reasonCode: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
+  message: Type.Union([Type.String({ minLength: 1 }), Type.Null()])
+}, { additionalProperties: false });
+export type AgentSessionAgentModelState = Static<typeof AgentSessionAgentModelStateSchema>;
+
+export const AgentSessionModelOverridesResponseSchema = Type.Object({
   workspaceId: Type.String({ minLength: 1 }),
   sessionId: Type.String({ minLength: 1 }),
-  runId: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
-  turnId: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
-  step: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
-  prevId: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
-  kind: AgentContextItemKindSchema,
-  status: AgentContextItemStatusSchema,
-  archiveAt: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
-  boundaryReason: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
-  output: AgentContextItemOutputSchema,
-  createdAt: Type.Number(),
-  updatedAt: Type.Number()
-});
-export type AgentContextItemRecord = Static<typeof AgentContextItemRecordSchema>;
-
-export const AgentContextItemsResponseSchema = Type.Object({
-  sessionId: Type.String({ minLength: 1 }),
-  headItemId: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
-  appliedItemId: Type.Number({ minimum: 0 }),
-  hasMoreBefore: Type.Optional(Type.Boolean()),
-  items: Type.Array(AgentContextItemRecordSchema)
-});
-export type AgentContextItemsResponse = Static<typeof AgentContextItemsResponseSchema>;
-
-export const AgentSessionTerminalStatusSchema = Type.Union([
-  Type.Literal("completed"),
-  Type.Literal("failed"),
-  Type.Literal("cancelled"),
-  Type.Null()
-]);
-export type AgentSessionTerminalStatus = Static<typeof AgentSessionTerminalStatusSchema>;
-
-export const AgentSessionActiveRunSchema = Type.Object(
-  {
-    runId: Type.String({ minLength: 1 }),
-    startedAt: Type.Number()
-  },
-  { additionalProperties: false }
-);
-export type AgentSessionActiveRun = Static<typeof AgentSessionActiveRunSchema>;
-
-export const AgentSessionLastRunStatusSchema = Type.Union([
-  Type.Literal("completed"),
-  Type.Literal("failed"),
-  Type.Literal("cancelled")
-]);
-export type AgentSessionLastRunStatus = Static<typeof AgentSessionLastRunStatusSchema>;
-
-export const AgentSessionLastRunSchema = Type.Object(
-  {
-    runId: Type.String({ minLength: 1 }),
-    status: AgentSessionLastRunStatusSchema,
-    startedAt: Type.Number(),
-    endedAt: Type.Number(),
-    durationMs: Type.Number({ minimum: 0 })
-  },
-  { additionalProperties: false }
-);
-export type AgentSessionLastRun = Static<typeof AgentSessionLastRunSchema>;
-
-export const AgentSessionRunStateSchema = Type.Object({
-  sessionId: Type.String({ minLength: 1 }),
-  status: AgentRunStatusSchema,
-  activeRunId: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
-  activeAssistantItemId: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
-  // Optional for backward compatibility; server may include it.
-  //
-  // Semantics:
-  // - When present, `activeRun` describes the currently running run (if any).
-  // - It is meant for persistent display (e.g. header elapsed timer) during `status: "running"`.
-  activeRun: Type.Optional(Type.Union([AgentSessionActiveRunSchema, Type.Null()])),
-  lastResponseTotalTokens: Type.Union([Type.Number({ minimum: 0 }), Type.Null()]),
-  nonTerminalItemIds: Type.Array(Type.Number({ minimum: 1 })),
-  runNoticeText: Type.Union([Type.String(), Type.Null()]),
-  updatedAt: Type.Number(),
-
-  // Semantics (event-like):
-  // - `lastTerminalStatus` is a strict, time-aligned terminal status intended to represent
-  //   the run that *just finished*.
-  // - It is computed with additional constraints (e.g. timestamps) to avoid mis-reporting
-  //   an older run as the just-finished one.
-  // - Consumers should NOT use it as the persistent "most recent run" status.
-  lastTerminalStatus: AgentSessionTerminalStatusSchema,
-  appliedItemId: Type.Number({ minimum: 0 }),
-
-  // Optional for backward compatibility; server may include it.
-  //
-  // Semantics (persistent):
-  // - `lastRun` represents the most recent *terminal* run (completed/failed/cancelled).
-  // - It is designed for persistent display (e.g. show last elapsed after run finishes).
-  // - It may be present even when `status: "running"` (meaning it refers to the previous run).
-  lastRun: Type.Optional(Type.Union([AgentSessionLastRunSchema, Type.Null()])),
-
-  // Authoritative context-window metadata aligned with the same effective run
-  // used by `lastResponseTotalTokens` display (prefer active run, fallback last terminal run).
-  contextWindowTokens: Type.Optional(Type.Union([Type.Integer({ minimum: 1 }), Type.Null()])),
-  contextTokenRatio: Type.Optional(Type.Union([Type.Number({ minimum: 0 }), Type.Null()]))
+  items: Type.Array(AgentSessionAgentModelStateSchema)
 }, { additionalProperties: false });
-export type AgentSessionRunState = Static<typeof AgentSessionRunStateSchema>;
+export type AgentSessionModelOverridesResponse = Static<typeof AgentSessionModelOverridesResponseSchema>;
 
-export const AgentSessionStatusSummaryRequestSchema = Type.Object(
-  {
-    sessionId: Type.String({ minLength: 1 }),
-    // Compatibility:
-    // - IM design doc v1 used `agentId`
-    // - current implementation used `selectedAgentId`
-    // Accept both. If both are provided, `selectedAgentId` wins.
-    agentId: Type.Optional(Type.String({ minLength: 1 })),
-    selectedAgentId: Type.Optional(Type.String({ minLength: 1 }))
-  },
-  { additionalProperties: false }
-);
-export type AgentSessionStatusSummaryRequest = Static<typeof AgentSessionStatusSummaryRequestSchema>;
+export const UpdateAgentSessionModelOverrideRequestSchema = Type.Object({
+  workspaceId: Type.String({ minLength: 1 }),
+  providerId: Type.String({ minLength: 1 }),
+  modelId: Type.String({ minLength: 1 })
+}, { additionalProperties: false });
+export type UpdateAgentSessionModelOverrideRequest = Static<typeof UpdateAgentSessionModelOverrideRequestSchema>;
 
-// Compatibility: IM design doc uses `terminalStatus`, while existing run-state uses `lastTerminalStatus`.
-// Keep both in status-summary response.
-export const AgentSessionRunStateWithTerminalStatusSchema = Type.Object(
-  {
-    ...AgentSessionRunStateSchema.properties,
-    terminalStatus: AgentSessionTerminalStatusSchema
-  },
-  {
-    additionalProperties: false
-  }
-);
-
-const AgentSessionStatusSummarySessionSchema = Type.Object(
-  {
-    ...AgentSessionRecordSchema.properties,
-    workspaceTitle: Type.Optional(Type.String({ minLength: 1 })),
-    workspaceDirName: Type.Optional(Type.String({ minLength: 1 }))
-  },
-  { additionalProperties: false }
-);
-
-export const AgentSessionStatusSummaryResponseSchema = Type.Object(
-  {
-    updatedAt: Type.Number(),
-    generatedAt: Type.Optional(Type.Number()),
-    session: AgentSessionStatusSummarySessionSchema,
-    agent: Type.Union([
-      Type.Object({
-        id: Type.String({ minLength: 1 }),
-        name: Type.String({ minLength: 1 })
-      }),
-      Type.Null()
-    ]),
-    runState: AgentSessionRunStateWithTerminalStatusSchema,
-    startedAt: Type.Union([Type.Number(), Type.Null()]),
-    elapsedMs: Type.Union([Type.Number({ minimum: 0 }), Type.Null()]),
-    contextWindowTokens: Type.Union([Type.Integer({ minimum: 1 }), Type.Null()]),
-    contextTokenRatio: Type.Union([Type.Number({ minimum: 0 }), Type.Null()])
-  },
-  { additionalProperties: false }
-);
-export type AgentSessionStatusSummaryResponse = Static<typeof AgentSessionStatusSummaryResponseSchema>;
-
-// --------------------------------------------------------------------------------------
-// IM plugins helpers (internal-only)
-// --------------------------------------------------------------------------------------
+export const AgentSessionModelWorkspaceQuerySchema = Type.Object({
+  workspaceId: Type.String({ minLength: 1 })
+}, { additionalProperties: false });
+export type AgentSessionModelWorkspaceQuery = Static<typeof AgentSessionModelWorkspaceQuerySchema>;
 
 export const AgentRecentSessionsRequestSchema = Type.Object(
   {
@@ -352,32 +305,17 @@ export const AgentListAvailableAgentsResponseSchema = Type.Object(
 );
 export type AgentListAvailableAgentsResponse = Static<typeof AgentListAvailableAgentsResponseSchema>;
 
-export const AgentSessionContextItemsTailRequestSchema = Type.Object(
-  {
-    pluginId: Type.String({ minLength: 1 }),
-    sessionId: Type.String({ minLength: 1 }),
-    tailLimit: Type.Optional(Type.Integer({ minimum: 1, maximum: 500 }))
-  },
-  { additionalProperties: false }
-);
-export type AgentSessionContextItemsTailRequest = Static<typeof AgentSessionContextItemsTailRequestSchema>;
-
-export const AgentSessionContextItemsTailResponseSchema = Type.Object(
-  {
-    sessionId: Type.String({ minLength: 1 }),
-    headItemId: Type.Union([Type.Number({ minimum: 1 }), Type.Null()]),
-    appliedItemId: Type.Number({ minimum: 0 }),
-    items: Type.Array(AgentContextItemRecordSchema)
-  },
-  { additionalProperties: false }
-);
-export type AgentSessionContextItemsTailResponse = Static<typeof AgentSessionContextItemsTailResponseSchema>;
-
 export const AgentCreateSessionRequestSchema = Type.Object({
   workspaceId: Type.String({ minLength: 1 }),
   title: Type.Optional(Type.String({ minLength: 1 }))
 }, { additionalProperties: false });
 export type AgentCreateSessionRequest = Static<typeof AgentCreateSessionRequestSchema>;
+
+export const AgentUpdateSessionTitleRequestSchema = Type.Object({
+  workspaceId: Type.String({ minLength: 1 }),
+  title: Type.String({ minLength: 1, maxLength: 1000 })
+}, { additionalProperties: false });
+export type AgentUpdateSessionTitleRequest = Static<typeof AgentUpdateSessionTitleRequestSchema>;
 
 export const AgentInternalCreateSessionRequestSchema = Type.Object(
   {
@@ -406,75 +344,36 @@ export const AgentChannelAllowlistCheckResponseSchema = Type.Object(
 );
 export type AgentChannelAllowlistCheckResponse = Static<typeof AgentChannelAllowlistCheckResponseSchema>;
 
-export const AgentSendMessageRequestSchema = Type.Object({
+const AgentSendMessageCommonFields = {
   workspaceId: Type.String({ minLength: 1 }),
-  text: Type.String({ minLength: 1 }),
   clientRequestId: Type.String({ minLength: 1 }),
   agentId: Type.Optional(Type.String({ minLength: 1 })),
   uiLocale: Type.Optional(AgentUiLocaleSchema)
+};
+
+export const AgentSendMessageRequestSchema = Type.Object({
+  ...AgentSendMessageCommonFields,
+  text: Type.String({ minLength: 1 }),
 }, { additionalProperties: false });
 export type AgentSendMessageRequest = Static<typeof AgentSendMessageRequestSchema>;
 
+export const AgentSendMessageMultipartPayloadSchema = Type.Object({
+  ...AgentSendMessageCommonFields,
+  text: Type.Optional(Type.String())
+}, { additionalProperties: false });
+export type AgentSendMessageMultipartPayload = Static<typeof AgentSendMessageMultipartPayloadSchema>;
+
 export const AgentSendMessageResponseSchema = Type.Object({
   sessionId: Type.String({ minLength: 1 }),
-  messageItemId: Type.Number({ minimum: 1 }),
+  messageId: Type.String({ minLength: 1 }),
   runId: Type.String({ minLength: 1 }),
   deduplicated: Type.Boolean()
 }, { additionalProperties: false });
 export type AgentSendMessageResponse = Static<typeof AgentSendMessageResponseSchema>;
 
-export const AgentControlResultSchema = Type.Object({
-  ok: Type.Boolean(),
-  session: AgentSessionRecordSchema,
-  runState: AgentSessionRunStateSchema
-});
-export type AgentControlResult = Static<typeof AgentControlResultSchema>;
-
-export const AgentCancelSessionRequestSchema = Type.Object({
-  workspaceId: Type.String({ minLength: 1 }),
-  updatedAt: Type.Optional(Type.Number())
-});
-export type AgentCancelSessionRequest = Static<typeof AgentCancelSessionRequestSchema>;
-
-export const AgentClearSessionRequestSchema = Type.Object({
-  workspaceId: Type.String({ minLength: 1 }),
-  reason: Type.Optional(Type.String()),
-  uiLocale: Type.Optional(AgentUiLocaleSchema),
-  updatedAt: Type.Optional(Type.Number())
-});
-export type AgentClearSessionRequest = Static<typeof AgentClearSessionRequestSchema>;
-
-export const AgentContextItemsQuerySchema = Type.Object({
-  afterId: Type.Optional(Type.Number({ minimum: 0 })),
-  tailLimit: Type.Optional(Type.Number({ minimum: 1, maximum: 500 })),
-  beforeId: Type.Optional(Type.Number({ minimum: 1 })),
-  limit: Type.Optional(Type.Number({ minimum: 1, maximum: 500 })),
-  expectedHeadItemId: Type.Optional(Type.Number({ minimum: 1 }))
-});
-export type AgentContextItemsQuery = Static<typeof AgentContextItemsQuerySchema>;
-
-export const AgentCompactSessionRequestSchema = Type.Object({
-  workspaceId: Type.String({ minLength: 1 }),
-  clientRequestId: Type.String({ minLength: 1 }),
-  agentId: Type.Optional(Type.String({ minLength: 1 })),
-  uiLocale: Type.Optional(AgentUiLocaleSchema),
-  updatedAt: Type.Optional(Type.Number())
-});
-export type AgentCompactSessionRequest = Static<typeof AgentCompactSessionRequestSchema>;
-
-export const AgentCompactSessionResponseSchema = Type.Object({
-  ok: Type.Boolean(),
-  session: AgentSessionRecordSchema,
-  runState: AgentSessionRunStateSchema,
-  runId: Type.String({ minLength: 1 }),
-  scheduled: Type.Boolean(),
-  skippedReason: Type.Optional(Type.String())
-});
-export type AgentCompactSessionResponse = Static<typeof AgentCompactSessionResponseSchema>;
-
 export const AgentRevertSessionRequestSchema = Type.Object({
   workspaceId: Type.String({ minLength: 1 }),
-  itemId: Type.Number({ minimum: 1 }),
+  messageId: Type.String({ minLength: 1 }),
   reason: Type.Optional(Type.String()),
   updatedAt: Type.Optional(Type.Number())
 });
@@ -482,8 +381,7 @@ export type AgentRevertSessionRequest = Static<typeof AgentRevertSessionRequestS
 
 export const AgentForkSessionRequestSchema = Type.Object({
   fromSessionId: Type.String({ minLength: 1 }),
-  fromItemId: Type.Number({ minimum: 1 }),
-  mode: Type.Union([Type.Literal("with_archive"), Type.Literal("visible_only")]),
+  fromMessageId: Type.String({ minLength: 1 }),
   title: Type.Optional(Type.String({ minLength: 1 }))
 }, { additionalProperties: false });
 export type AgentForkSessionRequest = Static<typeof AgentForkSessionRequestSchema>;

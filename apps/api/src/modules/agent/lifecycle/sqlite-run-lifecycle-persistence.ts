@@ -1,34 +1,34 @@
-import type { AgentContextItemOutput } from "@agent-workbench/shared";
-import type { AgentApiRunCompleteRequest, AgentApiRunStateRequest } from "@agent-workbench/shared/internal-contracts/agent-api";
 import type { Db } from "../../../infra/db/db.js";
-import type { SubtaskChildActivationInput, SubtaskChildActivationResult, SubtaskChildRunActivator } from "../subtask/subtask-ports.js";
+import type { AgentImageMediaType } from "@agent-workbench/shared/internal-contracts/agent-api-session";
+import { HttpError } from "../../../app/errors.js";
+import { assertAgentImageByteSize } from "../attachments/agent-attachment-storage.js";
+import { assertAgentAttachmentId, assertAgentAttachmentTempId, assertAgentAttachmentStorageKey } from "../attachments/agent-attachment-paths.js";
 import {
-  appendContextItem,
-  createRunRecord,
-  failNonTerminalContextItemsByRunId,
-  failRunRecordIfInFlight,
-  findClientRequestDedup,
-  getAgentSession,
-  getContextItemById,
-  getLatestSessionItemId,
+  appendMessage,
+  getMessageSessionHead,
+  getMessageRunState,
+  getPersistedRunTerminalIntent,
+  getMessageSession,
+  getMessageSessionById,
+  convergeRunTerminal,
+  markRunWorkInProgress,
+  persistRunTerminalIntent,
+  settleMessageRunIfCurrent,
+  startMessageRun,
+} from "../agent-message.store.js";
+import type {
+  SubtaskChildActivationInput,
+  SubtaskChildActivationResult,
+  SubtaskChildRunActivator,
+} from "../subtask/subtask-ports.js";
+import { toAutomaticSessionTitle } from "../session/session-title.js";
+import {
+  createMessageRunRecord,
+  findMessageClientRequestDedup,
   getRunRecord,
-  getRunState,
-  getSessionHead,
-  insertClientRequestDedup,
-  listInFlightSessionsWithoutActiveRunId,
-  listNonTerminalRunIdsByItemIds,
-  listNonTerminalRunIdsBySession,
-  listNonTerminalSessionItemIds,
-  listNonTerminalSessionItemIdsByRunId,
-  listRecoverableRuns,
-  setRunStateIdleIfActiveRunMatches,
-  setRunStateIdleIfNoActiveRun,
-  setRunStateIdle,
-  updateContextItem,
-  updateRunRecordStatus,
-  updateAgentSessionTitle,
-  updateRunState
-} from "../agent.store.js";
+  insertMessageClientRequestDedup,
+  updateAutoMessageSessionTitle,
+} from "../agent-message.store.js";
 import type {
   AtomicLifecyclePersistence,
   CancelSessionSnapshot,
@@ -37,423 +37,481 @@ import type {
   EnqueueFailureInput,
   EnqueueFailureSettlement,
   UserRunActivationInput,
-  UserRunActivationResult
+  UserRunActivationResult,
 } from "./run-lifecycle-ports.js";
 
-const NON_TERMINAL_ITEM_STATUS = new Set(["streaming", "queued", "running"] as const);
-const TERMINAL_RUN_RECORD_STATUS = new Set(["completed", "failed", "cancelled"] as const);
-
 function toSessionTitleFromFirstMessage(text: string) {
-  const compact = text.replace(/\s+/g, " ").trim();
-  if (!compact) return "新会话";
-  if (compact.length <= 50) return compact;
-  return `${compact.slice(0, 49)}…`;
+  return toAutomaticSessionTitle(text, "新会话");
 }
 
-function normalizeRunNoticeText(raw: unknown) {
-  if (raw == null) return "";
-  const value = String(raw)
-    .replace(/\r\n/g, "\n")
-    .replace(/\0/g, "")
-    .trim();
-  if (!value) return "";
-  if (value.length <= 1000) return value;
-  return `${value.slice(0, 1000)}...`;
+function validateUserRunImages(input: UserRunActivationInput) {
+  const attachmentIds = new Set<string>();
+  const storageKeys = new Set<string>();
+  for (let index = 0; index < input.images.length; index += 1) {
+    const image = input.images[index]!;
+    if (image.position !== index) throw new Error("invalid agent image position");
+    assertAgentAttachmentId(image.attachmentId);
+    assertAgentAttachmentTempId(image.tempId);
+    if (
+      image.filename.length < 1 ||
+      [...image.filename].length > 255 ||
+      !["image/png", "image/jpeg", "image/webp"].includes(image.mediaType)
+    ) {
+      throw new Error("invalid agent image metadata");
+    }
+    assertAgentAttachmentStorageKey(image.attachmentId, image.storageKey, image.mediaType as AgentImageMediaType);
+    if (attachmentIds.has(image.attachmentId) || storageKeys.has(image.storageKey)) {
+      throw new Error("duplicate agent image attachment");
+    }
+    assertAgentImageByteSize(image.byteSize);
+    attachmentIds.add(image.attachmentId);
+    storageKeys.add(image.storageKey);
+  }
 }
 
-function parseSubtaskSessionIdFromToolText(text: unknown) {
-  if (typeof text !== "string") return "";
-  const match = text.match(/(?:^|\n)subtask_session_id:\s*([^\s]+)/);
-  return match ? String(match[1] || "").trim() : "";
-}
-
-function toTerminalCancelledOutput(output: AgentContextItemOutput) {
-  if (!output || output.type !== "tool" || output.toolName !== "subtask") return output;
-  const result = output.result && typeof output.result === "object" ? (output.result as Record<string, unknown>) : null;
-  const fromResult = typeof result?.subtaskSessionId === "string" ? result.subtaskSessionId.trim() : "";
-  const subtaskSessionId = fromResult || parseSubtaskSessionIdFromToolText(output.text);
-  const body = subtaskSessionId
-    ? `Subtask was cancelled. To continue it later, call subtask with session: { mode: "existing", sessionId: "${subtaskSessionId}" }.`
-    : "Subtask was cancelled.";
-  const nextResult = result
-    ? { ...result, ...(subtaskSessionId && !fromResult ? { subtaskSessionId } : {}) }
-    : output.result;
-  const text = ["tool: subtask", "status: cancelled", ...(subtaskSessionId ? [`subtask_session_id: ${subtaskSessionId}`] : []), "", body].join("\n");
-  return { ...output, text, ...(nextResult !== output.result ? { result: nextResult } : {}) };
-}
-
-export class SqliteRunLifecyclePersistence implements AtomicLifecyclePersistence, SubtaskChildRunActivator {
+export class SqliteRunLifecyclePersistence
+  implements AtomicLifecyclePersistence, SubtaskChildRunActivator
+{
   constructor(private readonly db: Db) {}
 
-  activateUserRun(input: UserRunActivationInput): UserRunActivationResult {
+  activateUserRun(input: UserRunActivationInput, publishImages?: () => void): UserRunActivationResult {
     const transaction = this.db.transaction(() => {
-      const dedup = findClientRequestDedup(this.db, {
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        clientRequestId: input.clientRequestId
-      });
-      if (dedup) return { kind: "deduplicated" as const, ...dedup };
-
-      const runState = getRunState(this.db, input.workspaceId, input.sessionId);
-      if (runState.status !== "idle") return { kind: "session-running" as const };
-
-      const head = getSessionHead(this.db, input.workspaceId, input.sessionId);
-      const item = appendContextItem(this.db, {
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        runId: input.runId,
-        turnId: null,
-        step: null,
-        prevId: head,
-        kind: "user",
-        status: "completed",
-        output: { type: "user_text", text: input.text },
-        createdAt: input.createdAt
-      });
-      if (head == null) {
-        updateAgentSessionTitle(this.db, {
-          sessionId: input.sessionId,
-          title: toSessionTitleFromFirstMessage(input.text),
-          updatedAt: input.createdAt
-        });
-      }
-      insertClientRequestDedup(this.db, {
+      const dedup = findMessageClientRequestDedup(this.db, {
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
         clientRequestId: input.clientRequestId,
-        messageItemId: item.id,
-        runId: input.runId,
-        createdAt: input.createdAt
       });
-      createRunRecord(this.db, {
+      if (dedup) return { kind: "deduplicated" as const, ...dedup };
+      const runState = getMessageRunState(
+        this.db,
+        input.workspaceId,
+        input.sessionId,
+      );
+      if (!runState || runState.status !== "idle")
+        return { kind: "session-running" as const };
+      const session = getMessageSession(
+        this.db,
+        input.workspaceId,
+        input.sessionId,
+      );
+      if (!session) throw new Error("agent session not found");
+      const expected = input.expectedHistoricalFork;
+      // Title edits do not increment revision. Both expected-ID paths must
+      // compare the normalized authoritative title inside the activation txn.
+      if ((expected && session.title !== expected.title) ||
+          (input.expectedSessionTitle != null && session.title !== input.expectedSessionTitle)) {
+        throw new HttpError(409, "Scheduled session title changed before Run activation", "SESSION_ID_CONFLICT");
+      }
+      // expectedSessionTitle is supplied only for a preallocated new_session.
+      // A concurrent send/revert/compaction may leave the title unchanged;
+      // revision and ancestry must still match the pristine primary Session.
+      if (input.expectedSessionTitle != null && (session.kind !== "primary" ||
+          session.headMessageId !== null || session.contextRootMessageId !== null ||
+          session.revision !== 0 || session.forkedFromSessionId !== null ||
+          session.forkedFromMessageId !== null)) {
+        throw new HttpError(409, "Scheduled session changed before Run activation", "SESSION_ID_CONFLICT");
+      }
+      if (expected && (session.kind !== "primary" ||
+        session.forkedFromSessionId !== expected.sourceSessionId ||
+        session.forkedFromMessageId !== expected.sourceMessageId ||
+        session.headMessageId !== expected.headMessageId ||
+        session.contextRootMessageId !== expected.contextRootMessageId ||
+        session.revision !== expected.revision)) {
+        throw new HttpError(409, "Scheduled fork session changed before Run activation", "SESSION_ID_CONFLICT");
+      }
+      validateUserRunImages(input);
+      // All ordinary idempotency, state and fork conflicts have been decided in
+      // this synchronous SQLite transaction. Do not yield before publishing.
+      publishImages?.();
+      const insertAttachment = this.db.prepare(
+        `insert into agent_attachment
+          (id, workspace_id, storage_key, filename, media_type, byte_size, created_at)
+          values (@attachmentId, @workspaceId, @storageKey, @filename, @mediaType, @byteSize, @createdAt)`,
+      );
+      for (const image of input.images) {
+        insertAttachment.run({
+          ...image,
+          workspaceId: input.workspaceId,
+          createdAt: input.createdAt,
+        });
+      }
+      const messageId = `message-${input.runId}`;
+      const parts = [
+        {
+          id: `part-${input.runId}-text`,
+          position: 0,
+          type: "text" as const,
+          text: input.text,
+        },
+        ...input.images.map((image, index) => ({
+          id: `part-${input.runId}-image-${index}`,
+          position: index + 1,
+          type: "image" as const,
+          attachmentId: image.attachmentId,
+          mediaType: image.mediaType,
+          filename: image.filename,
+        })),
+      ];
+      const message = appendMessage(this.db, {
+        id: messageId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        expectedHeadMessageId: session.headMessageId,
+        expectedRevision: session.revision,
+        originRunId: null,
+        type: "user",
+        status: "completed",
+        parts,
+        createdAt: input.createdAt,
+      });
+      if (session.headMessageId == null)
+        updateAutoMessageSessionTitle(this.db, {
+          sessionId: input.sessionId,
+          title: toSessionTitleFromFirstMessage(input.text),
+          updatedAt: input.createdAt,
+        });
+      createMessageRunRecord(this.db, {
         runId: input.runId,
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
-        triggerItemId: item.id,
+        triggerMessageId: message.id,
         agentId: input.agentId,
         providerId: input.providerId,
-        modelId: input.modelId,
         uiLocale: input.uiLocale,
+        modelId: input.modelId,
+        runKind: "user",
         subtaskDepth: 0,
         parentRunId: null,
-        parentToolItemId: null,
+        parentToolExecutionId: null,
         status: "running",
-        createdAt: input.createdAt
+        createdAt: input.createdAt,
       });
-      updateRunState(this.db, {
+      insertMessageClientRequestDedup(this.db, {
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
-        status: "running",
-        activeRunId: input.runId,
-        activeAssistantItemId: null,
-        runNoticeText: "",
-        updatedAt: input.createdAt,
-        appliedItemId: item.id
+        clientRequestId: input.clientRequestId,
+        messageId: message.id,
+        runId: input.runId,
+        createdAt: input.createdAt,
       });
-      return { kind: "activated" as const, messageItemId: item.id, runId: input.runId };
+      startMessageRun(this.db, {
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        runId: input.runId,
+        updatedAt: input.createdAt,
+      });
+      return {
+        kind: "activated" as const,
+        messageId: message.id,
+        runId: input.runId,
+      };
     });
-    return transaction();
+    // Acquire SQLite's write reservation before the first dedup/state read.
+    // A DEFERRED transaction lets another connection pass those reads and
+    // reach filesystem publication before either can upgrade to a writer.
+    return transaction.immediate();
+  }
+
+  canEnqueueUserRunIfCurrent(input: { workspaceId: string; sessionId: string; runId: string }) {
+    return Boolean(this.db.prepare(`
+      select 1
+      from agent_run run
+      join session_run_state state
+        on state.workspace_id = run.workspace_id and state.session_id = run.session_id
+      where run.run_id = @runId
+        and run.workspace_id = @workspaceId
+        and run.session_id = @sessionId
+        and run.status = 'running'
+        and state.status = 'running'
+        and state.active_run_id = @runId
+      limit 1
+    `).get(input));
   }
 
   activate(input: SubtaskChildActivationInput): SubtaskChildActivationResult {
     const transaction = this.db.transaction(() => {
-      const state = getRunState(this.db, input.workspaceId, input.sessionId);
-      if (state.status !== "idle") return { kind: "session-running" as const };
-
-      let head = getSessionHead(this.db, input.workspaceId, input.sessionId);
-      let promptItemId: number | null = null;
-      for (const seed of input.seedItems) {
-        const item = appendContextItem(this.db, {
+      const state = getMessageRunState(
+        this.db,
+        input.workspaceId,
+        input.sessionId,
+      );
+      if (!state || state.status !== "idle")
+        return { kind: "session-running" as const };
+      const parentFence = this.db.prepare(`
+        select 1
+        from agent_run parent_run
+        join session_run_state parent_state
+          on parent_state.workspace_id = parent_run.workspace_id
+          and parent_state.session_id = parent_run.session_id
+        join agent_tool_execution execution
+          on execution.id = @parentToolExecutionId
+          and execution.origin_session_id = parent_run.session_id
+          and execution.origin_run_id = parent_run.run_id
+        join agent_message_part call_part
+          on call_part.id = execution.call_part_id and call_part.tool_name = 'subtask'
+        where parent_run.workspace_id = @workspaceId
+          and parent_run.run_id = @parentRunId
+          and parent_run.status = 'running'
+          and parent_state.status = 'running'
+          and parent_state.active_run_id = parent_run.run_id
+          and execution.status = 'running'
+        limit 1
+      `).get(input);
+      if (!parentFence) return { kind: "parent-not-active" as const };
+      let head = getMessageSessionHead(this.db, input);
+      if (!head) throw new Error("agent session not found");
+      for (let index = 0; index < input.systemTexts.length; index += 1) {
+        appendMessage(this.db, {
+          id: `${input.runId}-system-${index}`,
           workspaceId: input.workspaceId,
           sessionId: input.sessionId,
-          runId: seed.attachToRun ? input.runId : null,
-          turnId: null,
-          step: null,
-          prevId: head,
-          kind: seed.kind,
+          expectedHeadMessageId: head.headMessageId,
+          expectedRevision: head.revision,
+          originRunId: null,
+          type: "system",
           status: "completed",
-          output: seed.kind === "system"
-            ? { type: "system_text", text: seed.text }
-            : { type: "user_text", text: seed.text },
-          createdAt: input.createdAt
+          parts: [
+            {
+              id: `${input.runId}-system-part-${index}`,
+              position: 0,
+              type: "text",
+              text: input.systemTexts[index] ?? "",
+            },
+          ],
+          createdAt: input.createdAt,
         });
-        head = item.id;
-        if (seed.attachToRun) promptItemId = item.id;
+        head = getMessageSessionHead(this.db, input);
+        if (!head) throw new Error("agent session not found");
       }
-      if (promptItemId == null) throw new Error("subtask child activation requires a prompt item");
-
-      createRunRecord(this.db, {
+      const prompt = appendMessage(this.db, {
+        id: `${input.runId}-user`,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        expectedHeadMessageId: head.headMessageId,
+        expectedRevision: head.revision,
+        originRunId: null,
+        type: "user",
+        status: "completed",
+        parts: [
+          {
+            id: `${input.runId}-user-part`,
+            position: 0,
+            type: "text",
+            text: input.prompt,
+          },
+        ],
+        createdAt: input.createdAt,
+      });
+      createMessageRunRecord(this.db, {
         runId: input.runId,
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
-        triggerItemId: promptItemId,
+        triggerMessageId: prompt.id,
         agentId: input.agentId,
         providerId: input.providerId,
-        modelId: input.modelId,
         uiLocale: input.uiLocale,
+        modelId: input.modelId,
+        runKind: "subtask",
         subtaskDepth: input.subtaskDepth,
         parentRunId: input.parentRunId,
-        parentToolItemId: input.parentToolItemId,
+        parentToolExecutionId: input.parentToolExecutionId,
         status: "running",
-        createdAt: input.createdAt
+        createdAt: input.createdAt,
       });
-      updateRunState(this.db, {
+      startMessageRun(this.db, {
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
-        status: "running",
-        activeRunId: input.runId,
-        activeAssistantItemId: null,
-        runNoticeText: "",
+        runId: input.runId,
         updatedAt: input.createdAt,
-        appliedItemId: promptItemId
       });
-      return { kind: "activated" as const, promptItemId };
+      return { kind: "activated" as const, promptMessageId: prompt.id };
     });
     return transaction();
   }
 
-  failRunAfterEnqueueFailureIfCurrent(input: EnqueueFailureInput): EnqueueFailureSettlement {
+  failRunAfterEnqueueFailureIfCurrent(
+    input: EnqueueFailureInput,
+  ): EnqueueFailureSettlement {
     const transaction = this.db.transaction(() => {
       const run = getRunRecord(this.db, input.runId);
-      if (!run || run.workspaceId !== input.workspaceId || run.sessionId !== input.sessionId) return "missing-or-mismatch" as const;
-      if (TERMINAL_RUN_RECORD_STATUS.has(run.status as "completed" | "failed" | "cancelled")) return "already-terminal" as const;
-      updateRunRecordStatus(this.db, { runId: input.runId, status: "failed", updatedAt: input.updatedAt });
-      const state = getRunState(this.db, input.workspaceId, input.sessionId);
-      if (state.activeRunId !== input.runId) return "run-failed-state-not-current" as const;
-      setRunStateIdle(this.db, {
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        updatedAt: input.updatedAt,
-        appliedItemId: getLatestSessionItemId(this.db, input.workspaceId, input.sessionId)
-      });
-      return "failed-and-idled" as const;
+      if (
+        !run ||
+        run.workspaceId !== input.workspaceId ||
+        run.sessionId !== input.sessionId
+      )
+        return "missing-or-mismatch" as const;
+      if (run.executionPhase === "terminal") return "already-terminal" as const;
+      // `run_enqueue_failed` is a durable proof that work was never entered.
+      // Once work starts, a late enqueue rejection cannot replace its outcome.
+      if (run.executionPhase !== "work_pending") {
+        // Cancellation or another terminal authority has already persisted its
+        // immutable tuple. An enqueue failure must not replace that intent.
+        return "run-failed-state-not-current" as const;
+      }
+      persistRunTerminalIntent(this.db, { ...input, status: "failed", code: "run_enqueue_failed", detail: null });
+      return "intent-persisted" as const;
     });
     return transaction();
   }
 
   getCancelSessionSnapshot(sessionId: string): CancelSessionSnapshot | null {
-    const session = getAgentSession(this.db, sessionId);
+    const session = getMessageSessionById(this.db, sessionId);
     if (!session) return null;
-    return { sessionId: session.id, workspaceId: session.workspaceId, session, runState: getRunState(this.db, session.workspaceId, session.id) };
+    const runState = getMessageRunState(
+      this.db,
+      session.workspaceId,
+      session.id,
+    );
+    return {
+      sessionId: session.id,
+      workspaceId: session.workspaceId,
+      session,
+      runState: {
+        status: runState?.status ?? "idle",
+        activeRunId: runState?.activeRunId ?? null,
+      },
+    };
+  }
+
+  listActiveSessionIdsForCancel(input: CancelSessionsInput): string[] {
+    const visited = new Set<string>();
+    const queue = [input.rootSessionId];
+    const sessionIds: string[] = [];
+    while (queue.length > 0) {
+      const sessionId = queue.shift();
+      if (!sessionId || visited.has(sessionId)) continue;
+      visited.add(sessionId);
+      const session = getMessageSessionById(this.db, sessionId);
+      if (!session || session.workspaceId !== input.workspaceId) continue;
+      const state = getMessageRunState(this.db, session.workspaceId, session.id);
+      if (!state?.activeRunId || state.status !== "running") continue;
+      sessionIds.push(session.id);
+      for (const childSessionId of input.listActiveChildSessionIds({
+        workspaceId: session.workspaceId,
+        sessionId: session.id,
+        runId: state.activeRunId,
+      })) {
+        if (!visited.has(childSessionId)) queue.push(childSessionId);
+      }
+    }
+    return sessionIds;
   }
 
   cancelSessions(input: CancelSessionsInput): CancelSessionsResult {
     const transaction = this.db.transaction(() => {
       const cancelledRunIds = new Set<string>();
-      const visited = new Set<string>();
-      const queue = [input.rootSessionId];
-      const sessionIds: string[] = [];
-      while (queue.length > 0) {
-        const sessionId = queue.shift();
-        if (!sessionId || visited.has(sessionId)) continue;
-        visited.add(sessionId);
-        const session = getAgentSession(this.db, sessionId);
-        if (!session || session.workspaceId !== input.workspaceId) continue;
-        const state = getRunState(this.db, session.workspaceId, session.id);
-        if (session.id !== input.rootSessionId && (state.status !== "running" || !state.activeRunId)) continue;
-        sessionIds.push(session.id);
-        if (state.status === "running" && state.activeRunId) {
-          for (const childSessionId of input.listActiveChildSessionIds({
-            workspaceId: session.workspaceId,
-            sessionId: session.id,
-            runId: state.activeRunId
-          })) {
-            if (!visited.has(childSessionId)) queue.push(childSessionId);
-          }
-        }
-        const itemIds = new Set(listNonTerminalSessionItemIds(this.db, session.workspaceId, session.id));
-        const runIds = new Set(listNonTerminalRunIdsBySession(this.db, { workspaceId: session.workspaceId, sessionId: session.id }));
-        for (const runId of listNonTerminalRunIdsByItemIds(this.db, {
+      const terminalIntents: Array<{ workspaceId: string; sessionId: string; runId: string }> = [];
+      const sessionIds = this.listActiveSessionIdsForCancel(input);
+      for (const sessionId of sessionIds) {
+        const session = getMessageSessionById(this.db, sessionId);
+        if (!session) continue;
+        const messageState = getMessageRunState(this.db, session.workspaceId, session.id);
+        if (!messageState?.activeRunId || messageState.status !== "running") continue;
+        const runKey = {
           workspaceId: session.workspaceId,
           sessionId: session.id,
-          itemIds: [...itemIds]
-        })) runIds.add(runId);
-
-        for (const itemId of itemIds) {
-          const item = getContextItemById(this.db, itemId);
-          if (!item || !NON_TERMINAL_ITEM_STATUS.has(item.status as "streaming" | "queued" | "running")) continue;
-          updateContextItem(this.db, {
-            itemId,
-            status: "cancelled",
-            output: toTerminalCancelledOutput(item.output),
-            updatedAt: input.updatedAt
+          runId: messageState.activeRunId,
+        };
+        // A commit may already have atomically persisted a completed intent.
+        // Converge that fact rather than overwriting it with cancellation.
+        if (!getPersistedRunTerminalIntent(this.db, runKey)) {
+          persistRunTerminalIntent(this.db, {
+            ...runKey, status: "cancelled", code: "run_cancelled", detail: null,
+            updatedAt: input.updatedAt,
           });
+          cancelledRunIds.add(runKey.runId);
         }
-        setRunStateIdle(this.db, {
-          workspaceId: session.workspaceId,
-          sessionId: session.id,
-          updatedAt: input.updatedAt,
-          appliedItemId: getLatestSessionItemId(this.db, session.workspaceId, session.id)
-        });
-        for (const runId of runIds) {
-          updateRunRecordStatus(this.db, { runId, status: "cancelled", updatedAt: input.updatedAt });
-          cancelledRunIds.add(runId);
-        }
-        if (state.activeRunId && !runIds.has(state.activeRunId)) {
-          updateRunRecordStatus(this.db, { runId: state.activeRunId, status: "cancelled", updatedAt: input.updatedAt });
-          cancelledRunIds.add(state.activeRunId);
-        }
+        terminalIntents.push(runKey);
       }
-      const root = getAgentSession(this.db, input.rootSessionId);
+      const root = getMessageSessionById(this.db, input.rootSessionId);
       if (!root) throw new Error("cancel root session not found after cancel");
       return {
         rootSessionId: root.id,
         runtimeCancelSessionIds: sessionIds,
-        cancelledRunIds: [...cancelledRunIds]
+        cancelledRunIds: [...cancelledRunIds],
+        terminalIntents,
       };
     });
     return transaction();
   }
 
-  updateRunStateFromWorker(params: AgentApiRunStateRequest) {
-    const transaction = this.db.transaction(() => {
-      const currentState = getRunState(this.db, params.workspaceId, params.sessionId);
-      const activeRunId = typeof params.activeRunId === "string" && params.activeRunId.trim() ? params.activeRunId : null;
-      const activeRun = activeRunId ? getRunRecord(this.db, activeRunId) : null;
-      if (activeRunId && currentState.activeRunId && currentState.activeRunId !== activeRunId) return;
-      // A late idle/null writeback carries no run identity. It must not clear a
-      // newer durable in-flight run; terminal ownership belongs to completeRunFromWorker.
-      // Keep the existing idle clearing behavior for legacy state-only updates that
-      // have no corresponding run record.
-      const currentActiveRun = currentState.activeRunId ? getRunRecord(this.db, currentState.activeRunId) : null;
-      if (
-        params.status === "idle"
-        && !activeRunId
-        && currentActiveRun
-        && currentActiveRun.workspaceId === params.workspaceId
-        && currentActiveRun.sessionId === params.sessionId
-        && !TERMINAL_RUN_RECORD_STATUS.has(currentActiveRun.status as "completed" | "failed" | "cancelled")
-      ) return;
-      if (activeRunId && activeRun) {
-        if (activeRun.workspaceId !== params.workspaceId || activeRun.sessionId !== params.sessionId) return;
-        if (TERMINAL_RUN_RECORD_STATUS.has(activeRun.status as "completed" | "failed" | "cancelled")) return;
-      }
-      const appliedItemId = getLatestSessionItemId(this.db, params.workspaceId, params.sessionId);
-      const hasLastResponseTotalTokens = Object.prototype.hasOwnProperty.call(params, "lastResponseTotalTokens");
-      const hasRunNoticeText = Object.prototype.hasOwnProperty.call(params, "runNoticeText");
-      updateRunState(this.db, {
-        workspaceId: params.workspaceId,
-        sessionId: params.sessionId,
-        status: params.status,
-        activeRunId,
-        activeAssistantItemId: params.activeAssistantItemId,
-        ...(hasLastResponseTotalTokens ? { lastResponseTotalTokens: params.lastResponseTotalTokens ?? null } : {}),
-        ...(hasRunNoticeText
-          ? { runNoticeText: normalizeRunNoticeText(params.runNoticeText) }
-          : params.status === "idle"
-            ? { runNoticeText: "" }
-            : {}),
-        updatedAt: params.updatedAt ?? 0,
-        appliedItemId
-      });
-      if (activeRunId) updateRunRecordStatus(this.db, { runId: activeRunId, status: "running", updatedAt: params.updatedAt ?? 0 });
-    });
-    transaction();
+  markRunWorkInProgress(input: import("./run-lifecycle-ports.js").TerminalControlInput) {
+    return markRunWorkInProgress(this.db, input);
   }
 
-  completeRunFromWorker(params: AgentApiRunCompleteRequest) {
-    const transaction = this.db.transaction(() => {
-      const run = getRunRecord(this.db, params.runId);
-      if (!run || run.workspaceId !== params.workspaceId || run.sessionId !== params.sessionId) return false;
-      if (TERMINAL_RUN_RECORD_STATUS.has(run.status as "completed" | "failed" | "cancelled")) return false;
-      updateRunRecordStatus(this.db, { runId: params.runId, status: params.status, updatedAt: params.updatedAt ?? 0 });
-      if (params.status === "cancelled") {
-        for (const itemId of listNonTerminalSessionItemIdsByRunId(this.db, params)) {
-          const item = getContextItemById(this.db, itemId);
-          if (!item || item.workspaceId !== params.workspaceId || item.sessionId !== params.sessionId || item.runId !== params.runId) continue;
-          updateContextItem(this.db, {
-            itemId,
-            status: "cancelled",
-            ...(item.kind === "tool" && item.output.type === "tool" ? { output: toTerminalCancelledOutput(item.output) } : {}),
-            updatedAt: params.updatedAt ?? 0
-          });
-        }
-      }
-      const state = getRunState(this.db, params.workspaceId, params.sessionId);
-      if (state.activeRunId === params.runId) {
-        setRunStateIdle(this.db, {
-          workspaceId: params.workspaceId,
-          sessionId: params.sessionId,
-          updatedAt: params.updatedAt ?? 0,
-          appliedItemId: getLatestSessionItemId(this.db, params.workspaceId, params.sessionId)
-        });
-      }
-      return true;
-    });
-    return transaction();
+  persistRunTerminalIntent(input: import("./run-lifecycle-ports.js").TerminalIntentControlInput) {
+    return persistRunTerminalIntent(this.db, input);
+  }
+
+  convergeRunTerminal(input: import("./run-lifecycle-ports.js").TerminalControlInput) {
+    return convergeRunTerminal(this.db, input);
+  }
+
+  listWorkspaceRunningRunCandidates(workspaceId: string) {
+    return this.db.prepare(`
+      select workspace_id as workspaceId, session_id as sessionId, run_id as runId,
+        execution_phase as executionPhase
+      from agent_run
+      where workspace_id = @workspaceId and status = 'running'
+      order by session_id asc, run_id asc
+    `).all({ workspaceId }) as Array<{
+      workspaceId: string;
+      sessionId: string;
+      runId: string;
+      executionPhase: import("@agent-workbench/shared").AgentRunExecutionPhase;
+    }>;
   }
 
   listRecoverableRunCandidates() {
-    return listRecoverableRuns(this.db).map(({ workspaceId, sessionId, runId, triggerItemId }) => ({
-      workspaceId,
-      sessionId,
-      runId,
-      triggerItemId
-    }));
+    return this.db
+      .prepare(
+        `
+      select run.workspace_id as workspaceId, run.session_id as sessionId,
+        run.run_id as runId, run.run_kind as runKind,
+        run.trigger_message_id as triggerMessageId, run.execution_phase as executionPhase
+      from agent_run run
+      where run.status = 'running'
+    `,
+      )
+      .all() as Array<{
+      workspaceId: string;
+      sessionId: string;
+      runId: string;
+      runKind: "user" | "manual_compaction" | "subtask";
+      triggerMessageId: string | null;
+      executionPhase: import("@agent-workbench/shared").AgentRunExecutionPhase;
+    }>;
   }
 
-  isRecoverableRunCandidate(candidate: { workspaceId: string; sessionId: string; runId: string }) {
-    const transaction = this.db.transaction(() => {
-      const session = getAgentSession(this.db, candidate.sessionId);
-      if (!session || session.workspaceId !== candidate.workspaceId) return false;
-      const run = getRunRecord(this.db, candidate.runId);
-      if (
-        !run
-        || run.status !== "running"
-        || run.workspaceId !== candidate.workspaceId
-        || run.sessionId !== candidate.sessionId
-      ) return false;
-      const state = getRunState(this.db, candidate.workspaceId, candidate.sessionId);
-      return state.status === "running" && state.activeRunId === candidate.runId;
-    });
-    return transaction();
-  }
-
-  failNonTerminalContextItemsForRecovery(input: { runId: string; updatedAt: number }) {
-    return failNonTerminalContextItemsByRunId(this.db, input);
-  }
-
-  failRunRecordForRecovery(input: { runId: string; updatedAt: number }) {
-    return failRunRecordIfInFlight(this.db, input);
-  }
-
-  reclaimRunStateForRecovery(input: { workspaceId: string; sessionId: string; runId: string; updatedAt: number }) {
-    return setRunStateIdleIfActiveRunMatches(this.db, {
-      ...input,
-      appliedItemId: getLatestSessionItemId(this.db, input.workspaceId, input.sessionId)
-    });
-  }
-
-  appendRecoveryFailureNotice(input: {
+  isRecoverableRunCandidate(candidate: {
     workspaceId: string;
     sessionId: string;
     runId: string;
-    text: string;
-    createdAt: number;
+    executionPhase: import("@agent-workbench/shared").AgentRunExecutionPhase;
   }) {
-    appendContextItem(this.db, {
-      workspaceId: input.workspaceId,
-      sessionId: input.sessionId,
-      runId: input.runId,
-      turnId: null,
-      step: null,
-      prevId: getSessionHead(this.db, input.workspaceId, input.sessionId),
-      kind: "system",
-      status: "completed",
-      boundaryReason: null,
-      output: { type: "system_text", text: input.text },
-      createdAt: input.createdAt
+    const transaction = this.db.transaction(() => {
+      const session = getMessageSessionById(this.db, candidate.sessionId);
+      if (!session || session.workspaceId !== candidate.workspaceId)
+        return false;
+      const run = getRunRecord(this.db, candidate.runId);
+      if (
+        !run ||
+        run.status !== "running" ||
+        run.workspaceId !== candidate.workspaceId ||
+        run.sessionId !== candidate.sessionId
+      )
+        return false;
+      if (run.executionPhase === "terminal_intent_persisted") return true;
+      const state = getMessageRunState(
+        this.db,
+        candidate.workspaceId,
+        candidate.sessionId,
+      );
+      return (
+        state?.status === "running" && state.activeRunId === candidate.runId
+        && run.executionPhase === candidate.executionPhase
+      );
     });
-  }
-
-  listInFlightSessionsWithoutActiveRunId() {
-    return listInFlightSessionsWithoutActiveRunId(this.db);
-  }
-
-  reclaimDirtyRunStateForRecovery(input: { workspaceId: string; sessionId: string; updatedAt: number }) {
-    return setRunStateIdleIfNoActiveRun(this.db, {
-      ...input,
-      appliedItemId: getLatestSessionItemId(this.db, input.workspaceId, input.sessionId)
-    });
+    return transaction();
   }
 }

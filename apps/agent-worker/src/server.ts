@@ -4,6 +4,7 @@ import path from "node:path";
 import { Value } from "@sinclair/typebox/value";
 import { AgentWorkerEndpoints } from "@agent-workbench/shared/internal-contracts/endpoints";
 import {
+  AgentWorkerCancelSessionAndWaitRequestSchema,
   AgentWorkerCancelSessionRequestSchema,
   AgentWorkerEnqueueRequestSchema
 } from "@agent-workbench/shared/internal-contracts/agent-worker";
@@ -57,6 +58,12 @@ export function createWorkerServer(params: {
         return;
       }
 
+      if (method === "GET" && pathname === "/_internal/analytics-snapshot") {
+        // Private manager-to-worker observation endpoint; it exposes no run data.
+        sendJson(res, 200, params.runner.analyticsLiveSnapshot());
+        return;
+      }
+
       if (method === AgentWorkerEndpoints.enqueueRun.method && pathname === AgentWorkerEndpoints.enqueueRun.path) {
         const body: unknown = await readJsonBody(req);
         if (!Value.Check(AgentWorkerEnqueueRequestSchema, body)) {
@@ -73,7 +80,9 @@ export function createWorkerServer(params: {
           workspaceId: enqueue.workspaceId,
           sessionId: enqueue.sessionId,
           runId: enqueue.runId,
+          runKind: enqueue.runKind ?? "user",
           inputText: enqueue.inputText === null ? undefined : enqueue.inputText,
+          resumeAssistantMessageId: enqueue.resumeAssistantMessageId ?? null,
           workspacePath: enqueue.workspacePath,
           workspaceRepoDirNames: normalizeWorkspaceRepoDirNames(enqueue.workspaceRepoDirNames)
         });
@@ -94,6 +103,18 @@ export function createWorkerServer(params: {
         }
         params.runner.cancelSession(body.sessionId);
         sendJson(res, 202, { ok: true });
+        return;
+      }
+
+      if (method === AgentWorkerEndpoints.cancelSessionAndWait.method && pathname === AgentWorkerEndpoints.cancelSessionAndWait.path) {
+        const body: unknown = await readJsonBody(req);
+        if (!Value.Check(AgentWorkerCancelSessionAndWaitRequestSchema, body)) {
+          console.warn("invalid agent-worker cancel-session-and-wait payload");
+          sendJson(res, 400, { message: "invalid cancel and wait payload" });
+          return;
+        }
+        const idle = await params.runner.cancelSessionAndWait(body);
+        sendJson(res, 200, { ok: true, idle });
         return;
       }
 

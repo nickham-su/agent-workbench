@@ -34,6 +34,7 @@ import { useWorkspaceContext } from "@/features/workspace/context";
 const props = defineProps<{ terminal: TerminalRecord; active?: boolean }>();
 const emit = defineEmits<{
   exited: [{ terminalId: string; exitCode: number }];
+  invalidated: [terminalId: string];
 }>();
 const { t } = useI18n();
 const host = useWorkspaceHost();
@@ -249,7 +250,6 @@ function connect(force: boolean) {
     if (!socket) return;
     opened = true;
     wsState.value = "connected";
-    reconnectAttempts = 0;
     lastSize = null;
     // 连接建立后，立刻做一次 fit+resize，并启动一次 fit 冲刺，确保 tmux cols/rows 最终正确
     tryFitAndResize();
@@ -285,6 +285,16 @@ function connect(force: boolean) {
       ]);
       return;
     }
+    if (evt.code === 4404 || evt.code === 4410) {
+      wsState.value = "errored";
+      clearReconnectTimer();
+      writeHint([
+        t("terminal.hint.unavailableLine0"),
+        t("terminal.hint.unavailableLine1", { code: evt.code, reason: evt.reason || "-", wasClean: String(evt.wasClean) })
+      ]);
+      emit("invalidated", props.terminal.id);
+      return;
+    }
     if (wsState.value === "connected") {
       wsState.value = "disconnected";
       writeHint([
@@ -304,6 +314,7 @@ function connect(force: boolean) {
 
     if (msg.type === "output") {
       term?.write(msg.data);
+      reconnectAttempts = 0;
       // 首次输出后也做一次 nudge，进一步覆盖“无终端->新建终端”的首屏渲染异常
       window.setTimeout(() => nudgeResizeToForceRedraw(), 0);
       return;

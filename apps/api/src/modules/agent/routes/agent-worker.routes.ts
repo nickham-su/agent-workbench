@@ -2,11 +2,6 @@ import { Type } from "@sinclair/typebox";
 import type { FastifyInstance } from "fastify";
 import {
   AgentCancelSessionRequestSchema,
-  AgentContextItemRecordSchema,
-  AgentContextItemStatusSchema,
-  AgentContextItemsQuerySchema,
-  AgentContextItemsResponseSchema,
-  AgentControlResultSchema,
   AgentCreateSessionRequestSchema,
   AgentForkSessionRequestSchema,
   AgentRevertSessionRequestSchema,
@@ -16,86 +11,141 @@ import {
   AgentChannelAllowlistCheckRequestSchema,
   AgentChannelAllowlistCheckResponseSchema,
   type AgentSendMessageRequest,
-  AgentClearSessionRequestSchema,
-  AgentCompactSessionRequestSchema,
-  AgentCompactSessionResponseSchema,
   AgentSessionRecordSchema,
-  AgentSessionRunStateSchema,
   AgentUiLocaleSchema,
   AgentProviderNpmSchema,
   AgentRecentSessionsRequestSchema,
   AgentRecentSessionsResponseSchema,
   AgentListAvailableAgentsRequestSchema,
   AgentListAvailableAgentsResponseSchema,
-  AgentSessionStatusSummaryRequestSchema,
-  AgentSessionContextItemsTailRequestSchema,
-  AgentSessionContextItemsTailResponseSchema,
   AgentRecentWorkspacesRequestSchema,
   AgentRecentWorkspacesResponseSchema,
-  AgentSessionStatusSummaryResponseSchema,
   PluginToolCanonicalNameSchema,
   PluginRuntimeSnapshotsResponseSchema,
   PluginToolRpcExecuteRequestSchema,
   PluginToolRpcExecuteResponseSchema,
   PluginToolRpcListRequestSchema,
   PluginToolRpcListResponseSchema,
-  ErrorResponseSchema
-} from "@agent-workbench/shared";
+  ErrorResponseSchema,
+} from "@agent-workbench/shared/internal-contracts/agent-api-session";
 import {
   AgentApiEndpoints,
-  AgentApiContextItemParamsSchema,
-  AgentApiCreateContextItemRequestSchema,
-  AgentApiCreateContextItemResponseSchema,
-  AgentApiUpdateContextItemRequestSchema,
-  AgentApiUpdateContextItemResponseSchema,
-  AgentApiCompactContextRequestSchema,
-  AgentApiCompactContextResponseSchema,
+  AgentApiCreateStreamingAssistantRequestSchema,
+  AgentApiCreateStreamingAssistantResponseSchema,
+  AgentApiFlushAssistantPartsTransportRequestSchema,
+  hasValidAgentApiStreamingParts,
+  AgentApiResumeStreamingAssistantRequestSchema,
+  AgentApiReplaceStreamingAssistantRequestSchema,
+  AgentApiReplaceStreamingAssistantResponseSchema,
+  AgentApiDiscardStreamingAssistantRequestSchema,
+  AgentApiCompleteAssistantRequestSchema,
+  AgentApiCompleteTerminalAssistantRequestSchema,
+  AgentApiUpdateToolExecutionRequestSchema,
+  AgentApiUpdateRunNoticeRequestSchema,
+  AgentApiFencedWriteResponseSchema,
+  AgentApiCommitCompactionResponseSchema,
+  AgentApiCommitCompactionWithTerminalIntentRequestSchema,
+  AgentApiConfirmCompactionCommitRequestSchema,
+  AgentApiConfirmCompactionCommitResponseSchema,
   AgentApiSubtaskPreforkPlanRequestSchema,
   AgentApiSubtaskPreforkPlanResponseSchema,
   AgentApiSubtaskStartRequestSchema,
   AgentApiSubtaskStartResponseSchema,
+  hasAgentSubtaskSource,
+  normalizeAgentSubtaskSource,
   AgentApiSubtaskResultRequestSchema,
   AgentApiSubtaskResultResponseSchema,
   AgentApiSubtaskStatusRequestSchema,
   AgentApiSubtaskStatusResponseSchema,
-  AgentApiRunCompleteRequestSchema,
-  AgentApiRunCompleteResponseSchema,
-  AgentApiRunStateRequestSchema,
-  AgentApiRunStateResponseSchema,
+  AgentApiMarkRunWorkInProgressRequestSchema,
+  AgentApiMarkRunWorkInProgressResponseSchema,
+  AgentApiPersistTerminalIntentRequestSchema,
+  AgentApiPersistTerminalIntentResponseSchema,
+  AgentApiConvergeRunTerminalRequestSchema,
+  AgentApiConvergeRunTerminalResponseSchema,
   AgentApiExecutionProfileRequestSchema,
   AgentApiExecutionProfileResponseSchema,
   AgentApiMessagesContextRequestSchema,
   AgentApiMessagesContextResponseSchema,
+  AgentApiCompactionSourceRequestSchema,
+  AgentApiCompactionSourceResponseSchema,
+  AGENT_API_COMPACTION_SOURCE_REQUEST_KEYS,
   AgentApiPromptContextRequestSchema,
   AgentApiPromptContextResponseSchema,
-  type AgentApiContextItemParams,
-  type AgentApiCreateContextItemRequest,
-  type AgentApiUpdateContextItemRequest,
-  type AgentApiCompactContextRequest,
+  AgentApiArchiveReadRequestSchema,
+  AgentApiArchiveSearchRequestSchema,
+  AgentApiArchivePageResponseSchema,
+  type AgentApiCreateStreamingAssistantRequest,
+  type AgentApiFlushAssistantPartsRequest,
+  type AgentApiResumeStreamingAssistantRequest,
+  type AgentApiReplaceStreamingAssistantRequest,
+  type AgentApiDiscardStreamingAssistantRequest,
+  type AgentApiCompleteAssistantRequest,
+  type AgentApiCompleteTerminalAssistantRequest,
+  type AgentApiUpdateToolExecutionRequest,
+  type AgentApiUpdateRunNoticeRequest,
+  type AgentApiCommitCompactionWithTerminalIntentRequest,
+  type AgentApiConfirmCompactionCommitRequest,
   type AgentApiSubtaskPreforkPlanRequest,
   type AgentApiSubtaskStartRequest,
   type AgentApiSubtaskResultRequest,
   type AgentApiSubtaskStatusRequest,
-  type AgentApiRunCompleteRequest,
-  type AgentApiRunStateRequest,
+  type AgentApiMarkRunWorkInProgressRequest,
+  type AgentApiPersistTerminalIntentRequest,
+  type AgentApiConvergeRunTerminalRequest,
   type AgentApiExecutionProfileRequest,
   type AgentApiMessagesContextRequest,
-  type AgentApiPromptContextRequest
+  type AgentApiCompactionSourceRequest,
+  type AgentApiPromptContextRequest,
+  type AgentApiArchiveReadRequest,
+  type AgentApiArchiveSearchRequest,
 } from "@agent-workbench/shared/internal-contracts/agent-api";
 import { HttpError } from "../../../app/errors.js";
 import type { AgentWorkerRouteDependencies } from "./agent-route-types.js";
-import { assertInternalToken, assertOnlyAllowedBodyKeys, assertPluginCaller, AGENT_PRIMARY_SESSION_CREATE_BODY_KEYS, AGENT_PRIMARY_SESSION_FORK_BODY_KEYS } from "./agent-route-auth.js";
+import {
+  assertInternalToken,
+  assertOnlyAllowedBodyKeys,
+  assertPluginCaller,
+  AGENT_PRIMARY_SESSION_CREATE_BODY_KEYS,
+  AGENT_PRIMARY_SESSION_FORK_BODY_KEYS,
+} from "./agent-route-auth.js";
+
+const AGENT_API_COMPACTION_WITH_TERMINAL_INTENT_REQUEST_KEYS = new Set([
+  "workspaceId",
+  "sessionId",
+  "runId",
+  "messageId",
+  "textPartId",
+  "expectedHeadMessageId",
+  "expectedRevision",
+  "retainedFromMessageId",
+  "summaryText",
+  "intent",
+  "createdAt",
+]);
+const AGENT_API_CONFIRM_COMPACTION_COMMIT_REQUEST_KEYS = new Set(["workspaceId", "sessionId", "runId", "messageId"]);
 
 const AgentBuiltinToolNameSchema = Type.Union([
-  Type.Literal("bash"), Type.Literal("read"), Type.Literal("write"), Type.Literal("apply_patch"), Type.Literal("scratchpad"),
-  Type.Literal("todolist"), Type.Literal("subtask"), Type.Literal("archive_search"), Type.Literal("skill"),
-  Type.Literal("archive_read"), Type.Literal("visual_analyze")
+  Type.Literal("bash"),
+  Type.Literal("read"),
+  Type.Literal("write"),
+  Type.Literal("apply_patch"),
+  Type.Literal("scratchpad"),
+  Type.Literal("todolist"),
+  Type.Literal("subtask"),
+  Type.Literal("skill"),
+  Type.Literal("view_image"),
 ]);
 const AgentDynamicToolNameSchema = Type.Union([
-  AgentBuiltinToolNameSchema, Type.String({ pattern: "^mcp_[A-Za-z0-9_-]+_[A-Za-z0-9_-]+$" }), PluginToolCanonicalNameSchema
+  AgentBuiltinToolNameSchema,
+  Type.String({ pattern: "^mcp_[A-Za-z0-9_-]+_[A-Za-z0-9_-]+$" }),
+  PluginToolCanonicalNameSchema,
 ]);
 
-export async function registerAgentWorkerRoutes(app: FastifyInstance, dependencies: AgentWorkerRouteDependencies) {
+export async function registerAgentWorkerRoutes(
+  app: FastifyInstance,
+  dependencies: AgentWorkerRouteDependencies,
+) {
   app.route({
     method: AgentApiEndpoints.getSubtaskPreforkPlan.method,
     url: AgentApiEndpoints.getSubtaskPreforkPlan.path,
@@ -106,19 +156,162 @@ export async function registerAgentWorkerRoutes(app: FastifyInstance, dependenci
         200: AgentApiSubtaskPreforkPlanResponseSchema,
         400: ErrorResponseSchema,
         401: ErrorResponseSchema,
-        404: ErrorResponseSchema
-      }
+        404: ErrorResponseSchema,
+      },
     },
     handler: async (req) => {
       assertInternalToken(req, dependencies.internalToken);
       const body = req.body as AgentApiSubtaskPreforkPlanRequest;
       return dependencies.service.getSubtaskPreforkPlanFromWorker(body);
-    }
+    },
+  });
+
+  app.route({
+    method: AgentApiEndpoints.commitCompactionWithTerminalIntent.method,
+    url: AgentApiEndpoints.commitCompactionWithTerminalIntent.path,
+    schema: {
+      tags: ["agent"],
+      body: AgentApiCommitCompactionWithTerminalIntentRequestSchema,
+      response: {
+        200: AgentApiCommitCompactionResponseSchema,
+        400: ErrorResponseSchema,
+        401: ErrorResponseSchema,
+        404: ErrorResponseSchema,
+        409: ErrorResponseSchema,
+      },
+    },
+    preValidation: (req, _reply, done) => {
+      assertOnlyAllowedBodyKeys(req, AGENT_API_COMPACTION_WITH_TERMINAL_INTENT_REQUEST_KEYS);
+      done();
+    },
+    handler: async (req) => {
+      assertInternalToken(req, dependencies.internalToken);
+      return dependencies.service.commitCompactionWithTerminalIntentFromWorker(
+        req.body as AgentApiCommitCompactionWithTerminalIntentRequest,
+      );
+    },
+  });
+
+  app.route({
+    method: AgentApiEndpoints.confirmCompactionCommit.method,
+    url: AgentApiEndpoints.confirmCompactionCommit.path,
+    schema: {
+      tags: ["agent"],
+      body: AgentApiConfirmCompactionCommitRequestSchema,
+      response: { 200: AgentApiConfirmCompactionCommitResponseSchema, 400: ErrorResponseSchema, 401: ErrorResponseSchema },
+    },
+    preValidation: (req, _reply, done) => {
+      assertOnlyAllowedBodyKeys(req, AGENT_API_CONFIRM_COMPACTION_COMMIT_REQUEST_KEYS);
+      done();
+    },
+    handler: async (req) => {
+      assertInternalToken(req, dependencies.internalToken);
+      return dependencies.service.confirmCompactionCommitFromWorker(req.body as AgentApiConfirmCompactionCommitRequest);
+    },
+  });
+
+  app.route({
+    method: AgentApiEndpoints.getCompactionSource.method,
+    url: AgentApiEndpoints.getCompactionSource.path,
+    schema: {
+      tags: ["agent"],
+      body: AgentApiCompactionSourceRequestSchema,
+      response: {
+        200: AgentApiCompactionSourceResponseSchema,
+        400: ErrorResponseSchema,
+        401: ErrorResponseSchema,
+        404: ErrorResponseSchema,
+      },
+    },
+    preValidation: (req, _reply, done) => {
+      assertOnlyAllowedBodyKeys(req, new Set(AGENT_API_COMPACTION_SOURCE_REQUEST_KEYS));
+      done();
+    },
+    handler: async (req) => {
+      assertInternalToken(req, dependencies.internalToken);
+      return dependencies.service.getCompactionSourceFromWorker(
+        req.body as AgentApiCompactionSourceRequest,
+      );
+    },
+  });
+
+  app.route({
+    method: AgentApiEndpoints.completeTerminalAssistant.method,
+    url: AgentApiEndpoints.completeTerminalAssistant.path,
+    schema: {
+      tags: ["agent"],
+      body: AgentApiCompleteTerminalAssistantRequestSchema,
+      response: {
+        200: AgentApiFencedWriteResponseSchema,
+        400: ErrorResponseSchema,
+        401: ErrorResponseSchema,
+      },
+    },
+    handler: async (req) => {
+      assertInternalToken(req, dependencies.internalToken);
+      return dependencies.service.completeTerminalAssistantFromWorker(
+        req.body as AgentApiCompleteTerminalAssistantRequest,
+      );
+    },
+  });
+
+  app.route({
+    method: AgentApiEndpoints.discardStreamingAssistant.method,
+    url: AgentApiEndpoints.discardStreamingAssistant.path,
+    schema: {
+      tags: ["agent"],
+      body: AgentApiDiscardStreamingAssistantRequestSchema,
+      response: {
+        200: AgentApiFencedWriteResponseSchema,
+        400: ErrorResponseSchema,
+        401: ErrorResponseSchema,
+      },
+    },
+    handler: async (req) => {
+      assertInternalToken(req, dependencies.internalToken);
+      return dependencies.service.discardStreamingAssistantFromWorker(
+        req.body as AgentApiDiscardStreamingAssistantRequest,
+      );
+    },
+  });
+
+  app.route({
+    method: AgentApiEndpoints.replaceStreamingAssistant.method,
+    url: AgentApiEndpoints.replaceStreamingAssistant.path,
+    schema: {
+      tags: ["agent"],
+      body: AgentApiReplaceStreamingAssistantRequestSchema,
+      response: {
+        200: AgentApiReplaceStreamingAssistantResponseSchema,
+        400: ErrorResponseSchema,
+        401: ErrorResponseSchema,
+        404: ErrorResponseSchema,
+        409: ErrorResponseSchema,
+      },
+    },
+    handler: async (req) => {
+      assertInternalToken(req, dependencies.internalToken);
+      return dependencies.service.replaceStreamingAssistantFromWorker(
+        req.body as AgentApiReplaceStreamingAssistantRequest,
+      );
+    },
   });
 
   app.route({
     method: AgentApiEndpoints.startSubtask.method,
     url: AgentApiEndpoints.startSubtask.path,
+    preValidation: async (req) => {
+      // Only the new field is checked before AJV can coerce or remove it.
+      // Legacy requests retain the existing schema/authentication order.
+      if (!hasAgentSubtaskSource(req.body)) return;
+      assertInternalToken(req, dependencies.internalToken);
+      const source = normalizeAgentSubtaskSource(req.body);
+      if (!source.ok) throw new HttpError(400, source.message, source.code);
+      const body = req.body as { session: { sourceSessionId: string } };
+      if (source.sourceSessionId !== undefined) {
+        body.session.sourceSessionId = source.sourceSessionId;
+      }
+    },
     schema: {
       tags: ["agent"],
       body: AgentApiSubtaskStartRequestSchema,
@@ -127,14 +320,14 @@ export async function registerAgentWorkerRoutes(app: FastifyInstance, dependenci
         400: ErrorResponseSchema,
         401: ErrorResponseSchema,
         404: ErrorResponseSchema,
-        409: ErrorResponseSchema
-      }
+        409: ErrorResponseSchema,
+      },
     },
     handler: async (req) => {
       assertInternalToken(req, dependencies.internalToken);
       const body = req.body as AgentApiSubtaskStartRequest;
       return dependencies.service.startSubtaskRunFromWorker(body);
-    }
+    },
   });
 
   app.route({
@@ -147,14 +340,14 @@ export async function registerAgentWorkerRoutes(app: FastifyInstance, dependenci
         200: AgentApiSubtaskResultResponseSchema,
         400: ErrorResponseSchema,
         401: ErrorResponseSchema,
-        404: ErrorResponseSchema
-      }
+        404: ErrorResponseSchema,
+      },
     },
     handler: async (req) => {
       assertInternalToken(req, dependencies.internalToken);
       const body = req.body as AgentApiSubtaskResultRequest;
       return dependencies.service.getSubtaskRunResultFromWorker(body);
-    }
+    },
   });
 
   app.route({
@@ -167,192 +360,201 @@ export async function registerAgentWorkerRoutes(app: FastifyInstance, dependenci
         200: AgentApiSubtaskStatusResponseSchema,
         400: ErrorResponseSchema,
         401: ErrorResponseSchema,
-        404: ErrorResponseSchema
-      }
+        404: ErrorResponseSchema,
+      },
     },
     handler: async (req) => {
       assertInternalToken(req, dependencies.internalToken);
       const body = req.body as AgentApiSubtaskStatusRequest;
       return dependencies.service.getSubtaskRunStatusFromWorker(body);
-    }
+    },
   });
 
   app.route({
-    method: AgentApiEndpoints.createContextItem.method,
-    url: AgentApiEndpoints.createContextItem.path,
+    method: AgentApiEndpoints.createStreamingAssistant.method,
+    url: AgentApiEndpoints.createStreamingAssistant.path,
     schema: {
       tags: ["agent"],
-      body: AgentApiCreateContextItemRequestSchema,
+      body: AgentApiCreateStreamingAssistantRequestSchema,
       response: {
-        200: AgentApiCreateContextItemResponseSchema,
+        200: AgentApiCreateStreamingAssistantResponseSchema,
         400: ErrorResponseSchema,
         401: ErrorResponseSchema,
         404: ErrorResponseSchema,
-        409: ErrorResponseSchema
-      }
+        409: ErrorResponseSchema,
+      },
     },
     handler: async (req) => {
       assertInternalToken(req, dependencies.internalToken);
-      const body = req.body as AgentApiCreateContextItemRequest;
-      return dependencies.service.appendContextItemFromWorker(body);
-    }
+      return dependencies.service.createStreamingAssistantFromWorker(
+        req.body as AgentApiCreateStreamingAssistantRequest,
+      );
+    },
   });
 
   app.route({
-    method: AgentApiEndpoints.updateContextItem.method,
-    url: AgentApiEndpoints.updateContextItem.routeTemplate,
+    method: AgentApiEndpoints.flushAssistantParts.method,
+    url: AgentApiEndpoints.flushAssistantParts.path,
     schema: {
       tags: ["agent"],
-      params: AgentApiContextItemParamsSchema,
-      body: AgentApiUpdateContextItemRequestSchema,
+      body: AgentApiFlushAssistantPartsTransportRequestSchema,
       response: {
-        200: AgentApiUpdateContextItemResponseSchema,
+        200: AgentApiFencedWriteResponseSchema,
         400: ErrorResponseSchema,
         401: ErrorResponseSchema,
-        404: ErrorResponseSchema
-      }
+      },
     },
     handler: async (req) => {
       assertInternalToken(req, dependencies.internalToken);
-      const routeParams = req.params as AgentApiContextItemParams;
-      const body = req.body as AgentApiUpdateContextItemRequest;
-      const item = await dependencies.service.updateContextItemFromWorker({ itemId: routeParams.itemId, ...body });
-      return { ok: true, item };
-    }
-  });
-
-  app.route({
-    method: AgentApiEndpoints.updateRunState.method,
-    url: AgentApiEndpoints.updateRunState.path,
-    schema: {
-      tags: ["agent"],
-      body: AgentApiRunStateRequestSchema,
-      response: {
-        200: AgentApiRunStateResponseSchema,
-        400: ErrorResponseSchema,
-        401: ErrorResponseSchema
+      const body = req.body as AgentApiFlushAssistantPartsRequest;
+      if (!hasValidAgentApiStreamingParts(body.parts)) {
+        throw new HttpError(400, "invalid assistant parts");
       }
+      return dependencies.service.flushAssistantPartsFromWorker(
+        body,
+      );
     },
-    handler: async (req) => {
-      assertInternalToken(req, dependencies.internalToken);
-      const body = req.body as AgentApiRunStateRequest;
-      dependencies.service.updateRunStateFromWorker(body);
-      return { ok: true };
-    }
   });
 
   app.route({
-    method: AgentApiEndpoints.completeRun.method,
-    url: AgentApiEndpoints.completeRun.path,
+    method: AgentApiEndpoints.resumeStreamingAssistant.method,
+    url: AgentApiEndpoints.resumeStreamingAssistant.path,
     schema: {
       tags: ["agent"],
-      body: AgentApiRunCompleteRequestSchema,
+      body: AgentApiResumeStreamingAssistantRequestSchema,
       response: {
-        200: AgentApiRunCompleteResponseSchema,
-        400: ErrorResponseSchema,
-        401: ErrorResponseSchema
-      }
-    },
-    handler: async (req) => {
-      assertInternalToken(req, dependencies.internalToken);
-      const body = req.body as AgentApiRunCompleteRequest;
-      dependencies.service.completeRunFromWorker(body);
-      return { ok: true };
-    }
-  });
-
-  app.route({
-    method: AgentApiEndpoints.compactContext.method,
-    url: AgentApiEndpoints.compactContext.path,
-    schema: {
-      tags: ["agent"],
-      body: AgentApiCompactContextRequestSchema,
-      response: {
-        200: AgentApiCompactContextResponseSchema,
+        200: AgentApiFencedWriteResponseSchema,
         400: ErrorResponseSchema,
         401: ErrorResponseSchema,
-        404: ErrorResponseSchema,
-        409: ErrorResponseSchema
-      }
+      },
     },
     handler: async (req) => {
       assertInternalToken(req, dependencies.internalToken);
-      const body = req.body as AgentApiCompactContextRequest;
-      return dependencies.service.compactContextFromWorker(body);
-    }
+      return dependencies.service.resumeStreamingAssistantFromWorker(
+        req.body as AgentApiResumeStreamingAssistantRequest,
+      );
+    },
   });
 
-  app.post(
-    "/api/internal/agent/archive/search",
-    {
-      schema: {
-        tags: ["agent"],
-        body: Type.Object({
-          workspaceId: Type.String({ minLength: 1 }),
-          sessionId: Type.String({ minLength: 1 }),
-          query: Type.String({ minLength: 1 }),
-          beforePos: Type.Optional(Type.Integer({ minimum: 2 })),
-          maxHits: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
-          maxChars: Type.Optional(Type.Integer({ minimum: 1000, maximum: 10000 })),
-          snippet: Type.Optional(Type.Boolean()),
-          regex: Type.Optional(Type.Boolean())
-        }),
-        response: {
-          200: Type.Object({ text: Type.String(), noArchive: Type.Optional(Type.Boolean()) }),
-          400: ErrorResponseSchema,
-          401: ErrorResponseSchema,
-          404: ErrorResponseSchema
-        }
-      }
+  app.route({
+    method: AgentApiEndpoints.completeAssistant.method,
+    url: AgentApiEndpoints.completeAssistant.path,
+    schema: {
+      tags: ["agent"],
+      body: AgentApiCompleteAssistantRequestSchema,
+      response: {
+        200: AgentApiFencedWriteResponseSchema,
+        400: ErrorResponseSchema,
+        401: ErrorResponseSchema,
+      },
     },
-    async (req) => {
+    handler: async (req) => {
       assertInternalToken(req, dependencies.internalToken);
-      const body = req.body as {
-        workspaceId: string;
-        sessionId: string;
-        query: string;
-        beforePos?: number;
-        maxHits?: number;
-        maxChars?: number;
-        snippet?: boolean;
-        regex?: boolean;
-      };
-      return dependencies.service.archiveSearchFromWorker(body);
-    }
-  );
+      return dependencies.service.completeAssistantFromWorker(
+        req.body as AgentApiCompleteAssistantRequest,
+      );
+    },
+  });
 
-  app.post(
-    "/api/internal/agent/archive/read",
-    {
-      schema: {
-        tags: ["agent"],
-        body: Type.Object({
-          workspaceId: Type.String({ minLength: 1 }),
-          sessionId: Type.String({ minLength: 1 }),
-          beforePos: Type.Optional(Type.Integer({ minimum: 2 })),
-          lineCount: Type.Optional(Type.Integer({ minimum: 1, maximum: 200 })),
-          maxChars: Type.Optional(Type.Integer({ minimum: 1000, maximum: 10000 }))
-        }),
-        response: {
-          200: Type.Object({ text: Type.String(), noArchive: Type.Optional(Type.Boolean()) }),
-          400: ErrorResponseSchema,
-          401: ErrorResponseSchema,
-          404: ErrorResponseSchema
-        }
-      }
+  app.route({
+    method: AgentApiEndpoints.updateToolExecution.method,
+    url: AgentApiEndpoints.updateToolExecution.path,
+    schema: {
+      tags: ["agent"],
+      body: AgentApiUpdateToolExecutionRequestSchema,
+      response: {
+        200: AgentApiFencedWriteResponseSchema,
+        400: ErrorResponseSchema,
+        401: ErrorResponseSchema,
+      },
     },
-    async (req) => {
+    handler: async (req) => {
       assertInternalToken(req, dependencies.internalToken);
-      const body = req.body as {
-        workspaceId: string;
-        sessionId: string;
-        beforePos?: number;
-        lineCount?: number;
-        maxChars?: number;
-      };
-      return dependencies.service.archiveReadFromWorker(body);
-    }
-  );
+      return dependencies.service.updateToolExecutionFromWorker(
+        req.body as AgentApiUpdateToolExecutionRequest,
+      );
+    },
+  });
+
+  app.route({
+    method: AgentApiEndpoints.updateRunNotice.method,
+    url: AgentApiEndpoints.updateRunNotice.path,
+    schema: {
+      tags: ["agent"],
+      body: AgentApiUpdateRunNoticeRequestSchema,
+      response: {
+        200: AgentApiFencedWriteResponseSchema,
+        400: ErrorResponseSchema,
+        401: ErrorResponseSchema,
+      },
+    },
+    handler: async (req) => {
+      assertInternalToken(req, dependencies.internalToken);
+      return dependencies.service.updateRunNoticeFromWorker(
+        req.body as AgentApiUpdateRunNoticeRequest,
+      );
+    },
+  });
+
+  app.route({
+    method: AgentApiEndpoints.markRunWorkInProgress.method,
+    url: AgentApiEndpoints.markRunWorkInProgress.path,
+    schema: {
+      tags: ["agent"],
+      body: AgentApiMarkRunWorkInProgressRequestSchema,
+      response: {
+        200: AgentApiMarkRunWorkInProgressResponseSchema,
+        400: ErrorResponseSchema,
+        401: ErrorResponseSchema,
+      },
+    },
+    handler: async (req) => {
+      assertInternalToken(req, dependencies.internalToken);
+      return dependencies.service.markRunWorkInProgressFromWorker(
+        req.body as AgentApiMarkRunWorkInProgressRequest,
+      );
+    },
+  });
+
+  app.route({
+    method: AgentApiEndpoints.persistRunTerminalIntent.method,
+    url: AgentApiEndpoints.persistRunTerminalIntent.path,
+    schema: {
+      tags: ["agent"],
+      body: AgentApiPersistTerminalIntentRequestSchema,
+      response: {
+        200: AgentApiPersistTerminalIntentResponseSchema,
+        400: ErrorResponseSchema,
+        401: ErrorResponseSchema,
+      },
+    },
+    handler: async (req) => {
+      assertInternalToken(req, dependencies.internalToken);
+      return dependencies.service.persistRunTerminalIntentFromWorker(
+        req.body as AgentApiPersistTerminalIntentRequest,
+      );
+    },
+  });
+
+  app.route({
+    method: AgentApiEndpoints.convergeRunTerminal.method,
+    url: AgentApiEndpoints.convergeRunTerminal.path,
+    schema: {
+      tags: ["agent"],
+      body: AgentApiConvergeRunTerminalRequestSchema,
+      response: {
+        200: AgentApiConvergeRunTerminalResponseSchema,
+        400: ErrorResponseSchema,
+        401: ErrorResponseSchema,
+      },
+    },
+    handler: async (req) => {
+      assertInternalToken(req, dependencies.internalToken);
+      return dependencies.service.convergeRunTerminalFromWorker(
+        req.body as AgentApiConvergeRunTerminalRequest,
+      );
+    },
+  });
 
   app.route({
     method: AgentApiEndpoints.getPromptContext.method,
@@ -364,14 +566,14 @@ export async function registerAgentWorkerRoutes(app: FastifyInstance, dependenci
         200: AgentApiPromptContextResponseSchema,
         400: ErrorResponseSchema,
         401: ErrorResponseSchema,
-        404: ErrorResponseSchema
-      }
+        404: ErrorResponseSchema,
+      },
     },
     handler: async (req) => {
       assertInternalToken(req, dependencies.internalToken);
       const body = req.body as AgentApiPromptContextRequest;
       return dependencies.service.getPromptContextForRun(body);
-    }
+    },
   });
 
   app.route({
@@ -384,14 +586,42 @@ export async function registerAgentWorkerRoutes(app: FastifyInstance, dependenci
         200: AgentApiMessagesContextResponseSchema,
         400: ErrorResponseSchema,
         401: ErrorResponseSchema,
-        404: ErrorResponseSchema
-      }
+        404: ErrorResponseSchema,
+      },
     },
     handler: async (req) => {
       assertInternalToken(req, dependencies.internalToken);
       const body = req.body as AgentApiMessagesContextRequest;
       return dependencies.service.getMessagesContext(body);
-    }
+    },
+  });
+
+  app.route({
+    method: AgentApiEndpoints.archiveRead.method,
+    url: AgentApiEndpoints.archiveRead.path,
+    schema: {
+      tags: ["agent"],
+      body: AgentApiArchiveReadRequestSchema,
+      response: { 200: AgentApiArchivePageResponseSchema, 400: ErrorResponseSchema, 401: ErrorResponseSchema, 404: ErrorResponseSchema },
+    },
+    handler: async (req) => {
+      assertInternalToken(req, dependencies.internalToken);
+      return dependencies.service.archiveReadFromWorker(req.body as AgentApiArchiveReadRequest);
+    },
+  });
+
+  app.route({
+    method: AgentApiEndpoints.archiveSearch.method,
+    url: AgentApiEndpoints.archiveSearch.path,
+    schema: {
+      tags: ["agent"],
+      body: AgentApiArchiveSearchRequestSchema,
+      response: { 200: AgentApiArchivePageResponseSchema, 400: ErrorResponseSchema, 401: ErrorResponseSchema, 404: ErrorResponseSchema },
+    },
+    handler: async (req) => {
+      assertInternalToken(req, dependencies.internalToken);
+      return dependencies.service.archiveSearchFromWorker(req.body as AgentApiArchiveSearchRequest);
+    },
   });
 
   app.route({
@@ -404,14 +634,14 @@ export async function registerAgentWorkerRoutes(app: FastifyInstance, dependenci
         200: AgentApiExecutionProfileResponseSchema,
         400: ErrorResponseSchema,
         401: ErrorResponseSchema,
-        404: ErrorResponseSchema
-      }
+        404: ErrorResponseSchema,
+      },
     },
     handler: async (req) => {
       assertInternalToken(req, dependencies.internalToken);
       const body = req.body as AgentApiExecutionProfileRequest;
       return dependencies.service.getExecutionProfileForRun(body);
-    }
+    },
   });
 
   app.post(
@@ -422,7 +652,7 @@ export async function registerAgentWorkerRoutes(app: FastifyInstance, dependenci
         body: Type.Object({
           workspaceId: Type.String({ minLength: 1 }),
           sessionId: Type.String({ minLength: 1 }),
-          runId: Type.String({ minLength: 1 })
+          runId: Type.String({ minLength: 1 }),
         }),
         response: {
           200: Type.Object({
@@ -433,7 +663,7 @@ export async function registerAgentWorkerRoutes(app: FastifyInstance, dependenci
               agentId: Type.String({ minLength: 1 }),
               providerId: Type.String({ minLength: 1 }),
               modelId: Type.String({ minLength: 1 }),
-              source: Type.Literal("agent_default")
+              source: Type.Literal("agent_default"),
             }),
             provider: Type.Object({
               id: Type.String({ minLength: 1 }),
@@ -442,22 +672,21 @@ export async function registerAgentWorkerRoutes(app: FastifyInstance, dependenci
               options: Type.Object({
                 baseURL: Type.String({ minLength: 1 }),
                 apiKey: Type.String({ minLength: 1 }),
-                apiMode: Type.Optional(Type.Union([Type.Literal("responses"), Type.Literal("chatCompletions")]))
-              })
+              }),
             }),
             model: Type.Object({
               id: Type.String({ minLength: 1 }),
               providerModelId: Type.Optional(Type.String({ minLength: 1 })),
               name: Type.String({ minLength: 1 }),
               contextWindowTokens: Type.Integer({ minimum: 1 }),
-              options: Type.Optional(Type.Any())
-            })
+              options: Type.Optional(Type.Any()),
+            }),
           }),
           400: ErrorResponseSchema,
           401: ErrorResponseSchema,
-          404: ErrorResponseSchema
-        }
-      }
+          404: ErrorResponseSchema,
+        },
+      },
     },
     async (req) => {
       assertInternalToken(req, dependencies.internalToken);
@@ -467,6 +696,6 @@ export async function registerAgentWorkerRoutes(app: FastifyInstance, dependenci
         runId: string;
       };
       return dependencies.service.getSingleCallModelProfileForRun(body);
-    }
+    },
   );
 }

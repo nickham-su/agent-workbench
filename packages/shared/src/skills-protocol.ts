@@ -1,3 +1,4 @@
+import { parseExternalWorkspaceSkillId } from "./workspace-context-paths.js";
 export type ParsedSkillFrontmatter = {
   name: string;
   description: string;
@@ -6,8 +7,7 @@ export type ParsedSkillFrontmatter = {
 
 export type ParsedStableSkillIdentifier =
   | { skill: string; namespace: "builtin"; skillDir: string }
-  | { skill: string; namespace: "workspace"; rootDir: string; skillDir: string }
-  | { skill: string; namespace: "repo"; repoId: string; rootDir: string; skillDir: string };
+  | { skill: string; namespace: "external"; skillDir: string };
 
 const ASCII_SPACE_OR_TAB_AT_EDGES = /^[\u0020\u0009]+|[\u0020\u0009]+$/g;
 const FORBIDDEN_SKILL_SEGMENT_CHARS = /[\\`\u2028\u2029]|\p{Cc}|\p{Cf}/u;
@@ -53,27 +53,19 @@ export function parseStableSkillIdentifier(raw: unknown):
   | { kind: "invalid" }
   | { kind: "valid"; value: ParsedStableSkillIdentifier } {
   if (typeof raw !== "string") return { kind: "invalid" };
-  const skill = trimAsciiSpaceTab(raw);
-  if (!skill) return { kind: "required" };
-  if (!isWellFormedUnicode(skill) || skill.includes("\\") || skill.startsWith("/") || /^[A-Za-z]:\//.test(skill)) {
+  if (!raw) return { kind: "required" };
+  // Builtin retains its original ASCII edge trim; external IDs must remain byte-exact.
+  const builtin = trimAsciiSpaceTab(raw);
+  if (builtin.startsWith("builtin/")) {
+    const segments = builtin.split("/");
+    if (segments.length === 2 && segments.every(isValidSkillPathSegment)) {
+      return { kind: "valid", value: { skill: builtin, namespace: "builtin", skillDir: segments[1]! } };
+    }
     return { kind: "invalid" };
   }
-  const segments = skill.split("/");
-  if (!segments.every(isValidSkillPathSegment)) return { kind: "invalid" };
-
-  if (segments[0] === "builtin" && segments.length === 2) {
-    return { kind: "valid", value: { skill, namespace: "builtin", skillDir: segments[1]! } };
-  }
-  if (segments[0] === "workspace" && segments.length === 3) {
-    return { kind: "valid", value: { skill, namespace: "workspace", rootDir: segments[1]!, skillDir: segments[2]! } };
-  }
-  if (segments[0] === "repo" && segments.length === 4) {
-    return {
-      kind: "valid",
-      value: { skill, namespace: "repo", repoId: segments[1]!, rootDir: segments[2]!, skillDir: segments[3]! }
-    };
-  }
-  return { kind: "invalid" };
+  const parsed = parseExternalWorkspaceSkillId(raw);
+  if (!parsed) return { kind: "invalid" };
+  return { kind: "valid", value: { skill: raw, namespace: "external", skillDir: raw } };
 }
 
 export function parseSkillFrontmatter(text: string): ParsedSkillFrontmatter {

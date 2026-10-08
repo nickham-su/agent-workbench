@@ -3,23 +3,15 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { FastifyBaseLogger } from "fastify";
 import type {
-  UpdateWorkspaceAgentsInstructionsSettingsRequest,
-  UpdateWorkspaceExternalSkillRootsSettingsRequest,
-  WorkspaceAgentsInstructionCandidate,
-  WorkspaceAgentsInstructionsDetectResponse,
-  WorkspaceAgentsInstructionsSettingsResponse,
   WorkspaceDetail,
-  WorkspaceExternalSkillRoot,
-  WorkspaceExternalSkillRootsDetectResponse,
-  WorkspaceExternalSkillRootsSettingsResponse,
   WorkspaceAgentEnablementMode,
   WorkspaceAgentEnablementSettingsResponse,
   UpdateWorkspaceAgentEnablementSettingsRequest,
   WorkspaceAgentEnablementDetectResponse,
-  WorkspaceTopLevelSkillsResponse
+  WorkspaceAgentSessionTabVisibilityMutation,
+  WorkspaceAgentTabState
 } from "@agent-workbench/shared";
 import type { WorkspaceRecord } from "@agent-workbench/shared";
-import { isValidSkillPathSegment } from "@agent-workbench/shared";
 import { HttpError } from "../../app/errors.js";
 import type { AppContext } from "../../app/context.js";
 import { newId } from "../../utils/ids.js";
@@ -31,7 +23,11 @@ import { getOriginDefaultBranch, listHeadsBranches } from "../../infra/git/refs.
 import { withRepoLock } from "../../infra/locks/repoLock.js";
 import { cloneFromMirror } from "../../infra/git/clone.js";
 import { ensureDir, pathExists, rmrf } from "../../infra/fs/fs.js";
-import { agentArchiveWorkspaceDir, workspaceRepoDirPath, workspaceRoot } from "../../infra/fs/paths.js";
+import { closeSecureDirectories, openSecureRootDirectory, removeSecureDirectoryTree } from "../../infra/fs/secure-directory.js";
+import { deleteWorkspaceAgentData } from "../../infra/db/workspace-agent-data-cleanup.js";
+import { applyPatchUiArtifactsWorkspaceDir, workspaceRepoDirPath, workspaceRoot, writeUiArtifactsWorkspaceDir } from "../../infra/fs/paths.js";
+import { workspaceDeletingFence } from "../agent/lifecycle/workspace-deleting-fence.js";
+import { getWorkspaceRuntime } from "../agent/lifecycle/workspace-runtime-registry.js";
 import { ensureRepoMirror } from "../../infra/git/mirror.js";
 import { buildGitEnv } from "../../infra/git/gitEnv.js";
 import {
@@ -49,21 +45,45 @@ import {
   updateWorkspaceTitle
 } from "./workspace.store.js";
 import {
+  getWorkspaceDeletionIntent,
+  listWorkspaceDeletionIntents,
+  recordWorkspaceDeletionFailure,
+  upsertWorkspaceDeletionIntent,
+} from "./workspace-deletion.store.js";
+import {
   countActiveTerminalsByWorkspace,
   countActiveTerminalsByWorkspaceIds,
-  deleteTerminalRecord,
+  deleteTerminalRecordsByWorkspace,
   listTerminalsByWorkspace
 } from "../terminals/terminal.store.js";
 import { tmuxHasSession, tmuxKillSession } from "../../infra/tmux/session.js";
+import { assertTerminalGitAuthCleanupRootAnchors, cleanupTerminalGitAuthArtifacts } from "../terminals/terminal.gitAuth.js";
+import { clearTerminalAuthCleanupIntent, listTerminalAuthCleanupIntents } from "../terminals/terminal-auth-cleanup-intent.store.js";
 import { withWorkspaceRepoLock } from "../../infra/locks/workspaceRepoLock.js";
-import { parseSkillFrontmatter, scanReadableTopLevelSkills } from "../agent/top-level-skill.js";
 import { withWorkspaceLock } from "../../infra/locks/workspaceLock.js";
+import { workspaceLifecycleCoordinator } from "../../infra/locks/workspace-lifecycle-coordinator.js";
+import {
+  deleteWorkspaceSessionTabStateOverride,
+  findAgentSessionKindInWorkspace,
+  listEffectiveWorkspaceSessionTabStateOverrides,
+  upsertWorkspaceSessionTabStateOverride,
+  workspaceExistsForAgentTabState
+} from "./workspace-session-tab-state.store.js";
 
-const WORKSPACE_EXTERNAL_SKILL_ROOTS_SETTINGS_KEY = "workspace_external_skill_roots_v1";
-const WORKSPACE_AGENTS_INSTRUCTIONS_SETTINGS_KEY = "workspace_agents_instructions_v1";
 const WORKSPACE_AGENT_ENABLEMENT_SETTINGS_KEY = "workspace_agent_enablement_v1";
 const BUILTIN_SKILLS_ROOT = "skills";
-const WORKSPACE_AGENTS_FILENAME = "AGENTS.md";
+
+export type WorkspaceDeletionTerminalOperations = {
+  hasSession: (params: { sessionName: string; cwd: string }) => Promise<"exists" | "not_found">;
+  killSession: (params: { sessionName: string; cwd: string }) => Promise<void>;
+  cleanupAuthArtifacts?: (dataDir: string, terminalId: string, intents?: import("../terminals/terminal-auth-cleanup-intent.store.js").TerminalAuthCleanupIntent[]) => Promise<void>;
+};
+
+const defaultWorkspaceDeletionTerminalOperations: WorkspaceDeletionTerminalOperations = {
+  hasSession: tmuxHasSession,
+  killSession: tmuxKillSession,
+  cleanupAuthArtifacts: cleanupTerminalGitAuthArtifacts,
+};
 
 function formatRepoDisplayName(rawUrl: string) {
   let s = String(rawUrl || "").trim();
@@ -183,195 +203,51 @@ function buildWorkspaceDetail(ctx: AppContext, ws: WorkspaceRecord, terminalCoun
   };
 }
 
-export async function detectWorkspaceAgentsInstructions(
-  ctx: AppContext,
-  logger: FastifyBaseLogger,
-  workspaceId: string
-): Promise<WorkspaceAgentsInstructionsDetectResponse> {
-  const ws = await getWorkspaceById(ctx, workspaceId);
-  const enabledSet = new Set(
-    listEnabledWorkspaceAgentsInstructionsSourcesRaw(ctx, workspaceId).map((it) =>
-      getAgentsSourceIdentityKey({ sourceType: it.sourceType, repoId: it.repoId })
-    )
-  );
-  const candidates = await listWorkspaceAgentsInstructionsCandidates(ctx, logger, ws);
-  const items: WorkspaceAgentsInstructionCandidate[] = candidates.map((it) => ({
-    sourceType: it.sourceType,
-    ...(it.sourceType === "repo" ? { repoId: it.repoId } : {}),
-    displayPath: it.displayPath,
-    enabled: enabledSet.has(getAgentsSourceIdentityKey({ sourceType: it.sourceType, repoId: it.repoId }))
-  }));
-
-  items.sort((a, b) => {
-    if (a.sourceType !== b.sourceType) return a.sourceType === "workspace" ? -1 : 1;
-    if (a.sourceType === "workspace") return 0;
-    return String(a.repoId || "").localeCompare(String(b.repoId || ""));
-  });
-
-  return { workspaceId: ws.id, items, updatedAt: nowMs() };
-}
-
-export async function getWorkspaceAgentsInstructionsSettings(
-  ctx: AppContext,
-  workspaceId: string
-): Promise<WorkspaceAgentsInstructionsSettingsResponse> {
-  const ws = await getWorkspaceById(ctx, workspaceId);
-  const reposById = new Map(listWorkspaceRepos(ctx.db, ws.id).map((repo) => [repo.repoId, repo] as const));
-  const enabled = listEnabledWorkspaceAgentsInstructionsSourcesRaw(ctx, workspaceId);
-  const enabledSources = enabled
-    .map((it) => {
-      if (it.sourceType === "workspace") {
-        return {
-          sourceType: "workspace" as const,
-          displayPath: WORKSPACE_AGENTS_FILENAME,
-          enabledAt: it.enabledAt || 0
-        };
-      }
-      if (!it.repoId) return null;
-      const repo = reposById.get(it.repoId);
-      if (!repo) return null;
-      return {
-        sourceType: "repo" as const,
-        repoId: it.repoId,
-        displayPath: `${repo.dirName}/${WORKSPACE_AGENTS_FILENAME}`,
-        enabledAt: it.enabledAt || 0
-      };
-    })
-    .filter((it): it is NonNullable<typeof it> => it !== null);
-
-  const settings = readWorkspaceAgentsInstructionsSettings(ctx);
-  const updatedAt = Number(settings.workspaces?.[ws.id]?.updatedAt || 0) || 0;
-  return { workspaceId: ws.id, enabledSources, updatedAt };
-}
-
-export async function updateWorkspaceAgentsInstructionsSettings(
-  ctx: AppContext,
-  logger: FastifyBaseLogger,
-  workspaceId: string,
-  payload: UpdateWorkspaceAgentsInstructionsSettingsRequest
-): Promise<WorkspaceAgentsInstructionsSettingsResponse> {
-  const ws = await getWorkspaceById(ctx, workspaceId);
-  const candidates = await listWorkspaceAgentsInstructionsCandidates(ctx, logger, ws);
-  const candidateMap = new Map(
-    candidates.map((it) => [getAgentsSourceIdentityKey({ sourceType: it.sourceType, repoId: it.repoId }), it] as const)
-  );
-  const reposById = new Map(listWorkspaceRepos(ctx.db, ws.id).map((repo) => [repo.repoId, repo] as const));
-  const now = nowMs();
-
-  const deduped = new Map<string, WorkspaceAgentsEnabledSource>();
-  for (const item of payload.enabledSources || []) {
-    const sourceType = String((item as any)?.sourceType || "").trim();
-    const normalizedSource = sourceType === "workspace" ? "workspace" : sourceType === "repo" ? "repo" : "";
-    if (!normalizedSource) {
-      throw new HttpError(400, "invalid AGENTS instructions source", "WORKSPACE_AGENTS_INSTRUCTIONS_INVALID");
-    }
-    const repoId = normalizedSource === "repo" ? String((item as any)?.repoId || "").trim() : undefined;
-    if (normalizedSource === "workspace" && String((item as any)?.repoId || "").trim()) {
-      throw new HttpError(400, "workspace source must not include repoId", "WORKSPACE_AGENTS_INSTRUCTIONS_INVALID");
-    }
-    if (normalizedSource === "repo" && !repoId) {
-      throw new HttpError(400, "repo source must include repoId", "WORKSPACE_AGENTS_INSTRUCTIONS_INVALID");
-    }
-
-    const key = getAgentsSourceIdentityKey({ sourceType: normalizedSource, repoId });
-    const candidate = candidateMap.get(key);
-    if (!candidate) {
-      throw new HttpError(400, `invalid AGENTS instructions source: ${normalizedSource}/${repoId || ""}`, "WORKSPACE_AGENTS_INSTRUCTIONS_INVALID");
-    }
-    if (normalizedSource === "repo" && repoId && !reposById.has(repoId)) {
-      throw new HttpError(400, `invalid AGENTS instructions source: ${normalizedSource}/${repoId}`, "WORKSPACE_AGENTS_INSTRUCTIONS_INVALID");
-    }
-    deduped.set(key, {
-      sourceType: normalizedSource,
-      repoId,
-      enabledAt: now
-    });
-  }
-
-  const settings = readWorkspaceAgentsInstructionsSettings(ctx);
-  const workspaces = { ...(settings.workspaces || {}) };
-  workspaces[ws.id] = {
-    enabledSources: [...deduped.values()],
-    updatedAt: now
-  };
-  persistWorkspaceAgentsInstructionsSettings(ctx, { workspaces }, now);
-
-  const enabledSources = [...deduped.values()]
-    .sort((a, b) => {
-      if (a.sourceType !== b.sourceType) return a.sourceType === "workspace" ? -1 : 1;
-      if (a.sourceType === "workspace") return 0;
-      return String(a.repoId || "").localeCompare(String(b.repoId || ""));
-    })
-    .map((it) => ({
-      sourceType: it.sourceType,
-      ...(it.sourceType === "repo" ? { repoId: it.repoId } : {}),
-      displayPath:
-        it.sourceType === "workspace"
-          ? WORKSPACE_AGENTS_FILENAME
-          : `${reposById.get(String(it.repoId || ""))?.dirName || it.repoId}/${WORKSPACE_AGENTS_FILENAME}`,
-      enabledAt: it.enabledAt
-    }));
-
-  return { workspaceId: ws.id, enabledSources, updatedAt: now };
-}
-
-export async function listEnabledWorkspaceAgentsInstructions(params: {
-  ctx: AppContext;
-  logger: FastifyBaseLogger;
-  workspaceId: string;
-}) {
-  const ws = await getWorkspaceById(params.ctx, params.workspaceId);
-  const enabled = listEnabledWorkspaceAgentsInstructionsSourcesRaw(params.ctx, params.workspaceId);
-  const reposById = new Map(listWorkspaceRepos(params.ctx.db, ws.id).map((repo) => [repo.repoId, repo] as const));
-
-  const workspaceItems: Array<{ sourceType: "workspace"; filePath: string; displayPath: string }> = [];
-  const repoItems: Array<{ sourceType: "repo"; repoId: string; repoDirName: string; filePath: string; displayPath: string }> = [];
-
-  for (const item of enabled) {
-    if (item.sourceType === "workspace") {
-      workspaceItems.push({
-        sourceType: "workspace",
-        filePath: path.join(ws.path, WORKSPACE_AGENTS_FILENAME),
-        displayPath: WORKSPACE_AGENTS_FILENAME
-      });
-      continue;
-    }
-
-    if (!item.repoId) continue;
-    const repo = reposById.get(item.repoId);
-    if (!repo) continue;
-    const repoBasePath = await resolveWorkspaceRepoBasePath({ ctx: params.ctx, workspace: ws, repo, logger: params.logger, source: "settings" });
-    if (!repoBasePath) continue;
-    repoItems.push({
-      sourceType: "repo",
-      repoId: item.repoId,
-      repoDirName: repo.dirName,
-      filePath: path.join(repoBasePath, WORKSPACE_AGENTS_FILENAME),
-      displayPath: `${repo.dirName}/${WORKSPACE_AGENTS_FILENAME}`
-    });
-  }
-
-  repoItems.sort((a, b) => {
-    const nameCmp = a.repoDirName.localeCompare(b.repoDirName);
-    if (nameCmp !== 0) return nameCmp;
-    return a.repoId.localeCompare(b.repoId);
-  });
-
-  return [
-    ...workspaceItems,
-    ...repoItems.map((it) => ({
-      sourceType: "repo" as const,
-      repoId: it.repoId,
-      filePath: it.filePath,
-      displayPath: it.displayPath
-    }))
-  ];
-}
-
 export async function getWorkspaceById(ctx: AppContext, workspaceId: string): Promise<WorkspaceRecord> {
   const ws = getWorkspace(ctx.db, workspaceId);
   if (!ws) throw new HttpError(404, "Workspace not found");
   return ws;
+}
+
+function requireWorkspaceForAgentTabState(ctx: AppContext, workspaceId: string) {
+  if (!workspaceExistsForAgentTabState(ctx.db, workspaceId)) {
+    throw new HttpError(404, "Workspace not found", "WORKSPACE_NOT_FOUND");
+  }
+}
+
+export async function getWorkspaceAgentTabState(ctx: AppContext, workspaceId: string): Promise<WorkspaceAgentTabState> {
+  requireWorkspaceForAgentTabState(ctx, workspaceId);
+  const overrides = listEffectiveWorkspaceSessionTabStateOverrides(ctx.db, workspaceId);
+  return {
+    workspaceId,
+    closedSessionIds: overrides.filter((override) => override.kind === "primary" && !override.visible).map((override) => override.sessionId),
+    openedSubtaskSessionIds: overrides.filter((override) => override.kind === "subtask" && override.visible).map((override) => override.sessionId)
+  };
+}
+
+export async function setWorkspaceAgentSessionTabVisibility(
+  ctx: AppContext,
+  input: { workspaceId: string; sessionId: string; visible: boolean }
+): Promise<WorkspaceAgentSessionTabVisibilityMutation> {
+  return workspaceLifecycleCoordinator.withMutation(input.workspaceId, async () =>
+    ctx.db.transaction(() => {
+      requireWorkspaceForAgentTabState(ctx, input.workspaceId);
+      const kind = findAgentSessionKindInWorkspace(ctx.db, input.workspaceId, input.sessionId);
+      if (!kind) {
+        throw new HttpError(404, "Agent Session not found in Workspace", "AGENT_SESSION_NOT_FOUND_IN_WORKSPACE");
+      }
+
+      if (kind === "primary" && !input.visible) {
+        upsertWorkspaceSessionTabStateOverride(ctx.db, { ...input, updatedAt: nowMs() });
+      } else if (kind === "subtask" && input.visible) {
+        upsertWorkspaceSessionTabStateOverride(ctx.db, { ...input, updatedAt: nowMs() });
+      } else {
+        deleteWorkspaceSessionTabStateOverride(ctx.db, input.workspaceId, input.sessionId);
+      }
+
+      return { ...input };
+    })()
+  );
 }
 
 export async function createWorkspace(
@@ -502,7 +378,10 @@ export async function updateWorkspaceById(
   workspaceId: string,
   params: { title?: string; useTerminalCredential?: boolean }
 ) {
+  return workspaceLifecycleCoordinator.withMutation(workspaceId, async () => {
+    return withWorkspaceLock({ workspaceId }, async () => {
   const ws = await getWorkspaceById(ctx, workspaceId);
+  workspaceDeletingFence.assertWritable(ws.id);
   const wantsTitleUpdate = params.title !== undefined;
   const wantsTerminalCredentialUpdate = params.useTerminalCredential !== undefined;
   if (!wantsTitleUpdate && !wantsTerminalCredentialUpdate) throw new HttpError(400, "No fields to update");
@@ -534,6 +413,8 @@ export async function updateWorkspaceById(
     "workspace updated"
   );
   return getWorkspaceDetailById(ctx, ws.id);
+    });
+  });
 }
 
 export async function attachRepoToWorkspace(
@@ -542,7 +423,9 @@ export async function attachRepoToWorkspace(
   workspaceId: string,
   params: { repoId: string; branch?: string }
 ) {
+  return workspaceLifecycleCoordinator.withMutation(workspaceId, async () => {
   const ws = await getWorkspaceById(ctx, workspaceId);
+  workspaceDeletingFence.assertWritable(ws.id);
 
   return withWorkspaceLock({ workspaceId: ws.id }, async () => {
     const repoId = String(params.repoId || "").trim();
@@ -624,6 +507,7 @@ export async function attachRepoToWorkspace(
       await gitEnv.cleanup();
     }
   });
+  });
 }
 
 export async function detachRepoFromWorkspace(
@@ -632,7 +516,9 @@ export async function detachRepoFromWorkspace(
   workspaceId: string,
   repoId: string
 ) {
+  return workspaceLifecycleCoordinator.withMutation(workspaceId, async () => {
   const ws = await getWorkspaceById(ctx, workspaceId);
+  workspaceDeletingFence.assertWritable(ws.id);
 
   return withWorkspaceLock({ workspaceId: ws.id }, async () => {
     const id = String(repoId || "").trim();
@@ -664,489 +550,181 @@ export async function detachRepoFromWorkspace(
     logger.info({ workspaceId: ws.id, repoId: id }, "repo detached from workspace");
     return getWorkspaceDetailById(ctx, ws.id);
   });
+  });
 }
 
-export async function deleteWorkspace(ctx: AppContext, logger: FastifyBaseLogger, workspaceId: string) {
-  const ws = await getWorkspaceById(ctx, workspaceId);
+const WORKSPACE_AGENT_DRAIN_TIMEOUT_MS = 10_000;
+
+function listWorkspaceSessionIds(ctx: AppContext, workspaceId: string) {
+  return (ctx.db.prepare(`
+    select id as sessionId from agent_session where workspace_id = ? order by id
+  `).all(workspaceId) as Array<{ sessionId: string }>).map((row) => row.sessionId);
+}
+
+async function removeWorkspaceFileDomains(ctx: AppContext, ws: WorkspaceRecord) {
+  const dataRoot = await openSecureRootDirectory(ctx.dataDir);
+  try {
+    const domains = [
+      ["workspaces", ws.dirName],
+      ["agent", "attachments", "by_workspace", ws.id],
+      ["tmp", "agent", "ui-artifacts", "apply_patch", path.basename(applyPatchUiArtifactsWorkspaceDir(ctx.dataDir, ws.id))],
+      ["tmp", "agent", "ui-artifacts", "write", path.basename(writeUiArtifactsWorkspaceDir(ctx.dataDir, ws.id))],
+    ];
+    for (const relativeSegments of domains) {
+      const result = await removeSecureDirectoryTree({
+        root: dataRoot,
+        relativeSegments,
+        quarantineDirectory: ".workspace-delete-quarantine",
+      });
+      if (result === "replacement_pending") {
+        throw new HttpError(409, "Workspace file cleanup has a replacement pending; deletion remains pending.", "WORKSPACE_FILE_CLEANUP_REPLACEMENT_PENDING");
+      }
+    }
+  } finally {
+    await closeSecureDirectories(dataRoot);
+  }
+}
+
+function deletionFailureCode(error: unknown) {
+  return error instanceof HttpError ? error.code ?? "WORKSPACE_DELETION_PENDING" : "WORKSPACE_DELETION_PENDING";
+}
+
+function deletionFailureMessage(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.slice(0, 500);
+}
+
+/**
+ * 删除从 durable intent 开始。任一步失败都保留 tombstone 与 fence；重试或启动续作
+ * 将从当前可达步骤继续。只有文件域全部安全清理且最终 SQLite 事务成功后才释放 fence。
+ */
+export async function deleteWorkspace(
+  ctx: AppContext,
+  logger: FastifyBaseLogger,
+  workspaceId: string,
+  terminalOperations = defaultWorkspaceDeletionTerminalOperations,
+) {
+  const ws = await workspaceLifecycleCoordinator.withAdmission(workspaceId, async () =>
+    withWorkspaceLock({ workspaceId }, async () => {
+      const ws = await getWorkspaceById(ctx, workspaceId);
+      if (!/^[A-Za-z0-9._-]{1,160}$/.test(ws.dirName) || ws.dirName === "." || ws.dirName === "..") throw new HttpError(409, "Workspace path is invalid; aborting delete.", "WORKSPACE_PATH_INVALID");
+      const expectedPath = workspaceRoot(ctx.dataDir, ws.dirName);
+      if (path.resolve(ws.path) !== path.resolve(expectedPath)) {
+        logger.error({ workspaceId: ws.id, wsPath: ws.path, expectedPath }, "workspace path mismatch; abort delete");
+        throw new HttpError(409, "Workspace path is invalid; aborting delete.", "WORKSPACE_PATH_INVALID");
+      }
+      const existingIntent = getWorkspaceDeletionIntent(ctx.db, ws.id);
+      if (!existingIntent) {
+        ctx.db.transaction(() => {
+          upsertWorkspaceDeletionIntent(ctx.db, { workspaceId: ws.id, dirName: ws.dirName, now: nowMs() });
+        })();
+      }
+      if (!workspaceDeletingFence.isDeleting(ws.id)) workspaceDeletingFence.begin(ws.id);
+      return ws;
+    })
+  );
 
   const expectedPath = workspaceRoot(ctx.dataDir, ws.dirName);
-  // 删除前做强校验：即使 DB/path 字段出现脏数据，也不允许越界递归删除。
-  // 同时前置校验，避免 ws.path 异常时先执行 tmux 等副作用操作。
-  if (path.resolve(ws.path) !== path.resolve(expectedPath)) {
-    logger.error({ workspaceId: ws.id, wsPath: ws.path, expectedPath }, "workspace path mismatch; abort delete");
-    throw new HttpError(409, "Workspace path is invalid; aborting delete.", "WORKSPACE_PATH_INVALID");
-  }
-
-  // 杀掉该 workspace 下所有 tmux 会话并删除 terminal 记录
-  const terms = listTerminalsByWorkspace(ctx.db, ws.id);
-  let killFailed = false;
-  for (const term of terms) {
-    let killedOrMissing = false;
-    try {
-      const exists = await tmuxHasSession({ sessionName: term.sessionName, cwd: ws.path });
-      if (!exists) {
-        killedOrMissing = true;
-      } else {
-        await tmuxKillSession({ sessionName: term.sessionName, cwd: ws.path });
-        killedOrMissing = true;
-      }
-    } catch (err) {
-      // kill 失败不应中断整体流程，但也不能无条件删除 terminal 记录，避免产生新不一致
-      killFailed = true;
-      logger.warn({ workspaceId: ws.id, terminalId: term.id, sessionName: term.sessionName, err }, "tmux kill-session failed");
-    }
-
-    if (killedOrMissing) {
-      deleteTerminalRecord(ctx.db, term.id);
-    }
-  }
-
-  if (killFailed) {
-    // 保留 workspace 记录与未清理的 terminal，便于用户重试或手工处理；避免“删一半”。
-    throw new HttpError(409, "Failed to kill one or more terminal sessions; aborting delete.", "TERMINAL_KILL_FAILED");
-  }
-
-  // 先删 DB（事务），避免外键 restrict 导致“删一半”；目录与归档清理改为 best-effort。
-  ctx.db.transaction(() => {
-    // agent_session.workspace_id 对 workspaces 是 on delete restrict；必须先清理 workspace 下的 session。
-    // agent_client_request 没有外键，需手动清理。
-    ctx.db.prepare(`delete from agent_client_request where workspace_id = ?`).run(ws.id);
-    ctx.db.prepare(`delete from agent_session where workspace_id = ?`).run(ws.id);
-    deleteWorkspaceReposByWorkspace(ctx.db, ws.id);
-    deleteWorkspaceRecord(ctx.db, ws.id);
-  })();
-
   try {
-    await rmrf(expectedPath);
-  } catch (err) {
-    logger.warn({ workspaceId: ws.id, path: expectedPath, err }, "remove workspace path failed");
-  }
-
-  const archivePath = agentArchiveWorkspaceDir(ctx.dataDir, ws.id);
-  const dataDirAbs = path.resolve(ctx.dataDir);
-  const archiveAbs = path.resolve(archivePath);
-  const archiveRel = path.relative(dataDirAbs, archiveAbs);
-  const isArchiveInsideDataDir = archiveRel.length > 0 && !archiveRel.startsWith("..") && !path.isAbsolute(archiveRel);
-  if (!isArchiveInsideDataDir) {
-    logger.error({ workspaceId: ws.id, archivePath }, "agent archive path is invalid; skip archive cleanup");
-  } else {
-    try {
-      await rmrf(archivePath);
-    } catch (err) {
-      logger.warn({ workspaceId: ws.id, archivePath, err }, "remove workspace archive path failed");
+    const workspaceSessionIds = listWorkspaceSessionIds(ctx, ws.id);
+    if (workspaceSessionIds.length > 0) {
+      const registration = getWorkspaceRuntime();
+      if (!registration) {
+        throw new HttpError(503, "agent worker unavailable", "WORKSPACE_AGENT_WORKER_UNAVAILABLE");
+      }
+      await registration.handoffCoordinator.runExclusiveMany(workspaceSessionIds, async () => {
+        registration.settleWorkspaceRunsForDeletion(ws.id);
+        if (!registration.runtime.cancelSessionAndWait) {
+          throw new HttpError(503, "agent worker unavailable", "WORKSPACE_AGENT_WORKER_UNAVAILABLE");
+        }
+        for (const sessionId of workspaceSessionIds) {
+          let idle: boolean;
+          try {
+            idle = await registration.runtime.cancelSessionAndWait!({ sessionId, timeoutMs: WORKSPACE_AGENT_DRAIN_TIMEOUT_MS });
+          } catch (err) {
+            logger.warn({ workspaceId: ws.id, sessionId, err }, "agent worker unavailable during workspace deletion");
+            throw new HttpError(503, "agent worker unavailable", "WORKSPACE_AGENT_WORKER_UNAVAILABLE");
+          }
+          if (!idle) throw new HttpError(409, "agent worker did not stop in time", "WORKSPACE_AGENT_WORKER_DRAIN_TIMEOUT");
+        }
+      });
     }
-  }
 
-  logger.info({ workspaceId: ws.id }, "workspace deleted");
+    const terms = listTerminalsByWorkspace(ctx.db, ws.id);
+    for (const term of terms) {
+      try {
+        const presence = await terminalOperations.hasSession({ sessionName: term.sessionName, cwd: ctx.dataDir });
+        if (presence === "exists") {
+          await terminalOperations.killSession({ sessionName: term.sessionName, cwd: ctx.dataDir });
+        }
+      } catch (err) {
+        logger.warn({ workspaceId: ws.id, terminalId: term.id, sessionName: term.sessionName, err }, "tmux kill-session failed");
+        throw new HttpError(409, "Failed to kill one or more terminal sessions; deletion remains pending.", "TERMINAL_KILL_FAILED");
+      }
+    }
+
+    for (const term of terms) {
+      try {
+        const intents = listTerminalAuthCleanupIntents(ctx.db, term.id);
+        if (intents.some((intent) => intent.phase !== "recoverable")) {
+          throw new Error("auth cleanup locator is not recoverable");
+        }
+        await assertTerminalGitAuthCleanupRootAnchors(ctx.dataDir, intents);
+        await (terminalOperations.cleanupAuthArtifacts ?? cleanupTerminalGitAuthArtifacts)(ctx.dataDir, term.id, intents);
+        // 仅 recoverable 经过实际 root-slot cleanup 后可移除 latch；同时和最终
+        // terminal/Workspace record 删除位于下面同一 SQLite transaction。
+        const current = listTerminalAuthCleanupIntents(ctx.db, term.id);
+        if (current.some((intent) => intent.phase !== "recoverable")) throw new Error("auth cleanup locator is not recoverable");
+      } catch (err) {
+        logger.warn({ workspaceId: ws.id, terminalId: term.id, err }, "terminal Git auth artifact cleanup failed");
+        throw new HttpError(409, "Failed to clean terminal Git authentication artifacts; deletion remains pending.", "TERMINAL_AUTH_CLEANUP_FAILED");
+      }
+    }
+
+    await removeWorkspaceFileDomains(ctx, ws);
+    ctx.db.transaction(() => {
+      for (const term of terms) {
+        const intents = listTerminalAuthCleanupIntents(ctx.db, term.id);
+        if (intents.some((intent) => intent.phase !== "recoverable")) throw new Error("auth cleanup locator is not recoverable");
+        for (const intent of intents) clearTerminalAuthCleanupIntent(ctx.db, term.id, intent.artifactKind);
+      }
+      // Task history is scoped to this Workspace and cascades with its Task.
+      // Remove it before the Agent graph and the Workspace FK are deleted.
+      ctx.db.prepare("delete from scheduled_agent_task where workspace_id=?").run(ws.id);
+      deleteWorkspaceAgentData(ctx.db, ws.id);
+      deleteWorkspaceReposByWorkspace(ctx.db, ws.id);
+      deleteTerminalRecordsByWorkspace(ctx.db, ws.id);
+      deleteWorkspaceRecord(ctx.db, ws.id);
+    })();
+    workspaceDeletingFence.end(ws.id);
+    logger.info({ workspaceId: ws.id }, "workspace deleted");
+  } catch (error) {
+    const code = deletionFailureCode(error);
+    const message = deletionFailureMessage(error);
+    recordWorkspaceDeletionFailure(ctx.db, { workspaceId: ws.id, now: nowMs(), code, message });
+    throw error instanceof HttpError
+      ? error
+      : new HttpError(409, "Workspace deletion remains pending; retry later.", "WORKSPACE_DELETION_PENDING");
+  }
 }
 
-type ExternalSkillEnabledRoot = {
-  sourceType: "workspace" | "repo";
-  repoId?: string;
-  rootDir: string;
-  enabledAt: number;
-};
+/** 进程重启后恢复 durable fence，并在运行时可用时尝试续作。 */
+export async function resumePendingWorkspaceDeletions(ctx: AppContext, logger: FastifyBaseLogger) {
+  const intents = listWorkspaceDeletionIntents(ctx.db);
+  for (const intent of intents) workspaceDeletingFence.restore(intent.workspaceId);
+  for (const intent of intents) {
+    try {
+      await deleteWorkspace(ctx, logger, intent.workspaceId);
+    } catch (error) {
+      logger.warn({ workspaceId: intent.workspaceId, err: error }, "workspace deletion remains pending during startup resume");
+    }
+  }
+}
 
-type ExternalSkillSettingsPayload = {
-  workspaces?: Record<string, { enabledRoots?: ExternalSkillEnabledRoot[]; updatedAt?: number }>;
-};
-
-type ExternalSkillCandidate = WorkspaceExternalSkillRoot & {
-  rootPath: string;
-};
 
 type WorkspaceAgentEnablementSettingsPayload = {
   workspaces?: Record<string, { mode?: WorkspaceAgentEnablementMode; enabledAgentIds?: string[]; updatedAt?: number }>;
 };
-
-type WorkspaceAgentsEnabledSource = {
-  sourceType: "workspace" | "repo";
-  repoId?: string;
-  enabledAt: number;
-};
-
-type WorkspaceAgentsInstructionsSettingsPayload = {
-  workspaces?: Record<string, { enabledSources?: WorkspaceAgentsEnabledSource[]; updatedAt?: number }>;
-};
-
-function normalizeRelativeRepoPath(raw: string) {
-  const normalized = String(raw || "").trim().replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
-  if (!normalized || normalized === "." || normalized === "..") return "";
-  const segments = normalized.split("/").filter(Boolean);
-  if (segments.some((seg) => seg === "." || seg === "..")) return "";
-  return segments.join("/");
-}
-
-function normalizeTopLevelSkillRootName(raw: string) {
-  const normalized = normalizeRelativeRepoPath(raw);
-  if (!normalized) return "";
-  if (normalized.includes("/")) return "";
-  if (!normalized.toLowerCase().includes("skill")) return "";
-  return normalized;
-}
-
-function isPathInside(rootPath: string, targetPath: string) {
-  const normalizedRoot = path.resolve(rootPath);
-  const normalizedTarget = path.resolve(targetPath);
-  const withSep = normalizedRoot.endsWith(path.sep) ? normalizedRoot : `${normalizedRoot}${path.sep}`;
-  return normalizedTarget === normalizedRoot || normalizedTarget.startsWith(withSep);
-}
-
-async function resolveWorkspaceRootPath(params: {
-  workspace: Pick<WorkspaceRecord, "id" | "path">;
-  rootDir: string;
-}) {
-  const normalizedRootName = normalizeTopLevelSkillRootName(params.rootDir);
-  if (!normalizedRootName) return null;
-  const rootPath = path.join(params.workspace.path, normalizedRootName);
-  const rootStat = await fs.lstat(rootPath).catch((err: any) => {
-    if (err?.code === "ENOENT" || err?.code === "ENOTDIR") return null;
-    throw err;
-  });
-  if (!rootStat || !rootStat.isDirectory() || rootStat.isSymbolicLink()) return null;
-  const [workspaceRealPath, rootRealPath] = await Promise.all([
-    fs.realpath(params.workspace.path).catch(() => ""),
-    fs.realpath(rootPath).catch(() => "")
-  ]);
-  if (!workspaceRealPath || !rootRealPath) return null;
-  if (!isPathInside(workspaceRealPath, rootRealPath)) return null;
-  return rootPath;
-}
-
-async function resolveWorkspaceRepoBasePath(params: {
-  ctx: AppContext;
-  workspace: Pick<WorkspaceRecord, "id" | "dirName" | "path">;
-  repo: { repoId: string; dirName: string; path: string };
-  logger: FastifyBaseLogger;
-  source: "detect" | "settings";
-}) {
-  const expectedPath = workspaceRepoDirPath(params.ctx.dataDir, params.workspace.dirName, params.repo.dirName);
-  if (path.resolve(params.repo.path) !== path.resolve(expectedPath)) {
-    params.logger.warn(
-      { workspaceId: params.workspace.id, repoId: params.repo.repoId, source: params.source },
-      "skip repo skill roots: workspace repo path mismatch"
-    );
-    return null;
-  }
-  const repoStat = await fs.lstat(params.repo.path).catch((err: any) => {
-    if (err?.code === "ENOENT" || err?.code === "ENOTDIR") return null;
-    throw err;
-  });
-  if (!repoStat || !repoStat.isDirectory() || repoStat.isSymbolicLink()) return null;
-  const [workspaceRealPath, repoRealPath] = await Promise.all([
-    fs.realpath(params.workspace.path).catch((err: any) => {
-      if (err?.code === "ENOENT" || err?.code === "ENOTDIR") return "";
-      throw err;
-    }),
-    fs.realpath(params.repo.path).catch((err: any) => {
-      if (err?.code === "ENOENT" || err?.code === "ENOTDIR") return "";
-      throw err;
-    })
-  ]);
-  if (!workspaceRealPath || !repoRealPath) return null;
-  if (!isPathInside(workspaceRealPath, repoRealPath)) {
-    params.logger.warn(
-      { workspaceId: params.workspace.id, repoId: params.repo.repoId, source: params.source },
-      "skip repo skill roots: workspace repo realpath is outside workspace"
-    );
-    return null;
-  }
-  return params.repo.path;
-}
-
-async function scanTopLevelSkillCount(rootPath: string, logger: FastifyBaseLogger) {
-  const readableItems = await scanReadableTopLevelSkills({
-    rootPath,
-    logger,
-    logMessage: "failed to read top-level skill summary"
-  });
-  return readableItems.length;
-}
-
-async function listWorkspaceExternalSkillsCandidates(ctx: AppContext, logger: FastifyBaseLogger, ws: WorkspaceRecord) {
-  const workspaceEntries = await fs.readdir(ws.path, { withFileTypes: true }).catch((err: any) => {
-    if (err?.code === "ENOENT" || err?.code === "ENOTDIR") return [] as Awaited<ReturnType<typeof fs.readdir>>;
-    throw err;
-  });
-
-  const workspaceCandidates: ExternalSkillCandidate[] = [];
-  for (const entry of workspaceEntries) {
-    if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
-    const rootDir = normalizeTopLevelSkillRootName(String(entry.name || ""));
-    if (!rootDir) continue;
-    const rootPath = await resolveWorkspaceRootPath({ workspace: ws, rootDir });
-    if (!rootPath) continue;
-    const topLevelSkillCount = await scanTopLevelSkillCount(rootPath, logger).catch((err: any) => {
-      logger.warn({ err, workspaceId: ws.id, rootDir }, "detect workspace skills roots failed to count top-level skills");
-      return 0;
-    });
-    workspaceCandidates.push({
-      sourceType: "workspace",
-      rootDir,
-      displayName: rootDir,
-      topLevelSkillCount,
-      enabled: false,
-      rootPath
-    });
-  }
-
-  const repos = listWorkspaceRepos(ctx.db, ws.id);
-  const repoCandidates: ExternalSkillCandidate[] = [];
-  for (const repo of repos) {
-    const repoBasePath = await resolveWorkspaceRepoBasePath({ ctx, workspace: ws, repo, logger, source: "detect" });
-    if (!repoBasePath) continue;
-    let entries: Array<{ name: string; isDirectory: () => boolean; isSymbolicLink: () => boolean }> = [];
-    try {
-      entries = await fs.readdir(repoBasePath, { withFileTypes: true });
-    } catch (err: any) {
-      if (err?.code === "ENOENT" || err?.code === "ENOTDIR") continue;
-      logger.warn({ err, workspaceId: ws.id, repoId: repo.repoId }, "detect repo skills roots failed to list repo path");
-      continue;
-    }
-    for (const entry of entries) {
-      if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
-      const rootDir = normalizeTopLevelSkillRootName(String(entry.name || ""));
-      if (!rootDir) continue;
-      const rootPath = await resolveWorkspaceRepoSkillRootPath({ ctx, workspace: ws, repo, relativePath: rootDir, logger, source: "detect" });
-      if (!rootPath) continue;
-      const topLevelSkillCount = await scanTopLevelSkillCount(rootPath, logger).catch((err: any) => {
-        logger.warn({ err, workspaceId: ws.id, repoId: repo.repoId, rootDir }, "detect repo skills roots failed to count top-level skills");
-        return 0;
-      });
-      repoCandidates.push({
-        sourceType: "repo",
-        repoId: repo.repoId,
-        repoDirName: repo.dirName,
-        rootDir,
-        displayName: `${repo.dirName}/${rootDir}`,
-        topLevelSkillCount,
-        enabled: false,
-        rootPath
-      });
-    }
-  }
-
-  workspaceCandidates.sort((a, b) => a.rootDir.localeCompare(b.rootDir));
-  repoCandidates.sort((a, b) => (a.displayName === b.displayName ? String(a.repoId || "").localeCompare(String(b.repoId || "")) : a.displayName.localeCompare(b.displayName)));
-  return [...workspaceCandidates, ...repoCandidates];
-}
-
-export async function resolveWorkspaceRepoSkillRootPath(params: {
-  ctx: AppContext;
-  workspace: Pick<WorkspaceRecord, "id" | "dirName" | "path">;
-  repo: { repoId: string; dirName: string; path: string };
-  relativePath: string;
-  logger: FastifyBaseLogger;
-  source: "detect" | "settings" | "prompt";
-}) {
-  const normalizedRootName = normalizeTopLevelSkillRootName(params.relativePath);
-  if (!normalizedRootName) return null;
-  const repoBasePath = await resolveWorkspaceRepoBasePath({
-    ctx: params.ctx,
-    workspace: params.workspace,
-    repo: params.repo,
-    logger: params.logger,
-    source: params.source === "prompt" ? "settings" : params.source
-  });
-  if (!repoBasePath) return null;
-  const rootPath = path.join(repoBasePath, normalizedRootName);
-  const rootStat = await fs.lstat(rootPath).catch((err: any) => {
-    if (err?.code === "ENOENT" || err?.code === "ENOTDIR") return null;
-    throw err;
-  });
-  if (!rootStat || !rootStat.isDirectory() || rootStat.isSymbolicLink()) return null;
-  const [repoRealPath, rootRealPath] = await Promise.all([
-    fs.realpath(repoBasePath).catch(() => ""),
-    fs.realpath(rootPath).catch(() => "")
-  ]);
-  if (!repoRealPath || !rootRealPath) return null;
-  if (!isPathInside(repoRealPath, rootRealPath)) {
-    params.logger.warn(
-      { workspaceId: params.workspace.id, repoId: params.repo.repoId, relativePath: normalizedRootName, source: params.source },
-      "skip repo skill root: resolved path outside repo root"
-    );
-    return null;
-  }
-  return rootPath;
-}
-
-type PromptEnabledExternalSkillRoot = {
-  sourceType: "workspace" | "repo";
-  repoId?: string;
-  rootDir: string;
-  rootPath: string;
-};
-
-export async function resolveWorkspaceExternalSkillRootPath(params: {
-  ctx: AppContext;
-  workspace: Pick<WorkspaceRecord, "id" | "dirName" | "path">;
-  sourceType: "workspace" | "repo";
-  rootDir: string;
-  repoId?: string;
-  logger: FastifyBaseLogger;
-  source: "settings" | "prompt";
-}) {
-  const normalizedRootName = normalizeTopLevelSkillRootName(params.rootDir);
-  if (!normalizedRootName) return null;
-
-  if (params.sourceType === "workspace") {
-    const rootPath = await resolveWorkspaceRootPath({ workspace: params.workspace, rootDir: normalizedRootName });
-    if (!rootPath) return null;
-    return {
-      sourceType: "workspace" as const,
-      rootDir: normalizedRootName,
-      rootPath
-    };
-  }
-
-  const repoId = String(params.repoId || "").trim();
-  if (!repoId) return null;
-  const repo = getWorkspaceRepoByRepoId(params.ctx.db, params.workspace.id, repoId);
-  if (!repo) return null;
-  const rootPath = await resolveWorkspaceRepoSkillRootPath({
-    ctx: params.ctx,
-    workspace: params.workspace,
-    repo,
-    relativePath: normalizedRootName,
-    logger: params.logger,
-    source: params.source
-  });
-  if (!rootPath) return null;
-  return {
-    sourceType: "repo" as const,
-    repoId,
-    rootDir: normalizedRootName,
-    rootPath
-  };
-}
-
-function readExternalSkillsSettings(ctx: AppContext): ExternalSkillSettingsPayload {
-  const found = getSettingJson(ctx.db, WORKSPACE_EXTERNAL_SKILL_ROOTS_SETTINGS_KEY);
-  const value = found?.value;
-  if (!value || typeof value !== "object" || Array.isArray(value)) return { workspaces: {} };
-  const workspaces = (value as any).workspaces;
-  if (!workspaces || typeof workspaces !== "object" || Array.isArray(workspaces)) {
-    return { workspaces: {} };
-  }
-  return { workspaces: workspaces as ExternalSkillSettingsPayload["workspaces"] };
-}
-
-function persistExternalSkillsSettings(ctx: AppContext, payload: ExternalSkillSettingsPayload, updatedAt: number) {
-  setSettingJson(ctx.db, WORKSPACE_EXTERNAL_SKILL_ROOTS_SETTINGS_KEY, payload, updatedAt);
-}
-
-function getExternalRootIdentityKey(input: { sourceType: "workspace" | "repo"; rootDir: string; repoId?: string }) {
-  return input.sourceType === "workspace"
-    ? `workspace\u0000${input.rootDir}`
-    : `repo\u0000${String(input.repoId || "")}\u0000${input.rootDir}`;
-}
-
-function listEnabledWorkspaceExternalSkillRootsRaw(ctx: AppContext, workspaceId: string) {
-  const settings = readExternalSkillsSettings(ctx);
-  const workspace = settings.workspaces?.[workspaceId];
-  const entries = Array.isArray(workspace?.enabledRoots) ? workspace.enabledRoots : [];
-  const normalized = new Map<string, ExternalSkillEnabledRoot>();
-  for (const it of entries) {
-    const sourceType = String((it as any)?.sourceType || "").trim() === "workspace" ? "workspace" : "repo";
-    const rootDir = normalizeTopLevelSkillRootName(String((it as any)?.rootDir || ""));
-    if (!rootDir) continue;
-    const repoId = sourceType === "repo" ? String((it as any)?.repoId || "").trim() : undefined;
-    if (sourceType === "repo" && !repoId) continue;
-    if (sourceType === "workspace" && String((it as any)?.repoId || "").trim()) continue;
-    const key = getExternalRootIdentityKey({ sourceType, repoId, rootDir });
-    normalized.set(key, {
-      sourceType,
-      repoId,
-      rootDir,
-      enabledAt: Number.isFinite(Number((it as any)?.enabledAt)) ? Math.floor(Number((it as any).enabledAt)) : 0
-    });
-  }
-  return [...normalized.values()].sort((a, b) => {
-    if (a.sourceType !== b.sourceType) return a.sourceType === "workspace" ? -1 : 1;
-    if (a.sourceType === "workspace") return a.rootDir.localeCompare(b.rootDir);
-    const repoCmp = String(a.repoId || "").localeCompare(String(b.repoId || ""));
-    if (repoCmp !== 0) return repoCmp;
-    return a.rootDir.localeCompare(b.rootDir);
-  });
-}
-
-function readWorkspaceAgentsInstructionsSettings(ctx: AppContext): WorkspaceAgentsInstructionsSettingsPayload {
-  const found = getSettingJson(ctx.db, WORKSPACE_AGENTS_INSTRUCTIONS_SETTINGS_KEY);
-  const value = found?.value;
-  if (!value || typeof value !== "object" || Array.isArray(value)) return { workspaces: {} };
-  const workspaces = (value as any).workspaces;
-  if (!workspaces || typeof workspaces !== "object" || Array.isArray(workspaces)) return { workspaces: {} };
-  return { workspaces: workspaces as WorkspaceAgentsInstructionsSettingsPayload["workspaces"] };
-}
-
-function persistWorkspaceAgentsInstructionsSettings(
-  ctx: AppContext,
-  payload: WorkspaceAgentsInstructionsSettingsPayload,
-  updatedAt: number
-) {
-  setSettingJson(ctx.db, WORKSPACE_AGENTS_INSTRUCTIONS_SETTINGS_KEY, payload, updatedAt);
-}
-
-function getAgentsSourceIdentityKey(input: { sourceType: "workspace" | "repo"; repoId?: string }) {
-  return input.sourceType === "workspace" ? "workspace" : `repo\u0000${String(input.repoId || "")}`;
-}
-
-function listEnabledWorkspaceAgentsInstructionsSourcesRaw(ctx: AppContext, workspaceId: string) {
-  const settings = readWorkspaceAgentsInstructionsSettings(ctx);
-  const workspace = settings.workspaces?.[workspaceId];
-  const entries = Array.isArray(workspace?.enabledSources) ? workspace.enabledSources : [];
-  const normalized = new Map<string, WorkspaceAgentsEnabledSource>();
-  for (const it of entries) {
-    const sourceType = String((it as any)?.sourceType || "").trim() === "workspace" ? "workspace" : "repo";
-    const repoId = sourceType === "repo" ? String((it as any)?.repoId || "").trim() : undefined;
-    if (sourceType === "repo" && !repoId) continue;
-    if (sourceType === "workspace" && String((it as any)?.repoId || "").trim()) continue;
-    const key = getAgentsSourceIdentityKey({ sourceType, repoId });
-    normalized.set(key, {
-      sourceType,
-      repoId,
-      enabledAt: Number.isFinite(Number((it as any)?.enabledAt)) ? Math.floor(Number((it as any).enabledAt)) : 0
-    });
-  }
-  return [...normalized.values()].sort((a, b) => {
-    if (a.sourceType !== b.sourceType) return a.sourceType === "workspace" ? -1 : 1;
-    if (a.sourceType === "workspace") return 0;
-    return String(a.repoId || "").localeCompare(String(b.repoId || ""));
-  });
-}
-
-async function listWorkspaceAgentsInstructionsCandidates(
-  ctx: AppContext,
-  logger: FastifyBaseLogger,
-  ws: WorkspaceRecord
-): Promise<Array<Pick<WorkspaceAgentsInstructionCandidate, "sourceType" | "repoId" | "displayPath">>> {
-  const items: Array<Pick<WorkspaceAgentsInstructionCandidate, "sourceType" | "repoId" | "displayPath">> = [];
-
-  const wsFilePath = path.join(ws.path, WORKSPACE_AGENTS_FILENAME);
-  const wsStat = await fs.lstat(wsFilePath).catch((err: any) => {
-    if (err?.code === "ENOENT" || err?.code === "ENOTDIR") return null;
-    throw err;
-  });
-  if (wsStat && wsStat.isFile() && !wsStat.isSymbolicLink()) {
-    items.push({ sourceType: "workspace", displayPath: WORKSPACE_AGENTS_FILENAME });
-  }
-
-  const repos = listWorkspaceRepos(ctx.db, ws.id);
-  for (const repo of repos) {
-    const repoBasePath = await resolveWorkspaceRepoBasePath({ ctx, workspace: ws, repo, logger, source: "detect" });
-    if (!repoBasePath) continue;
-    const repoFilePath = path.join(repoBasePath, WORKSPACE_AGENTS_FILENAME);
-    const repoStat = await fs.lstat(repoFilePath).catch((err: any) => {
-      if (err?.code === "ENOENT" || err?.code === "ENOTDIR") return null;
-      throw err;
-    });
-    if (repoStat && repoStat.isFile() && !repoStat.isSymbolicLink()) {
-      items.push({ sourceType: "repo", repoId: repo.repoId, displayPath: `${repo.dirName}/${WORKSPACE_AGENTS_FILENAME}` });
-    }
-  }
-
-  return items;
-}
 
 function readWorkspaceAgentEnablementSettings(ctx: AppContext): WorkspaceAgentEnablementSettingsPayload {
   const found = getSettingJson(ctx.db, WORKSPACE_AGENT_ENABLEMENT_SETTINGS_KEY);
@@ -1234,7 +812,10 @@ export async function updateWorkspaceAgentEnablementSettings(
   workspaceId: string,
   payload: UpdateWorkspaceAgentEnablementSettingsRequest
 ): Promise<WorkspaceAgentEnablementSettingsResponse> {
+  return workspaceLifecycleCoordinator.withMutation(workspaceId, async () => {
+    return withWorkspaceLock({ workspaceId }, async () => {
   const ws = await getWorkspaceById(ctx, workspaceId);
+  workspaceDeletingFence.assertWritable(ws.id);
   const mode: WorkspaceAgentEnablementMode = String((payload as any)?.mode || "").trim() === "subset" ? "subset" : "all";
   const now = nowMs();
 
@@ -1259,244 +840,6 @@ export async function updateWorkspaceAgentEnablementSettings(
     enabledAgentIds,
     updatedAt: now
   };
-}
-
-export async function detectWorkspaceExternalSkillRoots(
-  ctx: AppContext,
-  logger: FastifyBaseLogger,
-  workspaceId: string
-): Promise<WorkspaceExternalSkillRootsDetectResponse> {
-  const ws = await getWorkspaceById(ctx, workspaceId);
-  const enabledSet = new Set(
-    listEnabledWorkspaceExternalSkillRootsRaw(ctx, workspaceId).map((it) =>
-      getExternalRootIdentityKey({ sourceType: it.sourceType, repoId: it.repoId, rootDir: it.rootDir })
-    )
-  );
-  const items = (await listWorkspaceExternalSkillsCandidates(ctx, logger, ws)).map((item) => ({
-    sourceType: item.sourceType,
-    repoId: item.repoId,
-    repoDirName: item.repoDirName,
-    rootDir: item.rootDir,
-    displayName: item.displayName,
-    topLevelSkillCount: item.topLevelSkillCount,
-    enabled: enabledSet.has(
-      getExternalRootIdentityKey({ sourceType: item.sourceType, repoId: item.repoId, rootDir: item.rootDir })
-    )
-  }));
-  return { workspaceId: ws.id, items, updatedAt: nowMs() };
-}
-
-export async function getWorkspaceExternalSkillRootsSettings(
-  ctx: AppContext,
-  workspaceId: string
-): Promise<WorkspaceExternalSkillRootsSettingsResponse> {
-  const ws = await getWorkspaceById(ctx, workspaceId);
-  const reposById = new Map(listWorkspaceRepos(ctx.db, ws.id).map((repo) => [repo.repoId, repo] as const));
-  const enabled = listEnabledWorkspaceExternalSkillRootsRaw(ctx, workspaceId);
-  const enabledRoots = enabled
-    .map((it) => {
-      if (it.sourceType === "workspace") {
-        return {
-          sourceType: "workspace" as const,
-          rootDir: it.rootDir,
-          displayName: it.rootDir,
-          enabledAt: it.enabledAt || 0
-        };
-      }
-      const repo = it.repoId ? reposById.get(it.repoId) : null;
-      if (!repo || !it.repoId) return null;
-      return {
-        sourceType: "repo" as const,
-        repoId: it.repoId,
-        rootDir: it.rootDir,
-        displayName: `${repo.dirName}/${it.rootDir}`,
-        enabledAt: it.enabledAt || 0
-      };
-    })
-    .filter((it): it is NonNullable<typeof it> => it !== null);
-
-  const settings = readExternalSkillsSettings(ctx);
-  const updatedAt = Number(settings.workspaces?.[ws.id]?.updatedAt || 0) || 0;
-  return { workspaceId: ws.id, enabledRoots, updatedAt };
-}
-
-export async function updateWorkspaceExternalSkillRootsSettings(
-  ctx: AppContext,
-  logger: FastifyBaseLogger,
-  workspaceId: string,
-  payload: UpdateWorkspaceExternalSkillRootsSettingsRequest
-): Promise<WorkspaceExternalSkillRootsSettingsResponse> {
-  const ws = await getWorkspaceById(ctx, workspaceId);
-  const candidates = await listWorkspaceExternalSkillsCandidates(ctx, logger, ws);
-  const candidateMap = new Map(candidates.map((it) => [
-    getExternalRootIdentityKey({ sourceType: it.sourceType, repoId: it.repoId, rootDir: it.rootDir }),
-    it
-  ] as const));
-  const reposById = new Map(listWorkspaceRepos(ctx.db, ws.id).map((repo) => [repo.repoId, repo] as const));
-  const now = nowMs();
-
-  const deduped = new Map<string, ExternalSkillEnabledRoot>();
-  for (const item of payload.enabledRoots || []) {
-    const sourceType = String((item as any)?.sourceType || "").trim();
-    const normalizedSource = sourceType === "workspace" ? "workspace" : sourceType === "repo" ? "repo" : "";
-    if (!normalizedSource) {
-      throw new HttpError(400, "invalid external skills root source", "WORKSPACE_EXTERNAL_SKILL_ROOT_INVALID");
-    }
-    const rootDir = normalizeTopLevelSkillRootName(String((item as any)?.rootDir || ""));
-    const repoId = normalizedSource === "repo" ? String((item as any)?.repoId || "").trim() : undefined;
-    if (!rootDir) {
-      throw new HttpError(400, `invalid external skills root: ${normalizedSource}/${rootDir}`, "WORKSPACE_EXTERNAL_SKILL_ROOT_INVALID");
-    }
-    if (normalizedSource === "workspace" && String((item as any)?.repoId || "").trim()) {
-      throw new HttpError(400, "workspace root must not include repoId", "WORKSPACE_EXTERNAL_SKILL_ROOT_INVALID");
-    }
-    if (normalizedSource === "repo" && !repoId) {
-      throw new HttpError(400, "repo root must include repoId", "WORKSPACE_EXTERNAL_SKILL_ROOT_INVALID");
-    }
-
-    const key = getExternalRootIdentityKey({ sourceType: normalizedSource, repoId, rootDir });
-    const candidate = candidateMap.get(key);
-    if (!candidate) {
-      throw new HttpError(400, `invalid external skills root: ${normalizedSource}/${repoId || ""}/${rootDir}`, "WORKSPACE_EXTERNAL_SKILL_ROOT_INVALID");
-    }
-
-    const resolved = await resolveWorkspaceExternalSkillRootPath({
-      ctx,
-      workspace: ws,
-      sourceType: normalizedSource,
-      repoId,
-      rootDir,
-      logger,
-      source: "settings"
     });
-    if (!resolved) {
-      throw new HttpError(400, `invalid external skills root: ${normalizedSource}/${repoId || ""}/${rootDir}`, "WORKSPACE_EXTERNAL_SKILL_ROOT_INVALID");
-    }
-
-    if (normalizedSource === "repo" && repoId && !reposById.has(repoId)) {
-      throw new HttpError(400, `invalid external skills root: ${normalizedSource}/${repoId}/${rootDir}`, "WORKSPACE_EXTERNAL_SKILL_ROOT_INVALID");
-    }
-
-    deduped.set(key, {
-      sourceType: normalizedSource,
-      repoId,
-      rootDir,
-      enabledAt: now
-    });
-  }
-
-  const settings = readExternalSkillsSettings(ctx);
-  const workspaces = { ...(settings.workspaces || {}) };
-  workspaces[ws.id] = {
-    enabledRoots: [...deduped.values()],
-    updatedAt: now
-  };
-  persistExternalSkillsSettings(ctx, { workspaces }, now);
-
-  const enabledRoots = [...deduped.values()]
-    .sort((a, b) => {
-      if (a.sourceType !== b.sourceType) return a.sourceType === "workspace" ? -1 : 1;
-      if (a.sourceType === "workspace") return a.rootDir.localeCompare(b.rootDir);
-      const repoCmp = String(a.repoId || "").localeCompare(String(b.repoId || ""));
-      if (repoCmp !== 0) return repoCmp;
-      return a.rootDir.localeCompare(b.rootDir);
-    })
-    .map((it) => ({
-      sourceType: it.sourceType,
-      ...(it.sourceType === "repo" ? { repoId: it.repoId } : {}),
-      rootDir: it.rootDir,
-      displayName:
-        it.sourceType === "workspace"
-          ? it.rootDir
-          : `${reposById.get(String(it.repoId || ""))?.dirName || it.repoId}/${it.rootDir}`,
-      enabledAt: it.enabledAt
-    }));
-
-  return { workspaceId: ws.id, enabledRoots, updatedAt: now };
-}
-
-export async function listWorkspaceTopLevelSkills(
-  ctx: AppContext,
-  logger: FastifyBaseLogger,
-  workspaceId: string
-): Promise<WorkspaceTopLevelSkillsResponse> {
-  const ws = await getWorkspaceById(ctx, workspaceId);
-  const rows: WorkspaceTopLevelSkillsResponse["items"] = [];
-
-  const builtinRootPath = path.join(ctx.repoRoot, BUILTIN_SKILLS_ROOT);
-  const builtin = await scanReadableTopLevelSkills({
-    rootPath: builtinRootPath,
-    logger,
-    logMessage: "failed to read builtin top-level skill summary"
   });
-  for (const item of builtin) {
-    if (!["builtin", item.entryName].every(isValidSkillPathSegment)) {
-      logger.warn({ sourceType: "builtin" }, "skip top-level skill with non-callable identifier");
-      continue;
-    }
-    const parsed = parseSkillFrontmatter(item.text);
-    rows.push({
-      id: `builtin/${item.entryName}`,
-      name: parsed.name.trim() || item.entryName,
-      description: parsed.description.trim(),
-      sourceType: "builtin"
-    });
-  }
-
-  const enabledRoots = await listEnabledWorkspaceExternalSkillRoots(ctx, logger, workspaceId);
-  for (const root of enabledRoots) {
-    const skills = await scanReadableTopLevelSkills({
-      rootPath: root.rootPath,
-      logger,
-      logMessage: "failed to read workspace top-level skill summary"
-    });
-    const idPrefix = root.sourceType === "workspace"
-      ? `workspace/${root.rootDir}`
-      : `repo/${root.repoId}/${root.rootDir}`;
-    for (const item of skills) {
-      const segments = root.sourceType === "workspace"
-        ? ["workspace", root.rootDir, item.entryName]
-        : ["repo", String(root.repoId || ""), root.rootDir, item.entryName];
-      if (!segments.every(isValidSkillPathSegment)) {
-        logger.warn({ sourceType: root.sourceType, ...(root.repoId ? { repoId: root.repoId } : {}), rootDir: root.rootDir }, "skip top-level skill with non-callable identifier");
-        continue;
-      }
-      const parsed = parseSkillFrontmatter(item.text);
-      rows.push({
-        id: `${idPrefix}/${item.entryName}`,
-        name: parsed.name.trim() || item.entryName,
-        description: parsed.description.trim(),
-        sourceType: root.sourceType,
-        ...(root.repoId ? { repoId: root.repoId } : {}),
-        rootDir: root.rootDir
-      });
-    }
-  }
-
-  rows.sort((a, b) => a.id.localeCompare(b.id));
-  return { workspaceId: ws.id, items: rows, updatedAt: nowMs() };
-}
-
-export async function listEnabledWorkspaceExternalSkillRoots(
-  ctx: AppContext,
-  logger: FastifyBaseLogger,
-  workspaceId: string
-): Promise<PromptEnabledExternalSkillRoot[]> {
-  const ws = await getWorkspaceById(ctx, workspaceId);
-  const enabled = listEnabledWorkspaceExternalSkillRootsRaw(ctx, workspaceId);
-  const items: PromptEnabledExternalSkillRoot[] = [];
-  for (const item of enabled) {
-    const resolved = await resolveWorkspaceExternalSkillRootPath({
-      ctx,
-      workspace: ws,
-      sourceType: item.sourceType,
-      repoId: item.repoId,
-      rootDir: item.rootDir,
-      logger,
-      source: "prompt"
-    });
-    if (!resolved) continue;
-    items.push(resolved);
-  }
-  return items;
 }

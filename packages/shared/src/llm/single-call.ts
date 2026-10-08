@@ -1,22 +1,15 @@
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
-import { generateText, streamText, type ToolSet } from "ai";
+import { createMoonshotAI } from "@ai-sdk/moonshotai";
+import { createDeepSeek } from "@ai-sdk/deepseek";
+import { streamText, type JSONValue, type ModelMessage, type StreamTextResult, type TextStreamPart, type ToolSet } from "ai";
+import { parseAiSdkCallSettings } from "./ai-sdk-call-settings.js";
+import { isReasoningProviderNpm, mergeReasoningProviderOptions } from "./reasoning-provider-options.js";
+import { reasoningProviderFixedOptions } from "./reasoning-provider-policy.js";
 
 const MODEL_TIMEOUT_MS_DEFAULT = 60_000;
 const MODEL_TIMEOUT_MS_MAX = 2_147_483_647;
-
-const RESERVED_MODEL_OPTION_KEYS = new Set([
-  "model",
-  "system",
-  "prompt",
-  "messages",
-  "input",
-  "abortSignal",
-  "providerOptions",
-  "tools",
-  "toolChoice"
-]);
 
 const SINGLE_CALL_ALLOWED_PARAM_KEYS = new Set([
   "system",
@@ -31,7 +24,8 @@ const SINGLE_CALL_ALLOWED_PARAM_KEYS = new Set([
   "allowTools"
 ]);
 
-export type SingleCallProviderNpm = "@ai-sdk/openai" | "@ai-sdk/openai-compatible" | "@ai-sdk/anthropic";
+export type SingleCallProviderNpm = "@ai-sdk/openai" | "@ai-sdk/openai-compatible" | "@ai-sdk/anthropic" | "@ai-sdk/moonshotai" | "@ai-sdk/deepseek";
+
 
 export type SingleCallModelProfile = {
   provider: {
@@ -40,7 +34,6 @@ export type SingleCallModelProfile = {
     options: {
       baseURL: string;
       apiKey: string;
-      apiMode?: "responses" | "chatCompletions";
     };
   };
   model: {
@@ -52,18 +45,20 @@ export type SingleCallModelProfile = {
 
 type SingleCallModelParams = {
   system?: string;
-  messages: Array<{
-    role: string;
-    content: unknown;
-  }>;
+  messages: ModelMessage[];
   sessionId?: string;
   temperature?: number;
   topP?: number;
   maxOutputTokens?: number;
-  timeoutMs?: number;
+  timeoutMs?: number | null;
   abortSignal?: AbortSignal;
   tools?: ToolSet;
   allowTools?: boolean;
+};
+
+/** Internal call-site policy; not a user-configurable model option. */
+type SingleCallExecutionOptions = {
+  disableSdkRetries?: boolean;
 };
 
 export type SingleCallGenerateResult = {
@@ -75,14 +70,31 @@ export type SingleCallStreamEvent =
   | { type: "text-delta"; text: string }
   | { type: "finish"; totalTokens: number | null };
 
-function isSafeObjectKey(raw: string) {
-  if (!raw) return false;
-  return raw !== "__proto__" && raw !== "prototype" && raw !== "constructor";
-}
-
 function toRecordObject(raw: unknown) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   return raw as Record<string, unknown>;
+}
+
+function toJsonValue(raw: unknown): JSONValue | undefined {
+  if (raw === null || typeof raw === "string" || typeof raw === "boolean") return raw;
+  if (typeof raw === "number") return Number.isFinite(raw) ? raw : undefined;
+  if (Array.isArray(raw)) {
+    const result: JSONValue[] = [];
+    for (const item of raw) {
+      const value = toJsonValue(item);
+      if (value === undefined) return undefined;
+      result.push(value);
+    }
+    return result;
+  }
+  const source = toRecordObject(raw);
+  if (!source) return undefined;
+  const result: Record<string, JSONValue> = {};
+  for (const [key, item] of Object.entries(source)) {
+    const value = toJsonValue(item);
+    if (value !== undefined) result[key] = value;
+  }
+  return result;
 }
 
 function toNonNegativeInt(raw: unknown) {
@@ -144,7 +156,8 @@ async function readStreamTotalTokens(stream: unknown): Promise<number | null> {
   return null;
 }
 
-function normalizeTimeoutMs(raw: number | undefined) {
+function normalizeTimeoutMs(raw: number | null | undefined) {
+  if (raw === null) return null;
   if (raw === undefined) return MODEL_TIMEOUT_MS_DEFAULT;
   const value = Number(raw);
   if (!Number.isFinite(value)) throw new Error("timeoutMs must be a finite number");
@@ -175,22 +188,17 @@ function assertAllowedParamKeys(params: SingleCallModelParams) {
 
 function providerOptionsKeyByNpm(npm: SingleCallProviderNpm) {
   if (npm === "@ai-sdk/openai-compatible") return "openaiCompatible";
+  if (npm === "@ai-sdk/moonshotai") return "moonshotai";
+  if (npm === "@ai-sdk/deepseek") return "deepseek";
   return npm === "@ai-sdk/anthropic" ? "anthropic" : "openai";
 }
 
 function buildModelRuntimeOptions(profile: SingleCallModelProfile) {
   const source = toRecordObject(profile.model.options) ?? {};
-  const aiSdkSource = toRecordObject(source.aiSdk) ?? {};
-  const aiSdk: Record<string, unknown> = {};
-  for (const [rawKey, value] of Object.entries(aiSdkSource)) {
-    const key = rawKey.trim();
-    if (!isSafeObjectKey(key)) continue;
-    if (RESERVED_MODEL_OPTION_KEYS.has(key)) continue;
-    aiSdk[key] = value;
-  }
+  const aiSdk = parseAiSdkCallSettings(source.aiSdk);
 
   if (aiSdk.maxOutputTokens === undefined && source.maxOutputTokens !== undefined) {
-    aiSdk.maxOutputTokens = source.maxOutputTokens;
+    aiSdk.maxOutputTokens = parseAiSdkCallSettings({ maxOutputTokens: source.maxOutputTokens }).maxOutputTokens;
   }
 
   const providerOptionsByKey = toRecordObject(source.providerOptionsByKey) ?? {};
@@ -200,7 +208,7 @@ function buildModelRuntimeOptions(profile: SingleCallModelProfile) {
   if (providerFromMap) {
     for (const [rawKey, value] of Object.entries(providerFromMap)) {
       const key = rawKey.trim();
-      if (!isSafeObjectKey(key)) continue;
+      if (!key || key === "__proto__" || key === "prototype" || key === "constructor") continue;
       providerOptions[key] = value;
     }
   }
@@ -208,7 +216,7 @@ function buildModelRuntimeOptions(profile: SingleCallModelProfile) {
   if (Object.keys(providerOptions).length === 0) {
     for (const [rawKey, value] of Object.entries(source)) {
       const key = rawKey.trim();
-      if (!isSafeObjectKey(key)) continue;
+      if (!key || key === "__proto__" || key === "prototype" || key === "constructor") continue;
       if (key === "aiSdk" || key === "providerOptionsByKey" || key === "maxOutputTokens") continue;
       providerOptions[key] = value;
     }
@@ -219,27 +227,6 @@ function buildModelRuntimeOptions(profile: SingleCallModelProfile) {
     providerOptions,
     providerKey
   };
-}
-
-function resolveOpenAiModelFactory(sdk: Record<string, unknown>, apiMode: "responses" | "chatCompletions") {
-  const responses = typeof sdk.responses === "function" ? (sdk.responses as (modelId: string) => unknown) : null;
-  const chat = typeof sdk.chat === "function" ? (sdk.chat as (modelId: string) => unknown) : null;
-  const chatCompletions =
-    typeof sdk.chatCompletions === "function" ? (sdk.chatCompletions as (modelId: string) => unknown) : null;
-
-  if (apiMode === "chatCompletions") {
-    if (chat) return chat;
-    if (chatCompletions) return chatCompletions;
-    throw new Error(`openai sdk does not expose chat/chatCompletions model factories for apiMode=${apiMode}`);
-  }
-
-  if (responses) return responses;
-  throw new Error(`openai sdk does not expose responses model factory for apiMode=${apiMode}`);
-}
-
-function normalizeOpenAiApiMode(raw: unknown): "responses" | "chatCompletions" {
-  if (raw === "responses" || raw === "chatCompletions") return raw;
-  return "responses";
 }
 
 function hasValidPromptCacheKey(providerOptions: Record<string, unknown>) {
@@ -269,9 +256,7 @@ function createLanguageModel(profile: SingleCallModelProfile) {
       apiKey: profile.provider.options.apiKey,
       baseURL: profile.provider.options.baseURL
     });
-    const apiMode = normalizeOpenAiApiMode(profile.provider.options.apiMode);
-    const createModel = resolveOpenAiModelFactory(sdk as unknown as Record<string, unknown>, apiMode);
-    return createModel(providerModelId);
+    return sdk.responses(providerModelId);
   }
 
   if (profile.provider.npm === "@ai-sdk/openai-compatible") {
@@ -283,6 +268,26 @@ function createLanguageModel(profile: SingleCallModelProfile) {
     return sdk.chatModel(providerModelId);
   }
 
+  if (profile.provider.npm === "@ai-sdk/moonshotai") {
+    const sdk = createMoonshotAI({
+      apiKey: profile.provider.options.apiKey,
+      ...(profile.provider.options.baseURL?.trim() ? { baseURL: profile.provider.options.baseURL.trim() } : {})
+    });
+    return sdk.chatModel(providerModelId);
+  }
+
+  if (profile.provider.npm === "@ai-sdk/deepseek") {
+    const sdk = createDeepSeek({
+      apiKey: profile.provider.options.apiKey,
+      ...(profile.provider.options.baseURL?.trim() ? { baseURL: profile.provider.options.baseURL.trim() } : {})
+    });
+    return sdk.chat(providerModelId);
+  }
+
+  if (profile.provider.npm !== "@ai-sdk/anthropic") {
+    throw new Error("reasoning provider single-call factory is not yet available");
+  }
+
   const sdk = createAnthropic({
     apiKey: profile.provider.options.apiKey,
     baseURL: profile.provider.options.baseURL
@@ -290,11 +295,13 @@ function createLanguageModel(profile: SingleCallModelProfile) {
   return sdk(providerModelId);
 }
 
-function createTimedAbortSignal(params: { timeoutMs: number; abortSignal?: AbortSignal }) {
+function createTimedAbortSignal(params: { timeoutMs: number | null; abortSignal?: AbortSignal }) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => {
-    controller.abort(new Error(`single-call model timeout after ${params.timeoutMs}ms`));
-  }, params.timeoutMs);
+  const timeout = params.timeoutMs == null
+    ? null
+    : setTimeout(() => {
+        controller.abort(new Error(`single-call model timeout after ${params.timeoutMs}ms`));
+      }, params.timeoutMs);
 
   const parent = params.abortSignal;
   const onParentAbort = () => {
@@ -307,7 +314,7 @@ function createTimedAbortSignal(params: { timeoutMs: number; abortSignal?: Abort
   }
 
   const cleanup = () => {
-    clearTimeout(timeout);
+    if (timeout) clearTimeout(timeout);
     if (parent) {
       try {
         parent.removeEventListener("abort", onParentAbort);
@@ -324,21 +331,32 @@ function createTimedAbortSignal(params: { timeoutMs: number; abortSignal?: Abort
   };
 }
 
-function buildSingleCallRequest(profile: SingleCallModelProfile, params: SingleCallModelParams, abortSignal: AbortSignal) {
+type SingleCallStreamChunk = TextStreamPart<ToolSet>;
+type SingleCallStreamResult = Pick<StreamTextResult<ToolSet, never>, "fullStream" | "usage" | "totalUsage">;
+type SingleCallRequest = Parameters<typeof streamText<ToolSet>>[0];
+
+function buildSingleCallRequest(profile: SingleCallModelProfile, params: SingleCallModelParams, abortSignal: AbortSignal, options?: SingleCallExecutionOptions) {
   assertAllowedParamKeys(params);
   const runtimeOptions = buildModelRuntimeOptions(profile);
-  const request: Record<string, unknown> = {
+  if (isReasoningProviderNpm(profile.provider.npm)) {
+    runtimeOptions.providerOptions = mergeReasoningProviderOptions(
+      runtimeOptions.providerOptions, reasoningProviderFixedOptions(profile.provider.npm));
+  }
+  const request: SingleCallRequest = {
     model: createLanguageModel(profile),
     messages: params.messages,
-    abortSignal
+    abortSignal,
+    ...runtimeOptions.aiSdk,
   };
+  if (options?.disableSdkRetries) {
+    request.maxRetries = 0;
+    // A summary error is propagated through fullStream; avoid the SDK default
+    // error logger printing provider-controlled responses (which may be private).
+    request.onError = () => {};
+  }
 
   if (typeof params.system === "string" && params.system.trim()) {
     request.system = params.system;
-  }
-
-  if (Object.keys(runtimeOptions.aiSdk).length > 0) {
-    Object.assign(request, runtimeOptions.aiSdk);
   }
   const providerOptions = buildProviderOptionsWithPromptCacheKey({
     providerNpm: profile.provider.npm,
@@ -346,8 +364,13 @@ function buildSingleCallRequest(profile: SingleCallModelProfile, params: SingleC
     providerOptions: runtimeOptions.providerOptions
   });
   if (Object.keys(providerOptions).length > 0) {
+    const jsonProviderOptions: Record<string, JSONValue> = {};
+    for (const [key, value] of Object.entries(providerOptions)) {
+      const jsonValue = toJsonValue(value);
+      if (jsonValue !== undefined) jsonProviderOptions[key] = jsonValue;
+    }
     request.providerOptions = {
-      [runtimeOptions.providerKey]: providerOptions
+      [runtimeOptions.providerKey]: jsonProviderOptions
     };
   }
 
@@ -369,11 +392,11 @@ function buildSingleCallRequest(profile: SingleCallModelProfile, params: SingleC
   return request;
 }
 
-export async function generateSingleCallText(profile: SingleCallModelProfile, params: SingleCallModelParams): Promise<SingleCallGenerateResult> {
+export async function generateSingleCallText(profile: SingleCallModelProfile, params: SingleCallModelParams, options?: SingleCallExecutionOptions): Promise<SingleCallGenerateResult> {
   let text = "";
   let totalTokens: number | null = null;
 
-  for await (const event of streamSingleCallText(profile, params)) {
+  for await (const event of streamSingleCallText(profile, params, options)) {
     if (event.type === "text-delta") {
       text += event.text;
       continue;
@@ -389,7 +412,7 @@ export async function generateSingleCallText(profile: SingleCallModelProfile, pa
   };
 }
 
-export function streamSingleCallText(profile: SingleCallModelProfile, params: SingleCallModelParams): AsyncIterable<SingleCallStreamEvent> {
+export function streamSingleCallText(profile: SingleCallModelProfile, params: SingleCallModelParams, options?: SingleCallExecutionOptions): AsyncIterable<SingleCallStreamEvent> {
   const timeoutMs = normalizeTimeoutMs(params.timeoutMs);
   return {
     [Symbol.asyncIterator]: async function* () {
@@ -397,23 +420,21 @@ export function streamSingleCallText(profile: SingleCallModelProfile, params: Si
         timeoutMs,
         abortSignal: params.abortSignal
       });
-      let stream: unknown = null;
+      let stream: SingleCallStreamResult | null = null;
       let finishEmitted = false;
       try {
-        const request = buildSingleCallRequest(profile, params, timed.signal);
-        stream = streamText(request as any);
-        for await (const chunk of (stream as any).fullStream as AsyncIterable<any>) {
-          if (!chunk || typeof chunk !== "object") continue;
+        const request = buildSingleCallRequest(profile, params, timed.signal, options);
+        stream = streamText(request);
+        for await (const chunk of stream.fullStream as AsyncIterable<SingleCallStreamChunk>) {
           if (chunk.type === "text-delta") {
-            const text = String(chunk.text || "");
+            const text = chunk.text;
             if (!text) continue;
             yield { type: "text-delta", text };
             continue;
           }
           if (chunk.type === "finish") {
             let totalTokens =
-              extractTotalTokens((chunk as Record<string, unknown>).usage) ??
-              extractTotalTokens((chunk as Record<string, unknown>).totalUsage) ??
+              extractTotalTokens(chunk.totalUsage) ??
               null;
             if (totalTokens == null) {
               totalTokens = await readStreamTotalTokens(stream);
@@ -423,10 +444,7 @@ export function streamSingleCallText(profile: SingleCallModelProfile, params: Si
             continue;
           }
           if (chunk.type === "error") {
-            if ((chunk as Record<string, unknown>).error !== undefined) {
-              throw (chunk as Record<string, unknown>).error;
-            }
-            throw new Error("stream error");
+            throw chunk.error;
           }
         }
 

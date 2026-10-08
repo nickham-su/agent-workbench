@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
-import { setSettingJson } from "../../settings/settings.store.js";
+import { getSettingJson, setSettingJson } from "../../settings/settings.store.js";
 import { normalizeMaxSubtaskDepthForUpdate } from "../../settings/settings.service.js";
-import { createAgentSession, createRunRecord, getRunRecord } from "../agent.store.js";
+import { AI_SDK_REDACTED_HEADER_VALUE } from "@agent-workbench/shared/llm-ai-sdk-call-settings";
+import { createMessageRunRecord, getRunRecord } from "../agent-message.store.js";
+import { appendMessage, createMessageSession, getMessageSessionHead } from "../agent-message.store.js";
 import { newSortableId } from "../../../utils/ids.js";
 import {
   createAgentIntegrationFixture,
@@ -114,18 +116,18 @@ async function createIntegrationFixtureForTest(
 function createSubtaskSessionForSettingsTest(fixture: AgentIntegrationFixture, params?: {
   title?: string;
   forkedFromSessionId?: string | null;
-  forkedFromItemId?: number | null;
+  forkedFromMessageId?: string | null;
 }) {
   const createdAt = Date.now();
   const id = newSortableId("sess");
-  createAgentSession(fixture.db, {
+  createMessageSession(fixture.db, {
     id,
     workspaceId: fixture.workspaceId,
     title: params?.title || "it-subtask-session",
     kind: "subtask",
     createdAt,
     forkedFromSessionId: params?.forkedFromSessionId ?? null,
-    forkedFromItemId: params?.forkedFromItemId ?? null
+    forkedFromMessageId: params?.forkedFromMessageId ?? null
   });
   return { id };
 }
@@ -236,6 +238,60 @@ test("agent settings 保存并回读 scratchpad，默认工具列表仍不包含
   assert.deepEqual(fallbackBody.agents[0]?.tools, ["bash", "write", "apply_patch", "subtask"]);
 });
 
+test("workspace available agents 按 surface 过滤，并支持 all 且保留工作区启用限制", async (t: TestContext) => {
+  const fixture = await createIntegrationFixtureForTest(t);
+  const createAgent = (id: string, name: string, scope: "user" | "subtask" | "both", order: number) => ({
+    id,
+    name,
+    summary: "",
+    prompt: "",
+    tools: ["read"],
+    pluginTools: [],
+    mcpServers: [],
+    defaultModel: { providerId: "ppchat", modelId: "gpt-5.2" },
+    scope,
+    order
+  });
+  const agentsRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/agents",
+    payload: {
+      agents: [
+        createAgent("user-only", "User Only", "user", 0),
+        createAgent("subtask-only", "Subtask Only", "subtask", 1),
+        createAgent("both", "Both", "both", 2),
+        createAgent("disabled-user", "Disabled User", "user", 3),
+      ]
+    }
+  });
+  assert.equal(agentsRes.statusCode, 200, `configure agents failed: ${agentsRes.body}`);
+
+  const enablementRes = await fixture.app.inject({
+    method: "PUT",
+    url: `/api/workspaces/${fixture.workspaceId}/agent-enablement/settings`,
+    payload: {
+      mode: "subset",
+      enabledAgentIds: ["user-only", "subtask-only", "both"]
+    }
+  });
+  assert.equal(enablementRes.statusCode, 200, `update workspace enablement failed: ${enablementRes.body}`);
+
+  async function listAvailable(surface?: "user" | "subtask" | "all") {
+    const suffix = surface ? `?surface=${surface}` : "";
+    const response = await fixture.app.inject({
+      method: "GET",
+      url: `/api/workspaces/${fixture.workspaceId}/agents/available${suffix}`
+    });
+    assert.equal(response.statusCode, 200, `list available agents failed: ${response.body}`);
+    return (response.json() as { agents: Array<{ id: string }> }).agents.map((agent) => agent.id);
+  }
+
+  assert.deepEqual(await listAvailable(), ["user-only", "both"]);
+  assert.deepEqual(await listAvailable("user"), ["user-only", "both"]);
+  assert.deepEqual(await listAvailable("subtask"), ["subtask-only", "both"]);
+  assert.deepEqual(await listAvailable("all"), ["user-only", "subtask-only", "both"]);
+});
+
 test("agent scope 校验会拒绝错误场景的 agent 并在无可用 agent 时返回明确错误", async (t: TestContext) => {
   const fixture = await createIntegrationFixtureForTest(t);
   const agentsRes = await fixture.app.inject({
@@ -312,6 +368,45 @@ test("agent runtime settings maxSubtaskDepth 默认值、边界和非法更新",
   }
 });
 
+test("agent runtime settings modelRequestRetryBackoffMaxMs 默认值、边界和旧数据兼容", async (t: TestContext) => {
+  const fixture = await createIntegrationFixtureForTest(t);
+
+  const defaultRes = await fixture.app.inject({ method: "GET", url: "/api/settings/agent/runtime" });
+  assert.equal(defaultRes.statusCode, 200);
+  assert.equal(defaultRes.json().modelRequestRetryBackoffMaxMs, 60_000);
+
+  for (const value of [2_000, 3_600_000]) {
+    const res = await fixture.app.inject({
+      method: "PUT",
+      url: "/api/settings/agent/runtime",
+      payload: { modelRequestRetryBackoffMaxMs: value }
+    });
+    assert.equal(res.statusCode, 200, res.body);
+    assert.equal(res.json().modelRequestRetryBackoffMaxMs, value);
+  }
+
+  for (const invalid of [1_999, 3_600_001, 2_000.5, "not-a-number", null]) {
+    const res = await fixture.app.inject({
+      method: "PUT",
+      url: "/api/settings/agent/runtime",
+      payload: { modelRequestRetryBackoffMaxMs: invalid }
+    });
+    assert.equal(res.statusCode, 400, res.body);
+  }
+
+  setSettingJson(fixture.db, "agent_runtime_v1", { modelRequestMaxRetries: 5 }, Date.now());
+  const legacyRes = await fixture.app.inject({ method: "GET", url: "/api/settings/agent/runtime" });
+  assert.equal(legacyRes.statusCode, 200);
+  assert.equal(legacyRes.json().modelRequestRetryBackoffMaxMs, 60_000);
+
+  for (const corrupt of [1_999, 3_600_001, 2_000.5, "not-a-number", null]) {
+    setSettingJson(fixture.db, "agent_runtime_v1", { modelRequestRetryBackoffMaxMs: corrupt }, Date.now());
+    const res = await fixture.app.inject({ method: "GET", url: "/api/settings/agent/runtime" });
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.json().modelRequestRetryBackoffMaxMs, 60_000, `stored ${String(corrupt)} should fall back to default`);
+  }
+});
+
 test("agent runtime settings 可通过 execution-profile 下发", async (t: TestContext) => {
   const fixture = await createIntegrationFixtureForTest(t);
 
@@ -321,7 +416,8 @@ test("agent runtime settings 可通过 execution-profile 下发", async (t: Test
     payload: {
       modelIdleTimeoutMs: 1234,
       modelTotalTimeoutMs: 5678,
-      modelRequestMaxRetries: 4
+      modelRequestMaxRetries: 4,
+      modelRequestRetryBackoffMaxMs: 120_000
     }
   });
   assert.equal(runtimeRes.statusCode, 200, `update agent runtime settings failed: ${runtimeRes.body}`);
@@ -335,7 +431,6 @@ test("agent runtime settings 可通过 execution-profile 下发", async (t: Test
 
   const runRecord = getRunRecord(fixture.db, msg.runId);
   assert.ok(runRecord, "run record should exist");
-  assert.equal(runRecord?.uiLocale, null, "missing uiLocale should be stored as null");
 
   const profileRes = await fixture.app.inject({
     method: "POST",
@@ -354,10 +449,35 @@ test("agent runtime settings 可通过 execution-profile 下发", async (t: Test
   assert.equal(profile.runtime?.modelIdleTimeoutMs, 1234);
   assert.equal(profile.runtime?.modelTotalTimeoutMs, 5678);
   assert.equal(profile.runtime?.modelRequestMaxRetries, 4);
+  assert.equal(profile.runtime?.modelRequestRetryBackoffMaxMs, 120_000);
   assert.equal(typeof profile.runtime?.autoCompactThresholdPct, "number");
   assert.equal(typeof profile.model?.contextWindowTokens, "number");
-  assert.equal(profile.provider?.options?.apiMode, "responses");
+  assert.equal(profile.provider?.options?.apiMode, undefined);
   assert.equal(profile.compaction, null);
+});
+
+test("agent runtime settings 部分更新时保留 modelRequestRetryBackoffMaxMs", async (t: TestContext) => {
+  const fixture = await createIntegrationFixtureForTest(t);
+
+  const initialRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/runtime",
+    payload: { modelRequestRetryBackoffMaxMs: 120_000 }
+  });
+  assert.equal(initialRes.statusCode, 200, initialRes.body);
+
+  const partialRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/runtime",
+    payload: { modelRequestMaxRetries: 7 }
+  });
+  assert.equal(partialRes.statusCode, 200, partialRes.body);
+  assert.equal(partialRes.json().modelRequestMaxRetries, 7);
+  assert.equal(partialRes.json().modelRequestRetryBackoffMaxMs, 120_000);
+
+  const getRes = await fixture.app.inject({ method: "GET", url: "/api/settings/agent/runtime" });
+  assert.equal(getRes.statusCode, 200, getRes.body);
+  assert.equal(getRes.json().modelRequestRetryBackoffMaxMs, 120_000);
 });
 
 test("agent runtime compactionModel 支持保存、下发、清空和引用保护", async (t: TestContext) => {
@@ -497,8 +617,31 @@ test("agent runtime compactionModel 支持保存、下发、清空和引用保�
   assert.equal(renameReferencedModelRes.json().code, "AGENT_PROVIDER_MODEL_RENAME_REFERENCED");
 });
 
-test("openai provider apiMode 会在 settings 与 execution-profile/single-call profile 中透传", async (t: TestContext) => {
+test("历史 apiMode 字段会被静默忽略且不会进入 settings 或运行时 profile", async (t: TestContext) => {
   const fixture = await createIntegrationFixtureForTest(t);
+
+  setSettingJson(fixture.db, "agent_providers_v1", {
+    default: { providerId: "compat_openai", modelId: "deepseek-v3" },
+    providers: [{
+      id: "compat_openai",
+      name: "compat_openai",
+      npm: "@ai-sdk/openai",
+      options: {
+        baseURL: "https://example.openai-compatible.invalid/v1",
+        apiKey: "sk-compat",
+        apiMode: "chatCompletions"
+      },
+      models: [{
+        id: "deepseek-v3",
+        name: "deepseek-v3",
+        contextWindowTokens: 128000
+      }]
+    }]
+  }, Date.now());
+
+  const legacyProvidersRes = await fixture.app.inject({ method: "GET", url: "/api/settings/agent/providers" });
+  assert.equal(legacyProvidersRes.statusCode, 200, `get legacy providers failed: ${legacyProvidersRes.body}`);
+  assert.equal(legacyProvidersRes.json().providers[0]?.options?.apiMode, undefined);
 
   const providersRes = await fixture.app.inject({
     method: "PUT",
@@ -546,12 +689,31 @@ test("openai provider apiMode 会在 settings 与 execution-profile/single-call 
   });
   assert.equal(providersRes.statusCode, 200, `update providers failed: ${providersRes.body}`);
 
+  const storedRow = getSettingJson(fixture.db, "agent_providers_v1");
+  assert.ok(storedRow);
+  const storedValue = storedRow.value as {
+    providers?: Array<{
+      id?: string;
+      name?: string;
+      npm?: string;
+      options?: Record<string, unknown>;
+      models?: Array<{ id?: string; contextWindowTokens?: number }>;
+    }>;
+  };
+  assert.equal(storedValue.providers?.length, 2);
+  const storedOpenAi = storedValue.providers?.find((provider) => provider.id === "compat_openai");
+  assert.equal(storedOpenAi?.name, "compat_openai");
+  assert.equal(storedOpenAi?.npm, "@ai-sdk/openai");
+  assert.equal(storedOpenAi?.options?.baseURL, "https://example.openai-compatible.invalid/v1");
+  assert.equal(Object.hasOwn(storedOpenAi?.options ?? {}, "apiMode"), false);
+  assert.deepEqual(storedOpenAi?.models, [{ id: "deepseek-v3", providerModelId: "deepseek-v3", name: "deepseek-v3", contextWindowTokens: 128000, options: {} }]);
+
   const getProvidersRes = await fixture.app.inject({ method: "GET", url: "/api/settings/agent/providers" });
   assert.equal(getProvidersRes.statusCode, 200, `get providers failed: ${getProvidersRes.body}`);
   const providersBody = getProvidersRes.json() as any;
   const openaiProvider = providersBody.providers.find((item: any) => item.id === "compat_openai");
   const anthropicProvider = providersBody.providers.find((item: any) => item.id === "anthropic_provider");
-  assert.equal(openaiProvider?.options?.apiMode, "chatCompletions");
+  assert.equal(openaiProvider?.options?.apiMode, undefined);
   assert.equal(anthropicProvider?.options?.apiMode, undefined);
 
   const agentsRes = await fixture.app.inject({
@@ -597,7 +759,7 @@ test("openai provider apiMode 会在 settings 与 execution-profile/single-call 
   assert.equal(executionProfileRes.statusCode, 200, `get execution profile failed: ${executionProfileRes.body}`);
   const executionProfile = executionProfileRes.json() as any;
   assert.equal(executionProfile.provider?.id, "compat_openai");
-  assert.equal(executionProfile.provider?.options?.apiMode, "chatCompletions");
+  assert.equal(executionProfile.provider?.options?.apiMode, undefined);
 
   const singleCallProfileRes = await fixture.app.inject({
     method: "POST",
@@ -614,68 +776,7 @@ test("openai provider apiMode 会在 settings 与 execution-profile/single-call 
   assert.equal(singleCallProfileRes.statusCode, 200, `get single-call model profile failed: ${singleCallProfileRes.body}`);
   const singleCallProfile = singleCallProfileRes.json() as any;
   assert.equal(singleCallProfile.provider?.id, "compat_openai");
-  assert.equal(singleCallProfile.provider?.options?.apiMode, "chatCompletions");
-
-  const invalidModeRes = await fixture.app.inject({
-    method: "PUT",
-    url: "/api/settings/agent/providers",
-    payload: {
-      default: { providerId: "compat_openai", modelId: "deepseek-v3" },
-      providers: [
-        {
-          id: "compat_openai",
-          name: "compat_openai",
-          npm: "@ai-sdk/openai",
-          options: {
-            baseURL: "https://example.openai-compatible.invalid/v1",
-            apiKey: "sk-compat",
-            apiMode: "invalid-mode"
-          },
-          models: [
-            {
-              id: "deepseek-v3",
-              name: "deepseek-v3",
-              contextWindowTokens: 128000
-            }
-          ]
-        }
-      ]
-    }
-  });
-
-  assert.equal(invalidModeRes.statusCode, 400, `update provider with invalid apiMode should fail: ${invalidModeRes.body}`);
-  const invalidModeBody = invalidModeRes.json() as any;
-  assert.equal(typeof invalidModeBody?.message, "string");
-
-  const keepModeRes = await fixture.app.inject({
-    method: "PUT",
-    url: "/api/settings/agent/providers",
-    payload: {
-      default: { providerId: "compat_openai", modelId: "deepseek-v3" },
-      providers: [
-        {
-          id: "compat_openai",
-          name: "compat_openai",
-          npm: "@ai-sdk/openai",
-          options: {
-            baseURL: "https://example.openai-compatible.invalid/v1",
-            apiKey: "sk-compat"
-          },
-          models: [
-            {
-              id: "deepseek-v3",
-              name: "deepseek-v3",
-              contextWindowTokens: 128000
-            }
-          ]
-        }
-      ]
-    }
-  });
-  assert.equal(keepModeRes.statusCode, 200, `update provider without apiMode failed: ${keepModeRes.body}`);
-  const keepModeBody = keepModeRes.json() as any;
-  const keepModeProvider = keepModeBody.providers.find((item: any) => item.id === "compat_openai");
-  assert.equal(keepModeProvider?.options?.apiMode, "chatCompletions");
+  assert.equal(singleCallProfile.provider?.options?.apiMode, undefined);
 });
 
 test("subtask session 的 execution-profile 按 subtask surface 校验", async (t: TestContext) => {
@@ -706,15 +807,29 @@ test("subtask session 的 execution-profile 按 subtask surface 校验", async (
 
   const createdAt = Date.now();
   const runId = newSortableId("run");
-  createRunRecord(fixture.db, {
+  const head = getMessageSessionHead(fixture.db, { workspaceId: fixture.workspaceId, sessionId: session.id });
+  assert.ok(head);
+  const triggerMessageId = newSortableId("msg");
+  appendMessage(fixture.db, {
+    id: triggerMessageId,
+    workspaceId: fixture.workspaceId,
+    sessionId: session.id,
+    expectedHeadMessageId: head.headMessageId,
+    expectedRevision: head.revision,
+    type: "user",
+    status: "completed",
+    originRunId: null,
+    parts: [{ id: newSortableId("part"), position: 0, type: "text", text: "subtask profile trigger" }],
+    createdAt
+  });
+  createMessageRunRecord(fixture.db, {
     runId,
     workspaceId: fixture.workspaceId,
     sessionId: session.id,
-    triggerItemId: 1,
+    triggerMessageId,
     agentId: "subtask-agent",
     providerId: "ppchat",
     modelId: "gpt-5.2",
-    uiLocale: null,
     status: "running",
     createdAt
   });
@@ -831,6 +946,197 @@ test("agent providers settings 要求 contextWindowTokens 必填且合法", asyn
     }
   });
   assert.equal(tooLargeRes.statusCode, 400);
+});
+
+test("agent providers settings 对 aiSdk 使用共享白名单并保留 legacy provider options", async (t: TestContext) => {
+  const fixture = await createIntegrationFixtureForTest(t);
+  const baseProvider = {
+    id: "ppchat",
+    name: "ppchat",
+    npm: "@ai-sdk/openai",
+    options: { baseURL: "https://example.invalid/v1", apiKey: "sk-test" },
+  };
+  const putModelOptions = async (options: Record<string, unknown>) => await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/providers",
+    payload: {
+      default: { providerId: "ppchat", modelId: "gpt-5.2" },
+      providers: [{
+        ...baseProvider,
+        models: [{ id: "gpt-5.2", name: "gpt-5.2", contextWindowTokens: 128000, options }],
+      }],
+    },
+  });
+
+  const supportedRes = await putModelOptions({
+    aiSdk: {
+      headers: { "x-model-config": "accepted" },
+      allowSystemInMessages: true,
+      maxOutputTokens: 512,
+    },
+    reasoningEffort: "high",
+  });
+  assert.equal(supportedRes.statusCode, 200, `supported aiSdk settings should save: ${supportedRes.body}`);
+  const savedModelOptions = supportedRes.json().providers[0]?.models[0]?.options;
+  assert.deepEqual(savedModelOptions?.aiSdk, {
+    headers: { "x-model-config": "accepted" },
+    allowSystemInMessages: true,
+    maxOutputTokens: 512,
+  });
+  assert.deepEqual(savedModelOptions?.providerOptionsByKey?.openai, { reasoningEffort: "high" });
+
+  const unknownRes = await putModelOptions({ aiSdk: { unsupportedFlag: true } });
+  assert.equal(unknownRes.statusCode, 400);
+
+  for (const reserved of ["model", "messages", "providerOptions", "tools", "toolChoice"]) {
+    const reservedRes = await putModelOptions({ aiSdk: { [reserved]: "override" } });
+    assert.equal(reservedRes.statusCode, 400, `${reserved} must be rejected`);
+  }
+
+  const sensitiveValue = "api-secret-sentinel";
+  for (const headerName of ["Authorization", "x-API-key", "Host", "Transfer-Encoding"]) {
+    const blockedHeaderRes = await putModelOptions({ aiSdk: { headers: { [headerName]: sensitiveValue } } });
+    assert.equal(blockedHeaderRes.statusCode, 400, `${headerName} must be rejected`);
+    assert.equal(blockedHeaderRes.json().code, "AGENT_PROVIDER_AI_SDK_OPTIONS_INVALID");
+    assert.equal(blockedHeaderRes.body.includes(sensitiveValue), false);
+  }
+
+  const getRes = await fixture.app.inject({ method: "GET", url: "/api/settings/agent/providers" });
+  assert.equal(getRes.statusCode, 200);
+  // 失败更新不得覆盖之前已经成功保存的设置。
+  assert.deepEqual(getRes.json().providers[0]?.models[0]?.options?.aiSdk, {
+    headers: { "x-model-config": "accepted" },
+    allowSystemInMessages: true,
+    maxOutputTokens: 512,
+  });
+});
+
+test("历史未知 aiSdk 字段不阻断 provider settings 读取", async (t: TestContext) => {
+  const fixture = await createIntegrationFixtureForTest(t);
+  setSettingJson(fixture.db, "agent_providers_v1", {
+    default: { providerId: "legacy", modelId: "legacy-model" },
+    providers: [{
+      id: "legacy",
+      name: "legacy",
+      npm: "@ai-sdk/openai",
+      options: { baseURL: "https://example.invalid/v1", apiKey: "sk-legacy" },
+      models: [{
+        id: "legacy-model",
+        name: "legacy-model",
+        contextWindowTokens: 128000,
+        options: { aiSdk: { unsupportedFlag: true } },
+      }],
+    }],
+  }, Date.now());
+
+  const getRes = await fixture.app.inject({ method: "GET", url: "/api/settings/agent/providers" });
+  assert.equal(getRes.statusCode, 200, `legacy settings read failed: ${getRes.body}`);
+  assert.deepEqual(getRes.json().providers[0]?.models[0]?.options?.aiSdk, { unsupportedFlag: true });
+});
+
+test("历史敏感 aiSdk headers 在 settings 与 internal profile 中只暴露安全标记，删除后可恢复", async (t: TestContext) => {
+  const fixture = await createIntegrationFixtureForTest(t, { agentWorkerConcurrency: 0 });
+  const secret = "unique-historical-header-secret-sentinel";
+  setSettingJson(fixture.db, "agent_providers_v1", {
+    default: { providerId: "ppchat", modelId: "gpt-5.2" },
+    providers: [{
+      id: "ppchat",
+      name: "ppchat",
+      npm: "@ai-sdk/openai",
+      options: { baseURL: "https://example.invalid/v1", apiKey: "sk-provider" },
+      models: [{
+        id: "gpt-5.2",
+        name: "gpt-5.2",
+        contextWindowTokens: 128000,
+        options: {
+          aiSdk: {
+            headers: {
+              Authorization: secret,
+              authorization: secret,
+              "X-API-Key": secret,
+              "x-api-key": secret,
+              "x-model-config": "history-kept",
+            },
+          },
+        },
+      }],
+    }],
+  }, Date.now());
+
+  const expectedHeaders = {
+    Authorization: AI_SDK_REDACTED_HEADER_VALUE,
+    authorization: AI_SDK_REDACTED_HEADER_VALUE,
+    "X-API-Key": AI_SDK_REDACTED_HEADER_VALUE,
+    "x-api-key": AI_SDK_REDACTED_HEADER_VALUE,
+    "x-model-config": "history-kept",
+  };
+  const settingsRes = await fixture.app.inject({ method: "GET", url: "/api/settings/agent/providers" });
+  assert.equal(settingsRes.statusCode, 200, `get settings failed: ${settingsRes.body}`);
+  assert.equal(settingsRes.body.includes(secret), false);
+  assert.deepEqual(settingsRes.json().providers[0]?.models[0]?.options?.aiSdk?.headers, expectedHeaders);
+
+  const session = await createPrimarySession(fixture);
+  const sent = await sendAgentMessage(fixture, {
+    sessionId: session.id,
+    text: "historical headers",
+    clientRequestId: "req_historical_sensitive_headers",
+  });
+  for (const url of ["/api/internal/agent/execution-profile", "/api/internal/agent/single-call-model-profile"]) {
+    const profileRes = await fixture.app.inject({
+      method: "POST",
+      url,
+      headers: { "x-awb-agent-internal-token": fixture.internalToken },
+      payload: { workspaceId: fixture.workspaceId, sessionId: session.id, runId: sent.runId },
+    });
+    assert.equal(profileRes.statusCode, 200, `${url} failed: ${profileRes.body}`);
+    assert.equal(profileRes.body.includes(secret), false);
+    assert.deepEqual(profileRes.json().model?.options?.aiSdk?.headers, expectedHeaders);
+  }
+
+  const markerSaveRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/providers",
+    payload: {
+      default: { providerId: "ppchat", modelId: "gpt-5.2" },
+      providers: [{
+        id: "ppchat",
+        name: "ppchat",
+        npm: "@ai-sdk/openai",
+        options: { baseURL: "https://example.invalid/v1" },
+        models: [{
+          id: "gpt-5.2",
+          name: "gpt-5.2",
+          contextWindowTokens: 128000,
+          options: { aiSdk: { headers: expectedHeaders } },
+        }],
+      }],
+    },
+  });
+  assert.equal(markerSaveRes.statusCode, 400, "安全标记不能被误保存为真实 header value");
+  assert.equal(markerSaveRes.json().code, "AGENT_PROVIDER_AI_SDK_OPTIONS_INVALID");
+
+  const recoveryRes = await fixture.app.inject({
+    method: "PUT",
+    url: "/api/settings/agent/providers",
+    payload: {
+      default: { providerId: "ppchat", modelId: "gpt-5.2" },
+      providers: [{
+        id: "ppchat",
+        name: "ppchat",
+        npm: "@ai-sdk/openai",
+        options: { baseURL: "https://example.invalid/v1" },
+        models: [{
+          id: "gpt-5.2",
+          name: "gpt-5.2",
+          contextWindowTokens: 128000,
+          options: { aiSdk: { headers: { "x-model-config": "history-kept" } } },
+        }],
+      }],
+    },
+  });
+  assert.equal(recoveryRes.statusCode, 200, `delete unsafe headers and save failed: ${recoveryRes.body}`);
+  assert.deepEqual(recoveryRes.json().providers[0]?.models[0]?.options?.aiSdk?.headers, { "x-model-config": "history-kept" });
+  assert.equal(recoveryRes.body.includes(AI_SDK_REDACTED_HEADER_VALUE), false);
 });
 
 test("single-call model profile 使用 agent 显式默认模型", async (t: TestContext) => {

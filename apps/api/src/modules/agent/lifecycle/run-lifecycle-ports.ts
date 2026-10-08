@@ -1,12 +1,15 @@
-import type { AgentControlResult, AgentSessionRunState } from "@agent-workbench/shared";
-import type { AgentApiRunCompleteRequest, AgentApiRunStateRequest } from "@agent-workbench/shared/internal-contracts/agent-api";
+import type { AgentImageMediaType } from "@agent-workbench/shared/internal-contracts/agent-api-session";
+import type { AgentMessageControlResult, AgentMessageSessionRunState } from "@agent-workbench/shared";
+import type { AgentRunExecutionPhase, AgentRunKind, AgentTerminalResultCode, AgentTerminalRunStatus } from "@agent-workbench/shared";
 import type { ActiveSubtaskChildQuery } from "../subtask/subtask-ports.js";
 
 export type AgentRuntimeRun = {
   workspaceId: string;
   sessionId: string;
   runId: string;
+  runKind?: AgentRunKind;
   inputText?: string;
+  resumeAssistantMessageId?: string | null;
   workspacePath: string;
   workspaceRepoDirNames: string[];
 };
@@ -14,6 +17,11 @@ export type AgentRuntimeRun = {
 export type RuntimeControlPort = {
   enqueueRun(run: AgentRuntimeRun): void | Promise<void>;
   cancelSession(sessionId: string): void | Promise<void>;
+  /** 删除工作区时使用的窄 drain 能力；普通用户取消不需要等待。 */
+  cancelSessionAndWait?(input: {
+    sessionId: string;
+    timeoutMs: number;
+  }): Promise<boolean>;
 };
 
 export type WorkspaceRunContext = {
@@ -47,30 +55,54 @@ export type RunCompletedEventPublisher = {
  * lifecycle outcomes rather than exposing Store or AppContext operations.
  */
 export type AtomicLifecyclePersistence = {
-  activateUserRun(input: UserRunActivationInput): UserRunActivationResult;
+  listActiveSessionIdsForCancel(input: CancelSessionsInput): string[];
+  activateUserRun(input: UserRunActivationInput, publishImages?: () => void): UserRunActivationResult;
+  canEnqueueUserRunIfCurrent(input: { workspaceId: string; sessionId: string; runId: string }): boolean;
   failRunAfterEnqueueFailureIfCurrent(input: EnqueueFailureInput): EnqueueFailureSettlement;
   getCancelSessionSnapshot(sessionId: string): CancelSessionSnapshot | null;
   cancelSessions(input: CancelSessionsInput): CancelSessionsResult;
-  updateRunStateFromWorker(input: AgentApiRunStateRequest): void;
-  completeRunFromWorker(input: AgentApiRunCompleteRequest): boolean;
+  markRunWorkInProgress(input: TerminalControlInput): "updated" | "already_in_progress";
+  persistRunTerminalIntent(input: TerminalIntentControlInput): "updated" | "already_persisted";
+  convergeRunTerminal(input: TerminalControlInput): { kind: "transitioned" | "already_converged"; finalStatus: AgentTerminalRunStatus };
+  listWorkspaceRunningRunCandidates(workspaceId: string): WorkspaceRunningRunCandidate[];
   listRecoverableRunCandidates(): RecoveryCandidate[];
   isRecoverableRunCandidate(candidate: RecoveryCandidate): boolean;
-  failNonTerminalContextItemsForRecovery(input: RecoveryCandidate & { updatedAt: number }): number;
-  failRunRecordForRecovery(input: RecoveryCandidate & { updatedAt: number }): number;
-  reclaimRunStateForRecovery(input: RecoveryCandidate & { updatedAt: number }): number;
-  appendRecoveryFailureNotice(input: RecoveryCandidate & { text: string; createdAt: number }): void;
-  listInFlightSessionsWithoutActiveRunId(): RecoveryDirtySession[];
-  reclaimDirtyRunStateForRecovery(input: RecoveryDirtySession & { updatedAt: number }): number;
 };
 
-export type RecoveryCandidate = { workspaceId: string; sessionId: string; runId: string; triggerItemId: number | null };
-export type RecoveryDirtySession = { workspaceId: string; sessionId: string };
+export type TerminalControlInput = {
+  workspaceId: string;
+  sessionId: string;
+  runId: string;
+  updatedAt: number;
+};
+
+export type TerminalIntentControlInput = TerminalControlInput & {
+  status: AgentTerminalRunStatus;
+  code: AgentTerminalResultCode;
+  detail: null;
+};
+
+export type WorkspaceRunningRunCandidate = {
+  workspaceId: string;
+  sessionId: string;
+  runId: string;
+  executionPhase: AgentRunExecutionPhase;
+};
+
+export type RecoveryCandidate = {
+  workspaceId: string;
+  sessionId: string;
+  runId: string;
+  runKind: AgentRunKind;
+  triggerMessageId: string | null;
+  executionPhase: AgentRunExecutionPhase;
+};
 
 export type CancelSessionSnapshot = {
   sessionId: string;
   workspaceId: string;
-  session: AgentControlResult["session"];
-  runState: Pick<AgentSessionRunState, "status" | "activeRunId">;
+  session: AgentMessageControlResult["session"];
+  runState: Pick<AgentMessageSessionRunState, "status" | "activeRunId">;
 };
 
 export type CancelSessionsInput = {
@@ -84,11 +116,22 @@ export type CancelSessionsResult = {
   rootSessionId: string;
   runtimeCancelSessionIds: string[];
   cancelledRunIds: string[];
+  terminalIntents?: Array<{ workspaceId: string; sessionId: string; runId: string }>;
 };
 
 export type CancelSessionCascadeResult = {
-  result: AgentControlResult;
+  result: AgentMessageControlResult;
   runtimeCancelSessionIds: string[];
+};
+
+/** Checked inside the same transaction that appends a scheduled Fork's Prompt. */
+export type ExpectedHistoricalForkSession = {
+  title: string;
+  headMessageId: string;
+  contextRootMessageId: string | null;
+  revision: number;
+  sourceSessionId: string;
+  sourceMessageId: string;
 };
 
 export type UserRunActivationInput = {
@@ -96,18 +139,31 @@ export type UserRunActivationInput = {
   sessionId: string;
   clientRequestId: string;
   text: string;
+  images: UserRunImageInput[];
   runId: string;
   agentId: string;
   providerId: string;
   modelId: string;
   uiLocale: "zh-CN" | "en-US" | null;
   createdAt: number;
+  expectedHistoricalFork?: ExpectedHistoricalForkSession;
+  expectedSessionTitle?: string;
+};
+
+export type UserRunImageInput = {
+  attachmentId: string;
+  storageKey: string;
+  tempId: string;
+  filename: string;
+  mediaType: AgentImageMediaType;
+  byteSize: number;
+  position: number;
 };
 
 export type UserRunActivationResult =
   | {
       kind: "deduplicated";
-      messageItemId: number;
+      messageId: string;
       runId: string;
     }
   | {
@@ -115,7 +171,7 @@ export type UserRunActivationResult =
     }
   | {
       kind: "activated";
-      messageItemId: number;
+      messageId: string;
       runId: string;
     };
 
@@ -127,6 +183,7 @@ export type EnqueueFailureInput = {
 };
 
 export type EnqueueFailureSettlement =
+  | "intent-persisted"
   | "failed-and-idled"
   | "run-failed-state-not-current"
   | "already-terminal"
@@ -138,11 +195,14 @@ export type StartUserRunCommand = {
   clientRequestId: string;
   text: string;
   inputText: string;
+  images?: UserRunImageInput[];
   agentId: string;
   providerId: string;
   modelId: string;
   uiLocale: "zh-CN" | "en-US" | null;
   runtime: RuntimeControlPort;
+  expectedHistoricalFork?: ExpectedHistoricalForkSession;
+  expectedSessionTitle?: string;
 };
 
 export type LifecycleClock = {
@@ -154,7 +214,7 @@ export type LifecycleIdGenerator = {
 };
 
 export type TriggerInputReader = {
-  getUserText(itemId: number): string | null;
+  getUserText(messageId: string): string | null;
 };
 
 export type LifecycleLogger = {
@@ -163,15 +223,26 @@ export type LifecycleLogger = {
   debug?(bindings: Record<string, unknown>, message: string): void;
 };
 
+export type SessionRuntimeHandoffCoordinatorPort = {
+  runExclusive<T>(sessionId: string, operation: () => Promise<T>): Promise<T>;
+  runExclusiveMany<T>(sessionIds: readonly string[], operation: () => Promise<T>): Promise<T>;
+};
+
 export type RunLifecycleApplicationDependencies = {
   workspaceRunContextReader: WorkspaceRunContextReader;
-  runStateReader: { get(sessionId: string): AgentSessionRunState };
+  runStateReader: { get(sessionId: string): AgentMessageSessionRunState };
   activeSubtaskChildQuery: ActiveSubtaskChildQuery;
   promptStaticCacheInvalidator: PromptStaticCacheInvalidator;
   runCompletedEventPublisher: RunCompletedEventPublisher;
   persistence: AtomicLifecyclePersistence;
+  attachmentCommitter?: {
+    prepare(input: { workspaceId: string; image: UserRunImageInput }): Promise<{ checkAvailable(): void; publish(): { dev: number; ino: number }; close(): Promise<void> }>;
+    removeTemp(input: Pick<UserRunImageInput, "tempId">): Promise<void>;
+    removeFinal(input: { workspaceId: string; image: UserRunImageInput; owned: { dev: number; ino: number } }): Promise<void>;
+  };
   triggerInputReader: TriggerInputReader;
   isContextAppendConflict(error: unknown): boolean;
+  runtimeHandoffCoordinator: SessionRuntimeHandoffCoordinatorPort;
   clock: LifecycleClock;
   ids: LifecycleIdGenerator;
   logger: LifecycleLogger;

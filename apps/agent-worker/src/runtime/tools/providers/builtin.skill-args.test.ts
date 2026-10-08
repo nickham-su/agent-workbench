@@ -11,14 +11,14 @@ async function createSkillFixture() {
   await fs.mkdir(skillDirectory);
   await fs.writeFile(path.join(skillDirectory, "SKILL.md"), "root instructions", "utf8");
   await fs.writeFile(path.join(skillDirectory, "reference.md"), "reference content", "utf8");
-  return { skillsRoot, skillId: "workspace/test-skills/demo" };
+  return { skillsRoot, skillId: "demo" };
 }
 
 function createSkillExecutionContext(skillsRoot: string) {
   return {
     run: { workspacePath: skillsRoot },
     promptContext: {
-      externalSkillRoots: [{ sourceType: "workspace", rootDir: "test-skills", rootPath: skillsRoot }]
+      externalSkills: [{ skillId: "demo", skillDirectoryPath: path.join(skillsRoot, "demo") }]
     },
     signal: new AbortController().signal
   } as any;

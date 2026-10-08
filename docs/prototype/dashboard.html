@@ -1,0 +1,1492 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Agent Workbench · 数据看板原型</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --app-bg: #000000;
+      --panel-bg: #141414;
+      --panel-bg-elevated: #1f1f1f;
+      --panel-bg-soft: #181818;
+      --border-color: #424242;
+      --border-color-secondary: #303030;
+      --text-color: rgba(255, 255, 255, 0.88);
+      --text-secondary: rgba(255, 255, 255, 0.65);
+      --text-tertiary: rgba(255, 255, 255, 0.45);
+      --fill-secondary: rgba(255, 255, 255, 0.08);
+      --fill-tertiary: rgba(255, 255, 255, 0.05);
+      --primary: #1668dc;
+      --primary-hover: #3c89e8;
+      --primary-soft: rgba(22, 104, 220, 0.15);
+      --success: #49aa19;
+      --success-soft: rgba(73, 170, 25, 0.12);
+      --warning: #d89614;
+      --warning-soft: rgba(216, 150, 20, 0.12);
+      --danger: #dc4446;
+      --danger-soft: rgba(220, 68, 70, 0.12);
+      --cyan: #13a8a8;
+      --purple: #642ab5;
+      --header-height: 48px;
+      --nav-height: 46px;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      font-size: 13px;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; background: var(--app-bg); color: var(--text-color); }
+    body { min-width: 1080px; }
+    button, select, input { font: inherit; }
+    button { color: inherit; }
+    svg { display: block; }
+
+    .app-shell { min-height: 100vh; background: var(--app-bg); }
+    .app-header {
+      height: var(--header-height);
+      padding: 0 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: var(--panel-bg-elevated);
+      border-bottom: 1px solid var(--border-color-secondary);
+    }
+    .brand { display: flex; align-items: center; gap: 9px; font-weight: 600; font-size: 14px; letter-spacing: .1px; }
+    .brand-mark {
+      width: 20px; height: 20px; display: grid; place-items: center;
+      border: 1px solid #3d76c5; border-radius: 4px;
+      background: linear-gradient(135deg, #163c72, #0c1e38);
+      color: #91caff;
+    }
+    .header-meta { display: flex; align-items: center; gap: 12px; color: var(--text-tertiary); font-size: 12px; }
+    .local-pill { display: inline-flex; align-items: center; gap: 6px; }
+    .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 3px var(--success-soft); }
+
+    .top-nav {
+      height: var(--nav-height);
+      padding: 0 20px;
+      display: flex;
+      align-items: flex-end;
+      gap: 24px;
+      background: var(--panel-bg);
+      border-bottom: 1px solid var(--border-color-secondary);
+    }
+    .top-tab {
+      height: 100%; padding: 0 1px; border: 0; background: transparent;
+      display: inline-flex; align-items: center; position: relative;
+      color: var(--text-secondary); cursor: pointer;
+    }
+    .top-tab:hover { color: var(--text-color); }
+    .top-tab.active { color: var(--text-color); }
+    .top-tab.active::after {
+      content: ""; position: absolute; left: 0; right: 0; bottom: 0;
+      height: 2px; background: var(--primary-hover); border-radius: 1px 1px 0 0;
+    }
+
+    .page { background: var(--panel-bg); min-height: calc(100vh - var(--header-height) - var(--nav-height)); }
+    .page-head {
+      position: sticky; top: 0; z-index: 10;
+      padding: 18px 20px 0;
+      background: rgba(20, 20, 20, .96);
+      backdrop-filter: blur(10px);
+      border-bottom: 1px solid var(--border-color-secondary);
+    }
+    .title-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; }
+    h1 { font-size: 20px; line-height: 28px; margin: 0; font-weight: 600; }
+    .subtitle { margin-top: 3px; color: var(--text-tertiary); font-size: 12px; }
+    .toolbar { display: flex; align-items: center; gap: 8px; }
+
+    .control, .icon-btn, .button {
+      height: 28px; border: 1px solid var(--border-color); border-radius: 2px;
+      background: var(--panel-bg); color: var(--text-color);
+      display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+      outline: none;
+    }
+    .control { min-width: 108px; padding: 0 8px; cursor: pointer; }
+    select.control { appearance: none; padding-right: 27px; background-image: linear-gradient(45deg, transparent 50%, #8c8c8c 50%), linear-gradient(135deg, #8c8c8c 50%, transparent 50%); background-position: calc(100% - 12px) 11px, calc(100% - 8px) 11px; background-size: 4px 4px, 4px 4px; background-repeat: no-repeat; }
+    .control:hover, .icon-btn:hover, .button:hover { border-color: var(--primary-hover); }
+    .icon-btn { width: 28px; padding: 0; cursor: pointer; }
+    .button { padding: 0 10px; cursor: pointer; }
+    .button.primary { background: var(--primary); border-color: var(--primary); color: white; }
+    .button.primary:hover { background: var(--primary-hover); }
+    .button.text { border-color: transparent; background: transparent; color: var(--text-secondary); }
+    .button.text:hover { background: var(--fill-tertiary); color: var(--text-color); border-color: transparent; }
+    .icon { width: 14px; height: 14px; stroke: currentColor; fill: none; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+
+    .section-nav { display: flex; align-items: center; gap: 20px; margin-top: 15px; height: 37px; }
+    .section-tab {
+      height: 37px; border: 0; padding: 0 1px; background: transparent;
+      color: var(--text-secondary); cursor: pointer; position: relative;
+    }
+    .section-tab:hover { color: var(--text-color); }
+    .section-tab.active { color: #69b1ff; }
+    .section-tab.active::after { content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; background: #1677ff; }
+
+    .content { width: 100%; max-width: none; padding: 16px 20px 36px; margin: 0; }
+    .view { display: none; animation: fade .16s ease-out; }
+    .view.active { display: block; }
+    @keyframes fade { from { opacity: .65; transform: translateY(2px); } to { opacity: 1; transform: none; } }
+
+    .filter-row { min-height: 34px; display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+    .filter-group { display: flex; align-items: center; gap: 8px; }
+    .filter-label { color: var(--text-secondary); }
+    .scope-note { display: inline-flex; align-items: center; gap: 5px; color: var(--text-tertiary); font-size: 12px; }
+    .scope-tag, .tag {
+      display: inline-flex; align-items: center; height: 20px; padding: 0 6px; border: 1px solid var(--border-color-secondary); border-radius: 2px;
+      background: var(--fill-tertiary); color: var(--text-tertiary); font-size: 11px; white-space: nowrap;
+    }
+    .scope-tag.global { border-color: rgba(22, 104, 220, .35); background: var(--primary-soft); color: #69b1ff; }
+    .tag.success { border-color: rgba(73,170,25,.35); background: var(--success-soft); color: #95de64; }
+    .tag.warning { border-color: rgba(216,150,20,.35); background: var(--warning-soft); color: #ffc53d; }
+    .tag.danger { border-color: rgba(220,68,70,.35); background: var(--danger-soft); color: #ff7875; }
+
+    .alert {
+      min-height: 40px; padding: 9px 12px; margin-bottom: 14px;
+      display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
+      border: 1px solid rgba(216, 150, 20, .42); border-radius: 3px;
+      background: var(--warning-soft);
+    }
+    .alert.info { border-color: rgba(22,104,220,.42); background: var(--primary-soft); }
+    .alert.danger { border-color: rgba(220,68,70,.42); background: var(--danger-soft); }
+    .alert-main { display: flex; align-items: flex-start; gap: 9px; min-width: 0; }
+    .alert-icon { color: #ffc53d; margin-top: 1px; }
+    .alert.info .alert-icon { color: #69b1ff; }
+    .alert.danger .alert-icon { color: #ff7875; }
+    .alert-title { font-weight: 500; line-height: 20px; }
+    .alert-desc { color: var(--text-secondary); font-size: 12px; line-height: 18px; }
+    .link { color: #69b1ff; cursor: pointer; border: 0; background: transparent; padding: 0; }
+    .link:hover { color: #91caff; }
+
+    .metric-grid { display: grid; grid-template-columns: repeat(6, minmax(150px, 1fr)); gap: 10px; margin-bottom: 12px; }
+    .metric-grid.five { grid-template-columns: repeat(5, minmax(165px, 1fr)); }
+    .metric-card, .panel {
+      background: var(--panel-bg-soft); border: 1px solid var(--border-color-secondary); border-radius: 3px;
+    }
+    .metric-card { min-height: 112px; padding: 13px 14px 11px; position: relative; overflow: hidden; }
+    .metric-card:hover { border-color: var(--border-color); background: #1a1a1a; }
+    .metric-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--text-secondary); }
+    .metric-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .metric-value { margin-top: 14px; font-size: 25px; line-height: 30px; font-variant-numeric: tabular-nums; letter-spacing: -.3px; }
+    .metric-value.small { font-size: 22px; }
+    .metric-foot { margin-top: 8px; display: flex; align-items: center; gap: 6px; color: var(--text-tertiary); font-size: 11px; }
+    .delta-up { color: #95de64; }
+    .delta-down { color: #ff7875; }
+    .mini-spark { position: absolute; right: 7px; bottom: 6px; width: 64px; height: 28px; opacity: .7; }
+    .metric-value.alert-value { color: #ff7875; }
+    .period-context {
+      min-height: 26px; margin: -2px 0 10px; padding: 0 2px;
+      display: flex; align-items: center; gap: 8px;
+      color: var(--text-tertiary); font-size: 11px;
+    }
+    .period-context strong { color: var(--text-secondary); font-weight: 500; }
+    .period-context .divider { width: 1px; height: 12px; background: var(--border-color-secondary); }
+    .period-context .compare-help {
+      display: inline-flex; align-items: center; gap: 4px;
+      border-bottom: 1px dotted var(--border-color); cursor: help;
+    }
+
+    .grid-main { display: grid; grid-template-columns: minmax(0, 1.8fr) minmax(320px, .9fr); gap: 12px; margin-bottom: 12px; }
+    .grid-equal { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-bottom: 12px; }
+    #view-agent {
+      --agent-metric-card-height: 130px;
+      --agent-metric-row-gap: 10px;
+    }
+    .trend-side-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-auto-rows: var(--agent-metric-card-height); align-content: start; gap: var(--agent-metric-row-gap); }
+    #view-agent > .metric-grid .metric-card,
+    #agent-tools .metric-card {
+      height: var(--agent-metric-card-height);
+      min-height: var(--agent-metric-card-height);
+    }
+    #view-agent > .grid-main {
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      gap: var(--agent-metric-row-gap);
+    }
+    #view-agent > .grid-main > .panel {
+      grid-column: span 4;
+      height: calc(var(--agent-metric-card-height) * 2 + var(--agent-metric-row-gap));
+    }
+    #view-agent > .grid-main > .trend-side-grid {
+      grid-column: span 2;
+    }
+    #view-overview,
+    #view-models,
+    #view-git,
+    #view-worker {
+      --agent-metric-card-height: 130px;
+      --agent-metric-row-gap: 10px;
+      --primary-chart-height: calc(var(--agent-metric-card-height) * 2 + var(--agent-metric-row-gap));
+      --primary-chart-body-height: calc(var(--primary-chart-height) - 45px);
+    }
+    #view-overview {
+      --primary-chart-height: calc(var(--agent-metric-card-height) * 3 + var(--agent-metric-row-gap) * 2);
+      --primary-chart-body-height: calc(var(--primary-chart-height) - 45px);
+    }
+    #view-overview > .grid-main,
+    #view-models > .grid-main,
+    #view-worker > .grid-main,
+    #view-git > .grid-equal {
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      gap: var(--agent-metric-row-gap);
+    }
+    #view-overview > .grid-main > .panel:first-child,
+    #view-models > .grid-main > .panel:first-child,
+    #view-worker > .grid-main > .panel:first-child,
+    #view-git > .grid-equal > .panel:first-child {
+      grid-column: span 4;
+      height: var(--primary-chart-height);
+    }
+    #view-git > .grid-equal > .panel:first-child {
+      grid-column: span 3;
+    }
+    #view-overview > .grid-main > .panel:last-child,
+    #view-models > .grid-main > .panel:last-child,
+    #view-worker > .grid-main > .panel:last-child,
+    #view-git > .grid-equal > .panel:last-child {
+      grid-column: span 2;
+      height: var(--primary-chart-height);
+    }
+    #view-git > .grid-equal > .panel:last-child {
+      grid-column: span 3;
+    }
+    #view-overview > .grid-main > .panel:first-child > .panel-body {
+      height: var(--primary-chart-body-height);
+    }
+    #view-overview > .grid-main > .panel:last-child th,
+    #view-overview > .grid-main > .panel:last-child td { padding-top: 8px; padding-bottom: 8px; }
+    #view-overview .volume-chart { height: calc(var(--primary-chart-body-height) - 53px); }
+    #view-models > .grid-main .bars-wrap,
+    #view-worker > .grid-main .bars-wrap,
+    #view-git > .grid-equal .bars-wrap,
+    #view-git > .grid-equal .chart {
+      height: var(--primary-chart-body-height);
+    }
+    #view-git > .grid-equal .chart svg { height: 172px; }
+    .metric-card.clickable { cursor: pointer; outline: none; }
+    .metric-card.clickable:hover { border-color: #3c89e8; }
+    .metric-card.clickable.selected {
+      border-color: #3c89e8; background: rgba(22,104,220,.1);
+      box-shadow: inset 0 0 0 1px rgba(60,137,232,.18);
+    }
+    .metric-card.clickable:focus-visible { border-color: #69b1ff; box-shadow: 0 0 0 2px rgba(60,137,232,.2); }
+    .agent-trend-chart { height: 225px; position: relative; }
+    .agent-trend-chart svg { width: 100%; height: 172px; overflow: visible; }
+    .agent-trend-grid { stroke: #2a2a2a; stroke-width: 1; vector-effect: non-scaling-stroke; }
+    .agent-trend-area { fill: url(#agentTrendAreaGradient); }
+    .agent-trend-path { fill: none; stroke: #3c89e8; stroke-width: 2; vector-effect: non-scaling-stroke; }
+    .agent-trend-point { fill: var(--panel-bg-soft); stroke: #69b1ff; stroke-width: 1.5; vector-effect: non-scaling-stroke; pointer-events: none; }
+    .agent-trend-hit { fill: transparent; cursor: crosshair; }
+    .agent-trend-hit:hover + .agent-trend-point { fill: #69b1ff; }
+    .agent-trend-label { fill: rgba(255,255,255,.4); font-size: 9px; text-anchor: middle; }
+    .agent-trend-axis { fill: rgba(255,255,255,.35); font-size: 9px; text-anchor: end; }
+    .model-trend-svg { width: 100%; height: 100%; overflow: visible; }
+    .model-trend-svg[hidden], #modelTrendBars[hidden] { display: none !important; }
+    .analysis-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 12px; }
+    .analysis-grid .span-2 { grid-column: span 2; }
+    .analysis-grid .span-3 { grid-column: span 3; }
+    .compact-donut-wrap { min-height: 218px; display: flex; align-items: center; gap: 20px; }
+    .compact-donut-wrap .donut { width: 126px; height: 126px; flex: 0 0 auto; }
+    .compact-donut-wrap .donut::after { inset: 21px; }
+    .mini-bar-list { display: flex; flex-direction: column; gap: 12px; min-height: 190px; justify-content: center; }
+    .mini-bar-row { display: grid; grid-template-columns: 88px minmax(0,1fr) 45px; align-items: center; gap: 9px; }
+    .mini-bar-row span:first-child { color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .mini-bar-row b { text-align: right; font-size: 11px; font-weight: 500; font-variant-numeric: tabular-nums; }
+    .small-line-chart { height: 205px; }
+    .small-line-chart svg { width: 100%; height: 100%; }
+    .panel { min-width: 0; }
+    .panel-head { height: 45px; padding: 0 14px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border-color-secondary); }
+    .panel-title { font-weight: 500; }
+    .panel-subtitle { color: var(--text-tertiary); font-size: 11px; margin-left: 6px; font-weight: 400; }
+    .panel-body { padding: 14px; }
+    .segmented { display: inline-flex; padding: 2px; background: var(--fill-secondary); border-radius: 3px; }
+    .segmented button { height: 23px; padding: 0 8px; border: 0; border-radius: 2px; background: transparent; color: var(--text-tertiary); cursor: pointer; font-size: 11px; }
+    .segmented button.active { background: #3a3a3a; color: var(--text-color); box-shadow: 0 1px 2px rgba(0,0,0,.4); }
+
+    .chart { height: 244px; position: relative; }
+    .chart svg { width: 100%; height: 212px; overflow: visible; }
+    .grid-line { stroke: #2a2a2a; stroke-width: 1; }
+    .axis-text { fill: rgba(255,255,255,.34); font-size: 10px; }
+    .chart-line { fill: none; stroke: #3c89e8; stroke-width: 2; vector-effect: non-scaling-stroke; }
+    .chart-line.green { stroke: #49aa19; }
+    .chart-line.orange { stroke: #d89614; }
+    .chart-area { fill: url(#blueArea); }
+    .chart-dot { fill: #141414; stroke: #69b1ff; stroke-width: 1.5; }
+    .chart-legend { height: 25px; display: flex; align-items: flex-end; justify-content: center; gap: 18px; color: var(--text-tertiary); font-size: 11px; }
+    .legend-item { display: inline-flex; align-items: center; gap: 5px; }
+    .legend-dot { width: 7px; height: 7px; border-radius: 50%; background: #3c89e8; }
+    .legend-dot.green { background: var(--success); }
+    .legend-dot.orange { background: var(--warning); }
+    .legend-dot.red { background: var(--danger); }
+    .legend-dot.purple { background: #9254de; }
+
+    .contribution-body {
+      --contribution-label-width: 27px;
+      --contribution-column-gap: clamp(1px, .28vw, 4px);
+      height: var(--primary-chart-body-height);
+      padding: 14px clamp(10px, 1.25vw, 18px) 11px;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      container-type: inline-size;
+    }
+    .contribution-months {
+      width: min(calc(100% - var(--contribution-label-width) - 8px), 585px);
+      min-height: 18px;
+      margin: 0 0 5px;
+      align-self: center;
+      transform: translateX(calc((var(--contribution-label-width) + 8px) / 2));
+      display: grid;
+      grid-template-columns: repeat(27, minmax(0, 1fr));
+      column-gap: var(--contribution-column-gap);
+      color: var(--text-secondary);
+      font-size: clamp(8px, 2.4cqw, 10px);
+      line-height: 1;
+    }
+    .contribution-months span { min-width: 0; white-space: nowrap; }
+    .contribution-main { width: min(100%, 620px); align-self: center; display: flex; align-items: stretch; gap: 8px; min-height: 0; }
+    .contribution-weekdays {
+      flex: 0 0 var(--contribution-label-width);
+      display: grid;
+      grid-template-rows: repeat(7, minmax(0, 1fr));
+      color: var(--text-tertiary);
+      font-size: clamp(8px, 2.2cqw, 9px);
+    }
+    .contribution-weekdays span { display: flex; align-items: center; }
+    .contribution-weeks {
+      flex: 1;
+      min-width: 0;
+      display: grid;
+      grid-template-columns: repeat(27, minmax(0, 1fr));
+      gap: var(--contribution-column-gap);
+    }
+    .contribution-week { min-width: 0; display: grid; grid-template-rows: repeat(7, auto); gap: var(--contribution-column-gap); }
+    .contribution-cell { display: block; width: 100%; aspect-ratio: 1; border-radius: clamp(1px, .45cqw, 2px); background: #21262d; }
+    .contribution-cell.level-1 { background: #0e4429; }
+    .contribution-cell.level-2 { background: #006d32; }
+    .contribution-cell.level-3 { background: #26a641; }
+    .contribution-cell.level-4 { background: #39d353; }
+    .contribution-cell.outside { visibility: hidden; }
+    .contribution-footer {
+      width: min(calc(100% - var(--contribution-label-width) - 8px), 585px);
+      margin: auto 0 0;
+      padding-top: 8px;
+      align-self: center;
+      transform: translateX(calc((var(--contribution-label-width) + 8px) / 2));
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      color: var(--text-tertiary);
+      font-size: clamp(8px, 2.4cqw, 10px);
+    }
+    .contribution-legend { display: inline-flex; align-items: center; gap: 4px; }
+    .contribution-legend i { width: clamp(7px, 2.5cqw, 10px); aspect-ratio: 1; border-radius: 2px; background: #21262d; }
+    .contribution-legend i:nth-of-type(2) { background: #0e4429; }
+    .contribution-legend i:nth-of-type(3) { background: #006d32; }
+    .contribution-legend i:nth-of-type(4) { background: #26a641; }
+    .contribution-legend i:nth-of-type(5) { background: #39d353; }
+
+    .quality-list { display: flex; flex-direction: column; gap: 14px; padding-top: 3px; }
+    .quality-row { display: grid; grid-template-columns: 96px minmax(0, 1fr) 48px; align-items: center; gap: 10px; }
+    .quality-name { color: var(--text-secondary); }
+    .quality-value { text-align: right; font-variant-numeric: tabular-nums; }
+    .progress { height: 6px; border-radius: 3px; background: var(--fill-secondary); overflow: hidden; }
+    .progress > i { display: block; height: 100%; border-radius: inherit; background: #3c89e8; }
+    .progress.success > i { background: var(--success); }
+    .progress.warning > i { background: var(--warning); }
+    .progress.danger > i { background: var(--danger); }
+    .quality-note { margin-top: 15px; padding-top: 12px; border-top: 1px solid var(--border-color-secondary); color: var(--text-tertiary); font-size: 11px; line-height: 18px; }
+
+    .table-wrap { overflow: auto; }
+    table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+    th { padding: 10px 12px; color: var(--text-tertiary); font-size: 11px; font-weight: 400; text-align: left; background: rgba(255,255,255,.018); border-bottom: 1px solid var(--border-color-secondary); }
+    td { padding: 10px 12px; color: var(--text-secondary); border-bottom: 1px solid var(--border-color-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    tbody tr:last-child td { border-bottom: 0; }
+    tbody tr:hover td { background: var(--fill-tertiary); }
+    td.strong { color: var(--text-color); }
+    .status-cell { display: inline-flex; align-items: center; gap: 7px; }
+    .status-light { width: 6px; height: 6px; border-radius: 50%; background: var(--success); }
+    .status-light.warning { background: var(--warning); }
+    .status-light.danger { background: var(--danger); }
+    .number { text-align: right; font-variant-numeric: tabular-nums; }
+
+    .stacked-bars { display: flex; align-items: flex-end; justify-content: space-between; gap: 10px; height: 190px; padding: 8px 6px 0; border-bottom: 1px solid var(--border-color-secondary); }
+    .bar-group { flex: 1; height: 100%; display: flex; flex-direction: column; justify-content: flex-end; align-items: stretch; gap: 1px; position: relative; }
+    .bar-part { min-height: 2px; background: #3c89e8; border-radius: 1px 1px 0 0; }
+    .bar-part.green { background: var(--success); }
+    .bar-part.red { background: var(--danger); }
+    .bar-part.orange { background: var(--warning); }
+    .bar-part.purple { background: #9254de; }
+    .bar-part.gray { background: #595959; }
+    .bar-label { position: absolute; top: calc(100% + 8px); left: 50%; transform: translateX(-50%); color: var(--text-tertiary); font-size: 10px; white-space: nowrap; }
+    .bars-wrap { height: 226px; }
+
+    .volume-chart { height: 252px; position: relative; padding: 8px 4px 26px 42px; }
+    .volume-y-labels {
+      position: absolute; left: 0; top: 5px; bottom: 23px; width: 34px;
+      display: flex; flex-direction: column; justify-content: space-between;
+      color: var(--text-tertiary); font-size: 10px; text-align: right;
+    }
+    .volume-line-svg { width: 100%; height: 100%; position: relative; z-index: 1; overflow: visible; }
+    .volume-line-grid { stroke: #2a2a2a; stroke-width: 1; vector-effect: non-scaling-stroke; }
+    .volume-line-area { fill: url(#volumeAreaGradient); }
+    .volume-line-path { fill: none; stroke: var(--overview-trend-color, #3c89e8); stroke-width: 2; vector-effect: non-scaling-stroke; }
+    .volume-line-point { fill: var(--panel-bg-soft); stroke: var(--overview-trend-color, #69b1ff); stroke-width: 1.5; vector-effect: non-scaling-stroke; pointer-events: none; }
+    .volume-line-hit { fill: transparent; cursor: crosshair; }
+    .volume-line-hit:hover + .volume-line-point { fill: var(--overview-trend-color, #69b1ff); stroke: rgba(255,255,255,.8); }
+    .volume-line-label { fill: rgba(255,255,255,.42); font-size: 9px; text-anchor: middle; }
+
+    .run-live { display: flex; align-items: center; gap: 8px; }
+    .subsection-heading {
+      margin: 22px 0 10px; display: flex; align-items: center; justify-content: space-between;
+      color: var(--text-color); font-size: 15px; font-weight: 600;
+    }
+    .subsection-heading small { color: var(--text-tertiary); font-size: 11px; font-weight: 400; }
+    .worker-live-heading { margin: 0 0 10px; }
+    .worker-live-grid {
+      display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px; margin-bottom: 12px;
+    }
+    .metric-grid.worker-history-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .worker-live-grid .metric-card { min-height: 112px; }
+    .worker-live-grid .metric-value.running { color: #95de64; }
+    .worker-live-grid .metric-value.queued { color: #ffc53d; }
+    .worker-live-grid .metric-value.ready-time { font-size: 22px; }
+    .slot-usage { width: 100%; display: flex; align-items: center; gap: 9px; }
+    .slot-usage .progress { flex: 1; }
+    .slot-usage span { color: var(--text-tertiary); font-size: 11px; white-space: nowrap; }
+    .live-chip { height: 28px; padding: 0 10px; display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--border-color-secondary); border-radius: 2px; background: var(--panel-bg-soft); color: var(--text-secondary); }
+    .live-chip b { color: var(--text-color); font-size: 15px; }
+    .live-chip.running .status-light { box-shadow: 0 0 0 3px var(--success-soft); animation: pulse 2s infinite; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.45} }
+
+    .donut-wrap { min-height: 212px; display: grid; grid-template-columns: 185px 1fr; align-items: center; gap: 18px; }
+    .donut { width: 150px; height: 150px; border-radius: 50%; background: conic-gradient(#49aa19 0 68%, #dc4446 68% 77%, #d89614 77% 84%, #3c89e8 84% 92%, #595959 92%); position: relative; margin: auto; }
+    .donut::after { content: ""; position: absolute; inset: 24px; border-radius: 50%; background: var(--panel-bg-soft); }
+    .donut-center { position: absolute; inset: 0; z-index: 1; display: grid; place-content: center; text-align: center; }
+    .donut-center b { font-size: 22px; font-weight: 500; }
+    .donut-center span { color: var(--text-tertiary); font-size: 11px; }
+    .legend-list { display: flex; flex-direction: column; gap: 10px; }
+    .legend-row { display: flex; align-items: center; justify-content: space-between; color: var(--text-secondary); }
+    .legend-row > span:first-child { display: inline-flex; align-items: center; gap: 7px; }
+
+    .health-button { position: relative; }
+    .health-badge { position: absolute; right: -3px; top: -3px; min-width: 15px; height: 15px; padding: 0 4px; border-radius: 8px; background: var(--warning); color: #111; font-size: 9px; line-height: 15px; font-weight: 600; }
+    .overlay { position: fixed; inset: 0; z-index: 50; background: rgba(0,0,0,.54); opacity: 0; pointer-events: none; transition: opacity .18s; }
+    .overlay.open { opacity: 1; pointer-events: auto; }
+    .drawer { position: absolute; right: 0; top: 0; bottom: 0; width: 500px; background: var(--panel-bg); border-left: 1px solid var(--border-color-secondary); transform: translateX(100%); transition: transform .22s ease; box-shadow: -10px 0 30px rgba(0,0,0,.45); display: flex; flex-direction: column; }
+    .overlay.open .drawer { transform: none; }
+    .drawer-head { height: 52px; padding: 0 16px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border-color-secondary); }
+    .drawer-title { font-size: 15px; font-weight: 600; }
+    .drawer-body { padding: 16px; overflow: auto; }
+    .health-summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 16px; }
+    .health-stat { padding: 11px; border: 1px solid var(--border-color-secondary); background: var(--panel-bg-soft); border-radius: 3px; }
+    .health-stat span { color: var(--text-tertiary); font-size: 11px; }
+    .health-stat b { display: block; margin-top: 5px; font-size: 20px; font-weight: 500; }
+    .drawer-section-title { margin: 18px 0 8px; color: var(--text-secondary); font-weight: 500; }
+    .diagnostic { padding: 10px 11px; border: 1px solid rgba(216,150,20,.35); background: var(--warning-soft); border-radius: 3px; color: var(--text-secondary); line-height: 19px; }
+    .diagnostic b { color: #ffc53d; font-weight: 500; }
+    .diagnostic small { display: block; margin-top: 4px; color: var(--text-tertiary); }
+
+    .toast { position: fixed; left: 50%; top: 18px; z-index: 80; transform: translate(-50%, -20px); opacity: 0; pointer-events: none; padding: 9px 13px; border: 1px solid var(--border-color); background: var(--panel-bg-elevated); border-radius: 3px; box-shadow: 0 8px 24px rgba(0,0,0,.45); transition: .2s; }
+    .toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+    .prototype-note { margin-top: 12px; color: var(--text-tertiary); font-size: 11px; text-align: right; }
+    .muted { color: var(--text-tertiary); }
+    .nowrap { white-space: nowrap; }
+
+    @media (max-width: 1280px) {
+      .metric-grid { grid-template-columns: repeat(3, 1fr); }
+      .metric-grid.five { grid-template-columns: repeat(3, 1fr); }
+      .grid-main { grid-template-columns: minmax(0, 1.45fr) minmax(300px, .8fr); }
+    }
+  </style>
+</head>
+<body>
+  <svg width="0" height="0" style="position:absolute">
+    <defs><linearGradient id="blueArea" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3c89e8" stop-opacity=".28"/><stop offset="1" stop-color="#3c89e8" stop-opacity="0"/></linearGradient></defs>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.34 5.66L20 14"/><path d="M20 6v5h-5"/></symbol>
+    <symbol id="i-pulse" viewBox="0 0 24 24"><path d="M3 12h4l2.2-6 4 12 2.2-6H21"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 8h.01"/></symbol>
+    <symbol id="i-warning" viewBox="0 0 24 24"><path d="M10.3 4.2 2.5 18a2 2 0 0 0 1.74 3h15.52a2 2 0 0 0 1.74-3L13.7 4.2a2 2 0 0 0-3.4 0Z"/><path d="M12 9v4"/><path d="M12 17h.01"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+    <symbol id="i-database" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v7c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 12v7c0 1.7 3.6 3 8 3s8-1.3 8-3v-7"/></symbol>
+  </svg>
+
+  <div class="app-shell">
+    <header class="app-header">
+      <div class="brand"><span class="brand-mark">A</span><span>Agent Workbench</span></div>
+      <div class="header-meta"><span class="local-pill"><i class="status-dot"></i>本地服务正常</span><span>v0.1.0</span></div>
+    </header>
+
+    <nav class="top-nav" aria-label="Workbench 导航">
+      <button class="top-tab">工作区</button>
+      <button class="top-tab">仓库</button>
+      <button class="top-tab active">数据看板</button>
+      <button class="top-tab">设置</button>
+    </nav>
+
+    <main class="page">
+      <div class="page-head">
+        <div class="title-row">
+          <div>
+            <h1>数据看板</h1>
+            <div class="subtitle">回看 Agent、模型、工具与 Git 使用情况 · 所有统计仅保存在本机</div>
+          </div>
+          <div class="toolbar">
+            <select id="rangeSelect" class="control" aria-label="时间范围">
+              <option>近 24 小时</option><option selected>近 7 天</option><option>近 30 天</option><option>近 90 天</option><option>自定义范围</option>
+            </select>
+            <button id="refreshBtn" class="icon-btn" title="刷新数据"><svg class="icon"><use href="#i-refresh"/></svg></button>
+          </div>
+        </div>
+        <nav class="section-nav" aria-label="数据看板分区">
+          <button class="section-tab active" data-view="overview">概览</button>
+          <button class="section-tab" data-view="agent">Agent</button>
+          <button class="section-tab" data-view="models">模型</button>
+          <button class="section-tab" data-view="git">Git</button>
+          <button class="section-tab" data-view="worker">Worker</button>
+        </nav>
+      </div>
+
+      <div class="content">
+        <section id="view-overview" class="view active">
+          <div class="metric-grid">
+            <article class="metric-card clickable selected" role="button" tabindex="0" data-overview-trend="volume"><div class="metric-head"><span class="metric-label">监控数据量</span></div><div class="metric-value">1,826</div><div class="metric-foot"><span class="delta-up">↑ 9.6%</span><span>Analytics 采集记录</span></div></article>
+            <article class="metric-card clickable" role="button" tabindex="0" data-overview-trend="duration"><div class="metric-head"><span class="metric-label">Agent 总时长</span></div><div class="metric-value">3h 14m</div><div class="metric-foot"><span class="delta-up">↑ 12.4%</span></div></article>
+            <article class="metric-card clickable" role="button" tabindex="0" data-overview-trend="requests"><div class="metric-head"><span class="metric-label">模型请求</span></div><div class="metric-value">218</div><div class="metric-foot"><span class="delta-up">↑ 6.3%</span></div></article>
+            <article class="metric-card clickable" role="button" tabindex="0" data-overview-trend="successRate" title="请求成功率 = completed / (completed + failed + timed_out)；cancelled、interrupted、unknown 不进入分母"><div class="metric-head"><span class="metric-label">请求成功率</span></div><div class="metric-value">93.1%</div><div class="metric-foot"><span class="delta-up">↑ 1.6pp</span></div></article>
+            <article class="metric-card clickable" role="button" tabindex="0" data-overview-trend="cacheHit" title="缓存命中率 = sum(cache_read_tokens) / sum(input_tokens)，仅统计缓存可比样本"><div class="metric-head"><span class="metric-label">缓存命中率</span></div><div class="metric-value">41.2%</div><div class="metric-foot"><span class="delta-up">↑ 2.7pp</span><span>输入缓存</span></div></article>
+            <article class="metric-card clickable" role="button" tabindex="0" data-overview-trend="commits"><div class="metric-head"><span class="metric-label">Git Commit</span></div><div class="metric-value">23</div><div class="metric-foot"><span class="delta-down">↓ 11.5%</span></div></article>
+          </div>
+
+          <div class="grid-main">
+            <article class="panel">
+              <div class="panel-head"><div><span id="overviewTrendTitle" class="panel-title">监控数据量趋势</span><span id="overviewBucketLabel" class="panel-subtitle">每 6 小时 | 共7天</span></div><span id="overviewTrendUnit" class="muted">采集记录数</span></div>
+              <div class="panel-body">
+                <div id="overviewTrendChartWrap" class="volume-chart" aria-label="监控数据量趋势图">
+                  <div class="volume-y-labels"><span id="volumeYMax">600</span><span id="volumeYMidHigh">450</span><span id="volumeYMid">300</span><span id="volumeYMidLow">150</span><span>0</span></div>
+                  <svg id="volumeLineChart" class="volume-line-svg" viewBox="0 0 760 218" preserveAspectRatio="none"></svg>
+                </div>
+                <div class="chart-legend"><span class="legend-item"><i id="overviewTrendLegendDot" class="legend-dot"></i><span id="overviewTrendLegend">监控数据量</span></span><span id="overviewTrendHint" class="muted">悬停查看各数据域构成</span></div>
+              </div>
+            </article>
+
+            <article class="panel">
+              <div class="panel-head"><span class="panel-title">数据域状态</span><div class="toolbar"><span class="tag success">全部正常</span><button class="button health-button" type="button" data-open-health><svg class="icon"><use href="#i-pulse"/></svg>数据健康</button></div></div>
+              <div class="table-wrap"><table><thead><tr><th>数据域</th><th>状态</th><th>最后成功</th></tr></thead><tbody>
+                <tr><td class="strong">Model</td><td><span class="status-cell"><i class="status-light"></i>正常</span></td><td>今天 14:31</td></tr>
+                <tr><td class="strong">Run</td><td><span class="status-cell"><i class="status-light"></i>正常</span></td><td>今天 14:32</td></tr>
+                <tr><td class="strong">Execution</td><td><span class="status-cell"><i class="status-light"></i>正常</span></td><td>今天 14:32</td></tr>
+                <tr><td class="strong">Agent Duration</td><td><span class="status-cell"><i class="status-light"></i>正常</span></td><td>今天 14:32</td></tr>
+                <tr><td class="strong">Tool</td><td><span class="status-cell"><i class="status-light"></i>正常</span></td><td>今天 14:32</td></tr>
+                <tr><td class="strong">Message</td><td><span class="status-cell"><i class="status-light"></i>正常</span></td><td>今天 14:32</td></tr>
+                <tr><td class="strong">Session</td><td><span class="status-cell"><i class="status-light"></i>正常</span></td><td>今天 14:32</td></tr>
+                <tr><td class="strong">Worker</td><td><span class="status-cell"><i class="status-light"></i>正常</span></td><td>今天 14:32</td></tr>
+                <tr><td class="strong">Git</td><td><span class="status-cell"><i class="status-light"></i>正常</span></td><td>今天 14:20</td></tr>
+              </tbody></table></div>
+            </article>
+          </div>
+        </section>
+
+        <section id="view-agent" class="view">
+          <div class="metric-grid">
+            <article class="metric-card clickable selected" role="button" tabindex="0" data-agent-trend="duration"><div class="metric-head">Agent 总时长</div><div class="metric-value">2h 07m</div><div class="metric-foot">仅顶层用户任务可靠区间</div></article>
+            <article class="metric-card clickable" role="button" tabindex="0" data-agent-trend="runs"><div class="metric-head">运行次数</div><div class="metric-value">29</div><div class="metric-foot">一个业务 Run 只计一次</div></article>
+            <article class="metric-card clickable" role="button" tabindex="0" data-agent-trend="mainTasks"><div class="metric-head">主任务</div><div class="metric-value">16</div><div class="metric-foot">顶层用户任务</div></article>
+            <article class="metric-card clickable" role="button" tabindex="0" data-agent-trend="subtasks"><div class="metric-head">子任务</div><div class="metric-value">11</div><div class="metric-foot">不计入 Agent 总时长</div></article>
+            <article class="metric-card clickable" role="button" tabindex="0" data-agent-trend="userMessages"><div class="metric-head">User消息</div><div class="metric-value">74</div><div class="metric-foot">不采集消息正文</div></article>
+            <article class="metric-card clickable" role="button" tabindex="0" data-agent-trend="assistantMessages"><div class="metric-head">Assistant消息</div><div class="metric-value">156</div><div class="metric-foot">不采集回复正文</div></article>
+          </div>
+
+          <div class="grid-main">
+            <article class="panel">
+              <div class="panel-head"><div><span id="agentTrendTitle" class="panel-title">Agent 总时长趋势</span><span id="agentTrendBucket" class="panel-subtitle">每 6 小时 | 共7天</span></div><span id="agentTrendUnit" class="muted">可靠执行时长</span></div>
+              <div class="panel-body agent-trend-chart">
+                <svg id="agentTrendChart" viewBox="0 0 760 220" preserveAspectRatio="none" aria-label="Agent 指标趋势图"></svg>
+                <div class="chart-legend"><span class="legend-item"><i class="legend-dot"></i><span id="agentTrendLegend">Agent 总时长</span></span></div>
+              </div>
+            </article>
+
+            <div id="agent-tools" class="trend-side-grid">
+              <article class="metric-card clickable" role="button" tabindex="0" data-agent-trend="toolCalls"><div class="metric-head">工具调用</div><div class="metric-value">682</div><div class="metric-foot">每个 Tool Fact 一次</div></article>
+              <article class="metric-card clickable" role="button" tabindex="0" data-agent-trend="toolSuccessRate" title="调用成功率 = completed / (completed + failed)，表示工具协议层执行完成比例"><div class="metric-head">调用成功率</div><div class="metric-value">97.2%</div><div class="metric-foot">协议层 Completed 占有效终态</div></article>
+              <article class="metric-card clickable" role="button" tabindex="0" data-agent-trend="manualCompactions"><div class="metric-head">手动压缩上下文</div><div class="metric-value">2</div><div class="metric-foot">成功提交的手动压缩摘要</div></article>
+              <article class="metric-card clickable" role="button" tabindex="0" data-agent-trend="autoCompactions"><div class="metric-head">自动压缩上下文</div><div class="metric-value">7</div><div class="metric-foot">成功提交的自动压缩摘要</div></article>
+            </div>
+          </div>
+
+          <div class="analysis-grid">
+            <article class="panel">
+                          <div class="panel-head"><span class="panel-title">Run 终态分布</span><div id="runStatusScope" class="segmented" role="group" aria-label="Run 类型"><button class="active" type="button" data-run-scope="all">全部</button><button type="button" data-run-scope="main">主任务</button><button type="button" data-run-scope="subtask">子任务</button></div></div>
+                          <div class="panel-body compact-donut-wrap"><div id="runStatusDonut" class="donut" style="background:conic-gradient(#49aa19 0 74%, #dc4446 74% 84%, #d89614 84% 91%, #595959 91%)"><div class="donut-center"><b id="runStatusTotal">151</b><span>已结束 Run</span></div></div><div class="legend-list" style="flex:1"><div class="legend-row"><span><i class="legend-dot green"></i>Completed</span><b data-run-status-value="completed">112</b></div><div class="legend-row"><span><i class="legend-dot red"></i>Failed</span><b data-run-status-value="failed">15</b></div><div class="legend-row"><span><i class="legend-dot orange"></i>Cancelled</span><b data-run-status-value="cancelled">11</b></div><div class="legend-row"><span><i class="legend-dot" style="background:#595959"></i>Interrupted / Unknown</span><b data-run-status-value="other">13</b></div></div></div>
+                        </article>
+
+            <article class="panel">
+                          <div class="panel-head"><span class="panel-title">运行类型构成</span></div>
+                          <div class="panel-body compact-donut-wrap"><div class="donut" style="background:conic-gradient(#3c89e8 0 60.13%, #9254de 60.13% 100%)"><div class="donut-center"><b>153</b><span>任务 Run</span></div></div><div class="legend-list" style="flex:1"><div class="legend-row"><span><i class="legend-dot" style="background:#3c89e8"></i>主任务</span><b>92</b></div><div class="legend-row"><span><i class="legend-dot" style="background:#9254de"></i>子任务</span><b>61</b></div></div></div>
+                        </article>
+
+            <article class="panel">
+                          <div class="panel-head"><span class="panel-title">消息分类统计</span><span class="panel-subtitle">按 Agent Message type 汇总</span></div>
+                          <div class="panel-body"><div class="mini-bar-list"><div class="mini-bar-row"><span>Assistant</span><div class="progress"><i style="width:100%"></i></div><b>892</b></div><div class="mini-bar-row"><span>User</span><div class="progress"><i style="width:47%;background:#9254de"></i></div><b>418</b></div><div class="mini-bar-row"><span>Runtime</span><div class="progress"><i style="width:32%;background:#13a8a8"></i></div><b>286</b></div><div class="mini-bar-row"><span>System</span><div class="progress"><i style="width:18%;background:#d89614"></i></div><b>164</b></div><div class="mini-bar-row"><span>Compaction</span><div class="progress"><i style="width:6%;background:#595959"></i></div><b>49</b></div></div></div>
+                        </article>
+
+            <article class="panel span-2">
+                          <div class="panel-head"><span class="panel-title">工具明细</span><span class="panel-subtitle">Completed 只表示协议层执行完成</span></div>
+                          <div class="table-wrap"><table><thead><tr><th>工具名</th><th class="number">调用</th><th class="number">Completed</th><th class="number">Failed</th><th class="number">Cancelled</th><th class="number">Unknown</th><th class="number">完成平均时长</th></tr></thead><tbody><tr><td class="strong">bash</td><td class="number">1,482</td><td class="number">1,420</td><td class="number">32</td><td class="number">27</td><td class="number">3</td><td class="number">2.42s</td></tr><tr><td class="strong">read</td><td class="number">1,126</td><td class="number">1,098</td><td class="number">14</td><td class="number">12</td><td class="number">2</td><td class="number">0.18s</td></tr><tr><td class="strong">apply_patch</td><td class="number">562</td><td class="number">519</td><td class="number">28</td><td class="number">13</td><td class="number">2</td><td class="number">0.63s</td></tr><tr><td class="strong">write</td><td class="number">438</td><td class="number">419</td><td class="number">11</td><td class="number">7</td><td class="number">1</td><td class="number">0.31s</td></tr></tbody></table></div>
+                        </article>
+
+            <article class="panel">
+                          <div class="panel-head"><span class="panel-title">工具状态分布</span></div>
+                          <div class="panel-body compact-donut-wrap"><div class="donut" style="background:conic-gradient(#49aa19 0 96.4%, #dc4446 96.4% 98.9%, #d89614 98.9% 99.8%, #595959 99.8%)"><div class="donut-center"><b>3,926</b><span>工具调用</span></div></div><div class="legend-list" style="flex:1"><div class="legend-row"><span><i class="legend-dot green"></i>Completed</span><b>3,785</b></div><div class="legend-row"><span><i class="legend-dot red"></i>Failed</span><b>96</b></div><div class="legend-row"><span><i class="legend-dot orange"></i>Cancelled</span><b>38</b></div><div class="legend-row"><span><i class="legend-dot" style="background:#595959"></i>Unknown</span><b>7</b></div></div></div>
+                        </article>
+          </div>
+        </section>
+
+        <section id="view-models" class="view">
+          <div class="metric-grid">
+            <article class="metric-card clickable selected" role="button" tabindex="0" data-model-trend="requests"><div class="metric-head">请求次数</div><div class="metric-value">1,284</div><div class="metric-foot">已跨 SDK Provider 调用边界</div></article>
+            <article class="metric-card clickable" role="button" tabindex="0" data-model-trend="successRate"><div class="metric-head">成功率</div><div class="metric-value">91.8%</div><div class="metric-foot">1,082 / 1,179</div></article>
+            <article class="metric-card clickable" role="button" tabindex="0" data-model-trend="timeoutRate"><div class="metric-head">超时率</div><div class="metric-value">5.6%</div><div class="metric-foot">Idle 48 · Total 18</div></article>
+            <article class="metric-card clickable" role="button" tabindex="0" data-model-trend="duration"><div class="metric-head">已完成请求平均时长</div><div class="metric-value small">8.42s</div><div class="metric-foot">可靠样本 1,074</div></article>
+            <article class="metric-card clickable" role="button" tabindex="0" data-model-trend="tokens"><div class="metric-head">输入 / 输出 Token</div><div class="metric-value small">4.8M / 1.2M</div><div class="metric-foot">Usage coverage 94.2%</div></article>
+            <article class="metric-card clickable" role="button" tabindex="0" data-model-trend="cacheHit"><div class="metric-head">缓存命中率</div><div class="metric-value">38.6%</div><div class="metric-foot">可比样本 764</div></article>
+          </div>
+          <div class="grid-main"><article class="panel"><div class="panel-head"><div><span id="modelTrendTitle" class="panel-title">模型请求趋势</span><span id="modelTrendBucket" class="panel-subtitle">每 6 小时 | 共7天</span></div><div id="modelTrendLegend" class="chart-legend" style="height:auto"><span class="legend-item"><i class="legend-dot"></i>完成</span><span class="legend-item"><i class="legend-dot orange"></i>失败</span><span class="legend-item"><i class="legend-dot red"></i>超时</span><span class="legend-item"><i class="legend-dot" style="background:#595959"></i>其他</span></div></div><div id="modelTrendBody" class="panel-body bars-wrap"><div id="modelTrendBars" class="stacked-bars"></div><svg id="modelTrendLine" class="model-trend-svg" viewBox="0 0 760 218" preserveAspectRatio="none" hidden></svg></div></article><article class="panel"><div class="panel-head"><span class="panel-title">Token数据覆盖率</span></div><div class="panel-body"><div class="quality-list"><div class="quality-row"><span class="quality-name">输入 Token</span><div class="progress success"><i style="width:96%"></i></div><span class="quality-value">96%</span></div><div class="quality-row"><span class="quality-name">输出 Token</span><div class="progress success"><i style="width:95%"></i></div><span class="quality-value">95%</span></div><div class="quality-row"><span class="quality-name">总 Token</span><div class="progress"><i style="width:94%"></i></div><span class="quality-value">94%</span></div><div class="quality-row"><span class="quality-name">输入缓存</span><div class="progress warning"><i style="width:60%"></i></div><span class="quality-value">60%</span></div></div></div></article></div>
+          <article class="panel"><div class="panel-head"><span class="panel-title">Provider / Model 对比</span><span class="panel-subtitle">系统级统计</span></div><div class="table-wrap"><table><thead><tr><th>Provider / Model</th><th class="number">请求</th><th class="number">成功率</th><th class="number">超时率</th><th class="number">完成平均时长</th><th class="number">Token</th><th class="number">缓存命中率</th></tr></thead><tbody><tr><td class="strong">anthropic / claude-sonnet</td><td class="number">824</td><td class="number">93.4%</td><td class="number">4.2%</td><td class="number">8.01s</td><td class="number">3.9M</td><td class="number">42.1%</td></tr><tr><td class="strong">openai / gpt-4.1</td><td class="number">356</td><td class="number">89.6%</td><td class="number">7.3%</td><td class="number">9.24s</td><td class="number">1.7M</td><td class="number">31.8%</td></tr><tr><td class="strong">custom / local-model</td><td class="number">104</td><td class="number">88.2%</td><td class="number">8.7%</td><td class="number">6.72s</td><td class="number"><span class="muted">未提供</span></td><td class="number"><span class="muted">不可比较</span></td></tr></tbody></table></div></article>
+        </section>
+
+        <section id="view-git" class="view">
+          <div class="metric-grid five"><article class="metric-card clickable selected" role="button" tabindex="0" data-git-trend="commits"><div class="metric-head">Commit</div><div class="metric-value">147</div><div class="metric-foot">包含 Merge Commit</div></article><article class="metric-card clickable" role="button" tabindex="0" data-git-trend="nonMerge"><div class="metric-head">非 Merge Commit</div><div class="metric-value">132</div><div class="metric-foot">当前 generation</div></article><article class="metric-card clickable" role="button" tabindex="0" data-git-trend="files"><div class="metric-head">变更文件</div><div class="metric-value">486</div><div class="metric-foot">二进制文件计文件数</div></article><article class="metric-card clickable" role="button" tabindex="0" data-git-trend="additions"><div class="metric-head">新增行</div><div class="metric-value">+18,420</div><div class="metric-foot">非 Merge numstat</div></article><article class="metric-card clickable" role="button" tabindex="0" data-git-trend="deletions"><div class="metric-head">删除行</div><div class="metric-value">−7,836</div><div class="metric-foot">不代表质量或产出</div></article></div>
+          <div class="grid-equal"><article class="panel"><div class="panel-head"><div><span id="gitTrendTitle" class="panel-title">Commit 趋势</span><span id="gitTrendBucket" class="panel-subtitle">每 6 小时 | 共7天</span></div><div id="gitTrendLegend" class="chart-legend" style="height:auto"><span class="legend-item"><i class="legend-dot green"></i>Commit</span></div></div><div class="panel-body chart"><svg id="gitTrendChart" viewBox="0 0 760 212" preserveAspectRatio="none"></svg></div></article><article class="panel"><div class="panel-head"><div><span class="panel-title">GitHub 提交视图</span><span class="panel-subtitle">固定近 180 天</span></div><span class="muted">每日 Commit</span></div><div class="contribution-body"><div id="gitContributionMonths" class="contribution-months"></div><div class="contribution-main"><div class="contribution-weekdays"><span></span><span>Mon</span><span></span><span>Wed</span><span></span><span>Fri</span><span></span></div><div id="gitContributionWeeks" class="contribution-weeks"></div></div><div class="contribution-footer"><span>固定近 180 天</span><span class="contribution-legend">少<i></i><i></i><i></i><i></i><i></i>多</span></div></div></article></div>
+          <article class="panel"><div class="panel-head"><span class="panel-title">Repo Coverage</span><span class="panel-subtitle">仅展示无敏感诊断，不显示路径、Remote、Commit Message 或 SHA</span></div><div class="table-wrap"><table><thead><tr><th>Repo 标识</th><th>状态</th><th>当前 Generation</th><th>历史覆盖起点</th><th>Coverage</th><th>说明</th></tr></thead><tbody><tr><td class="strong">repo · 8f2a</td><td><span class="tag success">Ready</span></td><td>Generation 16</td><td>2025-08-01</td><td>完整</td><td>当前可达历史已覆盖</td></tr><tr><td class="strong">repo · 31bc</td><td><span class="tag success">Ready</span></td><td>Generation 9</td><td>2025-11-18</td><td>完整</td><td>当前可达历史已覆盖</td></tr><tr><td class="strong">repo · a044</td><td><span class="tag success">Ready</span></td><td>Generation 4</td><td>2026-01-12</td><td>完整</td><td>当前可达历史已覆盖</td></tr></tbody></table></div></article>
+        </section>
+
+        <section id="view-worker" class="view">
+          <div class="subsection-heading worker-live-heading"><span>Worker 实时状态</span><span class="tag success">运行正常</span></div>
+          <div class="worker-live-grid">
+            <article class="metric-card"><div class="metric-head"><span class="metric-label">Running</span></div><div class="metric-value running">1</div><div class="metric-foot">当前正在执行</div></article>
+            <article class="metric-card"><div class="metric-head"><span class="metric-label">Queued</span></div><div class="metric-value queued">2</div><div class="metric-foot">等待调度</div></article>
+            <article class="metric-card"><div class="metric-head"><span class="metric-label">配置槽位</span></div><div class="metric-value">4</div><div class="metric-foot"><div class="slot-usage"><div class="progress success"><i style="width:25%"></i></div><span>1 / 4 占用</span></div></div></article>
+            <article class="metric-card"><div class="metric-head"><span class="metric-label">最近 Ready</span></div><div class="metric-value ready-time">今天 11:42</div><div class="metric-foot">最近一次就绪时间</div></article>
+          </div>
+          <div class="metric-grid worker-history-grid"><article class="metric-card"><div class="metric-head">异常退出</div><div class="metric-value alert-value">1</div><div class="metric-foot"><span class="delta-down">↓ 50.0%</span></div></article><article class="metric-card"><div class="metric-head">重启次数</div><div class="metric-value alert-value">1</div><div class="metric-foot"><span class="delta-down">↓ 50.0%</span><span>非 0 需留意</span></div></article><article class="metric-card"><div class="metric-head">重启失败</div><div class="metric-value">0</div><div class="metric-foot">未恢复运行的次数</div></article></div>
+          <div class="grid-main"><article class="panel"><div class="panel-head"><div><span class="panel-title">Worker 事件趋势</span><span id="workerEventBucket" class="panel-subtitle">每 6 小时 | 共7天</span></div><div class="chart-legend" style="height:auto"><span class="legend-item"><i class="legend-dot red"></i>异常退出</span><span class="legend-item"><i class="legend-dot orange"></i>重启次数</span></div></div><div class="panel-body bars-wrap"><div id="workerEventBars" class="stacked-bars"></div></div></article><article class="panel"><div class="panel-head"><span class="panel-title">最近重启记录</span><span class="panel-subtitle">每次重启都作为需要留意的事件</span></div><div class="table-wrap"><table><thead><tr><th>发生时间</th><th>事件</th><th>重启后状态</th></tr></thead><tbody><tr><td>今天 11:42</td><td class="strong">Worker 重启</td><td><span class="tag">已恢复运行</span></td></tr><tr><td>03/17 16:08</td><td class="strong">Worker 重启</td><td><span class="tag">已恢复运行</span></td></tr><tr><td>03/15 09:21</td><td class="strong">Worker 重启</td><td><span class="tag">已恢复运行</span></td></tr><tr><td>03/13 22:47</td><td class="strong">Worker 重启</td><td><span class="tag danger">未恢复</span></td></tr></tbody></table></div><div class="quality-note" style="margin:0 14px 14px">“已恢复运行”不抵消重启告警；这里只用于补充说明重启后的状态。</div></article></div>
+        </section>
+
+        <div class="prototype-note">交互原型 · 数据为演示用途 · Dashboard API 本期不提供详情下钻</div>
+      </div>
+    </main>
+  </div>
+
+  <div id="healthOverlay" class="overlay" aria-hidden="true">
+    <aside class="drawer" role="dialog" aria-label="数据健康">
+      <div class="drawer-head"><div><div class="drawer-title">数据健康</div><div class="subtitle">全局采集、聚合与历史覆盖状态</div></div><button id="closeHealth" class="icon-btn"><svg class="icon"><use href="#i-close"/></svg></button></div>
+      <div class="drawer-body">
+        <div class="health-summary"><div class="health-stat"><span>正常数据域</span><b style="color:#95de64">9</b></div><div class="health-stat"><span>健康降级</span><b>0</b></div><div class="health-stat"><span>错误</span><b>0</b></div></div>
+        <div class="drawer-section-title">数据域</div>
+        <article class="panel"><div class="table-wrap"><table><thead><tr><th style="width:29%">数据域</th><th style="width:25%">状态</th><th style="width:23%">待处理</th><th>最后成功</th></tr></thead><tbody><tr><td class="strong">Model</td><td><span class="tag success">Ready</span></td><td>Dirty 0</td><td>14:31</td></tr><tr><td class="strong">Run</td><td><span class="tag success">Ready</span></td><td>Dirty 0</td><td>14:32</td></tr><tr><td class="strong">Execution</td><td><span class="tag success">Ready</span></td><td><span class="muted">不适用</span></td><td>14:32</td></tr><tr><td class="strong">Agent Duration</td><td><span class="tag success">Ready</span></td><td>Dirty 0</td><td>14:32</td></tr><tr><td class="strong">Tool</td><td><span class="tag success">Ready</span></td><td>Dirty 0</td><td>14:32</td></tr><tr><td class="strong">Message</td><td><span class="tag success">Ready</span></td><td>Dirty 0</td><td>14:32</td></tr><tr><td class="strong">Session</td><td><span class="tag success">Ready</span></td><td>Dirty 0</td><td>14:32</td></tr><tr><td class="strong">Git</td><td><span class="tag success">Ready</span></td><td>Dirty 0</td><td>14:20</td></tr><tr><td class="strong">Worker</td><td><span class="tag success">Ready</span></td><td>Dirty 0</td><td>14:32</td></tr></tbody></table></div></article>
+        <div class="drawer-section-title">Git Coverage</div>
+        <article class="panel"><div class="panel-body"><div class="legend-row"><span>Repo · 8f2a</span><span class="tag success">完整</span></div><div class="legend-row" style="margin-top:10px"><span>Repo · 31bc</span><span class="tag success">完整</span></div><div class="legend-row" style="margin-top:10px"><span>Repo · a044</span><span class="tag success">完整</span></div></div></article>
+      </div>
+    </aside>
+  </div>
+
+  <div id="toast" class="toast">数据已刷新</div>
+
+  <script>
+    const tabs = [...document.querySelectorAll('.section-tab')];
+    const views = [...document.querySelectorAll('.view')];
+    tabs.forEach(tab => tab.addEventListener('click', () => {
+      tabs.forEach(x => x.classList.toggle('active', x === tab));
+      views.forEach(view => view.classList.toggle('active', view.id === `view-${tab.dataset.view}`));
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }));
+
+    const overlay = document.getElementById('healthOverlay');
+    const openHealth = () => { overlay.classList.add('open'); overlay.setAttribute('aria-hidden', 'false'); };
+    const closeHealth = () => { overlay.classList.remove('open'); overlay.setAttribute('aria-hidden', 'true'); };
+    document.querySelectorAll('[data-open-health]').forEach(x => x.addEventListener('click', openHealth));
+    document.getElementById('closeHealth').addEventListener('click', closeHealth);
+    overlay.addEventListener('click', event => { if (event.target === overlay) closeHealth(); });
+    document.addEventListener('keydown', event => { if (event.key === 'Escape') closeHealth(); });
+
+    const runStatusData = {
+      all: { completed: 112, failed: 15, cancelled: 11, other: 13 },
+      main: { completed: 67, failed: 8, cancelled: 4, other: 6 },
+      subtask: { completed: 42, failed: 6, cancelled: 5, other: 4 }
+    };
+    const runStatusColors = {
+      completed: '#49aa19',
+      failed: '#dc4446',
+      cancelled: '#d89614',
+      other: '#595959'
+    };
+
+    function renderRunStatus(scope) {
+      const data = runStatusData[scope] || runStatusData.all;
+      const entries = Object.entries(data);
+      const total = entries.reduce((sum, [, value]) => sum + value, 0);
+      let offset = 0;
+      const gradient = entries.map(([status, value]) => {
+        const start = offset / total * 100;
+        offset += value;
+        const end = offset / total * 100;
+        return `${runStatusColors[status]} ${start.toFixed(2)}% ${end.toFixed(2)}%`;
+      }).join(', ');
+      document.getElementById('runStatusDonut').style.background = `conic-gradient(${gradient})`;
+      document.getElementById('runStatusTotal').textContent = total.toLocaleString('zh-CN');
+      document.querySelectorAll('[data-run-status-value]').forEach(element => {
+        element.textContent = data[element.dataset.runStatusValue].toLocaleString('zh-CN');
+      });
+      document.querySelectorAll('[data-run-scope]').forEach(button => {
+        const selected = button.dataset.runScope === scope;
+        button.classList.toggle('active', selected);
+        button.setAttribute('aria-pressed', String(selected));
+      });
+    }
+    document.querySelectorAll('[data-run-scope]').forEach(button => button.addEventListener('click', () => renderRunStatus(button.dataset.runScope)));
+    renderRunStatus('all');
+
+    const presetData = {
+      '近 24 小时': {
+        cardWindow: '近 24 小时',
+        values: {
+          overview: ['118', '28m', '29', '96.3%', '44.8%', '2'],
+          agent: ['17m', '4', '2', '2', '9', '18'],
+          models: ['29', '96.3%', '3.4%', '7.84s', '108k / 27k', '44.8%'],
+          tools: ['94', '96.8%', '0', '1'],
+          git: ['2', '2', '7', '+186', '−44'],
+          worker: ['0', '0', '0']
+        },
+        deltas: {
+          overview: ['↑ 11.8%', '↑ 8.1%', '↑ 16.0%', '↑ 2.4pp', '↑ 3.1pp', '↑ 100%'],
+          agent: ['↑ 5.4%', '↑ 33.3%', '→ 0%', '↑ 100%', '↑ 12.5%', '↑ 15.0%'],
+          models: ['↑ 16.0%', '↑ 2.4pp', '↓ 1.2pp', '↓ 4.8%', '↑ 11.3%', '↑ 3.1pp'],
+          tools: ['↓ 3.2%', '↑ 0.6pp', '→ 0%', '新增'],
+          git: ['↑ 100%', '↑ 100%', '↑ 40.0%', '↑ 22.0%', '↓ 18.0%'],
+          worker: ['↓ 100%', '↓ 100%', '→ 0%']
+        }
+      },
+      '近 7 天': {
+        cardWindow: '近 7 天',
+        values: {
+          overview: ['1,826', '3h 14m', '218', '93.1%', '41.2%', '23'],
+          agent: ['2h 07m', '29', '16', '11', '74', '156'],
+          models: ['218', '93.1%', '4.7%', '8.16s', '806k / 196k', '41.2%'],
+          tools: ['682', '97.2%', '2', '7'],
+          git: ['23', '21', '74', '+2,814', '−1,087'],
+          worker: ['1', '1', '0']
+        },
+        deltas: {
+          overview: ['↑ 9.6%', '↑ 12.4%', '↑ 6.3%', '↑ 1.6pp', '↑ 2.7pp', '↓ 11.5%'],
+          agent: ['↑ 9.1%', '↑ 11.5%', '↑ 6.7%', '↑ 22.2%', '↑ 13.8%', '↑ 11.4%'],
+          models: ['↑ 6.3%', '↑ 1.6pp', '↓ 0.9pp', '↓ 3.2%', '↑ 8.1%', '↑ 2.7pp'],
+          tools: ['↑ 4.2%', '↑ 0.4pp', '↑ 100%', '↑ 40.0%'],
+          git: ['↓ 11.5%', '↓ 8.7%', '↑ 4.2%', '↑ 12.1%', '↓ 7.3%'],
+          worker: ['↓ 50.0%', '↓ 50.0%', '↓ 100%']
+        }
+      },
+      '近 30 天': {
+        cardWindow: '近 30 天',
+        values: {
+          overview: ['7,420', '18h 42m', '1,284', '91.8%', '38.6%', '147'],
+          agent: ['12h 08m', '164', '92', '61', '418', '892'],
+          models: ['1,284', '91.8%', '5.6%', '8.42s', '4.8M / 1.2M', '38.6%'],
+          tools: ['3,926', '97.5%', '11', '38'],
+          git: ['147', '132', '486', '+18,420', '−7,836'],
+          worker: ['4', '4', '1']
+        },
+        deltas: {
+          overview: ['↑ 8.4%', '↑ 7.8%', '↑ 9.7%', '↑ 0.8pp', '↑ 1.2pp', '↑ 14.8%'],
+          agent: ['↑ 6.9%', '↑ 8.6%', '↑ 7.0%', '↑ 11.0%', '↑ 9.1%', '↑ 8.7%'],
+          models: ['↑ 9.7%', '↑ 0.8pp', '↓ 0.4pp', '↓ 1.8%', '↑ 10.6%', '↑ 1.2pp'],
+          tools: ['↑ 11.2%', '↑ 0.3pp', '↑ 22.2%', '↑ 18.8%'],
+          git: ['↑ 14.8%', '↑ 13.8%', '↑ 18.5%', '↑ 21.3%', '↑ 9.6%'],
+          worker: ['↑ 33.3%', '↑ 33.3%', '→ 0%']
+        }
+      },
+      '近 90 天': {
+        cardWindow: '近 90 天',
+        values: {
+          overview: ['28,640', '76h 15m', '5,486', '92.4%', '40.3%', '624'],
+          agent: ['51h 24m', '682', '366', '254', '1,804', '3,850'],
+          models: ['5,486', '92.4%', '5.1%', '8.18s', '20.6M / 5.1M', '40.3%'],
+          tools: ['16,840', '97.5%', '62', '164'],
+          git: ['624', '566', '2,016', '+74,820', '−31,604'],
+          worker: ['11', '12', '2']
+        },
+        deltas: {}
+      }
+    };
+
+    document.querySelectorAll('.view .metric-grid').forEach(grid => {
+      const context = document.createElement('div');
+      context.className = 'period-context';
+      context.innerHTML = '<span>指标范围：<strong data-card-window>近 7 天</strong></span><i class="divider"></i><span class="compare-help" data-compare-context title="与紧邻的前一个等长周期对比">百分比为等长周期环比 <svg class="icon"><use href="#i-info"/></svg></span>';
+      grid.parentNode.insertBefore(context, grid);
+    });
+
+    const volumeConfig = {
+      '近 24 小时': { bucketLabel: '每 1 小时 | 共24小时', count: 24, hours: 1, base: 118, labelEvery: 4 },
+      '近 7 天': { bucketLabel: '每 6 小时 | 共7天', count: 28, hours: 6, base: 486, labelEvery: 4 },
+      '近 30 天': { bucketLabel: '每 1 天 | 共30天', count: 30, hours: 24, base: 1260, labelEvery: 5 },
+      '近 90 天': { bucketLabel: '每 3 天 | 共90天', count: 30, hours: 72, base: 3740, labelEvery: 5 },
+      '自定义范围': { bucketLabel: '自动分桶 | 自定义范围', count: 30, hours: 24, base: 1260, labelEvery: 5 }
+    };
+
+    function formatCompactNumber(value) {
+      if (value >= 10000) return `${(value / 1000).toFixed(value >= 100000 ? 0 : 1)}k`;
+      return value.toLocaleString('zh-CN');
+    }
+
+    const SVG_NS = 'http://www.w3.org/2000/svg';
+    function createSvgElement(name, attributes = {}) {
+      const element = document.createElementNS(SVG_NS, name);
+      Object.entries(attributes).forEach(([key, value]) => element.setAttribute(key, String(value)));
+      return element;
+    }
+
+    function createSmoothLinePath(data) {
+      if (!data.length) return '';
+      let path = `M ${data[0].x} ${data[0].y}`;
+      for (let index = 0; index < data.length - 1; index += 1) {
+        const p0 = data[index - 1] || data[index];
+        const p1 = data[index];
+        const p2 = data[index + 1];
+        const p3 = data[index + 2] || p2;
+        const cp1x = p1.x + (p2.x - p0.x) / 6;
+        const cp1y = p1.y + (p2.y - p0.y) / 6;
+        const cp2x = p2.x - (p3.x - p1.x) / 6;
+        const cp2y = p2.y - (p3.y - p1.y) / 6;
+        path += ` C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${p2.x} ${p2.y}`;
+      }
+      return path;
+    }
+
+    const overviewTrendMetrics = {
+      volume: { label: '监控数据量', unit: '采集记录数', kind: 'count', color: '#3c89e8', phase: .2, composition: true },
+      duration: { label: 'Agent 总时长', unit: '可靠执行时长', kind: 'duration', color: '#13a8a8', base: [1.2, 6.9, 37.4, 152.5], phase: .8 },
+      requests: { label: '模型请求', unit: '请求次数', kind: 'count', color: '#9254de', base: [1.2, 7.8, 42.8, 182.9], phase: 1.4 },
+      successRate: { label: '请求成功率', unit: '成功请求占比', kind: 'percent', color: '#49aa19', base: [96.3, 93.1, 91.8, 92.4], amplitude: 2.1, phase: 2 },
+      cacheHit: { label: '缓存命中率', unit: '输入缓存 Token 占比', kind: 'percent', color: '#d89614', base: [44.8, 41.2, 38.6, 40.3], amplitude: 3.6, phase: 2.6 },
+      commits: { label: 'Git Commit', trendTitle: 'Git Commit 趋势', unit: 'Commit 数', kind: 'count', color: '#49aa19', base: [.08, .82, 4.9, 20.8], phase: 3.1 }
+    };
+    let selectedOverviewTrend = 'volume';
+
+    function formatOverviewTrendValue(value, kind) {
+      if (kind === 'percent') return `${value.toFixed(1)}%`;
+      if (kind === 'duration') {
+        if (value >= 60) return `${(value / 60).toFixed(value >= 600 ? 0 : 1)}h`;
+        return `${Math.round(value)}m`;
+      }
+      return formatCompactNumber(Math.round(value));
+    }
+
+    function renderOverviewTrend(metricKey, range) {
+      const metric = overviewTrendMetrics[metricKey] || overviewTrendMetrics.volume;
+      const config = volumeConfig[range] || volumeConfig['近 30 天'];
+      const rangeIndex = getRangeMetricIndex(range);
+      const base = metric.composition ? config.base : metric.base[rangeIndex];
+      const values = Array.from({ length: config.count }, (_, index) => {
+        if (metric.kind === 'percent') {
+          return Math.min(100, Math.max(0, base + metric.amplitude * Math.sin(index * .79 + metric.phase) + metric.amplitude * .35 * Math.cos(index * 1.41)));
+        }
+        if (metric.kind === 'count' && base < .5) {
+          return (index + Math.round(metric.phase * 10)) % Math.max(2, Math.round(1 / base)) === 0 ? 1 : 0;
+        }
+        const rhythm = .72 + .15 * Math.sin(index * .91 + metric.phase) + .09 * Math.cos(index * 1.73) + (index % 7 === 5 ? .11 : 0);
+        const value = Math.max(0, base * rhythm);
+        return metric.kind === 'duration' ? value : Math.round(value);
+      });
+      const rawMax = Math.max(1, ...values);
+      const magnitude = 10 ** Math.floor(Math.log10(rawMax));
+      const yMax = metric.kind === 'percent' ? 100 : Math.max(1, Math.ceil(rawMax / magnitude) * magnitude);
+      document.getElementById('overviewBucketLabel').textContent = config.bucketLabel;
+      document.getElementById('volumeYMax').textContent = formatOverviewTrendValue(yMax, metric.kind);
+      document.getElementById('volumeYMidHigh').textContent = formatOverviewTrendValue(yMax * .75, metric.kind);
+      document.getElementById('volumeYMid').textContent = formatOverviewTrendValue(yMax * .5, metric.kind);
+      document.getElementById('volumeYMidLow').textContent = formatOverviewTrendValue(yMax * .25, metric.kind);
+
+      const now = Date.now();
+      const data = values.map((value, index) => {
+        const bucketStart = new Date(now - (config.count - index) * config.hours * 3600000);
+        const point = {
+          value, bucketStart,
+          x: config.count === 1 ? 0 : index / (config.count - 1) * 760,
+          y: 8 + (1 - value / yMax) * 184,
+          showLabel: index % config.labelEvery === 0 || index === config.count - 1
+        };
+        if (metric.composition) {
+          point.messages = Math.round(value * .16);
+          point.models = Math.round(value * .27);
+          point.tools = Math.round(value * .44);
+          point.git = Math.round(value * .04);
+          point.worker = Math.round(value * .01);
+          point.agent = value - point.messages - point.models - point.tools - point.git - point.worker;
+        }
+        return point;
+      });
+
+      const chart = document.getElementById('volumeLineChart');
+      chart.style.setProperty('--overview-trend-color', metric.color);
+      const defs = createSvgElement('defs');
+      const gradient = createSvgElement('linearGradient', { id: 'volumeAreaGradient', x1: 0, y1: 0, x2: 0, y2: 1 });
+      gradient.append(createSvgElement('stop', { offset: 0, 'stop-color': metric.color, 'stop-opacity': .3 }), createSvgElement('stop', { offset: 1, 'stop-color': metric.color, 'stop-opacity': 0 }));
+      defs.appendChild(gradient);
+
+      const grid = [0, 50, 100, 150, 200].map(y => createSvgElement('line', { class: 'volume-line-grid', x1: 0, y1: y, x2: 760, y2: y }));
+      const linePath = createSmoothLinePath(data);
+      const area = createSvgElement('path', { class: 'volume-line-area', d: `${linePath} L 760 200 L 0 200 Z` });
+      const line = createSvgElement('path', { class: 'volume-line-path', d: linePath });
+      const elements = [defs, ...grid, area, line];
+
+      data.forEach(point => {
+        if (point.showLabel) {
+          const label = createSvgElement('text', { class: 'volume-line-label', x: point.x, y: 216 });
+          label.textContent = formatBucketLabel(point.bucketStart, config);
+          elements.push(label);
+        }
+        const hit = createSvgElement('circle', { class: 'volume-line-hit', cx: point.x, cy: point.y, r: 9 });
+        const title = createSvgElement('title');
+        const timestamp = point.bucketStart.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+        title.textContent = metric.composition
+          ? `${timestamp}\n总记录：${Math.round(point.value).toLocaleString('zh-CN')}\nAgent：${point.agent} · 消息：${point.messages} · 模型：${point.models}\n工具：${point.tools} · Git：${point.git} · Worker：${point.worker}`
+          : `${timestamp}\n${metric.label}：${formatOverviewTrendValue(point.value, metric.kind)}`;
+        hit.appendChild(title);
+        const dot = createSvgElement('circle', { class: 'volume-line-point', cx: point.x, cy: point.y, r: 2.5 });
+        elements.push(hit, dot);
+      });
+      chart.replaceChildren(...elements);
+      document.getElementById('overviewTrendTitle').textContent = metric.trendTitle || `${metric.label}趋势`;
+      document.getElementById('overviewTrendUnit').textContent = metric.unit;
+      document.getElementById('overviewTrendLegend').textContent = metric.label;
+      document.getElementById('overviewTrendLegendDot').style.background = metric.color;
+      document.getElementById('overviewTrendHint').textContent = metric.composition ? '悬停查看各数据域构成' : '悬停查看当前时间桶数值';
+      document.getElementById('overviewTrendChartWrap').setAttribute('aria-label', `${metric.label}趋势图`);
+    }
+
+    function selectOverviewTrend(metricKey) {
+      selectedOverviewTrend = metricKey;
+      document.querySelectorAll('[data-overview-trend]').forEach(card => card.classList.toggle('selected', card.dataset.overviewTrend === metricKey));
+      renderOverviewTrend(metricKey, rangeSelect.value);
+    }
+
+    function getRangeMetricIndex(range) {
+      const index = ['近 24 小时', '近 7 天', '近 30 天', '近 90 天'].indexOf(range);
+      return index < 0 ? 2 : index;
+    }
+
+    function formatBucketLabel(date, bucket) {
+      return bucket.hours < 24
+        ? `${String(date.getHours()).padStart(2, '0')}:00`
+        : `${date.getMonth() + 1}/${date.getDate()}`;
+    }
+
+    function renderStackedTimeChart(containerId, bucketLabelId, range, createValues, series) {
+      const bucket = volumeConfig[range] || volumeConfig['近 30 天'];
+      const rangeIndex = getRangeMetricIndex(range);
+      const now = Date.now();
+      const rows = Array.from({ length: bucket.count }, (_, index) => ({
+        values: createValues(index, rangeIndex, bucket),
+        bucketStart: new Date(now - (bucket.count - index) * bucket.hours * 3600000),
+        showLabel: index % bucket.labelEvery === 0 || index === bucket.count - 1
+      }));
+      const maxTotal = Math.max(1, ...rows.map(row => series.reduce((sum, item) => sum + row.values[item.key], 0)));
+      const container = document.getElementById(containerId);
+      container.style.gap = bucket.count >= 28 ? '3px' : '6px';
+      container.replaceChildren(...rows.map(row => {
+        const group = document.createElement('div');
+        group.className = 'bar-group';
+        series.forEach(item => {
+          const value = row.values[item.key];
+          if (value <= 0) return;
+          const part = document.createElement('div');
+          part.className = `bar-part${item.className ? ` ${item.className}` : ''}`;
+          part.style.height = `${Math.max(2, value / maxTotal * 88)}%`;
+          group.appendChild(part);
+        });
+        if (row.showLabel) {
+          const label = document.createElement('span');
+          label.className = 'bar-label';
+          label.textContent = formatBucketLabel(row.bucketStart, bucket);
+          group.appendChild(label);
+        }
+        group.title = `${row.bucketStart.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}\n${series.map(item => `${item.label}：${row.values[item.key].toLocaleString('zh-CN')}`).join('\n')}`;
+        return group;
+      }));
+      document.getElementById(bucketLabelId).textContent = bucket.bucketLabel;
+    }
+
+    const modelTrendMetrics = {
+      requests: { label: '模型请求', chart: 'requests' },
+      successRate: { label: '成功率', chart: 'line', kind: 'percent', base: [96.3, 93.1, 91.8, 92.4], amplitude: 2.1, phase: .4 },
+      timeoutRate: { label: '超时率', chart: 'line', kind: 'timeoutPercent', base: [3.4, 4.7, 5.6, 5.1], amplitude: 1.2, phase: 1.2 },
+      duration: { label: '已完成请求平均时长', chart: 'line', kind: 'seconds', base: [7.84, 8.16, 8.42, 8.18], amplitude: .11, phase: 2.1 },
+      tokens: { label: '输入 / 输出 Token', chart: 'tokens' },
+      cacheHit: { label: '缓存命中率', chart: 'line', kind: 'percent', base: [44.8, 41.2, 38.6, 40.3], amplitude: 3.6, phase: 2.8 }
+    };
+    let selectedModelTrend = 'requests';
+
+    function setModelTrendLegend(items) {
+      const legend = document.getElementById('modelTrendLegend');
+      legend.replaceChildren(...items.map(item => {
+        const entry = document.createElement('span');
+        entry.className = 'legend-item';
+        const dot = document.createElement('i');
+        dot.className = `legend-dot${item.className ? ` ${item.className}` : ''}`;
+        if (item.color) dot.style.background = item.color;
+        entry.append(dot, document.createTextNode(item.label));
+        return entry;
+      }));
+    }
+
+    function formatModelTrendValue(value, kind) {
+      if (kind === 'percent' || kind === 'timeoutPercent') return `${value.toFixed(1)}%`;
+      if (kind === 'seconds') return `${value.toFixed(2)}s`;
+      return formatCompactNumber(Math.round(value));
+    }
+
+    function renderModelLineChart(metric, range) {
+      const bucket = volumeConfig[range] || volumeConfig['近 30 天'];
+      const rangeIndex = getRangeMetricIndex(range);
+      const values = Array.from({ length: bucket.count }, (_, index) => {
+        if (metric.kind === 'seconds') {
+          return Math.max(.1, metric.base[rangeIndex] * (1 + metric.amplitude * Math.sin(index * .79 + metric.phase) + .045 * Math.cos(index * 1.41)));
+        }
+        return Math.min(100, Math.max(0, metric.base[rangeIndex] + metric.amplitude * Math.sin(index * .79 + metric.phase) + metric.amplitude * .35 * Math.cos(index * 1.41)));
+      });
+      const rawMax = Math.max(...values);
+      const yMax = metric.kind === 'timeoutPercent'
+        ? Math.max(10, Math.ceil(rawMax / 5) * 5)
+        : metric.kind === 'seconds'
+          ? Math.ceil(rawMax * 2) / 2
+          : 100;
+      const now = Date.now();
+      const data = values.map((value, index) => ({
+        value,
+        bucketStart: new Date(now - (bucket.count - index) * bucket.hours * 3600000),
+        x: 48 + (bucket.count === 1 ? 0 : index / (bucket.count - 1) * 696),
+        y: 10 + (1 - value / yMax) * 180,
+        showLabel: index % bucket.labelEvery === 0 || index === bucket.count - 1
+      }));
+      const chart = document.getElementById('modelTrendLine');
+      const defs = createSvgElement('defs');
+      const gradient = createSvgElement('linearGradient', { id: 'modelTrendAreaGradient', x1: 0, y1: 0, x2: 0, y2: '100%' });
+      gradient.append(createSvgElement('stop', { offset: 0, 'stop-color': '#3c89e8', 'stop-opacity': .24 }), createSvgElement('stop', { offset: 1, 'stop-color': '#3c89e8', 'stop-opacity': 0 }));
+      defs.appendChild(gradient);
+      const elements = [defs];
+      [10, 55, 100, 145, 190].forEach((y, index) => {
+        elements.push(createSvgElement('line', { class: 'agent-trend-grid', x1: 48, y1: y, x2: 744, y2: y }));
+        const axis = createSvgElement('text', { class: 'agent-trend-axis', x: 40, y: y + 3 });
+        axis.textContent = formatModelTrendValue(yMax * (1 - index / 4), metric.kind);
+        elements.push(axis);
+      });
+      const linePath = createSmoothLinePath(data);
+      elements.push(createSvgElement('path', { d: `${linePath} L 744 190 L 48 190 Z`, fill: 'url(#modelTrendAreaGradient)' }));
+      elements.push(createSvgElement('path', { class: 'agent-trend-path', d: linePath }));
+      data.forEach(point => {
+        if (point.showLabel) {
+          const label = createSvgElement('text', { class: 'agent-trend-label', x: point.x, y: 215 });
+          label.textContent = formatBucketLabel(point.bucketStart, bucket);
+          elements.push(label);
+        }
+        const hit = createSvgElement('circle', { class: 'agent-trend-hit', cx: point.x, cy: point.y, r: 9 });
+        const title = createSvgElement('title');
+        title.textContent = `${point.bucketStart.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}\n${metric.label}：${formatModelTrendValue(point.value, metric.kind)}`;
+        hit.appendChild(title);
+        elements.push(hit, createSvgElement('circle', { class: 'agent-trend-point', cx: point.x, cy: point.y, r: 2.5 }));
+      });
+      chart.replaceChildren(...elements);
+      document.getElementById('modelTrendBucket').textContent = bucket.bucketLabel;
+      setModelTrendLegend([{ label: metric.label }]);
+    }
+
+    function renderModelTrend(metricKey, range) {
+      const metric = modelTrendMetrics[metricKey] || modelTrendMetrics.requests;
+      const bars = document.getElementById('modelTrendBars');
+      const line = document.getElementById('modelTrendLine');
+      document.getElementById('modelTrendTitle').textContent = `${metric.label}趋势`;
+      if (metric.chart === 'requests') {
+        bars.removeAttribute('hidden');
+        line.setAttribute('hidden', '');
+        const bases = [1.5, 58, 165, 660];
+        renderStackedTimeChart('modelTrendBars', 'modelTrendBucket', range, (index, rangeIndex) => {
+          const completed = Math.max(0, Math.round(bases[rangeIndex] * (.72 + .18 * Math.sin(index * .81) + .08 * Math.cos(index * 1.47))));
+          return {
+            completed,
+            failed: Math.max(0, Math.round(completed * (.045 + .018 * (1 + Math.sin(index * .67)) / 2))),
+            timedOut: Math.max(0, Math.round(completed * (.035 + .02 * (1 + Math.cos(index * .73)) / 2))),
+            other: Math.max(0, Math.round(completed * (.07 + .025 * (1 + Math.sin(index * .51)) / 2)))
+          };
+        }, [
+          { key: 'other', label: '其他', className: 'gray' },
+          { key: 'timedOut', label: '超时', className: 'red' },
+          { key: 'failed', label: '失败', className: 'orange' },
+          { key: 'completed', label: '完成', className: '' }
+        ]);
+        setModelTrendLegend([
+          { label: '完成' },
+          { label: '失败', className: 'orange' },
+          { label: '超时', className: 'red' },
+          { label: '其他', color: '#595959' }
+        ]);
+        return;
+      }
+      if (metric.chart === 'tokens') {
+        bars.removeAttribute('hidden');
+        line.setAttribute('hidden', '');
+        const inputBases = [5200, 195000, 790000, 2600000];
+        renderStackedTimeChart('modelTrendBars', 'modelTrendBucket', range, (index, rangeIndex) => {
+          const input = Math.max(0, Math.round(inputBases[rangeIndex] * (.7 + .2 * Math.sin(index * .74) + .08 * Math.cos(index * 1.27))));
+          return { input, output: Math.max(0, Math.round(input * (.22 + .06 * (1 + Math.sin(index * .63)) / 2))) };
+        }, [
+          { key: 'output', label: '输出 Token', className: 'purple' },
+          { key: 'input', label: '输入 Token', className: '' }
+        ]);
+        setModelTrendLegend([{ label: '输入 Token' }, { label: '输出 Token', className: 'purple' }]);
+        return;
+      }
+      bars.setAttribute('hidden', '');
+      line.removeAttribute('hidden');
+      renderModelLineChart(metric, range);
+    }
+
+    function selectModelTrend(metricKey) {
+      selectedModelTrend = metricKey;
+      document.querySelectorAll('[data-model-trend]').forEach(card => card.classList.toggle('selected', card.dataset.modelTrend === metricKey));
+      renderModelTrend(metricKey, rangeSelect.value);
+    }
+
+    function renderWorkerEventChart(range) {
+      renderStackedTimeChart('workerEventBars', 'workerEventBucket', range, (index, rangeIndex, bucket) => {
+        const interval = Math.max(5, Math.round(bucket.count / (rangeIndex + 4)));
+        const restarted = (index + rangeIndex * 2) % interval === interval - 2 ? 1 : 0;
+        const abnormal = restarted && (index + rangeIndex) % 3 !== 0 ? 1 : 0;
+        return { abnormal, restarted };
+      }, [
+        { key: 'restarted', label: '重启次数', className: 'orange' },
+        { key: 'abnormal', label: '异常退出', className: 'red' }
+      ]);
+    }
+
+    const gitTrendMetrics = {
+      commits: { label: 'Commit', color: '#49aa19', base: [.16, 7.2, 28.5, 85], phase: .2 },
+      nonMerge: { label: '非 Merge Commit', color: '#13a8a8', base: [.14, 6.5, 25.5, 77], phase: .8 },
+      files: { label: '变更文件', color: '#9254de', base: [.6, 25, 95, 290], phase: 1.4 },
+      additions: { label: '新增行', color: '#3c89e8', base: [12, 220, 820, 2900], phase: 2.1 },
+      deletions: { label: '删除行', color: '#dc4446', base: [5, 95, 350, 1200], phase: 2.8 }
+    };
+    let selectedGitTrend = 'commits';
+
+    function renderGitTrend(metricKey, range) {
+      const metric = gitTrendMetrics[metricKey] || gitTrendMetrics.commits;
+      const bucket = volumeConfig[range] || volumeConfig['近 30 天'];
+      const rangeIndex = getRangeMetricIndex(range);
+      const now = Date.now();
+      const values = Array.from({ length: bucket.count }, (_, index) => Math.max(0, Math.round(metric.base[rangeIndex] * (.7 + .22 * Math.sin(index * .82 + metric.phase) + .1 * Math.cos(index * 1.43)))));
+      const rawMax = Math.max(1, ...values);
+      const magnitude = 10 ** Math.floor(Math.log10(rawMax));
+      const yMax = Math.max(1, Math.ceil(rawMax / magnitude) * magnitude);
+      const data = values.map((value, index) => ({
+        value,
+        bucketStart: new Date(now - (bucket.count - index) * bucket.hours * 3600000),
+        x: 48 + (bucket.count === 1 ? 0 : index / (bucket.count - 1) * 696),
+        y: 18 + (1 - value / yMax) * 180,
+        showLabel: index % bucket.labelEvery === 0 || index === bucket.count - 1
+      }));
+      const elements = [];
+      [18, 63, 108, 153, 198].forEach((y, index) => {
+        elements.push(createSvgElement('line', { class: 'grid-line', x1: 48, y1: y, x2: 744, y2: y }));
+        const axis = createSvgElement('text', { class: 'axis-text', x: 40, y: y + 3, 'text-anchor': 'end' });
+        axis.textContent = formatCompactNumber(Math.round(yMax * (1 - index / 4)));
+        elements.push(axis);
+      });
+      elements.push(createSvgElement('path', { class: 'chart-line', style: `stroke:${metric.color}`, d: createSmoothLinePath(data) }));
+      data.forEach(point => {
+        if (point.showLabel) {
+          const label = createSvgElement('text', { class: 'axis-text', x: point.x, y: 211, 'text-anchor': 'middle' });
+          label.textContent = formatBucketLabel(point.bucketStart, bucket);
+          elements.push(label);
+        }
+        const dot = createSvgElement('circle', { cx: point.x, cy: point.y, r: 2.5, fill: '#141414', stroke: metric.color, 'stroke-width': 1.5 });
+        const title = createSvgElement('title');
+        title.textContent = `${point.bucketStart.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}\n${metric.label}：${point.value.toLocaleString('zh-CN')}`;
+        dot.appendChild(title);
+        elements.push(dot);
+      });
+      document.getElementById('gitTrendChart').replaceChildren(...elements);
+      document.getElementById('gitTrendTitle').textContent = `${metric.label}趋势`;
+      document.getElementById('gitTrendBucket').textContent = bucket.bucketLabel;
+      const legend = document.getElementById('gitTrendLegend');
+      const item = document.createElement('span');
+      item.className = 'legend-item';
+      const dot = document.createElement('i');
+      dot.className = 'legend-dot';
+      dot.style.background = metric.color;
+      item.append(dot, document.createTextNode(metric.label));
+      legend.replaceChildren(item);
+    }
+
+    function selectGitTrend(metricKey) {
+      selectedGitTrend = metricKey;
+      document.querySelectorAll('[data-git-trend]').forEach(card => card.classList.toggle('selected', card.dataset.gitTrend === metricKey));
+      renderGitTrend(metricKey, rangeSelect.value);
+    }
+
+    function renderGitContributionChart() {
+      const monthContainer = document.getElementById('gitContributionMonths');
+      const weekContainer = document.getElementById('gitContributionWeeks');
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const rangeStart = new Date(today);
+      rangeStart.setDate(today.getDate() - 179);
+      const gridEnd = new Date(today);
+      gridEnd.setDate(today.getDate() + (6 - today.getDay()));
+      const gridStart = new Date(gridEnd);
+      gridStart.setDate(gridEnd.getDate() - 188);
+      const monthLabels = [];
+      const weeks = [];
+      let previousMonth = -1;
+      for (let weekIndex = 0; weekIndex < 27; weekIndex += 1) {
+        const weekStart = new Date(gridStart);
+        weekStart.setDate(gridStart.getDate() + weekIndex * 7);
+        const visibleDays = Array.from({ length: 7 }, (_, dayIndex) => {
+          const date = new Date(weekStart);
+          date.setDate(weekStart.getDate() + dayIndex);
+          return date;
+        }).filter(date => date >= rangeStart && date <= today);
+        const monthBoundary = visibleDays.find(date => date.getDate() === 1);
+        const labelDate = monthBoundary || (weekIndex === 0 ? visibleDays[0] : null);
+        const monthLabel = document.createElement('span');
+        if (labelDate && labelDate.getMonth() !== previousMonth) {
+          monthLabel.textContent = `${labelDate.getMonth() + 1}月`;
+          previousMonth = labelDate.getMonth();
+        }
+        monthLabels.push(monthLabel);
+
+        const week = document.createElement('div');
+        week.className = 'contribution-week';
+        for (let dayIndex = 0; dayIndex < 7; dayIndex += 1) {
+          const date = new Date(weekStart);
+          date.setDate(weekStart.getDate() + dayIndex);
+          const cell = document.createElement('span');
+          cell.className = 'contribution-cell';
+          if (date < rangeStart || date > today) {
+            cell.classList.add('outside');
+          } else {
+            const serial = Math.floor(date.getTime() / 86400000);
+            const weekdayFactor = date.getDay() === 0 || date.getDay() === 6 ? .55 : 1;
+            const signal = (Math.sin(serial * .71) + Math.cos(serial * .37 + 1.4) + 2) / 4;
+            const count = Math.max(0, Math.round(signal * 9 * weekdayFactor) - (serial % 5 === 0 ? 3 : 0));
+            const level = count === 0 ? 0 : count <= 2 ? 1 : count <= 4 ? 2 : count <= 6 ? 3 : 4;
+            if (level) cell.classList.add(`level-${level}`);
+            cell.title = `${date.toLocaleDateString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' })} · ${count} Commit`;
+          }
+          week.appendChild(cell);
+        }
+        weeks.push(week);
+      }
+      monthContainer.replaceChildren(...monthLabels);
+      weekContainer.replaceChildren(...weeks);
+    }
+
+    const agentTrendMetrics = {
+      duration: { label: 'Agent 总时长', unit: '可靠执行时长', kind: 'duration', base: [18, 42, 168, 520], phase: .2 },
+      runs: { label: '运行次数', unit: 'Run', kind: 'count', base: [3, 8, 34, 108], phase: .8 },
+      mainTasks: { label: '主任务', unit: '任务', kind: 'count', base: [2, 5, 19, 60], phase: 1.3 },
+      subtasks: { label: '子任务', unit: '任务', kind: 'count', base: [1, 3, 13, 42], phase: 2.1 },
+      userMessages: { label: 'User消息', unit: '消息', kind: 'count', base: [8, 21, 88, 286], phase: 2.8 },
+      assistantMessages: { label: 'Assistant消息', unit: '消息', kind: 'count', base: [16, 44, 190, 620], phase: 3.4 },
+      toolCalls: { label: '工具调用', unit: '调用', kind: 'count', base: [16, 82, 560, 1820], phase: .5 },
+      toolSuccessRate: { label: '调用成功率', unit: '协议层成功率', kind: 'percent', base: [96.8, 97.2, 97.5, 97.5], phase: 2.4 },
+      manualCompactions: { label: '手动压缩上下文', unit: '次', kind: 'count', base: [.05, .1, .5, 2.8], phase: 1.1 },
+      autoCompactions: { label: '自动压缩上下文', unit: '次', kind: 'count', base: [.08, .35, 1.7, 7.5], phase: 1.7 }
+    };
+    let selectedAgentTrend = 'duration';
+
+    function formatDurationMinutes(minutes) {
+      if (minutes < 60) return `${Math.round(minutes)}m`;
+      const hours = Math.floor(minutes / 60);
+      const rest = Math.round(minutes % 60);
+      return rest ? `${hours}h ${rest}m` : `${hours}h`;
+    }
+
+    function formatAgentTrendValue(value, kind) {
+      if (kind === 'duration') return formatDurationMinutes(value);
+      if (kind === 'seconds') return `${value.toFixed(2)}s`;
+      if (kind === 'percent') return `${value.toFixed(1)}%`;
+      return Math.round(value).toLocaleString('zh-CN');
+    }
+
+    function renderAgentTrend(metricKey, range) {
+      const metric = agentTrendMetrics[metricKey];
+      const rangeIndex = ['近 24 小时', '近 7 天', '近 30 天', '近 90 天'].indexOf(range);
+      const normalizedIndex = rangeIndex < 0 ? 2 : rangeIndex;
+      const bucket = volumeConfig[range] || volumeConfig['近 30 天'];
+      const values = Array.from({ length: bucket.count }, (_, index) => {
+        if (metric.kind === 'percent') {
+          return Math.min(100, Math.max(0, metric.base[normalizedIndex] + .8 * Math.sin(index * .83 + metric.phase) + .35 * Math.cos(index * 1.57)));
+        }
+        if (metric.kind === 'seconds') {
+          return Math.max(.1, metric.base[normalizedIndex] * (1 + .12 * Math.sin(index * .83 + metric.phase) + .06 * Math.cos(index * 1.57)));
+        }
+        const rhythm = .73 + .2 * Math.sin(index * .88 + metric.phase) + .08 * Math.cos(index * 1.61 + metric.phase);
+        return Math.max(metric.kind === 'count' ? 0 : 1, metric.base[normalizedIndex] * rhythm);
+      });
+      const rawMax = Math.max(...values);
+      const yMax = metric.kind === 'percent'
+        ? 100
+        : metric.kind === 'seconds'
+        ? Math.ceil(rawMax * 2) / 2
+        : Math.ceil(rawMax / (10 ** Math.floor(Math.log10(Math.max(1, rawMax))))) * (10 ** Math.floor(Math.log10(Math.max(1, rawMax))));
+      const now = Date.now();
+      const data = values.map((value, index) => ({
+        value,
+        bucketStart: new Date(now - (bucket.count - index) * bucket.hours * 3600000),
+        x: 48 + (bucket.count === 1 ? 0 : index / (bucket.count - 1) * 696),
+        y: 10 + (1 - value / yMax) * 180,
+        showLabel: index % bucket.labelEvery === 0 || index === bucket.count - 1
+      }));
+
+      document.getElementById('agentTrendTitle').textContent = `${metric.label}趋势`;
+      document.getElementById('agentTrendLegend').textContent = metric.label;
+      document.getElementById('agentTrendUnit').textContent = metric.unit;
+      document.getElementById('agentTrendBucket').textContent = bucket.bucketLabel;
+
+      const chart = document.getElementById('agentTrendChart');
+      const defs = createSvgElement('defs');
+      const gradient = createSvgElement('linearGradient', { id: 'agentTrendAreaGradient', x1: 0, y1: 0, x2: 0, y2: '100%' });
+      gradient.append(createSvgElement('stop', { offset: 0, 'stop-color': '#3c89e8', 'stop-opacity': .28 }), createSvgElement('stop', { offset: 1, 'stop-color': '#3c89e8', 'stop-opacity': 0 }));
+      defs.appendChild(gradient);
+      const elements = [defs];
+      [10, 55, 100, 145, 190].forEach((y, index) => {
+        elements.push(createSvgElement('line', { class: 'agent-trend-grid', x1: 48, y1: y, x2: 744, y2: y }));
+        const axis = createSvgElement('text', { class: 'agent-trend-axis', x: 40, y: y + 3 });
+        axis.textContent = formatAgentTrendValue(yMax * (1 - index / 4), metric.kind);
+        elements.push(axis);
+      });
+      const linePath = createSmoothLinePath(data);
+      elements.push(createSvgElement('path', { class: 'agent-trend-area', d: `${linePath} L 744 190 L 48 190 Z` }));
+      elements.push(createSvgElement('path', { class: 'agent-trend-path', d: linePath }));
+      data.forEach(point => {
+        if (point.showLabel) {
+          const label = createSvgElement('text', { class: 'agent-trend-label', x: point.x, y: 215 });
+          label.textContent = bucket.hours < 24 ? `${String(point.bucketStart.getHours()).padStart(2, '0')}:00` : `${point.bucketStart.getMonth() + 1}/${point.bucketStart.getDate()}`;
+          elements.push(label);
+        }
+        const hit = createSvgElement('circle', { class: 'agent-trend-hit', cx: point.x, cy: point.y, r: 9 });
+        const title = createSvgElement('title');
+        title.textContent = `${point.bucketStart.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}\n${metric.label}：${formatAgentTrendValue(point.value, metric.kind)}`;
+        hit.appendChild(title);
+        elements.push(hit, createSvgElement('circle', { class: 'agent-trend-point', cx: point.x, cy: point.y, r: 2.5 }));
+      });
+      chart.replaceChildren(...elements);
+    }
+
+    function selectAgentTrend(metricKey) {
+      selectedAgentTrend = metricKey;
+      document.querySelectorAll('[data-agent-trend]').forEach(card => card.classList.toggle('selected', card.dataset.agentTrend === metricKey));
+      renderAgentTrend(metricKey, rangeSelect.value);
+    }
+
+    const rangeSelect = document.getElementById('rangeSelect');
+    function applyPresetRange() {
+      const range = rangeSelect.value;
+      const config = presetData[range] || presetData['近 30 天'];
+      document.querySelectorAll('[data-card-window]').forEach(el => el.textContent = range === '自定义范围' ? '自定义范围' : config.cardWindow);
+      document.querySelectorAll('[data-compare-context]').forEach(el => {
+        if (range === '近 90 天') {
+          el.innerHTML = '近 90 天不提供环比';
+          el.title = '为控制查询数据量，近 90 天不查询前一个等长周期';
+        } else {
+          el.innerHTML = '百分比为等长周期环比 <svg class="icon"><use href="#i-info"/></svg>';
+          el.title = '与紧邻的前一个等长周期对比';
+        }
+      });
+      Object.entries(config.values).forEach(([viewName, values]) => {
+        const cards = viewName === 'tools'
+          ? document.querySelectorAll('#agent-tools .metric-card')
+          : document.querySelectorAll(`#view-${viewName} > .metric-grid .metric-card`);
+        cards.forEach((card, index) => {
+          const value = card.querySelector('.metric-value');
+          if (value && values[index] != null) value.textContent = values[index];
+          const foot = card.querySelector('.metric-foot');
+          if (foot) {
+            foot.querySelectorAll('.delta-up, .delta-down, .auto-delta').forEach(el => el.remove());
+            const deltaText = config.deltas[viewName]?.[index];
+            if (deltaText) {
+              const delta = document.createElement('span');
+              delta.className = `auto-delta ${deltaText.startsWith('↑') ? 'delta-up' : deltaText.startsWith('↓') ? 'delta-down' : 'muted'}`;
+              delta.textContent = deltaText;
+              foot.prepend(delta);
+            }
+          }
+          if (viewName === 'worker' && index < 3 && value) {
+            value.classList.toggle('alert-value', Number(String(values[index]).replace(/,/g, '')) > 0);
+          }
+        });
+      });
+      renderOverviewTrend(selectedOverviewTrend, range);
+      renderAgentTrend(selectedAgentTrend, range);
+      renderModelTrend(selectedModelTrend, range);
+      renderGitTrend(selectedGitTrend, range);
+      renderWorkerEventChart(range);
+    }
+    document.querySelectorAll('[data-overview-trend]').forEach(card => {
+      card.addEventListener('click', () => selectOverviewTrend(card.dataset.overviewTrend));
+      card.addEventListener('keydown', event => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          selectOverviewTrend(card.dataset.overviewTrend);
+        }
+      });
+    });
+    document.querySelectorAll('[data-agent-trend]').forEach(card => {
+      card.addEventListener('click', () => selectAgentTrend(card.dataset.agentTrend));
+      card.addEventListener('keydown', event => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          selectAgentTrend(card.dataset.agentTrend);
+        }
+      });
+    });
+    document.querySelectorAll('[data-model-trend]').forEach(card => {
+      card.addEventListener('click', () => selectModelTrend(card.dataset.modelTrend));
+      card.addEventListener('keydown', event => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          selectModelTrend(card.dataset.modelTrend);
+        }
+      });
+    });
+    document.querySelectorAll('[data-git-trend]').forEach(card => {
+      card.addEventListener('click', () => selectGitTrend(card.dataset.gitTrend));
+      card.addEventListener('keydown', event => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          selectGitTrend(card.dataset.gitTrend);
+        }
+      });
+    });
+    renderGitContributionChart();
+    rangeSelect.addEventListener('change', applyPresetRange);
+    applyPresetRange();
+
+    const toast = document.getElementById('toast');
+    document.getElementById('refreshBtn').addEventListener('click', event => {
+      const icon = event.currentTarget.querySelector('svg');
+      icon.style.transition = 'transform .45s'; icon.style.transform = 'rotate(360deg)';
+      setTimeout(() => { icon.style.transition = 'none'; icon.style.transform = 'none'; }, 480);
+      document.getElementById('updatedAt')?.replaceChildren('最后更新：刚刚');
+      toast.classList.add('show'); setTimeout(() => toast.classList.remove('show'), 1500);
+    });
+
+    document.querySelectorAll('.top-tab:not(.active)').forEach(tab => tab.addEventListener('click', () => {
+      toast.textContent = `原型中未打开“${tab.textContent}”页面`;
+      toast.classList.add('show'); setTimeout(() => { toast.classList.remove('show'); toast.textContent = '数据已刷新'; }, 1500);
+    }));
+  </script>
+</body>
+</html>

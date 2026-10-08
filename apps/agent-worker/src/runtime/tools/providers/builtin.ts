@@ -1,5 +1,9 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import type { ModelMessage } from "ai";
+import { Value } from "@sinclair/typebox/value";
+import { AgentWorkspaceImagePathSchema, normalizeAgentSubtaskSource } from "@agent-workbench/shared/internal-contracts/agent-api";
+import { readSubtaskSourceSessionId } from "../../subtaskSource.js";
 import { generateSingleCallText } from "@agent-workbench/shared/llm-single-call";
 import { renderPromptTemplateFile } from "@agent-workbench/shared/prompts";
 import { runBashCommand } from "../../bash.js";
@@ -14,6 +18,7 @@ import { getBashToolAppendix } from "../../bashTools.js";
 import { runReadTool, runSkillTool, runWriteTool } from "../../fileTools.js";
 import { parseTodolistArgs, toTodolistResult } from "../../todolist.js";
 import { parseScratchpadArgs, toScratchpadResult } from "../../scratchpad.js";
+import { readWorkspaceImage } from "../../workspaceImageReader.js";
 import type { AvailableToolContext, ResolvedToolDefinition, ToolExecutionContext, ToolListContext, ToolProvider } from "../types.js";
 import { isBuiltinToolName, type BuiltinToolName } from "../types.js";
 
@@ -30,22 +35,6 @@ function subtaskReusedWaitTimeoutMs() {
   const value = Number(process.env.AWB_SUBTASK_REUSED_WAIT_TIMEOUT_MS || COMPACTION_TIMEOUT_MS);
   return Number.isFinite(value) && value >= 1 ? Math.floor(value) : COMPACTION_TIMEOUT_MS;
 }
-
-const VISUAL_MEDIA_TYPES = new Map<string, string>([
-  [".png", "image/png"],
-  [".jpg", "image/jpeg"],
-  [".jpeg", "image/jpeg"],
-  [".webp", "image/webp"],
-  [".gif", "image/gif"],
-  [".pdf", "application/pdf"]
-]);
-
-type VisualAnalyzeInputFile = {
-  relativePath: string;
-  absolutePath: string;
-  mediaType: string;
-  bytes: Uint8Array;
-};
 
 type ParsedSubtaskArgs = {
   description: string;
@@ -228,51 +217,11 @@ function shouldPrepareGitEnvForCommand(command: string) {
   return false;
 }
 
-function ensureSafeRelativePath(input: unknown, fieldName: string) {
-  if (typeof input !== "string") throw new Error(`${fieldName} must be a non-empty string`);
-  const value = input.trim();
-  if (!value) throw new Error(`${fieldName} must be a non-empty string`);
-  if (value.includes("\0") || value.includes("\n") || value.includes("\r")) {
-    throw new Error(`${fieldName} is invalid`);
-  }
-  if (path.isAbsolute(value)) {
-    throw new Error(`${fieldName} must be a relative path inside workspace`);
-  }
-  return value;
-}
-
-function isPathInside(rootPath: string, targetPath: string) {
-  const normalizedRoot = path.resolve(rootPath);
-  const normalizedTarget = path.resolve(targetPath);
-  const withSep = normalizedRoot.endsWith(path.sep) ? normalizedRoot : `${normalizedRoot}${path.sep}`;
-  return normalizedTarget === normalizedRoot || normalizedTarget.startsWith(withSep);
-}
-
-async function resolveVisualInputFile(params: {
-  workspacePath: string;
-  relativePath: string;
-}): Promise<VisualAnalyzeInputFile> {
-  const absolutePath = path.resolve(params.workspacePath, params.relativePath);
-  if (!isPathInside(params.workspacePath, absolutePath)) {
-    throw new Error(`path is outside workspace: ${params.relativePath}`);
-  }
-  const [workspaceRealPath, targetRealPath] = await Promise.all([fs.realpath(params.workspacePath), fs.realpath(absolutePath)]);
-  if (!isPathInside(workspaceRealPath, targetRealPath)) {
-    throw new Error(`path is outside workspace: ${params.relativePath}`);
-  }
-  const stat = await fs.stat(targetRealPath);
-  if (!stat.isFile()) {
-    throw new Error(`path is not a file: ${params.relativePath}`);
-  }
-  const mediaType = VISUAL_MEDIA_TYPES.get(path.extname(params.relativePath).toLowerCase());
-  if (!mediaType) {
-    throw new Error(`unsupported file type: ${params.relativePath}. Supported: PNG, JPG/JPEG, WEBP, GIF, PDF`);
-  }
-  const bytes = await fs.readFile(targetRealPath);
-  return { relativePath: params.relativePath, absolutePath: targetRealPath, mediaType, bytes };
-}
-
 function parseSubtaskArgs(raw: Record<string, unknown>): ParsedSubtaskArgs {
+  const source = normalizeAgentSubtaskSource(raw);
+  if (!source.ok) {
+    throw Object.assign(new Error(source.message), { code: source.code });
+  }
   const description = requireNonEmptyStringArg(raw.description, "subtask.description").slice(0, 50);
   const prompt = requireNonEmptyStringArg(raw.prompt, "subtask.prompt");
   const agentId = requireNonEmptyStringArg(raw.agentId, "subtask.agentId");
@@ -296,7 +245,7 @@ function parseSubtaskArgs(raw: Record<string, unknown>): ParsedSubtaskArgs {
     ? { mode: "existing", sessionId }
     : mode === "new"
       ? { mode: "new", ...(sessionId ? { sessionId } : {}) }
-      : { mode: "fork", ...(sessionId ? { sessionId } : {}) };
+      : { mode: "fork", ...(source.sourceSessionId !== undefined ? { sourceSessionId: source.sourceSessionId } : {}) };
   return { description, prompt, agentId, session };
 }
 
@@ -392,12 +341,7 @@ export class BuiltinToolProvider implements ToolProvider {
 
   isToolEnabled(toolName: string, ctx: AvailableToolContext | ToolExecutionContext) {
     if (!isBuiltinToolName(toolName)) return false;
-    if (
-      toolName === "read"
-      || toolName === "archive_search"
-      || toolName === "archive_read"
-      || toolName === "skill"
-    ) {
+    if (toolName === "read" || toolName === "skill") {
       return true;
     }
     return ctx.profile.agent.tools.includes(toolName as BuiltinToolName);
@@ -409,10 +353,10 @@ export class BuiltinToolProvider implements ToolProvider {
       model: ToolExecutionContext["profile"]["model"];
     };
     input: {
-      messages: Array<{ role: string; content: unknown }>;
+      messages: ModelMessage[];
       system?: string;
       sessionId?: string;
-      timeoutMs: number;
+      timeoutMs: number | null;
       abortSignal: AbortSignal;
     };
   }) {
@@ -437,6 +381,19 @@ export class BuiltinToolProvider implements ToolProvider {
 
   async execute(toolName: string, args: Record<string, unknown>, ctx: ToolExecutionContext): Promise<unknown> {
     switch (toolName) {
+      case "view_image": {
+        if (Object.keys(args).length !== 1 || !Value.Check(AgentWorkspaceImagePathSchema, args.path)) {
+          throw new Error("view_image requires one Workspace-relative path");
+        }
+        try {
+          // Validate actual bytes; never return them to the runner or its debug log.
+          await readWorkspaceImage({ workspacePath: ctx.run.workspacePath, path: args.path as string });
+        } catch {
+          // Filesystem errors can expose private absolute paths.
+          throw new Error("view_image cannot read a valid Workspace image at this path");
+        }
+        return { type: "image_ref", path: args.path };
+      }
       case "bash": {
         const command = requireNonEmptyStringArg(args.command, "bash.command");
         const timeoutSeconds = parseOptionalPositiveIntegerArg(args.timeout, "bash.timeout");
@@ -545,6 +502,29 @@ export class BuiltinToolProvider implements ToolProvider {
           signal: ctx.signal
         });
       }
+      case "archive_read": {
+        const cursor = typeof args.cursor === "string" ? args.cursor : undefined;
+        const limit = args.limit == null ? undefined : parseOptionalPositiveIntegerArg(args.limit, "archive_read.limit");
+        return await ctx.apiClient.archiveRead({
+          workspaceId: ctx.run.workspaceId,
+          sessionId: ctx.run.sessionId,
+          ...(cursor ? { cursor } : {}),
+          ...(limit ? { limit } : {}),
+        });
+      }
+      case "archive_search": {
+        const query = requireNonEmptyStringArg(args.query, "archive_search.query");
+        if ([...query.trim()].length < 3) throw new Error("archive_search.query must contain at least 3 characters");
+        const cursor = typeof args.cursor === "string" ? args.cursor : undefined;
+        const limit = args.limit == null ? undefined : parseOptionalPositiveIntegerArg(args.limit, "archive_search.limit");
+        return await ctx.apiClient.archiveSearch({
+          workspaceId: ctx.run.workspaceId,
+          sessionId: ctx.run.sessionId,
+          query: query.trim(),
+          ...(cursor ? { cursor } : {}),
+          ...(limit ? { limit } : {}),
+        });
+      }
       case "skill": {
         const skillArgs = parseSkillToolArgs(args);
         const repoRoot = String(process.env.AWB_AGENT_REPO_ROOT || "").trim() || process.cwd();
@@ -555,7 +535,7 @@ export class BuiltinToolProvider implements ToolProvider {
           ...(Object.prototype.hasOwnProperty.call(skillArgs, "filePath")
             ? { filePath: skillArgs.filePath }
             : {}),
-          externalSkillRoots: ctx.promptContext.externalSkillRoots,
+          externalSkills: ctx.promptContext.externalSkills,
           signal: ctx.signal
         });
       }
@@ -591,55 +571,6 @@ export class BuiltinToolProvider implements ToolProvider {
         const parsed = parseScratchpadArgs(args);
         return toScratchpadResult(parsed);
       }
-      case "archive_search": {
-        const query = requireNonEmptyStringArg(args.query, "archive_search.query");
-        const beforePos = parseOptionalPositiveIntegerArg(args.beforePos, "archive_search.beforePos");
-        if (beforePos != null && beforePos < 2) {
-          throw new Error("archive_search.beforePos must be an integer >= 2");
-        }
-        const maxHits = parseOptionalPositiveIntegerArg(args.maxHits, "archive_search.maxHits");
-        if (maxHits != null && maxHits > 100) {
-          throw new Error("archive_search.maxHits must be an integer between 1 and 100");
-        }
-        const maxChars = parseOptionalPositiveIntegerArg(args.maxChars, "archive_search.maxChars");
-        if (maxChars != null && (maxChars < 1000 || maxChars > 10000)) {
-          throw new Error("archive_search.maxChars must be an integer between 1000 and 10000");
-        }
-        if (args.snippet != null && typeof args.snippet !== "boolean") {
-          throw new Error("archive_search.snippet must be a boolean");
-        }
-        return await ctx.apiClient.archiveSearch({
-          workspaceId: ctx.run.workspaceId,
-          sessionId: ctx.run.sessionId,
-          query,
-          beforePos,
-          maxHits,
-          maxChars,
-          snippet: args.snippet === true,
-          regex: args.regex === true
-        });
-      }
-      case "archive_read": {
-        const beforePos = parseOptionalPositiveIntegerArg(args.beforePos, "archive_read.beforePos");
-        if (beforePos != null && beforePos < 2) {
-          throw new Error("archive_read.beforePos must be an integer >= 2");
-        }
-        const lineCount = parseOptionalPositiveIntegerArg(args.lineCount, "archive_read.lineCount");
-        if (lineCount != null && lineCount > 200) {
-          throw new Error("archive_read.lineCount must be an integer between 1 and 200");
-        }
-        const maxChars = parseOptionalPositiveIntegerArg(args.maxChars, "archive_read.maxChars");
-        if (maxChars != null && (maxChars < 1000 || maxChars > 10000)) {
-          throw new Error("archive_read.maxChars must be an integer between 1000 and 10000");
-        }
-        return await ctx.apiClient.archiveRead({
-          workspaceId: ctx.run.workspaceId,
-          sessionId: ctx.run.sessionId,
-          beforePos,
-          lineCount,
-          maxChars
-        });
-      }
       case "subtask": {
         const parsed = parseSubtaskArgs(args);
         const thresholdPct = 95;
@@ -650,13 +581,13 @@ export class BuiltinToolProvider implements ToolProvider {
           parentLastResponseTotalTokens: number;
           childContextWindowTokens: number;
         } | undefined;
-        if (parsed.session.mode === "fork") {
+        if (parsed.session.mode === "fork" && parsed.session.sourceSessionId === undefined) {
           try {
             const plan = await ctx.apiClient.getSubtaskPreforkPlan({
               workspaceId: ctx.run.workspaceId,
               parentSessionId: ctx.run.sessionId,
               parentRunId: ctx.run.runId,
-              parentToolItemId: ctx.pendingTool.itemId,
+              parentToolExecutionId: ctx.pendingTool.toolExecutionId,
               agentId: parsed.agentId,
               thresholdPct
             });
@@ -667,7 +598,7 @@ export class BuiltinToolProvider implements ToolProvider {
                 appendMessage: {
                   role: "user",
                   content: buildSubtaskPreforkSummaryPrompt({
-                    uiLocale: null,
+                    uiLocale: ctx.promptContext.uiLocale,
                     subtaskPrompt: parsed.prompt
                   })
                 }
@@ -682,7 +613,7 @@ export class BuiltinToolProvider implements ToolProvider {
                   // subtask prefork 是 one-shot 摘要任务，使用 messages-context 提供的通用最小 system。
                   system: messagesContext.system,
                   sessionId: ctx.run.sessionId,
-                  messages: messagesContext.messages,
+                  messages: messagesContext.messages as ModelMessage[],
                   timeoutMs: COMPACTION_TIMEOUT_MS,
                   abortSignal: ctx.signal
                 }
@@ -714,7 +645,7 @@ export class BuiltinToolProvider implements ToolProvider {
           workspaceId: ctx.run.workspaceId,
           parentSessionId: ctx.run.sessionId,
           parentRunId: ctx.run.runId,
-          parentToolItemId: ctx.pendingTool.itemId,
+          parentToolExecutionId: ctx.pendingTool.toolExecutionId,
           description: parsed.description,
           prompt: parsed.prompt,
           agentId: parsed.agentId,
@@ -723,149 +654,123 @@ export class BuiltinToolProvider implements ToolProvider {
           ...(preforkMeta ? { preforkMeta } : {})
         });
 
-        await ctx.updateToolItem({
-          status: "running",
-          output: {
-            type: "tool",
-            toolName,
-            toolCallId: ctx.pendingTool.toolCallId,
-            args,
-            text: ctx.renderToolText({
+        // Use only the successful response; never infer a source from arguments.
+        const sourceSessionId = parsed.session.mode === "fork" && parsed.session.sourceSessionId !== undefined
+          ? readSubtaskSourceSessionId(started)
+          : undefined;
+        const sourceMetadata = sourceSessionId !== undefined ? { sourceSessionId } : {};
+        try {
+          await ctx.updateToolExecution({
+            status: "running",
+            resultPreview: ctx.renderToolText({
               toolName,
               status: "running",
-              headers: [["subtask_session_id", started.sessionId]],
+              headers: [
+                ["subtask_session_id", started.sessionId],
+                ...(sourceSessionId !== undefined ? [["source_session_id", JSON.stringify(sourceSessionId)] as [string, string]] : [])
+              ],
               body: "Subtask started."
             }),
-            result: {
+            structuredResult: {
               subtaskSessionId: started.sessionId,
               subtaskAgentId: parsed.agentId,
-              subtaskAgentName: started.agentName
+              subtaskAgentName: started.agentName,
+              ...sourceMetadata
             }
-          }
-        });
+          });
 
-        if (!started.reused) {
-          await ctx.processNestedRun(
-            {
-              workspaceId: ctx.run.workspaceId,
-              sessionId: started.sessionId,
-              runId: started.runId,
-              inputText: parsed.prompt,
-              workspacePath: started.workspacePath,
-              workspaceRepoDirNames: [...ctx.run.workspaceRepoDirNames]
-            },
-            ctx.signal
-          );
-        }
-
-        if (ctx.signal.aborted) {
-          const abortError = new Error("subtask cancelled by parent abort");
-          (abortError as Error & { name: string }).name = "AbortError";
-          throw abortError;
-        }
-
-        let subtaskStatus = await ctx.apiClient.getSubtaskStatus({
-          workspaceId: ctx.run.workspaceId,
-          sessionId: started.sessionId,
-          runId: started.runId
-        });
-
-        let reusedWaitTimeoutMs: number | null = null;
-        if (started.reused && subtaskStatus.status === "running") {
-          reusedWaitTimeoutMs = subtaskReusedWaitTimeoutMs();
-          const pollIntervalMs = subtaskReusedPollIntervalMs();
-          const deadline = Date.now() + reusedWaitTimeoutMs;
-          while (subtaskStatus.status === "running" && Date.now() < deadline) {
-            if (!(await sleepMsWithAbort(pollIntervalMs, ctx.signal))) {
-              const abortError = new Error("subtask cancelled by parent abort");
-              (abortError as Error & { name: string }).name = "AbortError";
-              throw abortError;
-            }
-            subtaskStatus = await ctx.apiClient.getSubtaskStatus({
-              workspaceId: ctx.run.workspaceId,
-              sessionId: started.sessionId,
-              runId: started.runId
-            });
-          }
-        }
-        if (subtaskStatus.status === "running") {
-          if (started.reused) {
-            throw new Error(
-              `subtask reused-child wait timed out after ${reusedWaitTimeoutMs ?? subtaskReusedWaitTimeoutMs()}ms; child may still be running and was not modified`
+          if (!started.reused) {
+            await ctx.processNestedRun(
+              {
+                workspaceId: ctx.run.workspaceId,
+                sessionId: started.sessionId,
+                runId: started.runId,
+                runKind: "subtask",
+                inputText: parsed.prompt,
+                workspacePath: started.workspacePath,
+                workspaceRepoDirNames: [...ctx.run.workspaceRepoDirNames]
+              },
+              ctx.signal
             );
           }
-          throw new Error(`subtask did not reach terminal status: ${subtaskStatus.status}`);
-        }
 
-        const subtaskResult = await ctx.apiClient.getSubtaskResult({
-          workspaceId: ctx.run.workspaceId,
-          sessionId: started.sessionId,
-          runId: started.runId
-        });
-        const result = {
-          subtaskSessionId: started.sessionId,
-          subtaskAgentId: parsed.agentId,
-          subtaskAgentName: started.agentName,
-          resultText: subtaskResult.resultText
-        };
-        if (subtaskStatus.status === "failed" || subtaskStatus.status === "cancelled") {
-          const error = new Error(`subtask ${subtaskStatus.status}`) as Error & {
-            subtaskSessionId?: string;
-            subtaskResultText?: string;
+          if (ctx.signal.aborted) {
+            const abortError = new Error("subtask cancelled by parent abort");
+            (abortError as Error & { name: string }).name = "AbortError";
+            throw abortError;
+          }
+
+          let subtaskStatus = await ctx.apiClient.getSubtaskStatus({
+            workspaceId: ctx.run.workspaceId,
+            sessionId: started.sessionId,
+            runId: started.runId
+          });
+
+          let reusedWaitTimeoutMs: number | null = null;
+          if (started.reused && subtaskStatus.status === "running") {
+            reusedWaitTimeoutMs = subtaskReusedWaitTimeoutMs();
+            const pollIntervalMs = subtaskReusedPollIntervalMs();
+            const deadline = Date.now() + reusedWaitTimeoutMs;
+            while (subtaskStatus.status === "running" && Date.now() < deadline) {
+              if (!(await sleepMsWithAbort(pollIntervalMs, ctx.signal))) {
+                const abortError = new Error("subtask cancelled by parent abort");
+                (abortError as Error & { name: string }).name = "AbortError";
+                throw abortError;
+              }
+              subtaskStatus = await ctx.apiClient.getSubtaskStatus({
+                workspaceId: ctx.run.workspaceId,
+                sessionId: started.sessionId,
+                runId: started.runId
+              });
+            }
+          }
+          if (subtaskStatus.status === "running") {
+            if (started.reused) {
+              throw new Error(
+                `subtask reused-child wait timed out after ${reusedWaitTimeoutMs ?? subtaskReusedWaitTimeoutMs()}ms; child may still be running and was not modified`
+              );
+            }
+            throw new Error(`subtask did not reach terminal status: ${subtaskStatus.status}`);
+          }
+
+          const subtaskResult = await ctx.apiClient.getSubtaskResult({
+            workspaceId: ctx.run.workspaceId,
+            sessionId: started.sessionId,
+            runId: started.runId
+          });
+          const result = {
+            subtaskSessionId: started.sessionId,
+            subtaskAgentId: parsed.agentId,
+            subtaskAgentName: started.agentName,
+            resultText: subtaskResult.resultText,
+            ...sourceMetadata
           };
-          error.subtaskSessionId = started.sessionId;
-          error.subtaskResultText = typeof subtaskResult.resultText === "string" ? subtaskResult.resultText : undefined;
+          if (subtaskStatus.status === "failed" || subtaskStatus.status === "cancelled") {
+            const error = new Error(`subtask ${subtaskStatus.status}`) as Error & {
+              subtaskSessionId?: string;
+              subtaskResultText?: string;
+            };
+            error.subtaskSessionId = started.sessionId;
+            error.subtaskResultText = typeof subtaskResult.resultText === "string" ? subtaskResult.resultText : undefined;
+            throw error;
+          }
+          return result;
+        } catch (error) {
+          if (sourceSessionId !== undefined) {
+            // Keep error identity/name (including RPC fences and AbortError).
+            // Optional metadata must never replace a read-only original error.
+            const carrier = error !== null && typeof error === "object"
+              ? error
+              : new Error(typeof error === "string" ? error : "subtask failed after start", { cause: error });
+            try {
+              Object.assign(carrier, { subtaskSessionId: started.sessionId, sourceSessionId });
+            } catch {
+              // Frozen error objects still follow their original failure path.
+            }
+            throw carrier;
+          }
           throw error;
         }
-        return result;
-      }
-      case "visual_analyze": {
-        const pathsRaw = Array.isArray(args.paths) ? args.paths : [];
-        if (pathsRaw.length === 0) {
-          throw new Error("visual_analyze.paths must contain at least one file path");
-        }
-        const relativePaths = pathsRaw.map((item, index) => ensureSafeRelativePath(item, `visual_analyze.paths[${index}]`));
-        const prompt = typeof args.prompt === "string" ? args.prompt.trim() : "";
-        const files = await Promise.all(
-          relativePaths.map((relativePath) => resolveVisualInputFile({ workspacePath: ctx.run.workspacePath, relativePath }))
-        );
-
-        const userInstruction = prompt || "Analyze these visual files in order and provide concise, practical findings in natural language.";
-        const lines = [
-          `You are analyzing ${files.length} visual file(s) from a coding workspace.`,
-          "Use the input order as sequence and refer to them as 文件1, 文件2, ... in your response.",
-          "Return plain natural language only."
-        ];
-        const parts: Array<Record<string, unknown>> = [
-          {
-            type: "text",
-            text: `${lines.join("\n")}\n\nUser request:\n${userInstruction}`
-          }
-        ];
-        for (const file of files) {
-          parts.push({
-            type: "file",
-            data: file.bytes,
-            mediaType: file.mediaType,
-            filename: path.basename(file.relativePath)
-          });
-        }
-
-        const chosen = ctx.profile.vision ?? {
-          source: "agent_default_fallback" as const,
-          provider: ctx.profile.provider,
-          model: ctx.profile.model
-        };
-        const timeoutMs = Math.max(30_000, Math.floor(Number(ctx.profile.runtime.modelTotalTimeoutMs || 0)) || 120_000);
-        const response = await this.generateSingleCallSummary({
-          profile: { provider: chosen.provider, model: chosen.model },
-          input: { sessionId: ctx.run.sessionId, messages: [{ role: "user", content: parts }], timeoutMs, abortSignal: ctx.signal }
-        });
-        return {
-          text: response.text,
-          files: files.map((item) => item.relativePath),
-          source: chosen.source
-        };
       }
       default:
         throw new Error(`unsupported tool: ${toolName}`);

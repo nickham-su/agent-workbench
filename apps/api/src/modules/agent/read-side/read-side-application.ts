@@ -1,5 +1,6 @@
 import type {
   AgentApiExecutionProfileRequest,
+  AgentApiCompactionSourceRequest,
   AgentApiMessagesContextRequest,
   AgentApiPromptContextRequest
 } from "@agent-workbench/shared/internal-contracts/agent-api";
@@ -8,7 +9,8 @@ import { HttpError } from "../../../app/errors.js";
 export type ReadSideSession = {
   workspaceId: string;
   kind: "primary" | "subtask";
-  headItemId: number | null;
+  headMessageId: string | null;
+  revision: number;
 };
 
 export type ReadSideRun = {
@@ -19,6 +21,7 @@ export type ReadSideRun = {
   providerId: string;
   modelId: string;
   subtaskDepth: number | null;
+  triggerMessageId: string | null;
 };
 
 /**
@@ -48,6 +51,7 @@ export type ReadSideApplicationDependencies<ExecutionProfileResponse, MessagesCo
     session: ReadSideSession;
     run: ReadSideRun;
   }) => Promise<PromptContextResponse>;
+  projectCompactionSource: (input: AgentApiCompactionSourceRequest) => unknown;
 };
 
 export class ReadSideApplication<ExecutionProfileResponse, MessagesContextResponse, PromptContextResponse> {
@@ -83,6 +87,13 @@ export class ReadSideApplication<ExecutionProfileResponse, MessagesContextRespon
       session,
       run
     });
+  }
+
+  getCompactionSource(input: AgentApiCompactionSourceRequest) {
+    // The resolver owns every source read, including Session/Run ownership. Keeping this
+    // use case as a direct delegation prevents preflight queries from splitting the
+    // compaction source across SQLite snapshots.
+    return this.dependencies.projectCompactionSource(input);
   }
 
   private requireSession(input: { workspaceId: string; sessionId: string }) {

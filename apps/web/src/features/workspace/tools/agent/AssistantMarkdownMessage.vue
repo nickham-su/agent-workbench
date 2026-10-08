@@ -4,15 +4,14 @@
 
 <script setup lang="ts">
 import { message } from "ant-design-vue";
-import DOMPurify from "dompurify";
 import MarkdownIt from "markdown-it";
-import type { Config as DOMPurifyConfig } from "dompurify";
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
+import { sanitizeAgentMarkdown } from "./assistantMarkdownSanitizer";
 
 const props = defineProps<{
   text: string;
-  messageId: number;
+  messageId: string;
   streaming?: boolean;
   tone?: "normal" | "error";
   sectionKey?: string;
@@ -52,59 +51,6 @@ markdown.renderer.rules.fence = (tokens, idx, options) => {
   return `<div class="assistant-code-block" data-assistant-code-block="1"><button type="button" class="assistant-code-copy-btn" data-copy-code="1" aria-label="${copyLabel}" title="${copyLabel}"><span class="assistant-code-copy-icon" aria-hidden="true"></span></button><pre><code${classAttr}>${code}</code></pre></div>`;
 };
 
-let hookInstalled = false;
-
-function isSafeHref(raw: string) {
-  const value = String(raw || "").trim();
-  if (!value) return false;
-  if (value.startsWith("#")) return true;
-  if (value.startsWith("/") || value.startsWith("./") || value.startsWith("../")) return true;
-  try {
-    const url = new URL(value, "https://awb.local");
-    return url.protocol === "http:" || url.protocol === "https:" || url.protocol === "mailto:";
-  } catch {
-    return false;
-  }
-}
-
-function ensurePurifyHooks() {
-  if (hookInstalled) return;
-  hookInstalled = true;
-  DOMPurify.addHook("afterSanitizeAttributes", (node) => {
-    for (const attr of Array.from(node.attributes || [])) {
-      if (attr.name.toLowerCase().startsWith("on")) {
-        node.removeAttribute(attr.name);
-      }
-    }
-
-    const tagName = node.tagName?.toLowerCase?.() || "";
-    if (tagName === "img") {
-      node.remove();
-      return;
-    }
-
-    if (tagName === "a") {
-      const href = node.getAttribute("href") || "";
-      if (!isSafeHref(href)) {
-        node.removeAttribute("href");
-      } else {
-        node.setAttribute("target", "_blank");
-        node.setAttribute("rel", "noopener noreferrer");
-      }
-    }
-
-    if (node.hasAttribute("xlink:href")) {
-      node.removeAttribute("xlink:href");
-    }
-  });
-}
-
-const MARKDOWN_SANITIZE_CONFIG: DOMPurifyConfig = {
-  USE_PROFILES: { html: true },
-  FORBID_TAGS: ["img", "script", "style", "iframe", "object", "embed", "form", "input", "textarea", "select", "option", "meta", "link"],
-  FORBID_ATTR: ["style"]
-};
-
 function stableHash(input: string) {
   let hash = 2166136261;
   for (let i = 0; i < input.length; i += 1) {
@@ -138,8 +84,6 @@ function setCacheValue(cache: Map<string, string>, key: string, value: string, m
     cache.delete(firstKey);
   }
 }
-
-ensurePurifyHooks();
 
 const safeHtml = ref("");
 const toneClass = computed(() => (props.tone === "error" ? "is-error" : ""));
@@ -178,7 +122,7 @@ async function renderMarkdown() {
   }
 
   const html = markdown.render(rawText);
-  const sanitized = DOMPurify.sanitize(html, MARKDOWN_SANITIZE_CONFIG);
+  const sanitized = sanitizeAgentMarkdown(html);
   if (seq !== renderSeq) return;
   const safe = typeof sanitized === "string" ? sanitized : String(sanitized);
   safeHtml.value = safe;
@@ -308,7 +252,7 @@ onBeforeUnmount(() => {
 
 .assistant-markdown-message :deep(.assistant-code-block > pre) {
   margin: 0;
-  padding-top: 2rem;
+  padding-right: 2.5rem;
 }
 
 .assistant-markdown-message :deep(.assistant-code-copy-btn) {

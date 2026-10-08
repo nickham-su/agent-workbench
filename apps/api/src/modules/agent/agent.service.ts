@@ -1,5 +1,4 @@
 import type { AgentServiceCapabilities } from "./agent.composition.js";
-export { isSubtaskParentToolUniqueConstraintError } from "./agent.composition.js";
 
 /**
  * Stable compatibility facade for routes and runtimes. Construction belongs to
@@ -14,6 +13,18 @@ export class AgentService {
 
   listSessions(...args: Parameters<AgentServiceCapabilities["session"]["listSessions"]>): ReturnType<AgentServiceCapabilities["session"]["listSessions"]> {
     return this.capabilities.session.listSessions(...args);
+  }
+
+  listSessionRecords(...args: Parameters<AgentServiceCapabilities["query"]["listSessionRecords"]>): ReturnType<AgentServiceCapabilities["query"]["listSessionRecords"]> {
+    return this.capabilities.query.listSessionRecords(...args);
+  }
+
+  querySessionRecords(...args: Parameters<AgentServiceCapabilities["query"]["querySessionRecords"]>): ReturnType<AgentServiceCapabilities["query"]["querySessionRecords"]> {
+    return this.capabilities.query.querySessionRecords(...args);
+  }
+
+  getSessionRecord(...args: Parameters<AgentServiceCapabilities["query"]["getSessionRecord"]>): ReturnType<AgentServiceCapabilities["query"]["getSessionRecord"]> {
+    return this.capabilities.query.getSessionRecord(...args);
   }
 
   listRecentSessions(...args: Parameters<AgentServiceCapabilities["query"]["listRecentSessions"]>): ReturnType<AgentServiceCapabilities["query"]["listRecentSessions"]> {
@@ -40,24 +51,76 @@ export class AgentService {
     return this.capabilities.session.createPrimarySession(...args);
   }
 
+  createPrimarySessionWithExpectedId(...args: Parameters<AgentServiceCapabilities["session"]["createPrimarySessionWithExpectedId"]>): ReturnType<AgentServiceCapabilities["session"]["createPrimarySessionWithExpectedId"]> {
+    return this.capabilities.session.createPrimarySessionWithExpectedId(...args);
+  }
+
+  validateHistoricalSource(...args: Parameters<AgentServiceCapabilities["session"]["validateHistoricalSource"]>): ReturnType<AgentServiceCapabilities["session"]["validateHistoricalSource"]> {
+    return this.capabilities.session.validateHistoricalSource(...args);
+  }
+
+  forkPrimarySessionFromHistoricalAnchorWithExpectedId(...args: Parameters<AgentServiceCapabilities["session"]["forkPrimarySessionFromHistoricalAnchorWithExpectedId"]>): ReturnType<AgentServiceCapabilities["session"]["forkPrimarySessionFromHistoricalAnchorWithExpectedId"]> {
+    return this.capabilities.session.forkPrimarySessionFromHistoricalAnchorWithExpectedId(...args);
+  }
+
   forkPrimarySession(...args: Parameters<AgentServiceCapabilities["session"]["forkPrimarySession"]>): ReturnType<AgentServiceCapabilities["session"]["forkPrimarySession"]> {
     return this.capabilities.session.forkPrimarySession(...args);
+  }
+
+  updateSessionTitle(...args: Parameters<AgentServiceCapabilities["session"]["updateSessionTitle"]>): ReturnType<AgentServiceCapabilities["session"]["updateSessionTitle"]> {
+    return this.capabilities.session.updateSessionTitle(...args);
+  }
+
+  listSessionModelOverrides(...args: Parameters<AgentServiceCapabilities["session"]["listSessionModelOverrides"]>): ReturnType<AgentServiceCapabilities["session"]["listSessionModelOverrides"]> {
+    return this.capabilities.session.listSessionModelOverrides(...args);
+  }
+
+  setSessionModelOverride(...args: Parameters<AgentServiceCapabilities["session"]["setSessionModelOverride"]>): ReturnType<AgentServiceCapabilities["session"]["setSessionModelOverride"]> {
+    return this.capabilities.session.setSessionModelOverride(...args);
+  }
+
+  resetSessionModelOverride(...args: Parameters<AgentServiceCapabilities["session"]["resetSessionModelOverride"]>): ReturnType<AgentServiceCapabilities["session"]["resetSessionModelOverride"]> {
+    return this.capabilities.session.resetSessionModelOverride(...args);
   }
 
   sendMessage(...args: Parameters<AgentServiceCapabilities["session"]["sendMessage"]>): ReturnType<AgentServiceCapabilities["session"]["sendMessage"]> {
     return this.capabilities.session.sendMessage(...args);
   }
 
-  getContextItems(...args: Parameters<AgentServiceCapabilities["query"]["getContextItems"]>): ReturnType<AgentServiceCapabilities["query"]["getContextItems"]> {
-    return this.capabilities.query.getContextItems(...args);
+  getMessageTimeline(...args: Parameters<AgentServiceCapabilities["query"]["getMessageTimeline"]>): ReturnType<AgentServiceCapabilities["query"]["getMessageTimeline"]> {
+    return this.capabilities.query.getMessageTimeline(...args);
   }
 
   compactSession(...args: Parameters<AgentServiceCapabilities["session"]["compactSession"]>): ReturnType<AgentServiceCapabilities["session"]["compactSession"]> {
     return this.capabilities.session.compactSession(...args);
   }
 
-  getContextItem(...args: Parameters<AgentServiceCapabilities["query"]["getContextItem"]>): ReturnType<AgentServiceCapabilities["query"]["getContextItem"]> {
-    return this.capabilities.query.getContextItem(...args);
+  getMessageDetail(...args: Parameters<AgentServiceCapabilities["query"]["getMessageDetail"]>): ReturnType<AgentServiceCapabilities["query"]["getMessageDetail"]> {
+    return this.capabilities.query.getMessageDetail(...args);
+  }
+
+  getToolExecutionDetail(...args: Parameters<AgentServiceCapabilities["query"]["getToolExecutionDetail"]>): ReturnType<AgentServiceCapabilities["query"]["getToolExecutionDetail"]> {
+    return this.capabilities.query.getToolExecutionDetail(...args);
+  }
+
+  getLastAssistantText(...args: Parameters<AgentServiceCapabilities["query"]["getLastAssistantText"]>): ReturnType<AgentServiceCapabilities["query"]["getLastAssistantText"]> {
+    return this.capabilities.query.getLastAssistantText(...args);
+  }
+
+  getLatestTodolistToolExecution(...args: Parameters<AgentServiceCapabilities["query"]["getLatestTodolistToolExecution"]>): ReturnType<AgentServiceCapabilities["query"]["getLatestTodolistToolExecution"]> {
+    return this.capabilities.query.getLatestTodolistToolExecution(...args);
+  }
+
+  getMessageTimelineSnapshot(...args: Parameters<AgentServiceCapabilities["query"]["getMessageTimelineSnapshot"]>): ReturnType<AgentServiceCapabilities["query"]["getMessageTimelineSnapshot"]> {
+    return this.capabilities.query.getMessageTimelineSnapshot(...args);
+  }
+
+  getMessageRunState(...args: Parameters<AgentServiceCapabilities["query"]["getMessageRunState"]>): ReturnType<AgentServiceCapabilities["query"]["getMessageRunState"]> {
+    return this.capabilities.query.getMessageRunState(...args);
+  }
+
+  getRunStatus(...args: Parameters<AgentServiceCapabilities["query"]["getRunStatus"]>): ReturnType<AgentServiceCapabilities["query"]["getRunStatus"]> {
+    return this.capabilities.query.getRunStatus(...args);
   }
 
   getApplyPatchUiArtifact(...args: Parameters<AgentServiceCapabilities["query"]["getApplyPatchUiArtifact"]>): ReturnType<AgentServiceCapabilities["query"]["getApplyPatchUiArtifact"]> {
@@ -68,12 +131,8 @@ export class AgentService {
     return this.capabilities.query.getWriteUiArtifact(...args);
   }
 
-  getRunState(...args: Parameters<AgentServiceCapabilities["query"]["getRunState"]>): ReturnType<AgentServiceCapabilities["query"]["getRunState"]> {
-    return this.capabilities.query.getRunState(...args);
-  }
-
-  getSessionStatusSummary(...args: Parameters<AgentServiceCapabilities["query"]["getSessionStatusSummary"]>): ReturnType<AgentServiceCapabilities["query"]["getSessionStatusSummary"]> {
-    return this.capabilities.query.getSessionStatusSummary(...args);
+  getAttachmentContent(...args: Parameters<AgentServiceCapabilities["query"]["getAttachmentContent"]>): ReturnType<AgentServiceCapabilities["query"]["getAttachmentContent"]> {
+    return this.capabilities.query.getAttachmentContent(...args);
   }
 
   revertSession(...args: Parameters<AgentServiceCapabilities["session"]["revertSession"]>): ReturnType<AgentServiceCapabilities["session"]["revertSession"]> {
@@ -88,24 +147,64 @@ export class AgentService {
     return this.capabilities.lifecycle.recoverRunsOnStartup(...args);
   }
 
-  failRunsOnStartup(...args: Parameters<AgentServiceCapabilities["lifecycle"]["failRunsOnStartup"]>): ReturnType<AgentServiceCapabilities["lifecycle"]["failRunsOnStartup"]> {
-    return this.capabilities.lifecycle.failRunsOnStartup(...args);
+  settleWorkspaceRunsForDeletion(...args: Parameters<AgentServiceCapabilities["lifecycle"]["settleWorkspaceRunsForDeletion"]>): ReturnType<AgentServiceCapabilities["lifecycle"]["settleWorkspaceRunsForDeletion"]> {
+    return this.capabilities.lifecycle.settleWorkspaceRunsForDeletion(...args);
   }
 
-  appendContextItemFromWorker(...args: Parameters<AgentServiceCapabilities["lifecycle"]["appendContextItemFromWorker"]>): ReturnType<AgentServiceCapabilities["lifecycle"]["appendContextItemFromWorker"]> {
-    return this.capabilities.lifecycle.appendContextItemFromWorker(...args);
+  createStreamingAssistantFromWorker(...args: Parameters<AgentServiceCapabilities["lifecycle"]["createStreamingAssistantFromWorker"]>): ReturnType<AgentServiceCapabilities["lifecycle"]["createStreamingAssistantFromWorker"]> {
+    return this.capabilities.lifecycle.createStreamingAssistantFromWorker(...args);
   }
 
-  updateContextItemFromWorker(...args: Parameters<AgentServiceCapabilities["lifecycle"]["updateContextItemFromWorker"]>): ReturnType<AgentServiceCapabilities["lifecycle"]["updateContextItemFromWorker"]> {
-    return this.capabilities.lifecycle.updateContextItemFromWorker(...args);
+  flushAssistantPartsFromWorker(...args: Parameters<AgentServiceCapabilities["lifecycle"]["flushAssistantPartsFromWorker"]>): ReturnType<AgentServiceCapabilities["lifecycle"]["flushAssistantPartsFromWorker"]> {
+    return this.capabilities.lifecycle.flushAssistantPartsFromWorker(...args);
   }
 
-  updateRunStateFromWorker(...args: Parameters<AgentServiceCapabilities["lifecycle"]["updateRunStateFromWorker"]>): ReturnType<AgentServiceCapabilities["lifecycle"]["updateRunStateFromWorker"]> {
-    return this.capabilities.lifecycle.updateRunStateFromWorker(...args);
+  resumeStreamingAssistantFromWorker(...args: Parameters<AgentServiceCapabilities["lifecycle"]["resumeStreamingAssistantFromWorker"]>): ReturnType<AgentServiceCapabilities["lifecycle"]["resumeStreamingAssistantFromWorker"]> {
+    return this.capabilities.lifecycle.resumeStreamingAssistantFromWorker(...args);
   }
 
-  completeRunFromWorker(...args: Parameters<AgentServiceCapabilities["lifecycle"]["completeRunFromWorker"]>): ReturnType<AgentServiceCapabilities["lifecycle"]["completeRunFromWorker"]> {
-    return this.capabilities.lifecycle.completeRunFromWorker(...args);
+  replaceStreamingAssistantFromWorker(...args: Parameters<AgentServiceCapabilities["lifecycle"]["replaceStreamingAssistantFromWorker"]>): ReturnType<AgentServiceCapabilities["lifecycle"]["replaceStreamingAssistantFromWorker"]> {
+    return this.capabilities.lifecycle.replaceStreamingAssistantFromWorker(...args);
+  }
+
+  discardStreamingAssistantFromWorker(...args: Parameters<AgentServiceCapabilities["lifecycle"]["discardStreamingAssistantFromWorker"]>): ReturnType<AgentServiceCapabilities["lifecycle"]["discardStreamingAssistantFromWorker"]> {
+    return this.capabilities.lifecycle.discardStreamingAssistantFromWorker(...args);
+  }
+
+  completeAssistantFromWorker(...args: Parameters<AgentServiceCapabilities["lifecycle"]["completeAssistantFromWorker"]>): ReturnType<AgentServiceCapabilities["lifecycle"]["completeAssistantFromWorker"]> {
+    return this.capabilities.lifecycle.completeAssistantFromWorker(...args);
+  }
+
+  completeTerminalAssistantFromWorker(...args: Parameters<AgentServiceCapabilities["lifecycle"]["completeTerminalAssistantFromWorker"]>): ReturnType<AgentServiceCapabilities["lifecycle"]["completeTerminalAssistantFromWorker"]> {
+    return this.capabilities.lifecycle.completeTerminalAssistantFromWorker(...args);
+  }
+
+  archiveReadFromWorker(...args: Parameters<AgentServiceCapabilities["worker"]["archiveReadFromWorker"]>): ReturnType<AgentServiceCapabilities["worker"]["archiveReadFromWorker"]> {
+    return this.capabilities.worker.archiveReadFromWorker(...args);
+  }
+
+  archiveSearchFromWorker(...args: Parameters<AgentServiceCapabilities["worker"]["archiveSearchFromWorker"]>): ReturnType<AgentServiceCapabilities["worker"]["archiveSearchFromWorker"]> {
+    return this.capabilities.worker.archiveSearchFromWorker(...args);
+  }
+
+  updateToolExecutionFromWorker(...args: Parameters<AgentServiceCapabilities["lifecycle"]["updateToolExecutionFromWorker"]>): ReturnType<AgentServiceCapabilities["lifecycle"]["updateToolExecutionFromWorker"]> {
+    return this.capabilities.lifecycle.updateToolExecutionFromWorker(...args);
+  }
+
+  updateRunNoticeFromWorker(...args: Parameters<AgentServiceCapabilities["lifecycle"]["updateRunNoticeFromWorker"]>): ReturnType<AgentServiceCapabilities["lifecycle"]["updateRunNoticeFromWorker"]> {
+    return this.capabilities.lifecycle.updateRunNoticeFromWorker(...args);
+  }
+
+  markRunWorkInProgressFromWorker(...args: Parameters<AgentServiceCapabilities["lifecycle"]["markRunWorkInProgressFromWorker"]>): ReturnType<AgentServiceCapabilities["lifecycle"]["markRunWorkInProgressFromWorker"]> {
+    return this.capabilities.lifecycle.markRunWorkInProgressFromWorker(...args);
+  }
+
+  persistRunTerminalIntentFromWorker(...args: Parameters<AgentServiceCapabilities["lifecycle"]["persistRunTerminalIntentFromWorker"]>): ReturnType<AgentServiceCapabilities["lifecycle"]["persistRunTerminalIntentFromWorker"]> {
+    return this.capabilities.lifecycle.persistRunTerminalIntentFromWorker(...args);
+  }
+
+  convergeRunTerminalFromWorker(...args: Parameters<AgentServiceCapabilities["lifecycle"]["convergeRunTerminalFromWorker"]>): ReturnType<AgentServiceCapabilities["lifecycle"]["convergeRunTerminalFromWorker"]> {
+    return this.capabilities.lifecycle.convergeRunTerminalFromWorker(...args);
   }
 
   getSubtaskPreforkPlanFromWorker(...args: Parameters<AgentServiceCapabilities["worker"]["getSubtaskPreforkPlanFromWorker"]>): ReturnType<AgentServiceCapabilities["worker"]["getSubtaskPreforkPlanFromWorker"]> {
@@ -144,28 +243,24 @@ export class AgentService {
     return this.capabilities.worker.getPluginRuntimeSnapshotsFromWorker(...args);
   }
 
-  compactContextFromWorker(...args: Parameters<AgentServiceCapabilities["worker"]["compactContextFromWorker"]>): ReturnType<AgentServiceCapabilities["worker"]["compactContextFromWorker"]> {
-    return this.capabilities.worker.compactContextFromWorker(...args);
+  commitCompactionWithTerminalIntentFromWorker(...args: Parameters<AgentServiceCapabilities["worker"]["commitCompactionWithTerminalIntentFromWorker"]>): ReturnType<AgentServiceCapabilities["worker"]["commitCompactionWithTerminalIntentFromWorker"]> {
+    return this.capabilities.worker.commitCompactionWithTerminalIntentFromWorker(...args);
   }
 
-  clearSession(...args: Parameters<AgentServiceCapabilities["worker"]["clearSession"]>): ReturnType<AgentServiceCapabilities["worker"]["clearSession"]> {
-    return this.capabilities.worker.clearSession(...args);
-  }
-
-  archiveSearchFromWorker(...args: Parameters<AgentServiceCapabilities["worker"]["archiveSearchFromWorker"]>): ReturnType<AgentServiceCapabilities["worker"]["archiveSearchFromWorker"]> {
-    return this.capabilities.worker.archiveSearchFromWorker(...args);
+  confirmCompactionCommitFromWorker(...args: Parameters<AgentServiceCapabilities["worker"]["confirmCompactionCommitFromWorker"]>): ReturnType<AgentServiceCapabilities["worker"]["confirmCompactionCommitFromWorker"]> {
+    return this.capabilities.worker.confirmCompactionCommitFromWorker(...args);
   }
 
   getMessagesContext(...args: Parameters<AgentServiceCapabilities["worker"]["getMessagesContext"]>): ReturnType<AgentServiceCapabilities["worker"]["getMessagesContext"]> {
     return this.capabilities.worker.getMessagesContext(...args);
   }
 
-  archiveReadFromWorker(...args: Parameters<AgentServiceCapabilities["worker"]["archiveReadFromWorker"]>): ReturnType<AgentServiceCapabilities["worker"]["archiveReadFromWorker"]> {
-    return this.capabilities.worker.archiveReadFromWorker(...args);
-  }
-
   getPromptContextForRun(...args: Parameters<AgentServiceCapabilities["worker"]["getPromptContextForRun"]>): ReturnType<AgentServiceCapabilities["worker"]["getPromptContextForRun"]> {
     return this.capabilities.worker.getPromptContextForRun(...args);
+  }
+
+  getCompactionSourceFromWorker(...args: Parameters<AgentServiceCapabilities["worker"]["getCompactionSourceFromWorker"]>): ReturnType<AgentServiceCapabilities["worker"]["getCompactionSourceFromWorker"]> {
+    return this.capabilities.worker.getCompactionSourceFromWorker(...args);
   }
 
   checkChannelSenderAllowlist(...args: Parameters<AgentServiceCapabilities["worker"]["checkChannelSenderAllowlist"]>): ReturnType<AgentServiceCapabilities["worker"]["checkChannelSenderAllowlist"]> {

@@ -139,6 +139,7 @@ import { useI18n } from "vue-i18n";
 import { getAgentGlobalPromptSettings, updateAgentGlobalPromptSettings } from "@/shared/api";
 import {
   isReservedAgentGlobalPromptItem,
+  isReservedBuiltinGlobalPromptCommand,
   normalizeAgentGlobalPromptItems,
   toAgentGlobalPromptsRequest
 } from "./agentGlobalPrompts";
@@ -273,7 +274,7 @@ function submit() {
       return;
     }
     const normalized = commandRaw.toLowerCase();
-    if (normalized === "clear" || normalized === "compact") {
+    if (isReservedBuiltinGlobalPromptCommand(normalized)) {
       message.error(t("settings.agentGlobalPrompts.errors.commandConflictsBuiltin"));
       return;
     }

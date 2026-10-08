@@ -1,0 +1,57 @@
+<template>
+  <main class="dashboard-page">
+    <DashboardPageHeader v-model="section" :title="t('dashboard.title')" :subtitle="t('dashboard.subtitle')" :navigation-label="t('dashboard.sections')" :sections="sections" :label-for="(item) => t(`dashboard.${item}`)">
+      <template #controls>
+        <div class="controls"><label>{{ t("dashboard.range") }}<a-select :value="state.rangeKind.value" @update:value="state.setRangeKind"><a-select-option v-for="range in ranges" :key="range" :value="range">{{ t(`dashboard.${range}`) }}</a-select-option></a-select></label><a-button :loading="state.loading.value" :aria-label="t('dashboard.refresh')" @click="state.refresh">↻</a-button></div>
+      </template>
+      <template #custom><section v-if="state.rangeKind.value === 'custom'" class="custom-range" :aria-label="t('dashboard.custom')"><label>{{ t("dashboard.from") }}<input type="datetime-local" :value="state.customFromLocal.value" @input="state.setCustomInput('from', ($event.target as HTMLInputElement).value)" /></label><label>{{ t("dashboard.to") }}<input type="datetime-local" :value="state.customToLocal.value" @input="state.setCustomInput('to', ($event.target as HTMLInputElement).value)" /></label><p v-if="!state.customValidation.value.valid" role="alert">{{ t(`dashboard.error.${state.customValidation.value.code}`) }}</p><a-button type="primary" :disabled="!state.customValidation.value.valid" @click="state.refresh">{{ t("dashboard.apply") }}</a-button></section></template>
+    </DashboardPageHeader>
+    <div class="dashboard-content">
+    <a-alert v-if="state.errorCode.value" type="error" show-icon :message="t(`dashboard.error.${state.errorCode.value}`)" class="mb-3" />
+    <a-spin :spinning="state.loading.value && !response"><template v-if="response"><div class="metadata"><span>{{ formatDateTime(response.from, response.timezone, locale) }} – {{ formatDateTime(response.to, response.timezone, locale) }}</span><span v-if="data.overview.monitoringVolume.status === 'available' && data.overview.monitoringVolume.comparison.status === 'available'">{{ t("dashboard.comparisonContext") }}: {{ t("dashboard.previousSameDuration") }}</span><span>{{ t("dashboard.asOf") }}: {{ formatDateTime(response.asOf, response.timezone, locale) }}</span></div>
+      <section v-if="section === 'overview'" class="overview-section" data-testid="dashboard-section-overview">
+        <div class="metric-grid six">
+          <DashboardMetricCard :title="t('dashboard.monitoringVolume')" :value="formatCount(monitoringValue, locale)" :result="data.overview.monitoringVolume" clickable :selected="overviewTrend === 'monitoringVolume'" @select="overviewTrend = 'monitoringVolume'" />
+          <DashboardMetricCard :title="t('dashboard.agentDuration')" :value="formatDuration(countValue(data.overview.agentDuration))" :result="data.overview.agentDuration" clickable :selected="overviewTrend === 'agentDuration'" @select="overviewTrend = 'agentDuration'" />
+          <DashboardMetricCard :title="t('dashboard.toolCallCount')" :value="formatCount(countValue(data.agent.metrics.toolCallCount), locale)" :result="data.agent.metrics.toolCallCount" clickable :selected="overviewTrend === 'toolCallCount'" test-id="overview-metric-toolCallCount" @select="overviewTrend = 'toolCallCount'" />
+          <DashboardMetricCard :title="t('dashboard.modelRequests')" :value="formatCount(countValue(data.overview.modelRequests), locale)" :result="data.overview.modelRequests" clickable :selected="overviewTrend === 'modelRequests'" @select="overviewTrend = 'modelRequests'" />
+          <DashboardMetricCard :title="t('dashboard.modelSuccessRate')" :value="formatRatio(ratioValue(data.overview.modelSuccessRate), locale)" :result="data.overview.modelSuccessRate" clickable :selected="overviewTrend === 'modelSuccessRate'" @select="overviewTrend = 'modelSuccessRate'" />
+          <DashboardMetricCard :title="t('dashboard.cacheHitRate')" :value="formatRatio(ratioValue(data.overview.cacheHitRate), locale)" :result="data.overview.cacheHitRate" clickable :selected="overviewTrend === 'cacheHitRate'" @select="overviewTrend = 'cacheHitRate'" />
+        </div>
+        <div class="overview-main" data-testid="overview-main">
+          <DashboardTrendChart class="overview-chart" echarts :title="`${t(`dashboard.${overviewTrend}`)}${t('dashboard.trendSuffix')}`" :kind="overviewKinds[overviewTrend]" :panel="overviewPanel" :test-id="`overview-trend-${overviewTrend}`" :timezone="response.timezone" />
+          <DashboardDomainSummary :result="data.exceptions.domainHealth" :timezone="response.timezone" />
+        </div>
+      </section>
+      <section v-if="section === 'agent'" data-testid="dashboard-section-agent"><DashboardAgentSection :agent="data.agent" :timezone="response.timezone" /></section>
+      <section v-if="section === 'model'" data-testid="dashboard-section-model"><DashboardModelSection :model="data.model" :cache-hit-rate="data.overview.cacheHitRate" :timezone="response.timezone" /></section>
+      <section v-if="section === 'worker'" data-testid="dashboard-section-worker"><DashboardWorkerSection :worker="data.worker" :live-snapshot="data.exceptions.workerLiveSnapshot" :timezone="response.timezone" /></section>
+    </template><a-empty v-else-if="!state.loading.value" :description="t('dashboard.noData')" /></a-spin>
+    </div>
+  </main>
+</template>
+<script setup lang="ts">
+import { computed, inject, onMounted, ref } from "vue"; import { useI18n } from "vue-i18n"; import type { AnalyticsRangeKind, DashboardData, MetricResult } from "@agent-workbench/shared"; import { createDashboardState } from "../dashboard-state"; import { dashboardQueryKey } from "../dashboard-injection"; import { queryDashboard } from "../dashboard-api"; import { formatCount, formatDateTime, formatDuration, formatRatio } from "../dashboard-formatters"; import DashboardMetricCard from "../components/DashboardMetricCard.vue"; import DashboardTrendChart from "../components/DashboardTrendChart.vue"; import DashboardAgentSection from "../components/DashboardAgentSection.vue"; import DashboardModelSection from "../components/DashboardModelSection.vue"; import DashboardWorkerSection from "../components/DashboardWorkerSection.vue"; import DashboardRestartRecords from "../components/DashboardRestartRecords.vue"; import DashboardDomainSummary from "../components/DashboardDomainSummary.vue";
+import DashboardEmptyValue from "../components/DashboardEmptyValue.vue"; import DashboardPageHeader from "../components/DashboardPageHeader.vue"; import type { DashboardSection, CountResult, RatioResult } from "../dashboard-types"; import { metricNumberValue, metricRatioValue } from "../dashboard-types";
+const { t, locale } = useI18n(); const state = createDashboardState(inject(dashboardQueryKey, queryDashboard)); onMounted(() => { void state.refresh(); }); const response = computed(() => state.response.value); const data = computed<DashboardData>(() => response.value!.data); const section = ref<DashboardSection>("overview"); const sections: DashboardSection[] = ["overview", "agent", "model", "worker"]; const ranges: AnalyticsRangeKind[] = ["preset_24h", "preset_7d", "preset_30d", "preset_90d", "custom"];
+type OverviewTrend = Exclude<keyof DashboardData["overviewTrends"], "totalTokens"> | "toolCallCount";
+const overviewTrend = ref<OverviewTrend>("monitoringVolume");
+const overviewKinds = { monitoringVolume: "monitoring_total", agentDuration: "duration", toolCallCount: "count", modelRequests: "model_status", modelSuccessRate: "ratio", cacheHitRate: "ratio" } as const;
+const overviewPanel = computed(() => overviewTrend.value === "toolCallCount" ? data.value.agent.trends.toolCallCount : data.value.overviewTrends[overviewTrend.value]);
+function countValue(result: CountResult): number | null { return metricNumberValue(result); } function ratioValue(result: RatioResult): number | null { return metricRatioValue(result); } function monitoringCount(result: DashboardData["overview"]["monitoringVolume"]) { return result.status === "unavailable" ? null : result.value.count; }
+const monitoringValue = computed(() => monitoringCount(data.value.overview.monitoringVolume));
+type MetricDisplay = { key: string; value: string; result: MetricResult<unknown>; trend?: string };
+function display(key: string, result: MetricResult<unknown>, value: string, trend?: string): MetricDisplay { return { key, result, value, trend }; }
+
+</script>
+<style scoped>
+.dashboard-page{container-type:inline-size;height:100%;overflow:auto;color:var(--text-color);background:var(--panel-bg)}.dashboard-content{padding:14px 20px 36px;min-width:0}.controls,.controls label,.custom-range,.metadata,.panel header{display:flex;align-items:center;gap:8px}.controls label{font-size:12px;color:var(--text-color-secondary)}.controls .ant-select{min-width:118px}.custom-range{margin:12px 0;flex-wrap:wrap}.custom-range input{display:block}.custom-range p{color:#ff7875;font-size:12px}.metadata{justify-content:flex-start;flex-wrap:wrap;gap:8px 16px;margin:0 0 12px;font-size:11px;color:var(--text-color-secondary)}.stack,.overview-section{display:grid;gap:12px}.overview-main{display:grid;grid-template-columns:minmax(0,2fr) minmax(280px,1fr);gap:12px;align-items:stretch;min-width:0}.overview-main>*,.overview-section>*{min-width:0}.metric-tabs{display:flex;gap:6px;border-bottom:1px solid var(--border-color);margin:14px 0}.metric-tabs button,.panel header button{border:0;background:transparent;color:var(--text-color-secondary);padding:8px;cursor:pointer}.metric-tabs button[aria-pressed=true],.panel header button[aria-pressed=true]{color:var(--primary-color);border-bottom:2px solid var(--primary-color)}.metric-group{display:grid;gap:8px}.metric-group h3{font-size:14px;margin:0}.metric-grid{display:grid;gap:10px}.metric-grid.six{grid-template-columns:repeat(6,minmax(0,1fr))}.metric-grid.five{grid-template-columns:repeat(5,minmax(0,1fr))}.metric-grid.four{grid-template-columns:repeat(4,minmax(0,1fr))}.three{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.panel{background:var(--panel-bg-elevated);border:1px solid var(--border-color-secondary);border-radius:3px;padding:14px}.panel h3{margin:0;font-size:14px}.distribution{display:flex;flex-wrap:wrap;gap:10px;margin-top:10px}.distribution span,.snapshot{font-size:12px;padding:8px;background:var(--panel-bg);border-radius:5px}.snapshot{display:grid;gap:6px}.snapshot b{font-size:20px}.panel table{width:100%;border-collapse:collapse;margin-top:8px;font-size:12px}.panel th,.panel td{padding:8px;text-align:left;border-top:1px solid var(--border-color)}
+
+@media(max-width:1150px){.metric-grid.five{grid-template-columns:repeat(3,minmax(0,1fr))}.three{grid-template-columns:1fr}}
+@media(max-width:950px){.metric-grid.six{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media(max-width:930px){.overview-main{grid-template-columns:minmax(0,1fr)}}
+@container(max-width:950px){.metric-grid.six{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@container(max-width:930px){.overview-main{grid-template-columns:minmax(0,1fr)}}
+@container(max-width:700px){.metric-grid.six{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:700px){.dashboard-content{padding:12px 14px 30px}.controls{flex-wrap:wrap}.metric-grid.six,.metric-grid.five,.metric-grid.four{grid-template-columns:repeat(2,minmax(0,1fr))}}
+</style>

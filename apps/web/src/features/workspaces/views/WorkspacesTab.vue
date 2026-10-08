@@ -299,6 +299,7 @@ import {
 } from "@/shared/api";
 import { useReposState } from "@/features/repos/stores/repos";
 import { useWorkbenchSearchState } from "@/features/workbench/stores/workbenchSearch";
+import { clearPendingAgentRunsForWorkspace } from "@/features/workspace/tools/agent/agentPendingRunRegistry";
 
 const { t } = useI18n();
 
@@ -717,6 +718,7 @@ function confirmDelete(workspaceId: string) {
     cancelText: t("workspaces.deleteConfirm.cancel"),
     onOk: async () => {
       await deleteWorkspace(workspaceId);
+      clearPendingAgentRunsForWorkspace(typeof window === "undefined" ? null : window.sessionStorage, workspaceId);
       await refresh();
     }
   });

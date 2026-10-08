@@ -12,7 +12,13 @@ const ORIGIN = "http://preview.test";
 const TOKENS = [
   "bootstrap_code_0123456789abcdefg",
   "session_id_0123456789abcdefghijk",
-  "session_secret_0123456789abcdefg"
+  "session_secret_0123456789abcdefg",
+  "preview_test_token_0000000000001",
+  "preview_test_token_0000000000002",
+  "preview_test_token_0000000000003",
+  "preview_test_token_0000000000004",
+  "preview_test_token_0000000000005",
+  "preview_test_token_0000000000006"
 ];
 
 afterEach(async () => {
@@ -237,15 +243,37 @@ test("preview static routes apply resolver redirects, methods, HEAD, and media R
   assert.equal(invalidRange.headers["content-range"], "bytes */10");
 });
 
-test("exchange fails closed before code consumption and maps revalidation failures without leaking details", async (t) => {
+test("exchange permits missing Fetch Metadata but rejects invalid browser requests before code consumption", async (t) => {
   const { app, runtime } = await fixture();
   t.after(async () => { runtime.close(); await app.close(); });
-  const issued = runtime.issueBootstrap({ workspaceId: "workspace", entryPath: "demo/index.html" });
+  const missingMetadata = runtime.issueBootstrap({ workspaceId: "workspace", entryPath: "demo/index.html" });
+  const missingMetadataResult = await app.inject({
+    method: "POST",
+    url: "/__awb/exchange",
+    headers: { "content-type": "application/json", origin: ORIGIN },
+    payload: { code: missingMetadata.code }
+  });
+  assert.equal(missingMetadataResult.statusCode, 200);
 
-  const forbidden = await app.inject({ method: "POST", url: "/__awb/exchange", payload: { code: issued.code } });
-  assert.equal(forbidden.statusCode, 403);
-  const valid = await exchange(app, issued.code);
-  assert.equal(valid.statusCode, 200);
+  const crossSite = runtime.issueBootstrap({ workspaceId: "workspace", entryPath: "demo/index.html" });
+  const crossSiteResult = await app.inject({
+    method: "POST",
+    url: "/__awb/exchange",
+    headers: { "content-type": "application/json", "sec-fetch-site": "cross-site", origin: ORIGIN },
+    payload: { code: crossSite.code }
+  });
+  assert.equal(crossSiteResult.statusCode, 403);
+  assert.equal((await exchange(app, crossSite.code)).statusCode, 200);
+
+  const mismatchedOrigin = runtime.issueBootstrap({ workspaceId: "workspace", entryPath: "demo/index.html" });
+  const mismatchResult = await app.inject({
+    method: "POST",
+    url: "/__awb/exchange",
+    headers: { "content-type": "application/json", origin: "http://other.example.test" },
+    payload: { code: mismatchedOrigin.code }
+  });
+  assert.equal(mismatchResult.statusCode, 403);
+  assert.equal((await exchange(app, mismatchedOrigin.code)).statusCode, 200);
 
   const missing = runtime.issueBootstrap({ workspaceId: "missing", entryPath: "demo/index.html" });
   const missingResult = await exchange(app, missing.code);

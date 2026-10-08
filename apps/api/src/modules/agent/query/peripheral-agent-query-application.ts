@@ -1,4 +1,4 @@
-import type { AgentListAvailableAgentsResponse, AgentRecentSessionsResponse, AgentRecentWorkspacesResponse } from "@agent-workbench/shared";
+import type { AgentListAvailableAgentsResponse, AgentRecentSessionsResponse, AgentRecentWorkspacesResponse } from "@agent-workbench/shared/internal-contracts/agent-api-session";
 import { HttpError } from "../../../app/errors.js";
 import type { PeripheralAgentQueryApplicationDependencies } from "./peripheral-agent-query-ports.js";
 
@@ -18,7 +18,7 @@ export class PeripheralAgentQueryApplication {
     const runId = String(params.runId || "").trim();
     if (!runId || !this.dependencies.store.getRun(runId)) return { found: false, text: "" };
     const latest = this.dependencies.store.getLatestTerminalAssistantText(runId);
-    return { found: latest.itemId != null, text: latest.text };
+    return { found: latest.messageId != null, text: latest.text };
   }
 
   listAvailableAgents(params: { workspaceId: string; surface?: string }): AgentListAvailableAgentsResponse {

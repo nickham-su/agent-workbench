@@ -1,6 +1,6 @@
 import type { Component } from "vue";
 
-export type ToolId = "codeReview" | "terminal" | "files" | "search" | "agent" | "editor";
+export type ToolId = "codeReview" | "terminal" | "files" | "search" | "agent" | "editor" | "scheduledTasks";
 
 export type HeaderAction = {
   id: string;

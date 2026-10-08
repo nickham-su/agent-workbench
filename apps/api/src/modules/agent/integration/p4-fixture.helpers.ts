@@ -10,17 +10,13 @@ import { createAgentTestFixture, createTestWorkspace } from "../testkit/agent-te
 
 export type CreateP4FixtureOptions = {
   agentWorkerConcurrency?: number;
-  agentTestFaults?: {
-    archiveWrite?: { failAfterChunks?: number } | null;
-  };
   agentGlobalPromptsStored?: unknown;
   agentGlobalPromptsUpdatedAt?: number;
 };
 
 /**
  * P4 fixture owner. The exceptional pre-app settings are limited to P4's
- * archive-fault and global-prompt startup paths; ordinary callers reuse the
- * stable integration fixture directly.
+ * global-prompt startup path; ordinary callers reuse the stable integration fixture directly.
  */
 export async function createP4Fixture(t: TestContext, options: CreateP4FixtureOptions = {}) {
   const fixture = needsPreAppSetup(options)
@@ -33,7 +29,7 @@ export async function createP4Fixture(t: TestContext, options: CreateP4FixtureOp
 }
 
 function needsPreAppSetup(options: CreateP4FixtureOptions) {
-  return options.agentTestFaults !== undefined || options.agentGlobalPromptsStored !== undefined;
+  return options.agentGlobalPromptsStored !== undefined;
 }
 
 async function createP4FixtureWithPreAppSetup(options: CreateP4FixtureOptions): Promise<AgentIntegrationFixture> {
@@ -48,9 +44,6 @@ async function createP4FixtureWithPreAppSetup(options: CreateP4FixtureOptions): 
         options.agentGlobalPromptsStored,
         options.agentGlobalPromptsUpdatedAt ?? Date.now()
       );
-    }
-    if (options.agentTestFaults !== undefined) {
-      base.ctx.agentTestFaults = options.agentTestFaults;
     }
     app = await createApp(base.ctx);
     await app.ready();

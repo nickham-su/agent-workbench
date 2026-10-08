@@ -76,19 +76,20 @@ done
 curl -sSf "$BASE_URL/api/health" >/dev/null
 
 echo "[4/6] configure minimal provider/agent..."
-curl -sS -X PUT "$BASE_URL/api/settings/agent/providers" \
+curl -fsS -X PUT "$BASE_URL/api/settings/agent/providers" \
   -H 'content-type: application/json' \
   --data '{
+    "default": { "providerId": "ppchat", "modelId": "gpt-5.2" },
     "providers": [{
       "id": "ppchat",
       "name": "ppchat",
-      "npm": { "name": "@agent-infra/provider-openai", "version": "0.0.0-test" },
-      "options": { "baseURL": "http://127.0.0.1:1", "apiKey": "test", "apiMode": "responses" },
+      "npm": "@ai-sdk/openai",
+      "options": { "baseURL": "http://127.0.0.1:1", "apiKey": "test" },
       "models": [{ "id": "gpt-5.2", "name": "gpt-5.2", "contextWindowTokens": 128000 }]
     }]
   }' >/dev/null
 
-curl -sS -X PUT "$BASE_URL/api/settings/agent/agents" \
+curl -fsS -X PUT "$BASE_URL/api/settings/agent/agents" \
   -H 'content-type: application/json' \
   --data '{
     "agents": [{
@@ -105,7 +106,7 @@ curl -sS -X PUT "$BASE_URL/api/settings/agent/agents" \
     }]
   }' >/dev/null
 
-WORKSPACE_JSON=$(curl -sS -X POST "$BASE_URL/api/workspaces" \
+WORKSPACE_JSON=$(curl -fsS -X POST "$BASE_URL/api/workspaces" \
   -H 'content-type: application/json' \
   --data '{"repoIds":[],"title":"regression"}')
 WORKSPACE_ID=$(echo "$WORKSPACE_JSON" | jq -r '.id // empty')
@@ -114,7 +115,7 @@ if [[ -z "$WORKSPACE_ID" ]]; then
   exit 2
 fi
 
-SESSION_JSON=$(curl -sS -X POST "$BASE_URL/api/internal/agent/sessions/create" \
+SESSION_JSON=$(curl -fsS -X POST "$BASE_URL/api/internal/agent/sessions/create" \
   -H "x-awb-agent-internal-token: $INTERNAL_TOKEN" \
   -H 'content-type: application/json' \
   --data "{\"workspaceId\":\"$WORKSPACE_ID\",\"title\":\"regression\"}")
@@ -130,8 +131,8 @@ SSE_PID=$!
 sleep 1
 
 REQ='{"workspaceId":"'"$WORKSPACE_ID"'","sessionId":"'"$SESSION_ID"'","agentId":"default","text":"hello from regression","clientRequestId":"reg_req_1"}'
-R1=$(curl -sS -X POST "$BASE_URL/api/internal/agent/runs/trigger" -H "x-awb-agent-internal-token: $INTERNAL_TOKEN" -H 'content-type: application/json' --data "$REQ")
-R2=$(curl -sS -X POST "$BASE_URL/api/internal/agent/runs/trigger" -H "x-awb-agent-internal-token: $INTERNAL_TOKEN" -H 'content-type: application/json' --data "$REQ")
+R1=$(curl -fsS -X POST "$BASE_URL/api/internal/agent/runs/trigger" -H "x-awb-agent-internal-token: $INTERNAL_TOKEN" -H 'content-type: application/json' --data "$REQ")
+R2=$(curl -fsS -X POST "$BASE_URL/api/internal/agent/runs/trigger" -H "x-awb-agent-internal-token: $INTERNAL_TOKEN" -H 'content-type: application/json' --data "$REQ")
 
 RUN_ID=$(echo "$R1" | jq -r '.runId')
 DEDUP2=$(echo "$R2" | jq -r '.deduplicated')
@@ -140,8 +141,8 @@ if [[ "$DEDUP2" != "true" ]]; then
   exit 3
 fi
 
-# 触发run-complete产生SSE事件（best-effort）
-curl -sS -X POST "$BASE_URL/api/internal/agent/run-complete" \
+# 触发 run-complete 产生 SSE 事件。
+curl -fsS -X POST "$BASE_URL/api/internal/agent/run-complete" \
   -H "x-awb-agent-internal-token: $INTERNAL_TOKEN" \
   -H 'content-type: application/json' \
   --data '{"workspaceId":"'"$WORKSPACE_ID"'","sessionId":"'"$SESSION_ID"'","runId":"'"$RUN_ID"'","status":"completed"}' >/dev/null
@@ -158,7 +159,7 @@ fi
 
 kill "$SSE_PID" || true
 
-FINAL=$(curl -sS "$BASE_URL/api/internal/agent/runs/$RUN_ID/final-text" -H "x-awb-agent-internal-token: $INTERNAL_TOKEN")
+FINAL=$(curl -fsS "$BASE_URL/api/internal/agent/runs/$RUN_ID/final-text" -H "x-awb-agent-internal-token: $INTERNAL_TOKEN")
 echo "dedup second response: $R2"
 echo "final-text response: $FINAL"
 

@@ -35,14 +35,25 @@ async function expectHttpError(action: () => Promise<unknown>, statusCode: numbe
   await assert.rejects(action, (error: unknown) => error instanceof HttpError && error.statusCode === statusCode && error.code === code);
 }
 
-test("open requires Fetch Metadata before resolving or issuing a code", async () => {
+test("open permits missing Fetch Metadata before resolving and issuing a code", async () => {
+  const state = runtime();
+  const location = await openWorkspacePreview({
+    runtime: state.runtime as any,
+    fileService: { async resolve() { return entryTarget; }, async open() { throw new Error("not used"); } },
+    workspaceId: "workspace", path: "demo/index.html", secFetchSite: undefined, origin: undefined
+  });
+  assert.equal(location, "https://preview.example.test/__awb/bootstrap#bootstrap_code_0123456789abcdefg");
+  assert.deepEqual(state.issued, [{ workspaceId: "workspace", entryPath: "demo/index.html" }]);
+});
+
+test("open rejects explicit cross-site Fetch Metadata before resolving or issuing a code", async () => {
   const state = runtime();
   let resolved = false;
   await expectHttpError(
     () => openWorkspacePreview({
       runtime: state.runtime as any,
       fileService: { async resolve() { resolved = true; return entryTarget; }, async open() { throw new Error("not used"); } },
-      workspaceId: "workspace", path: "demo/index.html", secFetchSite: undefined, origin: undefined
+      workspaceId: "workspace", path: "demo/index.html", secFetchSite: "cross-site", origin: undefined
     }),
     403,
     "PREVIEW_REQUEST_FORBIDDEN"

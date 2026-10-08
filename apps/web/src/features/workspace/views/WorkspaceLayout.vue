@@ -109,7 +109,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, provide, reactive, ref, watch, type ComponentPublicInstance } from "vue";
 import { Modal, message } from "ant-design-vue";
-import { CodeOutlined, DownOutlined, EditOutlined, FolderOpenOutlined, RobotOutlined, SearchOutlined, UpOutlined } from "@ant-design/icons-vue";
+import { ClockCircleOutlined, CodeOutlined, DownOutlined, EditOutlined, FolderOpenOutlined, RobotOutlined, SearchOutlined, UpOutlined } from "@ant-design/icons-vue";
 import { useI18n } from "vue-i18n";
 import type { GitBranchesResponse, GitPushRequest, GitStatusResponse, WorkspaceDetail } from "@agent-workbench/shared";
 import {
@@ -138,6 +138,7 @@ import FileExplorerToolView from "../tools/file-explorer/FileExplorerToolView.vu
 import SearchToolView from "../tools/search/SearchToolView.vue";
 import TerminalToolView from "../tools/terminal/TerminalToolView.vue";
 import AgentToolView from "../tools/agent/AgentToolView.vue";
+import ScheduledTasksToolView from "../tools/scheduled-tasks/ScheduledTasksToolView.vue";
 import EditorToolView from "../tools/editor/EditorToolView.vue";
 import GitIdentityModal from "@/shared/components/GitIdentityModal.vue";
 import { createCodeReviewRuntime } from "@/features/workspace/tools/code-review/runtime";
@@ -148,7 +149,7 @@ const props = defineProps<{ workspaceId: string; previewEnabled: boolean }>();
 const { t } = useI18n();
 type PushParams = Omit<GitPushRequest, "target">;
 
-const TOOL_IDS: ToolId[] = ["files", "search", "codeReview", "terminal", "agent", "editor"];
+const TOOL_IDS: ToolId[] = ["files", "search", "codeReview", "terminal", "agent", "scheduledTasks", "editor"];
 const DOCK_AREAS: DockArea[] = ["leftTop", "leftBottom", "rightTop"];
 type ToolDefinition = {
   toolId: ToolId;
@@ -245,6 +246,15 @@ const tools = computed<ToolDefinition[]>(() => [
     keepAlive: true
   },
   {
+    toolId: "scheduledTasks",
+    title: () => t("workspace.tools.scheduledTasks"),
+    icon: ClockCircleOutlined,
+    view: ScheduledTasksToolView,
+    defaultArea: "leftTop",
+    allowedAreas: ["leftTop", "leftBottom"],
+    keepAlive: true
+  },
+  {
     toolId: "agent",
     title: () => t("workspace.tools.agent"),
     icon: RobotOutlined,
@@ -324,6 +334,7 @@ const toolArea = reactive<Record<ToolId, DockArea>>({
   files: "leftTop",
   search: "leftTop",
   agent: "leftTop",
+  scheduledTasks: "leftTop",
   editor: "rightTop"
 });
 
@@ -339,6 +350,7 @@ const toolMinimized = reactive<Record<ToolId, boolean>>({
   files: false,
   search: true,
   agent: false,
+  scheduledTasks: false,
   editor: true
 });
 const toolDots = reactive<Record<ToolId, boolean>>({
@@ -347,6 +359,7 @@ const toolDots = reactive<Record<ToolId, boolean>>({
   files: false,
   search: false,
   agent: false,
+  scheduledTasks: false,
   editor: false
 });
 const toolRuntimes = new Map<ToolId, ToolRuntime>();
@@ -488,6 +501,7 @@ function loadDockLayout(workspaceId: string): DockLayoutV3 | null {
       files: "leftTop",
       search: "leftTop",
       agent: "leftTop",
+      scheduledTasks: "leftTop",
       editor: "rightTop"
     };
     for (const toolId of TOOL_IDS) {
@@ -501,6 +515,7 @@ function loadDockLayout(workspaceId: string): DockLayoutV3 | null {
       files: false,
       search: true,
       agent: false,
+      scheduledTasks: false,
       editor: true
     };
     for (const toolId of TOOL_IDS) {
@@ -572,6 +587,7 @@ function saveDockLayout(workspaceId: string) {
         files: toolArea.files,
         search: toolArea.search,
         agent: toolArea.agent,
+        scheduledTasks: toolArea.scheduledTasks,
         editor: toolArea.editor
       },
       toolMinimized: {
@@ -580,6 +596,7 @@ function saveDockLayout(workspaceId: string) {
         files: toolMinimized.files,
         search: toolMinimized.search,
         agent: toolMinimized.agent,
+        scheduledTasks: toolMinimized.scheduledTasks,
         editor: toolMinimized.editor
       },
       activeToolIdByArea: {
@@ -718,9 +735,17 @@ function isToolVisible(toolId: ToolId) {
   return activeToolIdByArea[area] === toolId && !toolMinimized[toolId];
 }
 
+const agentOpenSessionRequest = ref<{ sessionId: string; sequence: number } | null>(null);
+watch(() => props.workspaceId, () => {
+  // 打开 Session 的意图只属于发起调用时的 Workspace。
+  agentOpenSessionRequest.value = null;
+});
 function callToolFrom(fromToolId: string, toToolId: string, call: ToolCall) {
   const toId = toToolId as ToolId;
   if (!toolById.value.has(toId)) return;
+  if (toId === "agent" && call.type === "openSession" && typeof call.payload?.sessionId === "string") {
+    agentOpenSessionRequest.value = { sessionId: call.payload.sessionId, sequence: Date.now() + Math.random() };
+  }
   const toArea = toolCurrentArea(toId);
   const fromId = toolById.value.has(fromToolId as ToolId) ? (fromToolId as ToolId) : null;
   const fromArea = fromId ? toolCurrentArea(fromId) : null;
@@ -865,7 +890,7 @@ const keepAliveIncludeByArea = computed(() => {
 });
 
 const toolVisibleById = computed(() => {
-  const out: Record<ToolId, boolean> = { codeReview: false, terminal: false, files: false, search: false, agent: false, editor: false };
+  const out: Record<ToolId, boolean> = { codeReview: false, terminal: false, files: false, search: false, agent: false, scheduledTasks: false, editor: false };
   for (const id of TOOL_IDS) out[id] = isToolEnabled(id) && isToolVisible(id);
   return out;
 });
@@ -983,6 +1008,9 @@ function isKeepAlive(toolId: ToolId) {
 }
 
 function toolViewProps(toolId: ToolId) {
+  if (toolId === "agent") {
+    return { workspaceId: props.workspaceId, toolId, openSessionRequest: agentOpenSessionRequest.value };
+  }
   if (toolId === "codeReview") {
     return {
       workspaceId: props.workspaceId,

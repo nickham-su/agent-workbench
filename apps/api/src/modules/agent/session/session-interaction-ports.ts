@@ -1,16 +1,18 @@
 import type {
-  AgentContextItemRecord,
-  AgentControlResult,
+  AgentImageMediaType,
   AgentForkSessionRequest,
   AgentRevertSessionRequest,
   AgentSendMessageRequest,
   AgentSendMessageResponse,
   AgentSessionRecord,
-  AgentSessionRunState,
-  AgentUiLocale
-} from "@agent-workbench/shared";
+  AgentUiLocale,
+  AgentUpdateSessionTitleRequest
+} from "@agent-workbench/shared/internal-contracts/agent-api-session";
 import type { AgentApiSubtaskStartRequest } from "@agent-workbench/shared/internal-contracts/agent-api";
+import type { AgentMessageControlResult, AgentMessageSessionRunState } from "@agent-workbench/shared";
 import type { AgentRuntimePort } from "../agent.runtime-port.js";
+import type { HistoricalForkSource } from "../agent-message.store.js";
+import type { ExpectedHistoricalForkSession } from "../lifecycle/run-lifecycle-ports.js";
 
 export type SessionCreateInput = {
   id: string;
@@ -18,20 +20,21 @@ export type SessionCreateInput = {
   title: string;
   kind: "primary" | "subtask";
   createdAt: number;
+  /** An execution's deterministic title must survive first-message auto naming. */
+  preserveTitle?: boolean;
   forkedFromSessionId?: string | null;
-  forkedFromItemId?: number | null;
+  forkedFromMessageId?: string | null;
 };
 
 export type SessionCloneInput = {
   id: string;
   createdAt: number;
-  archiveAt: number;
   fromSession: AgentSessionRecord;
-  fromItemId: number;
-  mode: "with_archive" | "visible_only";
+  fromMessageId: string;
   title?: string;
   targetKind: "primary" | "subtask";
   boundaryPolicy: "public-user-assistant" | "internal-resolved";
+  allowSourceWithActiveRun?: boolean;
 };
 
 export type SessionInteractionStore = {
@@ -39,17 +42,22 @@ export type SessionInteractionStore = {
   getSession(sessionId: string): AgentSessionRecord | null;
   listSessions(workspaceId: string): AgentSessionRecord[];
   createSession(input: SessionCreateInput): void;
+  setManualTitle(input: { sessionId: string; workspaceId: string; title: string }): boolean;
   cloneSession(input: SessionCloneInput): Promise<AgentSessionRecord>;
-  findClientRequestDedup(input: { workspaceId: string; sessionId: string; clientRequestId: string }): { messageItemId: number; runId: string } | null;
-  getRunState(workspaceId: string, sessionId: string): Pick<AgentSessionRunState, "status">;
-  getControlRunState(sessionId: string): AgentSessionRunState;
-  getTranscriptItem(sessionId: string, workspaceId: string, itemId: number): AgentContextItemRecord | null;
+  forkStableSourceSession(input: { id: string; workspaceId: string; sourceSessionId: string;
+    title: string; createdAt: number }): AgentSessionRecord;
+  validateHistoricalSource(input: { workspaceId: string; sourceSessionId: string; targetMessageId: string }): HistoricalForkSource;
+  forkHistoricalSource(input: { id: string; workspaceId: string; sourceSessionId: string;
+    targetMessageId: string; title: string; createdAt: number }): AgentSessionRecord;
+  findClientRequestDedup(input: { workspaceId: string; sessionId: string; clientRequestId: string }): { messageId: string; runId: string } | null;
+  getRunState(workspaceId: string, sessionId: string): Pick<AgentMessageSessionRunState, "status">;
+  getControlRunState(sessionId: string): AgentMessageSessionRunState;
   hasNonTerminalItems(workspaceId: string, sessionId: string): boolean;
-  moveHead(input: { workspaceId: string; sessionId: string; expectedHeadItemId: number | null; nextHeadItemId: number; updatedAt: number }): void;
+  revertBeforeUser(input: { workspaceId: string; sessionId: string; expectedHeadMessageId: string | null; expectedRevision: number; targetMessageId: string; updatedAt: number }): void;
 };
 
 export type SessionProfileReader = {
-  resolveUser(input: { workspaceId: string; requestedAgentId?: string | null }): { agentId: string; providerId: string; modelId: string };
+  resolveUser(input: { workspaceId: string; sessionId: string; requestedAgentId?: string | null }): { agentId: string; providerId: string; modelId: string };
 };
 
 export type SessionLifecycleStarter = {
@@ -59,11 +67,14 @@ export type SessionLifecycleStarter = {
     clientRequestId: string;
     text: string;
     inputText: string;
+    images: NormalizedAgentUserImageInput[];
     agentId: string;
     providerId: string;
     modelId: string;
     uiLocale: AgentUiLocale | null;
     runtime: AgentRuntimePort;
+    expectedHistoricalFork?: ExpectedHistoricalForkSession;
+    expectedSessionTitle?: string;
   }): Promise<AgentSendMessageResponse>;
 };
 
@@ -92,18 +103,42 @@ export type RevertSessionCommand = {
 export type SubtaskSessionMaterializationCommand = {
   workspaceId: string;
   parentSessionId: string;
-  parentToolItemId: number;
+  parentToolExecutionId: string;
   session: AgentApiSubtaskStartRequest["session"];
   subtaskTitleBase: string;
-  forkBoundaryItemId: number | null;
+  forkBoundaryMessageId: string | null;
   shouldUsePreforkSummary: boolean;
 };
 
 export type SessionInteractionApplication = {
   listSessions(workspaceId: string): AgentSessionRecord[];
   createPrimarySession(params: { workspaceId: string; title?: string }): AgentSessionRecord;
+  validateHistoricalSource(params: { workspaceId: string; sourceSessionId: string; targetMessageId: string }): HistoricalForkSource;
+  forkPrimarySessionFromHistoricalAnchorWithExpectedId(params: { workspaceId: string; sessionId: string;
+    sourceSessionId: string; targetMessageId: string; title: string }): AgentSessionRecord;
   forkPrimarySession(params: AgentForkSessionRequest): Promise<AgentSessionRecord>;
-  sendMessage(params: { sessionId: string; body: AgentSendMessageRequest; runtime: AgentRuntimePort }): Promise<AgentSendMessageResponse>;
-  revertSession(command: RevertSessionCommand): Promise<AgentControlResult>;
+  updateSessionTitle(params: { sessionId: string; body: AgentUpdateSessionTitleRequest }): AgentSessionRecord;
+  sendMessage(params: { sessionId: string; body: NormalizedAgentUserMessageInput; runtime: AgentRuntimePort;
+    expectedHistoricalFork?: ExpectedHistoricalForkSession; expectedSessionTitle?: string }): Promise<AgentSendMessageResponse>;
+  revertSession(command: RevertSessionCommand): Promise<AgentMessageControlResult>;
   resolveSubtaskSessionForStart(command: SubtaskSessionMaterializationCommand): Promise<{ session: AgentSessionRecord; createdSessionId: string | null }>;
+};
+
+export type NormalizedAgentUserImageInput = {
+  attachmentId: string;
+  storageKey: string;
+  tempId: string;
+  filename: string;
+  mediaType: AgentImageMediaType;
+  byteSize: number;
+  position: number;
+};
+
+export type NormalizedAgentUserMessageInput = {
+  workspaceId: string;
+  clientRequestId: string;
+  text: string;
+  agentId?: string;
+  uiLocale?: AgentUiLocale;
+  images?: NormalizedAgentUserImageInput[];
 };

@@ -16,7 +16,7 @@ test("P4 composition wires Lifecycle to its narrow persistence and active-child 
 
   const { testOnly } = createAgentComposition(fixture.ctx, fixture.app.log);
   assert.equal(typeof testOnly.lifecyclePersistence.activateUserRun, "function");
-  assert.equal(typeof testOnly.lifecyclePersistence.completeRunFromWorker, "function");
+  assert.equal(typeof testOnly.lifecyclePersistence.convergeRunTerminal, "function");
   assert.equal(typeof testOnly.lifecycleActiveSubtaskChildQuery.listByParentRun, "function");
   assert.deepEqual(testOnly.lifecycleActiveSubtaskChildQuery.listByParentRun({
     workspaceId: "workspace",

@@ -48,6 +48,7 @@ import {
   withWorkspaceUploadLock,
   writeWorkspaceFileText
 } from "./workspace-files.service.js";
+import { workspaceLifecycleCoordinator } from "../../infra/locks/workspace-lifecycle-coordinator.js";
 
 type MultipartFilePart = {
   type: "file";
@@ -69,13 +70,17 @@ type MultipartRequest = FastifyRequest & {
   parts: () => AsyncIterableIterator<MultipartPart>;
 };
 
+export type WorkspaceFilesRouteTestHooks = {
+  afterUploadMutationAdmitted?: (params: { workspaceId: string }) => Promise<void> | void;
+};
+
 function attachmentHeader(filename: string) {
   const safeName = filename.replace(/"/g, '\\"');
   const encoded = encodeURIComponent(filename);
   return `attachment; filename="${safeName}"; filename*=UTF-8''${encoded}`;
 }
 
-export async function registerWorkspaceFilesRoutes(app: FastifyInstance, ctx: AppContext) {
+export async function registerWorkspaceFilesRoutes(app: FastifyInstance, ctx: AppContext, hooks: WorkspaceFilesRouteTestHooks = {}) {
   app.post(
     "/api/workspaces/:workspaceId/files/list",
     {
@@ -246,21 +251,23 @@ export async function registerWorkspaceFilesRoutes(app: FastifyInstance, ctx: Ap
       const params = req.params as { workspaceId: string };
       const query = req.query as { dir?: string };
       const multipartReq = req as MultipartRequest;
-      if (!multipartReq.isMultipart()) throw new HttpError(400, "Invalid form");
+       if (!multipartReq.isMultipart()) throw new HttpError(400, "Invalid form");
+       return workspaceLifecycleCoordinator.withMutation(params.workspaceId, async () => {
+         // admission 必须覆盖 target 解析、upload lock、multipart 消费、写入与失败清理。
+         await hooks.afterUploadMutationAdmitted?.({ workspaceId: params.workspaceId });
+         const { dir, target } = await resolveWorkspaceUploadTarget(ctx, params.workspaceId, query?.dir);
+        const results = [] as Awaited<ReturnType<typeof saveWorkspaceUploadFile>>[];
 
-      const { dir, target } = await resolveWorkspaceUploadTarget(ctx, params.workspaceId, query?.dir);
-      const results = [] as Awaited<ReturnType<typeof saveWorkspaceUploadFile>>[];
-
-      await withWorkspaceUploadLock(target, async () => {
-        for await (const part of multipartReq.parts()) {
-          if (part.type !== "file") continue;
-          const filename = typeof part.filename === "string" ? part.filename : "";
-          const result = await saveWorkspaceUploadFile(target, { filename, stream: part.file });
-          results.push(result);
-        }
+        await withWorkspaceUploadLock(target, async () => {
+          for await (const part of multipartReq.parts()) {
+            if (part.type !== "file") continue;
+            const filename = typeof part.filename === "string" ? part.filename : "";
+            const result = await saveWorkspaceUploadFile(target, { filename, stream: part.file });
+            results.push(result);
+          }
+        });
+        return { dir, results };
       });
-
-      return { dir, results };
     }
   );
 
