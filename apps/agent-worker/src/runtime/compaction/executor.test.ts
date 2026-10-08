@@ -16,11 +16,13 @@ function createExecutor(input?: {
   onGetCompactionSource?: (options: Record<string, unknown>) => void;
   workDeadlineMsByMode?: { manual?: number; proactive?: number };
   summaryRetrySleep?: (ms: number, signal: AbortSignal) => Promise<boolean>;
+  commitRetrySleep?: (ms: number, signal: AbortSignal) => Promise<boolean>;
   onSummaryRetry?: (input: { retryAttempt: number; maxRetries: number; delayMs: number; abortSignal: AbortSignal }) => Promise<void>;
   confirm?: () => Promise<{ outcome: "committed" | "not_committed" }>;
   commit?: (request: Record<string, unknown>) => Promise<{ result: "updated" | "ignored"; summaryMessageId: string | null }>;
 }) {
   const requests: Record<string, unknown>[] = [];
+  const commitSignals: AbortSignal[] = [];
   const summaries: Array<Record<string, unknown>> = [];
   const executor = new CompactionExecutor({
     apiClient: {
@@ -32,8 +34,9 @@ function createExecutor(input?: {
         input?.onGetCompactionSource?.(options);
         return input?.source ?? testSource();
       },
-      async commitCompactionWithTerminalIntent(request: Record<string, unknown>) {
+      async commitCompactionWithTerminalIntent(request: Record<string, unknown>, options: { abortSignal: AbortSignal }) {
         requests.push(request as unknown as Record<string, unknown>);
+        commitSignals.push(options.abortSignal);
         return input?.commit
           ? await input.commit(request as unknown as Record<string, unknown>)
           : { result: "updated" as const, summaryMessageId: "summary" };
@@ -45,6 +48,7 @@ function createExecutor(input?: {
     nowMs: input?.nowMs,
     workDeadlineMsByMode: input?.workDeadlineMsByMode,
     summaryRetrySleep: input?.summaryRetrySleep,
+    commitRetrySleep: input?.commitRetrySleep,
     onSummaryRetry: input?.onSummaryRetry,
     newId: (prefix) => `${prefix}-id`,
     async generateSummary(request) {
@@ -55,7 +59,24 @@ function createExecutor(input?: {
         : { text: input?.summary ?? "brief summary" };
     },
   });
-  return { executor, requests, summaries };
+  return { executor, requests, summaries, commitSignals };
+}
+
+function recordCommitRetryWait() {
+  const calls: Array<{ ms: number; signal: AbortSignal; aborted: boolean }> = [];
+  return {
+    sleep: async (ms: number, signal: AbortSignal) => {
+      calls.push({ ms, signal, aborted: signal.aborted });
+      return !signal.aborted;
+    },
+    assertWait(commitSignals: AbortSignal[], callerSignal: AbortSignal) {
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0]!.ms, 1_000);
+      assert.equal(calls[0]!.signal, commitSignals[0]);
+      assert.notEqual(calls[0]!.signal, callerSignal);
+      assert.equal(calls[0]!.aborted, false);
+    },
+  };
 }
 
 const args = {
@@ -439,8 +460,10 @@ test("首次 commit 前 deadline 仍是 unavailable，但首次请求后退避�
   let now = 0;
   let commitCalls = 0;
   let confirmations = 0;
-  const { executor } = createExecutor({
+  const wait = recordCommitRetryWait();
+  const { executor, commitSignals } = createExecutor({
     source: testSource({ texts: ["x".repeat(100_000), "recent"] }),
+    commitRetrySleep: wait.sleep,
     nowMs: () => now,
     workDeadlineMsByMode: { proactive: 15_000 },
     commit: async () => {
@@ -460,6 +483,7 @@ test("首次 commit 前 deadline 仍是 unavailable，但首次请求后退避�
   );
   assert.equal(commitCalls, 1);
   assert.equal(confirmations, 0, "work deadline 已耗尽时不把 commit outcome 伪装为 unavailable");
+  wait.assertWait(commitSignals, args.abortSignal);
 });
 
 test("commit 第二次请求前耗尽时仍确认第一笔写入，不确认则 fail closed", async () => {
@@ -504,13 +528,17 @@ test("cancel after a lost commit response confirms the persisted manual completi
 
 test("negative confirmation after response loss is not proof an in-flight write cannot commit", async () => {
   let confirmations = 0;
-  const { executor } = createExecutor({
+  const wait = recordCommitRetryWait();
+  const { executor, requests, commitSignals } = createExecutor({
     source: testSource({ texts: ["x".repeat(100_000), "recent"] }),
+    commitRetrySleep: wait.sleep,
     commit: async () => { throw new InternalRpcNetworkError({ method: "POST", endpoint: "/complete" }); },
     confirm: async () => { confirmations += 1; return { outcome: "not_committed" }; },
   });
   assert.deepEqual(await executor.execute({ ...args, mode: "proactive" }), { kind: "failed", reason: "commit_outcome_uncertain" });
   assert.equal(confirmations, 1);
+  assert.equal(requests.length, 2);
+  wait.assertWait(commitSignals, args.abortSignal);
 });
 
 test("ignored proactive commit is not an ordinary CAS conflict", async () => {
@@ -747,8 +775,10 @@ test("caller cancellation during summary backoff stops before a second request",
 });
 
 test("manual commit response-loss retry replays the exact artifact request", async () => {
-  const { executor, requests } = createExecutor({
+  const wait = recordCommitRetryWait();
+  const { executor, requests, commitSignals } = createExecutor({
     source: testSource({ texts: ["x".repeat(100_000), "recent"] }),
+    commitRetrySleep: wait.sleep,
     commit: async () => {
       if (requests.length === 1) {
         const error = new Error("response lost");
@@ -764,11 +794,14 @@ test("manual commit response-loss retry replays the exact artifact request", asy
   assert.deepEqual(requests[1], requests[0]);
   assert.equal(requests[0]?.messageId, "message-id");
   assert.equal(requests[0]?.textPartId, "part-id");
+  wait.assertWait(commitSignals, args.abortSignal);
 });
 
 test("uncertain commit is confirmed before any caller can continue with the old context", async () => {
-  const { executor } = createExecutor({
+  const wait = recordCommitRetryWait();
+  const { executor, requests, commitSignals } = createExecutor({
     source: testSource({ texts: ["x".repeat(100_000), "recent"] }),
+    commitRetrySleep: wait.sleep,
     commit: async () => {
       const error = new Error("response lost");
       error.name = "InternalRpcNetworkError";
@@ -778,6 +811,8 @@ test("uncertain commit is confirmed before any caller can continue with the old 
   });
   const result = await executor.execute({ ...args, mode: "proactive" });
   assert.equal(result.kind, "committed");
+  assert.equal(requests.length, 2);
+  wait.assertWait(commitSignals, args.abortSignal);
 });
 
 test("late confirmation preserves a committed artifact; a negative observation stays uncertain", async () => {
@@ -821,15 +856,22 @@ test("a negative or unconfirmable response-loss observation both fail closed", a
     error.name = "InternalRpcNetworkError";
     throw error;
   };
-  const missing = createExecutor({ source: testSource({ texts: ["x".repeat(100_000), "recent"] }), commit: retryableCommit, confirm: async () => ({ outcome: "not_committed" }) });
+  const missingWait = recordCommitRetryWait();
+  const missing = createExecutor({ source: testSource({ texts: ["x".repeat(100_000), "recent"] }), commitRetrySleep: missingWait.sleep, commit: retryableCommit, confirm: async () => ({ outcome: "not_committed" }) });
   assert.deepEqual(await missing.executor.execute({ ...args, mode: "proactive" }), { kind: "failed", reason: "commit_outcome_uncertain" });
+  assert.equal(missing.requests.length, 2);
+  missingWait.assertWait(missing.commitSignals, args.abortSignal);
 
+  const unknownWait = recordCommitRetryWait();
   const unknown = createExecutor({
     source: testSource({ texts: ["x".repeat(100_000), "recent"] }),
+    commitRetrySleep: unknownWait.sleep,
     commit: retryableCommit,
     confirm: async () => { throw new Error("confirm unavailable"); },
   });
   assert.deepEqual(await unknown.executor.execute({ ...args, mode: "proactive" }), { kind: "failed", reason: "commit_outcome_uncertain" });
+  assert.equal(unknown.requests.length, 2);
+  unknownWait.assertWait(unknown.commitSignals, args.abortSignal);
 });
 
 test("configured summary model is the only model used; capacity errors do not split the complete input", async () => {

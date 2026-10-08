@@ -50,6 +50,8 @@ export type CompactionExecutorDependencies = {
   workDeadlineMsByMode?: Partial<Record<CompactionMode, number>>;
   /** Test seam only; production waits must remain abortable. */
   summaryRetrySleep?: (ms: number, signal: AbortSignal) => Promise<boolean>;
+  /** Test seam only for exact commit replay; production waits remain abortable. */
+  commitRetrySleep?: (ms: number, signal: AbortSignal) => Promise<boolean>;
   /** Called before each summary retry wait; not part of the provider retry count. */
   onSummaryRetry?: (input: {
     expectedRevision: number;
@@ -330,7 +332,8 @@ export class CompactionExecutor {
       if (!this.isRetryableControlWriteError(error)) throw error;
       // Once one response is lost, a later retry failure cannot prove that the
       // original write was absent. Preserve this fact for the confirmation path.
-      if (!await this.sleepWithAbort(COMMIT_REPLAY_DELAY_MS, params.abortSignal)) {
+      const sleep = this.dependencies.commitRetrySleep ?? ((ms: number, signal: AbortSignal) => this.sleepWithAbort(ms, signal));
+      if (!await sleep(COMMIT_REPLAY_DELAY_MS, params.abortSignal)) {
         throw new CompactionCommitOutcomeUncertainError(error);
       }
       try {
