@@ -1554,10 +1554,12 @@ const previewError = ref("");
 const previewCache = new AttachmentPreviewCache();
 let previewGeneration = 0;
 async function showPreviewAt(index: number) {
+  if (!attachmentPreviewVisible.value || !Number.isInteger(index)) return;
   const attachment = previewAttachments.value[index];
   if (!attachment) return;
   const generation = ++previewGeneration;
   previewIndex.value = index;
+  previewUrl.value = "";
   previewLoading.value = true;
   previewError.value = "";
   try {
@@ -1588,8 +1590,14 @@ function closeAttachmentPreview() {
   attachmentPreviewVisible.value = false;
   previewAttachments.value = [];
   previewUrl.value = "";
+  previewLoading.value = false;
+  previewError.value = "";
   previewCache.clear();
 }
+watch(
+  () => [props.workspaceId, props.sessionId],
+  closeAttachmentPreview,
+);
 
 async function copyTextWithFeedback(content: string, copiedMessage: string) {
   const normalizedContent = content.trim();
@@ -2015,7 +2023,7 @@ onBeforeUnmount(() => {
   pendingRunController.stop();
   if (elapsedTimer !== null) window.clearInterval(elapsedTimer);
   if (mentionTimer !== null) window.clearTimeout(mentionTimer);
-  previewCache.clear();
+  closeAttachmentPreview();
   timelineRefreshScheduler.dispose();
   detailCache.reset();
   messageMutationState.clear();
