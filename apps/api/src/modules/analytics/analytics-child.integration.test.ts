@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { fork } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
@@ -7,6 +9,7 @@ import { test } from "node:test";
 import { createApp } from "../../app/createApp.js";
 import { analyticsDbPath } from "../../infra/fs/paths.js";
 import { closeAnalyticsDb, openAnalyticsDb, ANALYTICS_SCHEMA_VERSION } from "./analytics-db.js";
+import { AnalyticsSupervisor, __analyticsSupervisorInternals } from "./analytics-supervisor.js";
 import { analyticsFingerprint } from "./signal-store.js";
 import { createAgentTestFixture } from "../agent/testkit/agent-testkit.js";
 
@@ -59,6 +62,79 @@ test("Analytics child owns an empty store and serves a contract-valid 200 respon
   await fs.stat(analyticsDbPath(fixture.dataDir));
   assert.equal((await app.inject({ method: "GET", url: "/api/health" })).statusCode, 200);
 });
+
+for (const failInitialization of [false, true]) {
+  test(`Analytics startup logs correlate parent and child ${failInitialization ? "initialization failure" : "successful serving"}`, async (t) => {
+    const fixture = await createAgentTestFixture({ dataDirPrefix: "analytics-startup-private-test-" });
+    if (failInitialization) {
+      const db = await openAnalyticsDb(fixture.dataDir);
+      db.prepare("UPDATE analytics_schema_meta SET schema_version = ?").run(ANALYTICS_SCHEMA_VERSION + 1);
+      closeAnalyticsDb(db);
+    }
+    const parentLogs: string[] = [];
+    t.mock.method(console, "info", (...args: unknown[]) => { parentLogs.push(args.join(" ")); });
+    t.mock.method(console, "warn", (...args: unknown[]) => { parentLogs.push(args.join(" ")); });
+    let childLogs = "";
+    const supervisor = new AnalyticsSupervisor({
+      dataDir: fixture.dataDir, startupTimeoutMs: 8_000, shutdownTimeoutMs: 100, restartLimit: 0,
+      workerFactory: () => {
+        const child = fork(fileURLToPath(new URL("./analytics.worker.ts", import.meta.url)), [], {
+          env: {
+            ...__analyticsSupervisorInternals.createMinimalChildEnv(fixture.dataDir, { collectorEnabled: false }),
+            // Keep the test-only source loader cache and temporary files inside
+            // this fixture; the production child's minimal environment is unchanged.
+            TMPDIR: fixture.dataDir,
+            TMP: fixture.dataDir,
+            HOME: fixture.dataDir,
+            TSX_DISABLE_CACHE: "1",
+          },
+          execArgv: __analyticsSupervisorInternals.createSafeChildExecArgv(true),
+          stdio: ["ignore", "pipe", "pipe", "ipc"],
+        });
+        child.stdout!.on("data", (chunk: Buffer) => { childLogs += chunk.toString("utf8"); });
+        child.stderr!.on("data", (chunk: Buffer) => { childLogs += chunk.toString("utf8"); });
+        return child;
+      },
+    });
+    t.after(async () => { await supervisor.close(); await fixture.dispose(); });
+    supervisor.onReady(async () => {
+      const result = await supervisor.signal({
+        kind: "expected_slots_config", sentAt: Date.now(), requestId: randomUUID(),
+        sourceConfigVersion: 1, effectiveAt: 1, enabledFactDomains: ["execution", "model"],
+        slots: [
+          { domain: "execution", producerNamespace: "api_local_fallback", producerId: "api_local_fallback" },
+          { domain: "model", producerNamespace: "api_local_fallback", producerId: "api_local_fallback" },
+        ],
+      });
+      assert.equal(result.accepted, true);
+    });
+    assert.equal(await supervisor.start(), !failInitialization);
+    const expectedOutcome = `database initialization ${failInitialization ? "failed" : "completed"}`;
+    const deadline = Date.now() + 1_000;
+    while (!childLogs.includes(expectedOutcome) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.ok(childLogs.includes("database initialization started"));
+    assert.ok(childLogs.includes(expectedOutcome));
+    const startupId = /startupId=([\w-]+)/.exec(parentLogs[0]!)?.[1];
+    assert.ok(startupId);
+    const databaseLines = childLogs.split("\n").filter((line) => line.includes("[Analytics] database initialization"));
+    assert.equal(databaseLines.length, 2);
+    for (const line of databaseLines) {
+      assert.ok(line.includes(`startupId=${startupId}`));
+      const at = /\bat=(\S+)/.exec(line)?.[1];
+      assert.ok(at);
+      assert.equal(new Date(at).toISOString(), at);
+      assert.match(line, /stage=initializing elapsedMs=\d+/);
+    }
+    const terminalLogs = parentLogs.filter((line) => /worker startup (completed|failed);/.test(line));
+    assert.equal(terminalLogs.length, 1);
+    assert.ok(terminalLogs[0]!.includes(failInitialization ? "reason=initialization_failed" : "stage=bootstrap"));
+    assert.equal(supervisor.isReady, !failInitialization);
+    assert.ok(![...parentLogs, childLogs].some((line) => line.includes(fixture.dataDir)));
+    assert.ok(![...parentLogs, childLogs].some((line) => line.includes("analytics_schema_meta")));
+  });
+}
 
 test("a corrupt startup source never starts the supervisor and leaves Dashboard at 503 while API health remains available", async (t) => {
   const fixture = await createAgentTestFixture({ dataDirPrefix: "analytics-corrupt-source-" });

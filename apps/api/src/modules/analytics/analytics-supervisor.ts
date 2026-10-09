@@ -42,6 +42,16 @@ type PendingRequest = {
 };
 type PendingSignal = { kind: "signal"; resolve: (result: AnalyticsSignalResult) => void; timer: NodeJS.Timeout };
 
+type StartupAttempt = {
+  child: AnalyticsChildProcess;
+  startupId: string;
+  startedAt: number;
+  stage: "initializing" | "bootstrap";
+  bootstrapStartedAt: number | null;
+};
+
+const elapsedMs = (startedAt: number) => Math.max(0, Math.round(performance.now() - startedAt));
+
 const UNAVAILABLE: DashboardQueryErrorResponse = { kind: "error", error: { code: "ANALYTICS_UNAVAILABLE" } };
 const SAFE_CHILD_ENV_KEYS = ["NODE_ENV", "TZ"] as const;
 
@@ -103,11 +113,12 @@ export class AnalyticsSupervisor {
   private closeWaiters = new Set<() => void>();
   private pending = new Map<string, PendingRequest | PendingSignal>();
   private startRequestId: string | null = null;
+  private startupAttempt: StartupAttempt | null = null;
   private readyListeners = new Set<() => void>();
 
   constructor(private readonly options: AnalyticsSupervisorOptions) {
     this.workerFactory = options.workerFactory ?? (() => defaultWorkerFactory(options));
-    this.startupTimeoutMs = options.startupTimeoutMs ?? 5_000;
+    this.startupTimeoutMs = options.startupTimeoutMs ?? 60_000;
     this.queryTimeoutMs = options.queryTimeoutMs ?? 2_000;
     this.signalTimeoutMs = options.signalTimeoutMs ?? Math.min(this.queryTimeoutMs, 1_000);
     this.shutdownTimeoutMs = options.shutdownTimeoutMs ?? 2_000;
@@ -147,6 +158,18 @@ export class AnalyticsSupervisor {
       return promise;
     }
 
+    // Like the timeout budget, this measurement begins after the factory
+    // returns. It includes child module loading, DB initialization and bootstrap.
+    const requestId = randomUUID();
+    this.startupAttempt = {
+      child,
+      startupId: requestId,
+      startedAt: performance.now(),
+      stage: "initializing",
+      bootstrapStartedAt: null,
+    };
+    console.info(`[Analytics] worker startup started; ${this.startupLogFields(this.startupAttempt)}`);
+
     this.activeChild = child;
     child.on("message", (message: unknown) => this.onChildMessage(child, message));
     child.on("error", () => {
@@ -155,10 +178,10 @@ export class AnalyticsSupervisor {
     });
     child.once("exit", () => this.onChildExit(child));
 
-    const requestId = randomUUID();
     this.startRequestId = requestId;
     this.startupTimer = setTimeout(() => {
-      console.warn("[Analytics] worker startup timed out; retiring worker");
+      if (this.activeChild !== child) return;
+      this.finishStartupLog(child, "timeout");
       this.beginRetirement(child);
     }, this.startupTimeoutMs);
     this.send(child, { type: "initialize", requestId }, () => this.beginRetirement(child));
@@ -249,23 +272,33 @@ export class AnalyticsSupervisor {
       if (message.requestId !== this.startRequestId || this.ready) return this.beginRetirement(child);
       this.ready = true;
       this.startRequestId = null;
+      const attempt = this.startupAttempt;
+      if (attempt?.child === child) {
+        console.info(`[Analytics] worker ready received; ${this.startupLogFields(attempt)}`);
+        attempt.stage = "bootstrap";
+        attempt.bootstrapStartedAt = performance.now();
+        console.info(`[Analytics] worker bootstrap started; ${this.startupLogFields(attempt)}`);
+      }
       void (async () => {
         for (const listener of this.readyListeners) {
           try { await listener(); }
           catch {
+            this.finishStartupLog(child, "failed", "bootstrap_failed");
             this.beginRetirement(child);
             return;
           }
         }
-        if (this.activeChild !== child || this.retiringChild || !this.ready) return;
+        if (this.activeChild !== child || this.retiringChild || !this.ready || this.closing) return;
         this.serving = true;
         this.clearStartupTimer();
+        this.finishStartupLog(child, "completed");
         this.finishStart(true);
       })();
       return;
     }
     if (message.type === "initialization_failed") {
       if (message.requestId !== this.startRequestId) return this.beginRetirement(child);
+      this.finishStartupLog(child, "failed", "initialization_failed");
       return this.beginRetirement(child);
     }
     if (message.type === "dashboard_result") {
@@ -301,6 +334,7 @@ export class AnalyticsSupervisor {
   private beginRetirement(child: AnalyticsChildProcess) {
     if (this.retiringChild === child) return;
     if (this.activeChild !== child) return;
+    this.finishStartupLog(child, "failed", this.closing ? "closed" : "retired");
     this.activeChild = null;
     this.retiringChild = child;
     this.retirementExhausted = false;
@@ -342,6 +376,7 @@ export class AnalyticsSupervisor {
   private onChildExit(child: AnalyticsChildProcess) {
     const wasManaged = this.activeChild === child || this.retiringChild === child;
     if (!wasManaged) return;
+    this.finishStartupLog(child, "failed", "exited");
     if (this.activeChild === child) {
       // Exit can arrive before a prior error/message failure is observed.
       this.activeChild = null;
@@ -367,6 +402,34 @@ export class AnalyticsSupervisor {
       });
     } catch {
       onFailure();
+    }
+  }
+
+  private startupLogFields(attempt: StartupAttempt) {
+    const bootstrap = attempt.bootstrapStartedAt === null
+      ? ""
+      : ` bootstrapElapsedMs=${elapsedMs(attempt.bootstrapStartedAt)}`;
+    return `startupId=${attempt.startupId} at=${new Date().toISOString()} stage=${attempt.stage} elapsedMs=${elapsedMs(attempt.startedAt)} timeoutMs=${this.startupTimeoutMs}${bootstrap}`;
+  }
+
+  /** Consume the child-bound attempt so retirement and late hooks cannot log
+   * a second outcome or attach their result to a replacement child. */
+  private finishStartupLog(
+    child: AnalyticsChildProcess,
+    outcome: "completed" | "failed" | "timeout",
+    reason?: "bootstrap_failed" | "initialization_failed" | "closed" | "retired" | "exited",
+  ) {
+    const attempt = this.startupAttempt;
+    if (attempt?.child !== child) return;
+    this.startupAttempt = null;
+    const fields = this.startupLogFields(attempt);
+    if (outcome === "completed") {
+      console.info(`[Analytics] worker startup completed; ${fields}`);
+    } else if (outcome === "timeout") {
+      // Preserve the existing fixed prefix for operational log filters.
+      console.warn(`[Analytics] worker startup timed out; retiring worker; ${fields}`);
+    } else {
+      console.warn(`[Analytics] worker startup failed; reason=${reason}; ${fields}`);
     }
   }
 

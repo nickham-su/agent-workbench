@@ -1,3 +1,4 @@
+import { performance } from "node:perf_hooks";
 import { Value } from "@sinclair/typebox/value";
 import {
   DashboardQuerySuccessResponseSchema,
@@ -192,11 +193,19 @@ function retire() {
 async function handleMessage(message: AnalyticsParentMessage) {
   if (message.type === "initialize") {
     if (initialized || closing || !analyticsDataDir) return retire();
+    const startedAt = performance.now();
+    // Only the internal startup ID and timing are logged. Database errors can
+    // contain private paths, SQL or values and must never be printed here.
+    const startupFields = () =>
+      `startupId=${message.requestId} at=${new Date().toISOString()} stage=initializing elapsedMs=${Math.max(0, Math.round(performance.now() - startedAt))}`;
+    console.info(`[Analytics] database initialization started; ${startupFields()}`);
     try {
       db = await openAnalyticsDb(analyticsDataDir);
       initialized = true;
+      console.info(`[Analytics] database initialization completed; ${startupFields()}`);
       send({ type: "ready", requestId: message.requestId });
     } catch {
+      console.warn(`[Analytics] database initialization failed; ${startupFields()}`);
       send({ type: "initialization_failed", requestId: message.requestId });
       retire();
     }
