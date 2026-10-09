@@ -861,6 +861,57 @@ test("executePendingTools 忽略遗留 running 工具，不重放也不伪造失
   });
 });
 
+test("成功结果时间与 completedAt 一致，写回重试不重新执行或采集时间", async () => {
+  await withTempWorkspace(async (workspacePath) => {
+    const completedAt = Date.parse("2026-05-20T08:30:12.345Z");
+    const updates: Array<{ status: string; resultPreview?: string; completedAt?: number }> = [];
+    let clockCalls = 0;
+    let providerCalls = 0;
+    let retrySleeps = 0;
+    let completedAttempts = 0;
+    const runner = new AgentRunner({
+      async updateToolExecution(input: { status: string; resultPreview?: string; completedAt?: number }) {
+        updates.push(input);
+        if (input.status === "completed" && ++completedAttempts === 1) {
+          throw new InternalRpcHttpError({ status: 503, method: "POST", endpoint: "/fixture/writeback" });
+        }
+        return { result: "updated" };
+      },
+    } as any, {} as any, { info() {}, warn() {}, error() {} }, 1, {
+      nowMs: () => {
+        assert.equal(providerCalls, 1, "sample only after the provider returns");
+        return completedAt + clockCalls++;
+      },
+      controlWriteSleep: async () => { retrySleeps++; return true; },
+    });
+    (runner as any).toolRegistry = {
+      async isToolEnabled() { return true; },
+      async execute() { providerCalls++; return { content: "fixture output", actualStart: 1, actualEnd: 1 }; },
+    };
+
+    await executeToolForTest(runner, {
+      profile: testProfile("read"), run: testRun(workspacePath),
+      tool: pendingTool({ executionId: "execution-time", toolName: "read", args: { filePath: "fixture.txt" } }),
+      parentSessionId: "sess_baseline", signal: new AbortController().signal,
+      promptContext: testPromptContext(),
+    });
+
+    assert.equal(providerCalls, 1);
+    assert.equal(clockCalls, 1);
+    assert.equal(retrySleeps, 1);
+    const completedUpdates = updates.filter((update) => update.status === "completed");
+    assert.equal(completedUpdates.length, 2);
+    assert.strictEqual(completedUpdates[0], completedUpdates[1], "retry reuses the same request");
+    assert.equal(completedUpdates[0].completedAt, completedAt);
+    assert.equal(completedUpdates[0].resultPreview,
+      "tool: read\nstatus: completed\ncompleted_at: 2026-05-20T08:30:12.345Z\nsource: fixture.txt\nrange: 1-1\n\nfixture output");
+    for (const update of updates.filter((update) => update.status !== "completed")) {
+      assert.equal(update.completedAt, undefined);
+      assert.equal(Boolean(update.resultPreview?.includes("completed_at:")), false);
+    }
+  });
+});
+
 for (const toolName of ["read", "bash", "plugin_fixture"] as const) test(`普通工具 ${toolName} completed writeback 不保留 structuredResult`, async () => {
   await withTempWorkspace(async (workspacePath) => {
     const updates: Array<{
@@ -1359,6 +1410,7 @@ test("subtask executeTool 成功时 completed output 保留完整长文本且无
       resultArtifactPath?: string;
     }> = [];
     const longText = "R".repeat(9_500);
+    const completedAt = Date.parse("2026-05-20T08:30:12.345Z");
     const apiClient = {
       async updateToolExecution(input: {
         status?: string;
@@ -1403,6 +1455,7 @@ test("subtask executeTool 成功时 completed output 保留完整长文本且无
       {} as any,
       { info() {}, warn() {}, error() {} },
       1,
+      { nowMs: () => completedAt },
     );
     (runner as any).processRun = async () => {};
 
@@ -1461,7 +1514,7 @@ test("subtask executeTool 成功时 completed output 保留完整长文本且无
     } as Record<string, unknown>;
     assert.equal(
       output.text,
-      `tool: subtask\nstatus: completed\nsubtask_session_id: sub_succ\n\n${longText}`,
+      `tool: subtask\nstatus: completed\ncompleted_at: 2026-05-20T08:30:12.345Z\nsubtask_session_id: sub_succ\n\n${longText}`,
     );
     assert.equal(output.textTruncated, undefined);
     assert.equal(output.textArtifactPath, undefined);

@@ -311,6 +311,7 @@ function buildToolSuccessText(params: {
   status: "completed";
   args: Record<string, unknown>;
   result: unknown;
+  completedAt: number;
 }) {
   const resultObj = toRecordObject(params.result);
 
@@ -321,6 +322,8 @@ function buildToolSuccessText(params: {
     return viewImagePathPreview(params.result.path);
   }
 
+  const completedAtText = new Date(params.completedAt).toISOString();
+
   if (params.toolName === "apply_patch") {
     const summary = toRecordObject(resultObj?.summary);
     const body = typeof resultObj?.text === "string" ? resultObj.text : "apply_patch completed";
@@ -328,6 +331,7 @@ function buildToolSuccessText(params: {
       toolName: params.toolName,
       status: params.status,
       headers: [
+        ["completed_at", completedAtText],
         ["files", summary && typeof summary.fileCount === "number" ? String(summary.fileCount) : undefined],
         ["additions", summary && typeof summary.additions === "number" ? String(summary.additions) : undefined],
         ["deletions", summary && typeof summary.deletions === "number" ? String(summary.deletions) : undefined]
@@ -342,6 +346,7 @@ function buildToolSuccessText(params: {
       toolName: params.toolName,
       status: params.status,
       headers: [
+        ["completed_at", completedAtText],
         ["total", summary && typeof summary.total === "number" ? String(summary.total) : undefined],
         ["pending", summary && typeof summary.pending === "number" ? String(summary.pending) : undefined],
         ["in_progress", summary && typeof summary.inProgress === "number" ? String(summary.inProgress) : undefined],
@@ -360,6 +365,7 @@ function buildToolSuccessText(params: {
       toolName: params.toolName,
       status: params.status,
       headers: [
+        ["completed_at", completedAtText],
         ["subtask_session_id", subtaskSessionId || undefined],
         ["source_session_id", sourceSessionId !== undefined ? JSON.stringify(sourceSessionId) : undefined]
       ],
@@ -373,6 +379,7 @@ function buildToolSuccessText(params: {
     return buildToolText({
       toolName: params.toolName,
       status: params.status,
+      headers: [["completed_at", completedAtText]],
       body
     });
   }
@@ -395,7 +402,10 @@ function buildToolSuccessText(params: {
       : typeof resultObj?.summary === "string"
         ? resultObj.summary
         : stringifyResult(params.result);
-    const headers: Array<[string, string | undefined]> = [["source", source]];
+    const headers: Array<[string, string | undefined]> = [
+      ["completed_at", completedAtText],
+      ["source", source]
+    ];
     if (range) {
       headers.push(["range", range]);
     }
@@ -417,6 +427,7 @@ function buildToolSuccessText(params: {
     const headers = [
       `tool: ${params.toolName}`,
       `status: ${params.status}`,
+      `completed_at: ${completedAtText}`,
       ...(skillId ? [`skill_id: ${skillId}`] : []),
       ...(filePath ? [`file_path: ${filePath}`] : []),
       `truncated: ${truncated ? "true" : "false"}`
@@ -439,6 +450,7 @@ function buildToolSuccessText(params: {
       toolName: params.toolName,
       status: params.status,
       headers: [
+        ["completed_at", completedAtText],
         ["command", command || undefined],
         ["exit_code", exitCode == null ? "null" : String(exitCode)],
         ["timed_out", timedOut ? "true" : undefined],
@@ -458,7 +470,10 @@ function buildToolSuccessText(params: {
     return buildToolText({
       toolName: params.toolName,
       status: params.status,
-      headers: [["target", target]],
+      headers: [
+        ["completed_at", completedAtText],
+        ["target", target]
+      ],
       body
     });
   }
@@ -470,6 +485,7 @@ function buildToolSuccessText(params: {
     return buildToolText({
       toolName: params.toolName,
       status: params.status,
+      headers: [["completed_at", completedAtText]],
       body
     });
   }
@@ -481,7 +497,17 @@ function buildToolSuccessText(params: {
     return buildToolText({
       toolName: params.toolName,
       status: params.status,
+      headers: [["completed_at", completedAtText]],
       body
+    });
+  }
+
+  if (params.toolName === "archive_read" || params.toolName === "archive_search") {
+    return buildToolText({
+      toolName: params.toolName,
+      status: params.status,
+      headers: [["completed_at", completedAtText]],
+      body: stringifyResult(params.result)
     });
   }
 
@@ -1418,12 +1444,13 @@ export function buildToolExecutionBatchesForTest(tools: PendingTool[], parallelL
   return buildToolExecutionBatches(tools, parallelLimit);
 }
 
-export function buildToolSuccessTextForTest(params: { toolName: string; args: Record<string, unknown>; result: unknown }) {
+export function buildToolSuccessTextForTest(params: { toolName: string; args: Record<string, unknown>; result: unknown; completedAt: number }) {
   return buildToolSuccessText({
     toolName: params.toolName,
     status: "completed",
     args: params.args,
-    result: params.result
+    result: params.result,
+    completedAt: params.completedAt
   });
 }
 
@@ -1934,6 +1961,7 @@ export class AgentRunner {
     const writeback = async (role: string, input: {
       status: "running" | "completed" | "failed";
       output: { text?: string; result?: unknown; error?: string; textTruncated?: boolean; textArtifactPath?: string };
+      completedAt?: number;
     }) => {
       capture?.recordWritebackAttempt(role, input.output);
       try {
@@ -1948,7 +1976,7 @@ export class AgentRunner {
           error: input.output.error,
           resultTruncated: input.output.textTruncated,
           resultArtifactPath: input.output.textArtifactPath,
-          ...(input.status === "running" ? { startedAt: nowMs() } : { completedAt: nowMs() }),
+          ...(input.status === "running" ? { startedAt: nowMs() } : { completedAt: input.completedAt ?? nowMs() }),
           updatedAt: nowMs()
         };
         const response = await this.retryControlWrite(`tool execution ${input.status}`, signal, async () =>
@@ -2045,12 +2073,16 @@ export class AgentRunner {
 
       if (signal.aborted) return { paused: false as const };
 
+      // Sample once after the tool returns; result processing and writeback retries
+      // must not change the completion time recorded in the text and database.
+      const completedAt = this.nowMsFn();
       phase = "completed_output_build";
       const rawSuccessText = buildToolSuccessText({
         toolName: tool.toolName,
         status: "completed",
         args: tool.args,
-        result: providerResult
+        result: providerResult,
+        completedAt
       });
       let finalizedText: {
         text: string;
@@ -2088,7 +2120,7 @@ export class AgentRunner {
         result: providerResult
       };
       phase = "completed_writeback";
-      await writeback("completed", { status: "completed", output });
+      await writeback("completed", { status: "completed", output, completedAt });
       await writeItemLog({
         logger: this.logger,
         workspacePath: run.workspacePath,

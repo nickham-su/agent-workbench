@@ -31,9 +31,9 @@ test("view_image accepts genuine uploaded images and screenshots but returns onl
     await fs.writeFile(path.join(workspacePath, relativePath), bytes);
     assert.deepEqual(await provider.execute("view_image", { path: relativePath }, ctx), { type: "image_ref", path: relativePath });
   }
-  const output = buildToolSuccessTextForTest({ toolName: "view_image", args: { path: "repo/screenshots/page.png" }, result: { type: "image_ref", path: "repo/screenshots/page.png" } });
+  const output = buildToolSuccessTextForTest({ toolName: "view_image", args: { path: "repo/screenshots/page.png" }, result: { type: "image_ref", path: "repo/screenshots/page.png" }, completedAt: Date.parse("2026-05-20T08:30:12.345Z") });
   assert.equal(output, viewImagePathPreview("repo/screenshots/page.png"));
-  assert.throws(() => buildToolSuccessTextForTest({ toolName: "view_image", args: {}, result: { type: "image_ref", path: "a.png", data: png } }), /invalid view_image result/);
+  assert.throws(() => buildToolSuccessTextForTest({ toolName: "view_image", args: {}, result: { type: "image_ref", path: "a.png", data: png }, completedAt: Date.parse("2026-05-20T08:30:12.345Z") }), /invalid view_image result/);
   assert.equal(provider.canHandle("view_image"), true);
   assert.equal(provider.isToolEnabled("view_image", { profile: { agent: { tools: ["view_image"] } } } as never), true);
   assert.equal(provider.isToolEnabled("view_image", { profile: { agent: { tools: [] } } } as never), false);
