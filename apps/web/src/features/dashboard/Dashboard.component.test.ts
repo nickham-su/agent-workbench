@@ -968,7 +968,8 @@ test("当前采集健康使用活动时间，不显示旧实例诊断或历史�
     assert.match(wrapper.get(".health-table tbody tr td:last-child").text(), /2026/);
     assert.doesNotMatch(wrapper.get(".health-table tbody tr td:last-child").text(), /1970/);
     assert.equal(wrapper.findAll(".health-evidence-trigger").length, 0);
-    assert.match(wrapper.get(".health-scope").text(), /当前采集活动|current collection activity/);
+    assert.equal(wrapper.find(".health-scope").exists(), false);
+    assert.doesNotMatch(wrapper.text(), /状态反映当前采集活动|Status reflects current collection activity/);
     assert.doesNotMatch(wrapper.text(), /开放覆盖缺口|open coverage gaps/);
   } finally { wrapper.unmount(); }
 });

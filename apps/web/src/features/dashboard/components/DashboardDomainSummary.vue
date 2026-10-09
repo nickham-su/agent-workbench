@@ -1,6 +1,5 @@
 <template>
   <DashboardPanelShell :title="t('dashboard.domainStatusSummary')" test-id="overview-domain-health">
-    <p class="health-scope">{{ t('dashboard.healthCollectionScope') }}</p>
     <p v-if="result.status !== 'available'" class="health-reason">{{ t(`dashboard.reason.${result.status === 'partial' ? result.partialReason : result.unavailableReason}`) }}</p>
     <div v-if="result.status !== 'unavailable'" class="health-table-scroll">
       <table class="health-table"><thead><tr><th scope="col">{{ t('dashboard.domain') }}</th><th scope="col">{{ t('dashboard.statusLabel') }}</th><th scope="col">{{ t('dashboard.lastCollectionActivityAt') }}</th></tr></thead>
@@ -69,7 +68,6 @@ const domainLabels: Record<AnalyticsDomain, string> = {
 </script>
 <style scoped>
 .health-reason{font-size:12px;color:var(--text-color-secondary);margin:0 0 8px}
-.health-scope{font-size:12px;color:var(--text-color-secondary);margin:0 0 8px}
 .health-table-scroll{max-height:344px;overflow:auto;min-width:0}
 .health-table{width:100%;border-collapse:collapse;font-size:12px;white-space:nowrap;text-align:left}.health-table th,.health-table td{padding:9px 6px;border-bottom:1px solid var(--border-color-secondary)}.health-table thead th{color:var(--text-color-secondary);font-weight:400;position:sticky;top:0;background:var(--panel-bg-elevated)}.health-table tbody th{font-weight:500}.health-table td:last-child{color:var(--text-color-secondary);font-variant-numeric:tabular-nums}
 .health-state{display:inline-flex;align-items:center;gap:5px}
