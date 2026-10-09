@@ -202,13 +202,23 @@ const DomainHealthSlotSchema = Type.Union([
     producerGeneration: Type.Null(), lifecycle: Type.Null(), checkpoint: StrictObject({ freshness: Type.Literal("missing"), observedAt: Type.Null() }), coverageGaps: CoverageGapSummarySchema
   })
 ]);
+/** Current collection activity only; historical coverage and certification remain separate. */
+const DomainCollectionHealthSchema = StrictObject({
+  lastActivityAt: Type.Union([SafeIntegerSchema, Type.Null()]),
+  freshSlotCount: NonNegativeIntegerSchema,
+  staleSlotCount: NonNegativeIntegerSchema,
+  missingGenerationSlotCount: NonNegativeIntegerSchema,
+  missingCheckpointSlotCount: NonNegativeIntegerSchema,
+  closingSlotCount: NonNegativeIntegerSchema,
+});
 const DomainHealthRowSchema = StrictObject({
   domain: AnalyticsDomainSchema,
   status: Type.Union([Type.Literal("healthy"), Type.Literal("degraded"), Type.Literal("stale"), Type.Literal("unavailable"), Type.Literal("disabled")]),
   collectionStartedAt: Type.Union([SafeIntegerSchema, Type.Null()]), reconciledThrough: Type.Union([SafeIntegerSchema, Type.Null()]),
   rollupReadyThrough: Type.Union([SafeIntegerSchema, Type.Null()]), retentionFloor: Type.Union([SafeIntegerSchema, Type.Null()]),
   lastSucceededAt: Type.Union([SafeIntegerSchema, Type.Null()]), expectedSlotCount: NonNegativeIntegerSchema,
-  activeGenerationCount: NonNegativeIntegerSchema, slots: Type.Array(DomainHealthSlotSchema), coverageGaps: CoverageGapSummarySchema
+  activeGenerationCount: NonNegativeIntegerSchema, slots: Type.Array(DomainHealthSlotSchema), coverageGaps: CoverageGapSummarySchema,
+  collection: Type.Optional(DomainCollectionHealthSchema),
 });
 
 function ExtendedMetricResultSchema<T extends TSchema>(value: T, metadata: TProperties) {

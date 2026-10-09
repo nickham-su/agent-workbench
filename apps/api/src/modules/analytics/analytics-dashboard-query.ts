@@ -78,6 +78,67 @@ function stateMap(db: AnalyticsDb): StateMap {
   return new Map(rows.map((row) => [row.domain as AnalyticsDomain, row]));
 }
 
+type DomainHealthRow = NonNullable<DashboardData["exceptions"]["domainHealth"]["data"]>[number];
+type HealthSlot = {
+  domain: AnalyticsDomain;
+  producerNamespace: string;
+  producerId: string;
+  producerGeneration: string | null;
+  lifecycle: string | null;
+  checkpointAt: number | null;
+};
+const COLLECTION_CHECKPOINT_MAX_AGE_MS = 60_000;
+
+/** A slot is collecting if any running generation has a recent checkpoint.
+ * This projection must never change certification, coverage, or stored state. */
+function currentCollection(slots: HealthSlot[], now: number) {
+  const grouped = new Map<string, HealthSlot[]>();
+  for (const slot of slots) {
+    const key = JSON.stringify([slot.producerNamespace, slot.producerId]);
+    const group = grouped.get(key);
+    if (group) group.push(slot);
+    else grouped.set(key, [slot]);
+  }
+  const collection: NonNullable<DomainHealthRow["collection"]> = {
+    lastActivityAt: null,
+    freshSlotCount: 0,
+    staleSlotCount: 0,
+    missingGenerationSlotCount: 0,
+    missingCheckpointSlotCount: 0,
+    closingSlotCount: 0,
+  };
+  for (const group of grouped.values()) {
+    const running = group.filter((slot) => slot.producerGeneration !== null &&
+      (slot.lifecycle === "registered" || slot.lifecycle === "stale"));
+    // Future timestamps cannot prove activity now. Treat an all-invalid history
+    // like a missing usable checkpoint, without inventing clock-skew tolerance.
+    const checkpoints = running.flatMap((slot) => slot.checkpointAt !== null &&
+      Number.isSafeInteger(slot.checkpointAt) && slot.checkpointAt >= 0 && slot.checkpointAt <= now
+      ? [slot.checkpointAt] : []);
+    for (const at of checkpoints) {
+      collection.lastActivityAt = Math.max(collection.lastActivityAt ?? at, at);
+    }
+    if (checkpoints.some((at) => at >= now - COLLECTION_CHECKPOINT_MAX_AGE_MS)) {
+      collection.freshSlotCount += 1;
+    } else if (checkpoints.length > 0) {
+      collection.staleSlotCount += 1;
+    } else if (running.length > 0) {
+      collection.missingCheckpointSlotCount += 1;
+    } else if (group.some((slot) => slot.producerGeneration !== null && slot.lifecycle === "closing")) {
+      collection.closingSlotCount += 1;
+    } else {
+      collection.missingGenerationSlotCount += 1;
+    }
+  }
+  const expectedSlotCount = grouped.size;
+  const status: DomainHealthRow["status"] = expectedSlotCount === 0 ||
+    collection.missingGenerationSlotCount > 0 || collection.missingCheckpointSlotCount > 0 ||
+    collection.closingSlotCount > 0
+    ? "degraded"
+    : collection.staleSlotCount > 0 ? "stale" : "healthy";
+  return { collection, status };
+}
+
 type DomainConfig = {
   collection_config_version: string;
   effective_at: number;
@@ -1831,16 +1892,9 @@ function queryDashboardSnapshot(
       LEFT JOIN analytics_producer_checkpoint c ON c.rowid=(SELECT checkpoint.rowid FROM analytics_producer_checkpoint checkpoint
         WHERE checkpoint.domain=g.domain AND checkpoint.producer_namespace=g.producer_namespace AND checkpoint.producer_id=g.producer_id AND checkpoint.producer_generation=g.producer_generation
         ORDER BY checkpoint.received_at DESC LIMIT 1)
-      WHERE s.expected_enabled=1`,
+       WHERE s.expected_enabled=1`,
     )
-    .all() as Array<{
-    domain: AnalyticsDomain;
-    producerNamespace: string;
-    producerId: string;
-    producerGeneration: string | null;
-    lifecycle: string | null;
-    checkpointAt: number | null;
-  }>;
+    .all() as HealthSlot[];
   const allGapSummaries = db
     .prepare(
       `SELECT domain, SUM(gap_to IS NULL) AS openCount, SUM(gap_to IS NOT NULL) AS historicalCount, MIN(gap_from) AS earliestGapFrom
@@ -1855,11 +1909,13 @@ function queryDashboardSnapshot(
   const gapsByDomain = new Map(
     allGapSummaries.map((summary) => [summary.domain, summary]),
   );
-  const healthRows = [...states.values()].map((state) => {
+  const healthRows: DomainHealthRow[] = [...states.values()].map((state) => {
     const slots = allHealthSlots.filter((slot) => slot.domain === state.domain);
+    const activity = state.domain === "model" || state.domain === "execution" || state.domain === "worker"
+      ? currentCollection(slots, now) : undefined;
     const activeLifecycles = new Set(["registered", "closing", "stale"]);
     const expectedSlotCount = new Set(
-      slots.map((slot) => `${slot.producerNamespace}:${slot.producerId}`),
+      slots.map((slot) => JSON.stringify([slot.producerNamespace, slot.producerId])),
     ).size;
     const gapSummary = gapsByDomain.get(state.domain);
     const coverageGaps = {
@@ -1870,7 +1926,8 @@ function queryDashboardSnapshot(
     };
     return {
       domain: state.domain,
-      status: state.status,
+      status: state.status === "disabled" ? "disabled" : activity?.status ?? state.status,
+      ...(activity ? { collection: activity.collection } : {}),
       collectionStartedAt: state.collectionStartedAt,
       reconciledThrough: state.reconciledThrough,
       rollupReadyThrough: state.rollupReadyThrough,
@@ -1882,11 +1939,8 @@ function queryDashboardSnapshot(
           slot.producerGeneration !== null &&
           activeLifecycles.has(slot.lifecycle ?? ""),
       ).length,
-      slots: slots.map((slot) => {
-        const active =
-          slot.producerGeneration !== null &&
-          activeLifecycles.has(slot.lifecycle ?? "");
-        return !active
+      slots: slots.map((slot): DomainHealthRow["slots"][number] => {
+        return slot.producerGeneration === null || !activeLifecycles.has(slot.lifecycle ?? "")
           ? {
               slotStatus: "missing_generation",
               producerNamespace: slot.producerNamespace,
@@ -1916,6 +1970,12 @@ function queryDashboardSnapshot(
       coverageGaps,
     };
   });
+  const executionHealth = healthRows.find((row) => row.domain === "execution");
+  const durationHealth = healthRows.find((row) => row.domain === "agent_duration");
+  if (executionHealth && durationHealth) {
+    if (durationHealth.status !== "disabled") durationHealth.status = executionHealth.status;
+    durationHealth.collection = executionHealth.collection;
+  }
   data.exceptions.domainHealth = {
     status: "available",
     data: healthRows,

@@ -1,8 +1,9 @@
 <template>
   <DashboardPanelShell :title="t('dashboard.domainStatusSummary')" test-id="overview-domain-health">
+    <p class="health-scope">{{ t('dashboard.healthCollectionScope') }}</p>
     <p v-if="result.status !== 'available'" class="health-reason">{{ t(`dashboard.reason.${result.status === 'partial' ? result.partialReason : result.unavailableReason}`) }}</p>
     <div v-if="result.status !== 'unavailable'" class="health-table-scroll">
-      <table class="health-table"><thead><tr><th scope="col">{{ t('dashboard.domain') }}</th><th scope="col">{{ t('dashboard.statusLabel') }}</th><th scope="col">{{ t('dashboard.lastSucceededAt') }}</th></tr></thead>
+      <table class="health-table"><thead><tr><th scope="col">{{ t('dashboard.domain') }}</th><th scope="col">{{ t('dashboard.statusLabel') }}</th><th scope="col">{{ t('dashboard.lastCollectionActivityAt') }}</th></tr></thead>
         <tbody>
           <tr v-for="domain in result.data" :key="domain.domain">
             <th scope="row">{{ t(`dashboard.${domainLabels[domain.domain]}`) }}</th>
@@ -18,7 +19,7 @@
                 </Popover>
               </span>
             </td>
-            <td>{{ formatDateTime(domain.lastSucceededAt, timezone, locale) }}</td>
+            <td>{{ formatDateTime(activityAt(domain), timezone, locale) }}</td>
           </tr>
         </tbody>
       </table>
@@ -36,17 +37,28 @@ import DashboardStatusBadge from "./DashboardStatusBadge.vue";
 const { t, locale } = useI18n();
 withDefaults(defineProps<{ result: DashboardData["exceptions"]["domainHealth"]; timezone?: string }>(), { timezone: "UTC" });
 type HealthRow = NonNullable<DashboardData["exceptions"]["domainHealth"]["data"]>[number];
+function activityAt(domain: HealthRow): number | null {
+  return domain.collection ? domain.collection.lastActivityAt : domain.lastSucceededAt;
+}
 function evidence(domain: HealthRow): string[] {
   const items: string[] = [];
-  if (domain.status === "disabled") items.push(t("dashboard.healthEvidenceDisabled"));
-  if (domain.coverageGaps.openCount > 0)
-    items.push(t("dashboard.healthEvidenceGaps", { count: domain.coverageGaps.openCount }));
-  if (domain.expectedSlotCount > domain.activeGenerationCount)
-    items.push(t("dashboard.healthEvidenceMissingGeneration", { count: domain.expectedSlotCount - domain.activeGenerationCount }));
-  const stale = domain.slots.filter((slot) => slot.checkpoint.freshness === "stale").length;
-  const missing = domain.slots.filter((slot) => slot.slotStatus === "generation_active" && slot.checkpoint.freshness === "missing").length;
-  if (stale > 0) items.push(t("dashboard.healthEvidenceStaleCheckpoint", { count: stale }));
-  if (missing > 0) items.push(t("dashboard.healthEvidenceMissingCheckpoint", { count: missing }));
+  if (domain.status === "disabled") return [t("dashboard.healthEvidenceDisabled")];
+  const collection = domain.collection;
+  if (collection) {
+    // Counts are API-owned, mutually exclusive per slot, including the execution
+    // diagnostics mirrored by agent_duration (whose own slots remain empty).
+    const slotCount = collection.freshSlotCount + collection.staleSlotCount +
+      collection.missingGenerationSlotCount + collection.missingCheckpointSlotCount + collection.closingSlotCount;
+    if (slotCount === 0) items.push(t("dashboard.healthEvidenceNoExpectedSlots"));
+    if (collection.missingGenerationSlotCount > 0)
+      items.push(t("dashboard.healthEvidenceMissingGeneration", { count: collection.missingGenerationSlotCount }));
+    if (collection.staleSlotCount > 0)
+      items.push(t("dashboard.healthEvidenceStaleCheckpoint", { count: collection.staleSlotCount }));
+    if (collection.missingCheckpointSlotCount > 0)
+      items.push(t("dashboard.healthEvidenceMissingCheckpoint", { count: collection.missingCheckpointSlotCount }));
+    if (collection.closingSlotCount > 0)
+      items.push(t("dashboard.healthEvidenceClosing", { count: collection.closingSlotCount }));
+  }
   return items.length ? items : [t("dashboard.healthEvidenceUnknown")];
 }
 const domainLabels: Record<AnalyticsDomain, string> = {
@@ -57,6 +69,7 @@ const domainLabels: Record<AnalyticsDomain, string> = {
 </script>
 <style scoped>
 .health-reason{font-size:12px;color:var(--text-color-secondary);margin:0 0 8px}
+.health-scope{font-size:12px;color:var(--text-color-secondary);margin:0 0 8px}
 .health-table-scroll{max-height:344px;overflow:auto;min-width:0}
 .health-table{width:100%;border-collapse:collapse;font-size:12px;white-space:nowrap;text-align:left}.health-table th,.health-table td{padding:9px 6px;border-bottom:1px solid var(--border-color-secondary)}.health-table thead th{color:var(--text-color-secondary);font-weight:400;position:sticky;top:0;background:var(--panel-bg-elevated)}.health-table tbody th{font-weight:500}.health-table td:last-child{color:var(--text-color-secondary);font-variant-numeric:tabular-nums}
 .health-state{display:inline-flex;align-items:center;gap:5px}

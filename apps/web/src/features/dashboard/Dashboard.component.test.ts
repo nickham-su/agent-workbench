@@ -893,7 +893,7 @@ test("概览监控趋势只使用服务端 total，密集桶分类轴不显示�
  wrapper.unmount();
 });
 
-test("健康侧栏仅在表格逐行展示真实域状态和最后成功时间", () => {
+test("健康侧栏兼容旧响应，并逐行展示当前状态和最近更新时间", () => {
   const available = dashboardSuccessFixture.data.exceptions.domainHealth;
   const result = { ...available, data: [
     available.data[0],
@@ -908,42 +908,96 @@ test("健康侧栏仅在表格逐行展示真实域状态和最后成功时间",
   assert.match(wrapper.get(".health-table tbody tr:last-child").text(), /降级|Degraded/);
 });
 
-test("域状态摘要仅为异常域提供可操作的已知迹象，不猜测根因", async () => {
+test("域状态摘要只展示当前采集诊断，忽略历史缺口和旧实例", async () => {
   const source = dashboardSuccessFixture.data.exceptions.domainHealth;
   const base = source.data[0]!;
+  const collection = { lastActivityAt: 2, freshSlotCount: 0, staleSlotCount: 0,
+    missingGenerationSlotCount: 0, missingCheckpointSlotCount: 0, closingSlotCount: 0 };
   const worker = { ...base, domain: "worker" as const, status: "degraded" as const,
     coverageGaps: { ...base.coverageGaps, openCount: 3, hasOpenGap: true },
-    slots: [{ ...base.slots[0]!, producerId: "secret-producer-id" }] };
+    slots: [{ ...base.slots[0]!, producerId: "secret-producer-id", checkpoint: { freshness: "stale" as const, observedAt: 1 } }],
+    collection: { ...collection, closingSlotCount: 1 } };
   const disabled = { ...base, domain: "model" as const, status: "disabled" as const,
     expectedSlotCount: 0, activeGenerationCount: 0, slots: [] };
-  const stale = { ...base, domain: "session" as const, status: "stale" as const,
-    slots: [{ ...base.slots[0]!, checkpoint: { freshness: "stale" as const, observedAt: 2 } }] };
+  const stale = { ...base, domain: "model" as const, status: "stale" as const,
+    collection: { ...collection, staleSlotCount: 1 } };
   const missing = { ...base, domain: "execution" as const, status: "degraded" as const,
     expectedSlotCount: 2, activeGenerationCount: 1,
-    slots: [{ ...base.slots[0]!, checkpoint: { freshness: "missing" as const, observedAt: null } }] };
+    slots: [{ ...base.slots[0]!, checkpoint: { freshness: "missing" as const, observedAt: null } }],
+    collection: { ...collection, missingGenerationSlotCount: 1, missingCheckpointSlotCount: 1 } };
+  const zero = { ...base, domain: "agent_duration" as const, status: "degraded" as const,
+    expectedSlotCount: 0, activeGenerationCount: 0, slots: [], collection };
   const wrapper = mount(DomainSummary, { ...options, attachTo: document.body,
-    props: { result: { ...source, data: [base, worker, disabled, stale, missing] } } });
+    props: { result: { ...source, data: [base, worker, disabled, stale, missing, zero] } } });
   try {
     const rows = wrapper.findAll(".health-table tbody tr");
-    assert.equal(rows.length, 5);
+    assert.equal(rows.length, 6);
     assert.equal(rows[0]!.findAll(".health-evidence-trigger").length, 0);
     const triggers = rows.slice(1).map((row) => row.get("button.health-evidence-trigger"));
     for (const trigger of triggers) {
       assert.equal(trigger.attributes("type"), "button");
       assert.match(trigger.attributes("aria-label") ?? "", /已知异常迹象|Known indicators/);
     }
-    assert.match(triggers[0]!.attributes("aria-label")!, /3 个开放覆盖缺口|3 open coverage gaps/);
-    assert.doesNotMatch(triggers[0]!.attributes("aria-label")!, /根因|root cause|secret-producer-id/);
+    assert.match(triggers[0]!.attributes("aria-label")!, /正在停止|are stopping/);
+    assert.doesNotMatch(triggers[0]!.attributes("aria-label")!, /根因|root cause|secret-producer-id|开放覆盖缺口|open coverage gaps|检查点已过期|stale checkpoints/);
     assert.match(triggers[1]!.attributes("aria-label")!, /当前已禁用|currently disabled/);
     assert.match(triggers[2]!.attributes("aria-label")!, /检查点已过期|stale checkpoints/);
     assert.match(triggers[3]!.attributes("aria-label")!, /缺少活跃 Generation|no active generation/);
-    assert.match(triggers[3]!.attributes("aria-label")!, /检查点缺失|no checkpoint/);
+    assert.match(triggers[3]!.attributes("aria-label")!, /缺少有效检查点|no usable checkpoint/);
+    assert.match(triggers[4]!.attributes("aria-label")!, /未配置预期采集槽位|No expected collection slots/);
     await triggers[0]!.trigger("click");
     await new Promise((resolve) => setTimeout(resolve, 50));
-    assert.match(document.body.querySelector(".ant-popover-inner")?.textContent ?? "", /3 个开放覆盖缺口|3 open coverage gaps/);
+    assert.match(document.body.querySelector(".ant-popover-inner")?.textContent ?? "", /正在停止|are stopping/);
+    assert.doesNotMatch(document.body.querySelector(".ant-popover-inner")?.textContent ?? "", /开放覆盖缺口|open coverage gaps/);
   } finally {
     wrapper.unmount();
   }
+});
+
+test("当前采集健康使用活动时间，不显示旧实例诊断或历史认证时间", () => {
+  const source = dashboardSuccessFixture.data.exceptions.domainHealth;
+  const base = source.data[0]!;
+  const row = { ...base, domain: "execution" as const, status: "healthy" as const,
+    lastSucceededAt: 1, coverageGaps: { ...base.coverageGaps, openCount: 8, hasOpenGap: true },
+    collection: { lastActivityAt: Date.UTC(2026, 5, 9), freshSlotCount: 1, staleSlotCount: 0,
+      missingGenerationSlotCount: 0, missingCheckpointSlotCount: 0, closingSlotCount: 0 } };
+  const wrapper = mount(DomainSummary, { ...options, props: { result: { ...source, data: [row] }, timezone: "UTC" } });
+  try {
+    assert.match(wrapper.get(".health-table thead").text(), /最近更新|Last activity/);
+    assert.match(wrapper.get(".health-table tbody tr").text(), /健康|Healthy/);
+    assert.match(wrapper.get(".health-table tbody tr td:last-child").text(), /2026/);
+    assert.doesNotMatch(wrapper.get(".health-table tbody tr td:last-child").text(), /1970/);
+    assert.equal(wrapper.findAll(".health-evidence-trigger").length, 0);
+    assert.match(wrapper.get(".health-scope").text(), /当前采集活动|current collection activity/);
+    assert.doesNotMatch(wrapper.text(), /开放覆盖缺口|open coverage gaps/);
+  } finally { wrapper.unmount(); }
+});
+
+test("缺少采集活动不回退历史认证时间，镜像域只使用服务端当前诊断", () => {
+  const source = dashboardSuccessFixture.data.exceptions.domainHealth;
+  const base = source.data[0]!;
+  const row = { ...base, domain: "agent_duration" as const, status: "degraded" as const,
+    expectedSlotCount: 0, activeGenerationCount: 0, slots: [], lastSucceededAt: Date.UTC(2020, 0, 1),
+    collection: { lastActivityAt: null, freshSlotCount: 0, staleSlotCount: 0,
+      missingGenerationSlotCount: 0, missingCheckpointSlotCount: 1, closingSlotCount: 0 } };
+  const wrapper = mount(DomainSummary, { ...options, props: { result: { ...source, data: [row] }, timezone: "UTC" } });
+  try {
+    assert.equal(wrapper.get(".health-table tbody tr td:last-child").text(), "—");
+    const diagnostic = wrapper.get(".health-evidence-trigger").attributes("aria-label")!;
+    assert.match(diagnostic, /缺少有效检查点|no usable checkpoint/);
+    assert.doesNotMatch(diagnostic, /未配置预期采集槽位|No expected collection slots/);
+  } finally { wrapper.unmount(); }
+});
+
+test("旧响应的异常摘要不重新猜测历史槽位与缺口", () => {
+  const source = dashboardSuccessFixture.data.exceptions.domainHealth;
+  const row = { ...source.data[0]!, status: "stale" as const,
+    coverageGaps: { ...source.data[0]!.coverageGaps, openCount: 9, hasOpenGap: true } };
+  const wrapper = mount(DomainSummary, { ...options, props: { result: { ...source, data: [row] } } });
+  try {
+    assert.match(wrapper.get(".health-evidence-trigger").attributes("aria-label")!, /暂无更具体|no more specific/);
+    assert.doesNotMatch(wrapper.text(), /开放覆盖缺口|open coverage gaps/);
+  } finally { wrapper.unmount(); }
 });
 
 test("概览窄屏布局有双栏堆叠与六卡重排断点", () => {
