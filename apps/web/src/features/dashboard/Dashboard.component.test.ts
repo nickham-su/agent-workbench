@@ -655,7 +655,7 @@ test("概览工具调用趋势从 Agent 数据读取，部分采集仍保留真�
   assert.match(chart.get(".chart-details").text(), /0/);
   assert.match(chart.get(".chart-details").text(), /7/);
   assert.equal(chart.find(".metric-hint").exists(), false);
-  await wrapper.get('.metric-grid.six button').trigger("click");
+  await wrapper.findAll('.metric-grid.six button')[5]!.trigger("click");
   assert.ok(wrapper.find('[data-testid="overview-trend-monitoringVolume"]').exists(), "切回其他卡片时趋势同步更新");
   wrapper.unmount();
 });
@@ -798,16 +798,16 @@ test("概览用六卡 + 双栏主趋势/健康表，卡片切换保留真实 DTO
   const overview = wrapper.get('[data-testid="dashboard-section-overview"]');
   const cards = overview.findAll(".metric-grid.six .metric-card");
   assert.equal(cards.length, 6);
-  const cardKeys = ["monitoringVolume", "agentDuration", "toolCallCount", "modelRequests", "modelSuccessRate", "cacheHitRate"];
+  const cardKeys = ["agentDuration", "toolCallCount", "modelRequests", "modelSuccessRate", "cacheHitRate", "monitoringVolume"];
   assert.deepEqual(cards.map((card) => card.get(".metric-title").text()), cardKeys.map((key) => i18n.global.t(`dashboard.${key}`)));
   assert.equal(overview.find('[data-testid="overview-metric-totalTokens"]').exists(), false);
-  assert.ok(overview.find('[data-testid="overview-trend-monitoringVolume"]').exists());
-  for (const [index, trend] of [
-    "monitoringVolume", "agentDuration", "toolCallCount", "modelRequests", "modelSuccessRate", "cacheHitRate",
-  ].entries()) {
+  assert.ok(overview.find('[data-testid="overview-trend-agentDuration"]').exists());
+  assert.deepEqual(cards.map((card) => card.get("button").attributes("aria-pressed")), ["true", "false", "false", "false", "false", "false"]);
+  for (const [index, trend] of cardKeys.entries()) {
     await cards[index]!.get("button").trigger("click");
     const chart = overview.get(`[data-testid="overview-trend-${trend}"]`);
     assert.match(chart.get("h3").text(), new RegExp(cards[index]!.get(".metric-title").text()));
+    assert.deepEqual(cards.map((card) => card.get("button").attributes("aria-pressed")), cardKeys.map((_, cardIndex) => String(cardIndex === index)));
   }
   assert.equal(overview.findAll(".overview-main > *").length, 2);
   assert.ok(overview.find('[data-testid="overview-domain-health"]').exists());
@@ -815,7 +815,7 @@ test("概览用六卡 + 双栏主趋势/健康表，卡片切换保留真实 DTO
   assert.equal(overview.findAll('[data-testid="overview-domain-health"] .dashboard-panel-actions').length, 0);
   assert.equal(overview.findAll(".overview-diagnostics, .configuration-diagnostics").length, 0);
   assert.doesNotMatch(overview.text(), /配置诊断|Configuration diagnostic/);
-  await overview.findAll(".metric-grid.six button")[1].trigger("click");
+  await overview.findAll(".metric-grid.six button")[0].trigger("click");
   assert.ok(overview.find('[data-testid="overview-trend-agentDuration"]').exists());
   await wrapper.findAll("nav.dashboard-section-tabs button")[3]!.trigger("click");
   assert.ok(wrapper.find('[data-testid="dashboard-section-worker"] .worker-main').exists());
