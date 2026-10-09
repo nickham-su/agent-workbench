@@ -1,5 +1,6 @@
 import type { AnalyticsRangeKind } from "@agent-workbench/shared";
 import { HOUR_MS } from "./analytics-rollups.js";
+import { ceilLocalHour } from "./analytics-hour-boundaries.js";
 
 export type DisplayBucket = { from: number; to: number };
 
@@ -38,6 +39,16 @@ function hourlyBuckets(from: number, to: number): DisplayBucket[] {
   return buckets;
 }
 
+function localHourlyBuckets(from: number, to: number, timezone: string): DisplayBucket[] {
+  const buckets: DisplayBucket[] = [];
+  for (let cursor = from; cursor < to;) {
+    const end = Math.min(to, ceilLocalHour(cursor + 1, timezone));
+    buckets.push({ from: cursor, to: end });
+    cursor = end;
+  }
+  return buckets;
+}
+
 /**
  * Business facts are always filtered in UTC. This planner only determines
  * presentation intervals. Long ranges follow IANA local calendar days, so a
@@ -50,7 +61,8 @@ export function planDisplayBuckets(input: {
   rangeKind: AnalyticsRangeKind;
 }): DisplayBucket[] {
   if (input.to <= input.from) return [];
-  if (input.rangeKind === "preset_24h" || input.to - input.from <= 24 * HOUR_MS) return hourlyBuckets(input.from, input.to);
+  if (input.rangeKind === "preset_24h") return localHourlyBuckets(input.from, input.to, input.timezone);
+  if (input.to - input.from <= 24 * HOUR_MS) return hourlyBuckets(input.from, input.to);
 
   const boundaries = [input.from];
   let cursor = input.from;

@@ -1,4 +1,5 @@
 import type { DashboardErrorCode, DashboardQueryRequest } from "@agent-workbench/shared";
+import { ceilLocalHour } from "./analytics-hour-boundaries.js";
 
 export const DASHBOARD_MAX_CUSTOM_RANGE_MS = 366 * 24 * 60 * 60 * 1000;
 
@@ -87,9 +88,10 @@ export function resolveDashboardRange(
   }
 
   if (request.rangeKind !== "custom") {
+    const from = snapshot.reportingLagAnchor - PRESET_DURATION_MS[request.rangeKind];
     return {
       rangeId: snapshot.rangeId,
-      from: snapshot.reportingLagAnchor - PRESET_DURATION_MS[request.rangeKind],
+      from: request.rangeKind === "preset_24h" ? ceilLocalHour(from, request.timezone) : from,
       to: snapshot.reportingLagAnchor,
       asOf: snapshot.asOf,
       timezone: request.timezone
