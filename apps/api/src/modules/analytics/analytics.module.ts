@@ -39,6 +39,7 @@ export async function registerAnalyticsModule(
       abandonLocalFallbackGeneration: (input) => supervisor.abandonLocalFallbackGeneration(input),
     };
   if (!supervisor) return;
+  ctx.analyticsSignal = (signal) => supervisor.signal(signal);
 
   const slots = ctx.agentWorkerEnabled
     ? [
@@ -111,6 +112,7 @@ export async function registerAnalyticsModule(
   app.addHook("onClose", async () => {
     closed = true;
     unsubscribe?.();
+    ctx.analyticsSignal = undefined;
     ctx.analyticsDiagnostics = undefined;
     await supervisor.close();
   });

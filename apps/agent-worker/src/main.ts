@@ -21,7 +21,7 @@ const apiClient = new AgentApiClient({
 
 const mcpManager = new McpManager(apiClient, console);
 const attachmentStorage = createAgentAttachmentStorage();
-const analyticsSignals = new AnalyticsSignalProducer({ apiOrigin: env.apiOrigin, internalToken: env.internalToken, dataDir: env.dataDir, namespace: "agent_worker", producerId: "agent_runner" });
+const analyticsSignals = new AnalyticsSignalProducer({ apiOrigin: env.apiOrigin, internalToken: env.internalToken, dataDir: env.dataDir, namespace: "agent_worker", producerId: "agent_runner", generation: env.analyticsProducerGeneration });
 analyticsSignals.start();
 const runner = new AgentRunner(
   apiClient,

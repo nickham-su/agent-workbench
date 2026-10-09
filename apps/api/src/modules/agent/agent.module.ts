@@ -49,6 +49,7 @@ export async function registerAgentModule(app: FastifyInstance, ctx: AppContext)
       responseValidation: ctx.agentWorkerResponseValidation,
       pidFilePath: agentWorkerPidPath(ctx.dataDir),
       logger: app.log,
+      dispatchAnalyticsSignal: ctx.analyticsSignal,
       diagnoseOutboxCorrupt: ctx.analyticsDiagnostics?.outboxCorrupt,
       onReady: async (generation) => {
         await recoverAfterAgentRuntimeReady({
@@ -131,9 +132,15 @@ export async function registerAgentModule(app: FastifyInstance, ctx: AppContext)
   }
 
   if (!workerManager) return;
-  await workerManager.start();
   app.addHook("onClose", async () => {
     dispose();
     await workerManager?.stop();
   });
+  try {
+    await workerManager.start();
+  } catch (error) {
+    dispose();
+    await workerManager.stop().catch(() => undefined);
+    throw error;
+  }
 }

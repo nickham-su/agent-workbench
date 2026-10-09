@@ -106,3 +106,12 @@ test("model outbox recovery has a single owner and deletes only acknowledged eve
   assert.equal(await fs.stat(path.join(dir, "1-e1.json")).then(() => true, () => false), false);
   assert.equal(await fs.stat(path.join(dir, "bad.json")).then(() => true, () => false), true);
 });
+
+test("Producer keeps standalone UUID defaults and honors a validated parent generation", () => {
+  const options = { apiOrigin: "http://unused.invalid", internalToken: "test", dataDir: ".unused", namespace: "agent_worker" as const, producerId: "agent_runner" };
+  const standalone = new AnalyticsSignalProducer(options);
+  assert.match(standalone.producerGeneration, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  const generation = "90c4f9bd-4df6-4eb0-b11d-866e780dd4da";
+  assert.equal(new AnalyticsSignalProducer({ ...options, generation }).producerGeneration, generation);
+  assert.throws(() => new AnalyticsSignalProducer({ ...options, generation: "../outside" }), /Invalid AWB_AGENT_ANALYTICS_GENERATION/);
+});

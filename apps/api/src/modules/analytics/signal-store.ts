@@ -712,6 +712,7 @@ export function authenticateSignalDomain(
     generation: string;
   }> = [];
   for (const slot of slots) {
+    backfillAbandonedExitGaps(db, domain, slot.producer_namespace, slot.producer_id, now);
     const unsafeAbandoned = db
       .prepare(
         `SELECT 1 FROM analytics_producer_generation g
@@ -1070,6 +1071,39 @@ function canClose(db: AnalyticsDb, signal: GenerationControl) {
   );
 }
 
+/** An exact terminal guard can precede the first real collection signal.
+ * Once a real coverage boundary exists, record its gap without touching the
+ * terminal generation or inventing observations. Any existing gap is retained. */
+function backfillAbandonedExitGaps(
+  db: AnalyticsDb,
+  domain: Domain,
+  namespace: string,
+  producerId: string,
+  now: number,
+) {
+  if (gapFrom(db, domain) === null) return;
+  const rows = db.prepare(
+    `SELECT g.* FROM analytics_producer_generation g
+     WHERE domain=? AND producer_namespace=? AND producer_id=? AND lifecycle='abandoned'
+       AND NOT EXISTS (SELECT 1 FROM analytics_signal_coverage_gap gap
+         WHERE gap.domain=g.domain AND gap.producer_namespace=g.producer_namespace
+           AND gap.producer_id=g.producer_id AND gap.producer_generation=g.producer_generation)`,
+  ).all(domain, namespace, producerId) as Array<GenerationRow & { producer_generation: string }>;
+  for (const row of rows) {
+    createGap(db, {
+      kind: "register", domain,
+      producerNamespace: namespace as GenerationControl["producerNamespace"],
+      producerId, producerGeneration: row.producer_generation,
+      sentAt: now, controlSequence: row.control_sequence, finalSequence: row.final_sequence,
+      committedSequence: row.committed_sequence, maxObservedAt: row.max_observed_at,
+      earliestOpenStartedAt: row.earliest_open_started_at,
+      openExecutionCount: 0, openModelCount: 0,
+      knownDrop: Boolean(row.known_drop), droppedSinceSequence: row.dropped_since_sequence,
+      outboxPending: row.outbox_pending, oldestPendingAt: row.oldest_pending_at, lossEpoch: row.loss_epoch,
+    }, "abandoned_exit");
+  }
+}
+
 /** Child-internal supervisor operation; public producers cannot request it. */
 export function abandonGeneration(
   db: AnalyticsDb,
@@ -1116,9 +1150,8 @@ function abandonLifecycleTargets(
   for (const target of targets) {
     const row = db
       .prepare(
-        `SELECT committed_sequence, max_observed_at, earliest_open_started_at, known_drop, dropped_since_sequence, outbox_pending, oldest_pending_at, loss_epoch
-      FROM analytics_producer_generation WHERE domain=? AND producer_namespace=? AND producer_id=? AND producer_generation=?
-        AND lifecycle IN ('registered','closing','stale')`,
+        `SELECT lifecycle, committed_sequence, max_observed_at, earliest_open_started_at, known_drop, dropped_since_sequence, outbox_pending, oldest_pending_at, loss_epoch
+      FROM analytics_producer_generation WHERE domain=? AND producer_namespace=? AND producer_id=? AND producer_generation=?`,
       )
       .get(
         target.domain,
@@ -1126,7 +1159,10 @@ function abandonLifecycleTargets(
         target.producerId,
         target.producerGeneration,
       ) as Record<string, unknown> | undefined;
-    if (!row) continue;
+    if (row && TERMINAL_LIFECYCLES.has(row.lifecycle as GenerationRow["lifecycle"])) continue;
+    // Exact exit evidence can beat the producer's first register to this store.
+    // Persist a terminal guard even then; an ACK must not permit late revival.
+    // Missing observations stay null/zero rather than fabricating a watermark.
     abandonGeneration(
       db,
       {
@@ -1137,16 +1173,16 @@ function abandonLifecycleTargets(
         sentAt: now,
         controlSequence: 1,
         finalSequence: null,
-        committedSequence: Number(row.committed_sequence),
-        maxObservedAt: row.max_observed_at as number | null,
-        earliestOpenStartedAt: row.earliest_open_started_at as number | null,
+        committedSequence: Number(row?.committed_sequence ?? 0),
+        maxObservedAt: (row?.max_observed_at ?? null) as number | null,
+        earliestOpenStartedAt: (row?.earliest_open_started_at ?? null) as number | null,
         openExecutionCount: 0,
         openModelCount: 0,
-        knownDrop: Boolean(row.known_drop),
-        droppedSinceSequence: row.dropped_since_sequence as number | null,
-        outboxPending: Number(row.outbox_pending),
-        oldestPendingAt: row.oldest_pending_at as number | null,
-        lossEpoch: Number(row.loss_epoch),
+        knownDrop: Boolean(row?.known_drop),
+        droppedSinceSequence: (row?.dropped_since_sequence ?? null) as number | null,
+        outboxPending: Number(row?.outbox_pending ?? 0),
+        oldestPendingAt: (row?.oldest_pending_at ?? null) as number | null,
+        lossEpoch: Number(row?.loss_epoch ?? 0),
       },
       now,
     );
@@ -1172,7 +1208,7 @@ export function abandonLocalFallbackGeneration(
       now,
     );
     // A crash can happen after intent persistence but before register reaches
-    // the child. That is still a completed recovery operation, not a retry.
+    // the child. The terminal guard also prevents that late register reviving it.
     return true;
   })();
 }
@@ -1519,8 +1555,6 @@ export function acceptAnalyticsSignal(
       return { accepted: true, receipt: null };
     }
     const domainEnabled = isSignalDomainEnabled(db, signal.domain);
-    if (domainEnabled)
-      markCollectionStarted(db, signal.domain, signal.observedAt);
     const { fingerprint, ...unsigned } = signal;
     if (eventFingerprint(unsigned) !== fingerprint) {
       if (domainEnabled)
@@ -1592,6 +1626,10 @@ export function acceptAnalyticsSignal(
           { accepted: false, receipt: null });
     const generationMode = ensureEventGeneration(db, signal);
     if (!generationMode) return { accepted: false, receipt: null };
+    // Receipt-only terminal Model recovery is not a new collection boundary.
+    // Rejected events and receipt replays must not create one either.
+    if (domainEnabled && generationMode === "active")
+      markCollectionStarted(db, signal.domain, signal.observedAt);
     // Receipts remain durable while disabled so re-enable never creates a sequence hole.
     if (domainEnabled) applyFact(db, signal, now);
     db.prepare(

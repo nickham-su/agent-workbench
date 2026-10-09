@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { isCanonicalAnalyticsSignal, type AnalyticsControlSignal, type AnalyticsSignal, type AnalyticsSignalEvent } from "@agent-workbench/shared";
+import { isCanonicalAnalyticsSignal, type AnalyticsControlSignal, type AnalyticsSignal, type AnalyticsSignalEvent, type AnalyticsSignalResult } from "@agent-workbench/shared";
 import { openSecureAnalyticsRoot } from "@agent-workbench/shared/node/analytics-root";
 
 /**
@@ -44,7 +44,17 @@ const LIFECYCLE_REPLAY_TIMEOUT_MS = 750;
 type WorkerLifecycleTarget = { domain: "execution" | "model" | "worker"; producerNamespace: "agent_worker" | "worker_observer"; producerId: string; producerGeneration: string };
 type WorkerLifecycleCapture = { occurredAt: number; targetIdentityQuality: "exact" | "unknown"; targets: WorkerLifecycleTarget[] };
 type WorkerLiveSnapshot = { snapshotAt: number; activeCount: number; queueLength: number; concurrency: number; runnerMode: "agent_worker"; analyticsProducerGeneration: string | null; childEpoch: number };
-type WorkerLifecycleIntent = { version: 2; signal: AnalyticsSignalEvent };
+type WorkerLifecycleIntent = { version: 2; signal: AnalyticsSignalEvent; legacy?: boolean };
+type ChildLifetime = {
+  generation: string;
+  epoch: number;
+  exited: boolean;
+  failedToSpawn: boolean;
+  exit: Promise<void>;
+  controlled: boolean;
+  suppressRestart: boolean;
+  lifecycleTask?: Promise<unknown>;
+};
 
 /** AbortSignal is advisory for fetch implementations. Recovery must also stay
  * bounded when a test double or a nonconforming transport never settles. */
@@ -87,6 +97,7 @@ export function buildAgentWorkerSpawnEnv(params: {
   internalToken: string;
   responseValidation: "strict" | "warn";
   pidFilePath: string;
+  analyticsProducerGeneration?: string;
 }): NodeJS.ProcessEnv {
   return {
     ...params.parentEnv,
@@ -99,6 +110,7 @@ export function buildAgentWorkerSpawnEnv(params: {
     AWB_AGENT_INTERNAL_TOKEN: params.internalToken,
     AWB_INTERNAL_RPC_RESPONSE_VALIDATION: params.responseValidation,
     AWB_AGENT_WORKER_PID_FILE: params.pidFilePath,
+    AWB_AGENT_ANALYTICS_GENERATION: params.analyticsProducerGeneration,
     AWB_AGENT_REPO_ROOT: params.repoRoot
   };
 }
@@ -117,6 +129,8 @@ export async function completeAgentWorkerReady(params: {
 export class AgentWorkerProcessManager {
   private child: ChildProcess | null = null;
   private stopping = false;
+  private stopPromise: Promise<void> | null = null;
+  private readonly childLifetimes = new WeakMap<ChildProcess, ChildLifetime>();
   private restartTimer: NodeJS.Timeout | null = null;
   private restartAttempt = 0;
   private recentFailureTs: number[] = [];
@@ -151,6 +165,10 @@ export class AgentWorkerProcessManager {
       logger: FastifyBaseLogger;
       onReady?: (generation: number) => void | Promise<void>;
       diagnoseOutboxCorrupt?: (input: { producerGeneration: string; recordedAt?: number }) => Promise<boolean>;
+      /** API-owned capability; no HTTP fallback when this transport is present. */
+      dispatchAnalyticsSignal?: (signal: AnalyticsSignal) => Promise<AnalyticsSignalResult>;
+      /** Test-only exit deadline override. */
+      childExitTimeoutMs?: number;
       /** Injectable only to make recovery ordering observable without spawning a real worker. */
       spawnWorker?: typeof spawn;
       waitForWorkerReady?: () => Promise<void>;
@@ -167,7 +185,13 @@ export class AgentWorkerProcessManager {
   }
 
   private async drainLifecycleTasks(timeoutMs = 1_000) {
-    await Promise.race([Promise.allSettled([...this.lifecycleTasks]), new Promise((resolve) => setTimeout(resolve, timeoutMs))]);
+    const deadline = Date.now() + timeoutMs;
+    try {
+      while (this.lifecycleTasks.size) {
+        await withinAnalyticsRecoveryBudget(deadline, async () => { await Promise.allSettled([...this.lifecycleTasks]); });
+      }
+      return true;
+    } catch { return false; }
   }
 
   async start() {
@@ -177,7 +201,7 @@ export class AgentWorkerProcessManager {
   }
 
   private async startInternal() {
-    this.stopping = false;
+    if (this.stopping) return;
     if (this.child) return;
     if (!this.analyticsCheckpointTimer) {
       this.tryEmitWorkerControl("register");
@@ -209,6 +233,8 @@ export class AgentWorkerProcessManager {
       args = [srcEntry];
     }
 
+    if (this.stopping || this.child) return;
+    const analyticsProducerGeneration = randomUUID();
     const child = (this.params.spawnWorker ?? spawn)(command, args, {
       cwd: this.params.repoRoot,
       stdio: ["ignore", "pipe", "pipe"],
@@ -223,7 +249,8 @@ export class AgentWorkerProcessManager {
         apiOrigin: this.params.apiOrigin,
         internalToken: this.params.internalToken,
         responseValidation: this.params.responseValidation,
-        pidFilePath: this.params.pidFilePath
+        pidFilePath: this.params.pidFilePath,
+        analyticsProducerGeneration
       })
     });
     child.unref();
@@ -240,23 +267,42 @@ export class AgentWorkerProcessManager {
     child.stderr?.on("data", (chunk) => {
       this.params.logger.warn({ output: chunk.toString("utf8").trim() }, "agent-worker stderr");
     });
-    child.on("exit", (code, signal) => {
-      // An obsolete child may report after its replacement has spawned.
-      if (this.child !== child || this.childEpoch !== childEpoch) return;
-      this.params.logger.warn({ code, signal }, "agent-worker exited");
+    let resolveExit!: () => void;
+    const lifetime: ChildLifetime = {
+      generation: analyticsProducerGeneration, epoch: childEpoch, exited: false, failedToSpawn: false,
+      exit: new Promise<void>((resolve) => { resolveExit = resolve; }),
+      controlled: false, suppressRestart: false,
+    };
+    this.childLifetimes.set(child, lifetime);
+    child.once("exit", (code, signal) => {
+      lifetime.exited = true;
+      resolveExit();
+      const current = this.child === child && this.childEpoch === childEpoch;
       const lifecycle = this.captureWorkerLifecycle(Date.now(), child, childEpoch);
-      this.child = null;
-      this.lastLiveSnapshot = null;
-      if (this.stopping) return;
-      this.trackLifecycle(this.recoverExitedWorkerOutboxes().finally(() => {
-        if (this.stopping) return;
-        this.trackLifecycle(this.persistAndDispatchWorkerLifecycle("unexpected_exit", lifecycle));
-        this.handleUnexpectedExit();
+      if (current) {
+        this.child = null;
+        this.lastLiveSnapshot = null;
+      }
+      this.params.logger.warn({ code, signal }, "agent-worker exited");
+      lifetime.lifecycleTask = this.trackLifecycle(this.recoverExitedWorkerOutboxes().finally(async () => {
+        await this.persistAndDispatchWorkerLifecycle(lifetime.controlled ? "controlled_stop" : "unexpected_exit", lifecycle);
+        if (current && !this.stopping && !lifetime.suppressRestart && this.child === null && this.childEpoch === childEpoch) this.handleUnexpectedExit();
       }));
+    });
+    child.on("error", () => {
+      // Node reports a failed spawn by error/close, not exit. No producer ever
+      // ran in that case; do not invent an exit certificate or block cleanup.
+      if (child.pid === undefined) {
+        lifetime.failedToSpawn = true;
+        if (this.child === child && this.childEpoch === childEpoch) this.child = null;
+      }
+      this.params.logger.warn({ errorCode: "AGENT_WORKER_PROCESS_ERROR" }, "agent-worker process operation failed");
     });
 
     try {
       await (this.params.waitForWorkerReady?.() ?? this.waitUntilReady());
+      if (lifetime.failedToSpawn) throw new Error("AGENT_WORKER_SPAWN_FAILED");
+      if (this.stopping || lifetime.exited || this.child !== child) return;
       await completeAgentWorkerReady({
         generation: ++this.readyGeneration,
         onReady: this.params.onReady,
@@ -267,71 +313,97 @@ export class AgentWorkerProcessManager {
           this.recentFailureTs = [];
         },
       });
+      if (this.stopping || lifetime.exited || this.child !== child) return;
       this.tryEmitWorkerEvent("ready");
       this.trackLifecycle(this.emitWorkerSnapshot(child, childEpoch));
       if (this.activeRestartAttemptId) this.tryEmitWorkerEvent("restart_succeeded", this.activeRestartAttemptId);
       this.activeRestartAttemptId = null;
     } catch (err) {
       this.params.logger.error({ err }, "agent-worker failed to become ready");
-      // A late readiness failure from an obsolete child must not detach its
-      // replacement (nor its epoch-bound snapshot) from the manager.
-      if (this.child === child && this.childEpoch === childEpoch) {
-        this.child = null;
-        this.lastLiveSnapshot = null;
-      }
-      child.kill("SIGKILL");
+      // The spawn-bound UUID remains known even when health/snapshot never succeeded.
+      // Only an actual exit is evidence; never detach a live child before its exit.
+      lifetime.suppressRestart = true;
+      if (!lifetime.exited) await this.terminateChild(child, lifetime, "SIGKILL");
+      await lifetime.lifecycleTask;
       throw err;
     }
   }
 
-  async stop() {
+  stop(): Promise<void> {
+    if (!this.stopPromise) this.stopPromise = this.stopInternal();
+    return this.stopPromise;
+  }
+
+  private async terminateChild(child: ChildProcess, lifetime: ChildLifetime, signal: "SIGTERM" | "SIGKILL") {
+    if (lifetime.exited || lifetime.failedToSpawn) return;
+    child.kill(signal);
+    try {
+      await withinAnalyticsRecoveryBudget(Date.now() + (this.params.childExitTimeoutMs ?? (signal === "SIGTERM" ? 3_000 : 1_000)), async () => lifetime.exit);
+    } catch {
+      if (signal === "SIGTERM") {
+        child.kill("SIGKILL");
+        try {
+          await withinAnalyticsRecoveryBudget(Date.now() + (this.params.childExitTimeoutMs ?? 1_000), async () => lifetime.exit);
+        } catch { throw new Error("AGENT_WORKER_EXIT_UNCONFIRMED"); }
+      } else {
+        throw new Error("AGENT_WORKER_EXIT_UNCONFIRMED");
+      }
+    }
+  }
+
+  private async stopInternal() {
     this.stopping = true;
     if (this.analyticsCheckpointTimer) clearInterval(this.analyticsCheckpointTimer);
     this.analyticsCheckpointTimer = null;
-    this.tryEmitWorkerControl("closing");
-    this.tryEmitWorkerControl("closed");
-    if (this.restartTimer) {
-      clearTimeout(this.restartTimer);
-      this.restartTimer = null;
-    }
+    if (this.restartTimer) clearTimeout(this.restartTimer);
+    this.restartTimer = null;
     const child = this.child;
-    const lifecycle = this.captureWorkerLifecycle(Date.now(), child, this.childEpoch);
-    if (!child) {
-      this.trackLifecycle(this.persistAndDispatchWorkerLifecycle("controlled_stop", lifecycle));
-      await this.drainLifecycleTasks();
-      return;
+    let childExitError: unknown;
+    if (child) {
+      try {
+        const lifetime = this.childLifetimes.get(child);
+        if (!lifetime) throw new Error("AGENT_WORKER_EXIT_IDENTITY_UNAVAILABLE");
+        lifetime.controlled = true;
+        lifetime.suppressRestart = true;
+        await this.terminateChild(child, lifetime, "SIGTERM");
+        await lifetime.lifecycleTask;
+      } catch (error) {
+        // The observer has stopped independently. Still retire it truthfully,
+        // but never turn an unconfirmed child kill into an exit certificate.
+        childExitError = error;
+      }
     }
-    this.child = null;
+    await this.replayWorkerLifecycleIntents();
+    // Snapshot/ready work may have been in flight. Do not close their sender first.
+    const drained = await this.drainLifecycleTasks(2_500);
+    const closing = drained && await this.dispatchAnalyticsAccepted(this.createWorkerControl("closing"));
+    const closed = closing && await this.dispatchAnalyticsAccepted(this.createWorkerControl("closed"));
+    if (!closed) {
+      // Preserve exact observer stop evidence independently of child identity.
+      await this.persistAndDispatchWorkerLifecycle("controlled_stop", {
+        occurredAt: Date.now(), targetIdentityQuality: "exact",
+        targets: [{ domain: "worker", producerNamespace: "worker_observer", producerId: "process_manager", producerGeneration: this.analyticsGeneration }],
+      });
+    }
+    if (childExitError) throw childExitError;
+  }
 
-    child.kill("SIGTERM");
-    const done = await Promise.race([
-      new Promise<boolean>((resolve) => {
-        child.once("exit", () => resolve(true));
-      }),
-      new Promise<boolean>((resolve) => {
-        setTimeout(() => resolve(false), 3000);
-      })
-    ]);
-    if (!done) {
-      child.kill("SIGKILL");
-    }
-    this.trackLifecycle(this.persistAndDispatchWorkerLifecycle("controlled_stop", lifecycle));
-    await this.drainLifecycleTasks();
+  private createWorkerControl(kind: "register" | "checkpoint" | "closing" | "closed") {
+    const signal: AnalyticsControlSignal = { kind, domain: "worker", producerNamespace: "worker_observer", producerId: "process_manager", producerGeneration: this.analyticsGeneration, sentAt: Date.now(), controlSequence: ++this.analyticsControlSequence, finalSequence: kind === "closing" || kind === "closed" ? this.analyticsSequence : null, committedSequence: this.analyticsSequence, maxObservedAt: Date.now(), earliestOpenStartedAt: null, openExecutionCount: 0, openModelCount: 0, knownDrop: false, droppedSinceSequence: null, outboxPending: 0, oldestPendingAt: null, lossEpoch: 0 };
+    return signal;
   }
 
   private tryEmitWorkerControl(kind: "register" | "checkpoint" | "closing" | "closed") {
-    const signal: AnalyticsControlSignal = { kind, domain: "worker", producerNamespace: "worker_observer", producerId: "process_manager", producerGeneration: this.analyticsGeneration, sentAt: Date.now(), controlSequence: ++this.analyticsControlSequence, finalSequence: kind === "closing" || kind === "closed" ? this.analyticsSequence : null, committedSequence: this.analyticsSequence, maxObservedAt: Date.now(), earliestOpenStartedAt: null, openExecutionCount: 0, openModelCount: 0, knownDrop: false, droppedSinceSequence: null, outboxPending: 0, oldestPendingAt: null, lossEpoch: 0 };
-    this.tryDispatchAnalytics(signal);
+    this.tryDispatchAnalytics(this.createWorkerControl(kind));
   }
 
   private captureWorkerLifecycle(occurredAt: number, child = this.child, childEpoch = this.childEpoch): WorkerLifecycleCapture {
-    const targets: WorkerLifecycleTarget[] = [{ domain: "worker", producerNamespace: "worker_observer", producerId: "process_manager", producerGeneration: this.analyticsGeneration }];
-    const snapshot = child && this.lastLiveSnapshot && this.lastLiveSnapshot.childEpoch === childEpoch ? this.lastLiveSnapshot : null;
-    const generation = snapshot?.analyticsProducerGeneration;
-    if (generation) {
-      targets.push({ domain: "execution", producerNamespace: "agent_worker", producerId: "agent_runner", producerGeneration: generation },
-        { domain: "model", producerNamespace: "agent_worker", producerId: "agent_runner", producerGeneration: generation });
-    }
+    const lifetime = child ? this.childLifetimes.get(child) : undefined;
+    const generation = lifetime?.epoch === childEpoch ? lifetime.generation : null;
+    const targets: WorkerLifecycleTarget[] = generation ? [
+      { domain: "execution", producerNamespace: "agent_worker", producerId: "agent_runner", producerGeneration: generation },
+      { domain: "model", producerNamespace: "agent_worker", producerId: "agent_runner", producerGeneration: generation },
+    ] : [];
     return { occurredAt, targetIdentityQuality: generation ? "exact" : "unknown", targets };
   }
 
@@ -345,13 +417,13 @@ export class AgentWorkerProcessManager {
   }
 
   private tryEmitWorkerEvent(event: "ready" | "restart_attempted" | "restart_succeeded" | "restart_failed", restartAttemptId: string | null = null) {
-    this.tryDispatchAnalytics(this.createWorkerEvent(event, restartAttemptId));
+    if (!this.stopping) this.tryDispatchAnalytics(this.createWorkerEvent(event, restartAttemptId));
   }
 
   private async emitWorkerSnapshot(child: ChildProcess, childEpoch: number) {
     const snapshot = await this.readWorkerSnapshot();
     // Do not let an in-flight A request populate the snapshot cache for B.
-    if (!snapshot || this.child !== child || this.childEpoch !== childEpoch) return;
+    if (!snapshot || this.stopping || this.child !== child || this.childEpoch !== childEpoch) return;
     this.lastLiveSnapshot = { ...snapshot, childEpoch };
     const now = Date.now();
     const { analyticsProducerGeneration: _producerGeneration, ...snapshotPayload } = snapshot;
@@ -382,7 +454,27 @@ export class AgentWorkerProcessManager {
   }
 
   private tryDispatchAnalytics(signal: AnalyticsSignal) {
-    void fetch(`${this.params.apiOrigin}/api/analytics/internal/signal`, { method: "POST", headers: { "content-type": "application/json", "x-awb-agent-internal-token": this.params.internalToken }, body: JSON.stringify(signal), signal: AbortSignal.timeout(750) }).catch(() => undefined);
+    this.trackLifecycle(this.dispatchAnalyticsAccepted(signal));
+  }
+
+  private async dispatchAnalytics(signal: AnalyticsSignal, timeoutMs = 750): Promise<AnalyticsSignalResult | null> {
+    try {
+      return await withinAnalyticsRecoveryBudget(Date.now() + timeoutMs, async (abortSignal) => {
+        if (this.params.dispatchAnalyticsSignal) return this.params.dispatchAnalyticsSignal(signal);
+        const response = await fetch(`${this.params.apiOrigin}/api/analytics/internal/signal`, {
+          method: "POST", headers: { "content-type": "application/json", "x-awb-agent-internal-token": this.params.internalToken },
+          body: JSON.stringify(signal), signal: abortSignal,
+        });
+        if (!response.ok) return null;
+        return await response.json() as AnalyticsSignalResult;
+      });
+    } catch { return null; }
+  }
+
+  private async dispatchAnalyticsAccepted(signal: AnalyticsSignal, timeoutMs = 750) {
+    const value = await this.dispatchAnalytics(signal, timeoutMs);
+    if (value?.accepted !== true) return false;
+    return signal.kind !== "event" || (value.receipt?.eventId === signal.eventId && value.receipt.fingerprint === signal.fingerprint);
   }
 
   private async withLifecycleDirectory<T>(operation: (directory: Awaited<ReturnType<Awaited<ReturnType<typeof openSecureAnalyticsRoot>>["openDirectory"]>>) => Promise<T>) {
@@ -429,7 +521,7 @@ export class AgentWorkerProcessManager {
     // Version 2 is canonical at rest. Version 1 is replayed conservatively by
     // converting its historical observer target to an unknown-target v2 event.
     if (raw?.version === 2 && isCanonicalAnalyticsSignal(candidate)) return { version: 2, signal: candidate };
-    if (raw?.version === 1) return { version: 2, signal: candidate };
+    if (raw?.version === 1) return { version: 2, signal: candidate, legacy: true };
     return null;
   }
 
@@ -440,7 +532,7 @@ export class AgentWorkerProcessManager {
       && (["agent_worker", "worker_observer"] as string[]).includes(String((target as Record<string, unknown>).producerNamespace))
       && typeof (target as Record<string, unknown>).producerId === "string" && typeof (target as Record<string, unknown>).producerGeneration === "string") : [];
     return { occurredAt: typeof payload.occurredAt === "number" ? payload.occurredAt : intent.signal.observedAt,
-      targetIdentityQuality: targets.length >= 3 && payload.targetIdentityQuality === "exact" ? "exact" : "unknown",
+      targetIdentityQuality: !intent.legacy && targets.length > 0 && payload.targetIdentityQuality === "exact" ? "exact" : "unknown",
       targets: targets.length ? targets : [{ domain: "worker", producerNamespace: "worker_observer", producerId: "process_manager", producerGeneration: intent.signal.producerGeneration }] };
   }
 
@@ -451,7 +543,7 @@ export class AgentWorkerProcessManager {
     if (existing) return existing;
     const owner = (async () => {
       let deliver = intent;
-      if (deliver.signal.producerGeneration !== this.analyticsGeneration || !isCanonicalAnalyticsSignal(deliver.signal)) {
+      if (deliver.legacy || deliver.signal.producerGeneration !== this.analyticsGeneration || !isCanonicalAnalyticsSignal(deliver.signal)) {
         // API observer generations are process-scoped. Convert once, atomically
         // replace the durable intent, then retry that exact converted DTO.
         const event = deliver.signal.eventType === "worker_unexpected_exit" ? "unexpected_exit" : "controlled_stop";
@@ -489,14 +581,8 @@ export class AgentWorkerProcessManager {
     } finally { this.lifecycleReplayInFlight = false; }
   }
 
-  private async dispatchAnalyticsForReceipt(signal: AnalyticsSignalEvent, timeoutMs: number) {
-    try {
-      const response = await fetch(`${this.params.apiOrigin}/api/analytics/internal/signal`, { method: "POST", headers: { "content-type": "application/json", "x-awb-agent-internal-token": this.params.internalToken }, body: JSON.stringify(signal), signal: AbortSignal.timeout(Math.max(1, timeoutMs)) });
-      const value = await response.json() as { accepted?: unknown; receipt?: { eventId?: unknown; fingerprint?: unknown } | null };
-      return response.ok && value.accepted === true && value.receipt?.eventId === signal.eventId && value.receipt.fingerprint === signal.fingerprint;
-    } catch {
-      return false;
-    }
+  private dispatchAnalyticsForReceipt(signal: AnalyticsSignalEvent, timeoutMs: number) {
+    return this.dispatchAnalyticsAccepted(signal, Math.max(1, timeoutMs));
   }
 
   /** This manager is the only process that invokes recovery after child exit. */
@@ -519,11 +605,8 @@ export class AgentWorkerProcessManager {
             try { event = parseRecoveredModelOutboxSignal(JSON.parse(await directory.readFile(name)), generation); } catch { event = null; }
             if (!event) { await withinAnalyticsRecoveryBudget(deadline, async () => await this.params.diagnoseOutboxCorrupt?.({ producerGeneration: generation }) ?? false); continue; }
             try {
-              const outcome = await withinAnalyticsRecoveryBudget(deadline, async (signal) => {
-                const response = await fetch(`${this.params.apiOrigin}/api/analytics/internal/signal`, { method: "POST", headers: { "content-type": "application/json", "x-awb-agent-internal-token": this.params.internalToken }, body: JSON.stringify(event), signal });
-                return { ok: response.ok, result: await response.json().catch(() => null) as { accepted?: boolean; receipt?: { eventId?: string; fingerprint?: string } | null } | null };
-              });
-              if (outcome.ok && outcome.result?.accepted && outcome.result.receipt?.eventId === event.eventId && outcome.result.receipt.fingerprint === event.fingerprint) await directory.deleteFile(name);
+              const accepted = await withinAnalyticsRecoveryBudget(deadline, async () => this.dispatchAnalyticsForReceipt(event!, Math.max(1, deadline - Date.now())));
+              if (accepted) await directory.deleteFile(name);
             } catch { break; }
           }
         } catch { /* lock or malformed child directory: retain evidence */ }
@@ -590,6 +673,7 @@ export class AgentWorkerProcessManager {
     const origin = `http://${this.params.workerHost}:${this.params.workerPort}`;
     const deadline = Date.now() + 10_000;
     while (Date.now() < deadline) {
+      if (this.stopping) throw new Error("AGENT_WORKER_STOPPING");
       try {
         if (this.params.socketPath) {
           const ok = await new Promise<boolean>((resolve) => {

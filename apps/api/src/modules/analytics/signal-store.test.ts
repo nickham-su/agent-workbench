@@ -13,6 +13,8 @@ import { closeAnalyticsDb, openAnalyticsDb } from "./analytics-db.js";
 import {
   acceptAnalyticsSignal,
   abandonGeneration,
+  abandonLocalFallbackGeneration,
+  authenticateSignalDomain,
   analyticsFingerprint,
   diagnoseOutboxCorrupt,
   markStaleGenerations,
@@ -792,6 +794,8 @@ test("a worker-unexpected-exit infers only Runs with an open agent-worker execut
   const db = await openAnalyticsDb(root, 50);
   t.after(() => closeAnalyticsDb(db));
   enableWorkerFactDomains(db);
+  // Real accepted execution Facts always have a Generation first.
+  assert.equal(acceptAnalyticsSignal(db, checkpoint({ kind: "register", sentAt: 1, committedSequence: 0, maxObservedAt: null } as any), 1).accepted, true);
   db.prepare(
     `INSERT INTO analytics_run_fact (run_id, run_kind, parent_run_id, display_status, status_quality, inferred_evidence_type, created_at, terminal_at, source_updated_at, collected_at)
     VALUES ('running-run', 'user', NULL, 'running', 'observed', NULL, 1, NULL, 1, 1), ('unlinked-run', 'user', NULL, 'running', 'observed', NULL, 1, NULL, 1, 1)`,
@@ -872,19 +876,19 @@ test("a worker-unexpected-exit infers only Runs with an open agent-worker execut
       queuedAt: null, startedAt: 1, endedAt: 120, endTimeQuality: "observed", endReason: "completed",
     } as any,
   });
-  assert.equal(acceptAnalyticsSignal(db, observedFinish, 120).accepted, true);
+  assert.equal(acceptAnalyticsSignal(db, observedFinish, 120).accepted, false);
   assert.deepEqual(
     db.prepare("SELECT status, ended_at, effective_ended_at, end_time_quality, end_reason FROM analytics_execution_fact WHERE execution_id='open-execution'").get(),
-    { status: "ended", ended_at: 120, effective_ended_at: 120, end_time_quality: "observed", end_reason: "completed" },
+    { status: "ended", ended_at: 100, effective_ended_at: 100, end_time_quality: "inferred", end_reason: "worker_exit" },
   );
   const delayedStart = event({
     eventId: "open-execution-delayed-start", sequence: 2, subjectIdentity: "execution:open-execution",
     payload: { executionId: "open-execution", runId: "running-run", runtimeKind: "agent_worker", runKind: "user", parentRunId: null, queuedAt: null, startedAt: 1, endedAt: null, endTimeQuality: "unknown", endReason: null } as any,
   });
-  assert.equal(acceptAnalyticsSignal(db, delayedStart, 121).accepted, true);
+  assert.equal(acceptAnalyticsSignal(db, delayedStart, 121).accepted, false);
   assert.deepEqual(
     db.prepare("SELECT status, ended_at, effective_ended_at, end_time_quality, end_reason FROM analytics_execution_fact WHERE execution_id='open-execution'").get(),
-    { status: "ended", ended_at: 120, effective_ended_at: 120, end_time_quality: "observed", end_reason: "completed" },
+    { status: "ended", ended_at: 100, effective_ended_at: 100, end_time_quality: "inferred", end_reason: "worker_exit" },
   );
 });
 
@@ -1924,4 +1928,215 @@ test("configuration epochs are monotonic, normalized, and disabled signals retai
       { collection_config_version: "0000000000000003", effective_at: 110 },
     ],
   );
+});
+
+function exitBeforeRegister(generation: string, sequence: number, quality: "exact" | "unknown" = "exact") {
+  const unsigned = {
+    kind: "event" as const, domain: "worker" as const, producerNamespace: "worker_observer" as const,
+    producerId: "process_manager", producerGeneration: "early-exit-observer", sequence,
+    eventId: `early-exit-${sequence}`, payloadVersion: 1 as const, eventType: "worker_controlled_stop" as const,
+    subjectIdentity: `worker:early-exit:${sequence}`, observedAt: 30,
+    payload: { occurredAt: 25, event: "controlled_stop", restartAttemptId: null, runnerMode: "agent_worker" as const,
+      targetIdentityQuality: quality, targets: (["execution", "model"] as const).map((domain) => ({
+        domain, producerNamespace: "agent_worker", producerId: "agent_runner", producerGeneration: generation,
+      })) },
+  };
+  return { ...unsigned, fingerprint: analyticsFingerprint(unsigned as any) } as AnalyticsSignalEvent;
+}
+
+function delayedTerminalModel(generation: string): AnalyticsSignalEvent {
+  const unsigned = {
+    kind: "event" as const, domain: "model" as const, producerNamespace: "agent_worker" as const,
+    producerId: "agent_runner", producerGeneration: generation, sequence: 1, eventId: "early-exit-delayed-model",
+    payloadVersion: 1 as const, eventType: "model_finished" as const, subjectIdentity: "model:early-exit-delayed",
+    observedAt: 20, payload: {
+      modelCallId: "early-exit-delayed", executionId: "old-execution", runId: "old-run", attemptNo: 1,
+      providerId: "provider", modelId: "model", startedAt: 10, endedAt: 20, status: "completed" as const,
+      completionQuality: "observed" as const, timeoutKind: null, inputTokens: 2, outputTokens: 3, totalTokens: 5,
+      totalSource: "reported" as const, cacheReadTokens: null, cacheWriteTokens: null, cacheComparable: false,
+      cacheWriteVerified: false, failureKind: null,
+    },
+  };
+  return { ...unsigned, fingerprint: analyticsFingerprint(unsigned as any) };
+}
+
+test("exact exit before register persists minimal terminal generations and preserves delayed model fact-only recovery", async (t) => {
+  const root = await dataDir(); t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const db = await openAnalyticsDb(root, 1); t.after(() => closeAnalyticsDb(db));
+  enableWorkerFactDomains(db);
+  const generation = "dead-before-register";
+  const rows = () => db.prepare("SELECT domain, lifecycle, final_sequence, committed_sequence, max_observed_at, earliest_open_started_at, known_drop, outbox_pending, loss_epoch FROM analytics_producer_generation WHERE producer_generation=? ORDER BY domain").all(generation);
+  assert.deepEqual(rows(), []);
+  const exit = exitBeforeRegister(generation, 1);
+  assert.equal(acceptAnalyticsSignal(db, exit, 30).accepted, true);
+  const terminalRows = rows();
+  assert.deepEqual(terminalRows, ["execution", "model"].map((domain) => ({
+    domain, lifecycle: "abandoned", final_sequence: null, committed_sequence: 0, max_observed_at: null,
+    earliest_open_started_at: null, known_drop: 0, outbox_pending: 0, loss_epoch: 0,
+  })));
+  const watermarks = () => db.prepare("SELECT domain, collection_started_at, reconciled_through, rollup_ready_through, last_succeeded_at FROM analytics_domain_state WHERE domain IN ('execution','model') ORDER BY domain").all();
+  const beforeLateFact = watermarks();
+  const gaps = () => db.prepare("SELECT domain, cause, gap_from, gap_to FROM analytics_signal_coverage_gap WHERE producer_generation=? ORDER BY domain").all(generation);
+  const beforeGaps = gaps();
+  assert.deepEqual(beforeGaps, []);
+  assert.ok(beforeLateFact.every((row: any) => row.collection_started_at === null && row.reconciled_through === null && row.last_succeeded_at === null));
+  for (const domain of ["execution", "model"] as const) {
+    for (const kind of ["register", "checkpoint"] as const) {
+      assert.equal(acceptAnalyticsSignal(db, checkpoint({ domain, kind, producerGeneration: generation, controlSequence: 100, sentAt: 100, committedSequence: 0, maxObservedAt: 100 } as any), 100).accepted, false);
+    }
+  }
+  assert.equal(acceptAnalyticsSignal(db, event({ producerGeneration: generation }), 101).accepted, false);
+  const delayed = delayedTerminalModel(generation);
+  assert.equal(acceptAnalyticsSignal(db, delayed, 102).accepted, true);
+  assert.equal(acceptAnalyticsSignal(db, delayed, 103).accepted, true);
+  assert.equal((db.prepare("SELECT COUNT(*) AS n FROM analytics_model_call_fact WHERE model_call_id='early-exit-delayed'").get() as { n: number }).n, 1);
+  assert.ok(db.prepare("SELECT event_id FROM analytics_event_receipt WHERE event_id=?").get(delayed.eventId));
+  assert.deepEqual(rows(), terminalRows);
+  assert.deepEqual(watermarks(), beforeLateFact);
+  assert.deepEqual(gaps(), beforeGaps);
+  for (const domain of ["execution", "model"] as const)
+    assert.equal(authenticateSignalDomain(db, domain, 110), null);
+  assert.deepEqual(watermarks(), beforeLateFact);
+  assert.deepEqual(gaps(), []);
+  for (const domain of ["execution", "model"] as const) {
+    // No synthetic boundary at exit time: a genuine replacement register owns it.
+    assert.equal(acceptAnalyticsSignal(db, checkpoint({ domain, kind: "register", producerGeneration: "actual-replacement", sentAt: 140, controlSequence: 1, committedSequence: 0, maxObservedAt: null } as any), 140).accepted, true);
+    assert.deepEqual(db.prepare("SELECT collection_started_at, reconciled_through, last_succeeded_at FROM analytics_domain_state WHERE domain=?").get(domain), { collection_started_at: 140, reconciled_through: null, last_succeeded_at: null });
+    assert.deepEqual(db.prepare("SELECT gap_from, gap_to, cause FROM analytics_signal_coverage_gap WHERE domain=? AND producer_generation=?").get(domain, generation), { gap_from: 140, gap_to: null, cause: "abandoned_exit" });
+    assert.equal(acceptAnalyticsSignal(db, checkpoint({ domain, producerGeneration: "actual-replacement", sentAt: 160, controlSequence: 2, committedSequence: 0, maxObservedAt: 160 } as any), 160).accepted, true);
+    assert.deepEqual(db.prepare("SELECT status, reconciled_through, last_error_code FROM analytics_domain_state WHERE domain=?").get(domain), { status: "healthy", reconciled_through: 160, last_error_code: null });
+  }
+  assert.deepEqual(rows(), terminalRows);
+  const historical = gaps();
+  assert.deepEqual(historical, ["execution", "model"].map((domain) => ({ domain, cause: "abandoned_exit", gap_from: 140, gap_to: 160 })));
+  for (const domain of ["execution", "model"] as const)
+    assert.equal(acceptAnalyticsSignal(db, checkpoint({ domain, producerGeneration: "actual-replacement", sentAt: 180, controlSequence: 3, committedSequence: 0, maxObservedAt: 180 } as any), 180).accepted, true);
+  assert.deepEqual(gaps(), historical, "later certification must not erase or narrow recorded history");
+});
+
+test("unknown exit cannot manufacture missing target generations or abandon a replacement", async (t) => {
+  const root = await dataDir(); t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const db = await openAnalyticsDb(root, 1); t.after(() => closeAnalyticsDb(db));
+  enableWorkerFactDomains(db);
+  for (const domain of ["execution", "model"] as const)
+    assert.equal(acceptAnalyticsSignal(db, checkpoint({ domain, producerGeneration: "replacement", sentAt: 20, committedSequence: 0, maxObservedAt: 20 } as any), 20).accepted, true);
+  assert.equal(acceptAnalyticsSignal(db, exitBeforeRegister("unknown-missing", 1, "unknown"), 30).accepted, true);
+  assert.deepEqual(db.prepare("SELECT domain, lifecycle FROM analytics_producer_generation WHERE producer_generation='replacement' ORDER BY domain").all(), [
+    { domain: "execution", lifecycle: "registered" }, { domain: "model", lifecycle: "registered" },
+  ]);
+  assert.deepEqual(db.prepare("SELECT domain FROM analytics_producer_generation WHERE producer_generation='unknown-missing'").all(), []);
+  assert.deepEqual(db.prepare("SELECT domain FROM analytics_signal_coverage_gap WHERE producer_generation='unknown-missing'").all(), []);
+});
+
+test("repeat exact exits preserve closed and abandoned targets without extra gaps or replacement effects", async (t) => {
+  const root = await dataDir(); t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const db = await openAnalyticsDb(root, 1); t.after(() => closeAnalyticsDb(db));
+  enableWorkerFactDomains(db);
+  const generation = "already-terminal";
+  for (const kind of ["register", "closing", "closed"] as const) {
+    assert.equal(acceptAnalyticsSignal(db, checkpoint({ domain: "model", producerGeneration: generation, kind, sentAt: kind === "register" ? 10 : kind === "closing" ? 11 : 12, finalSequence: kind === "register" ? null : 0, committedSequence: 0, maxObservedAt: null } as any), 12).accepted, true);
+  }
+  assert.equal(acceptAnalyticsSignal(db, checkpoint({ producerGeneration: "replacement", sentAt: 20, committedSequence: 0, maxObservedAt: 20 } as any), 20).accepted, true);
+  const first = exitBeforeRegister(generation, 1);
+  assert.equal(acceptAnalyticsSignal(db, first, 30).accepted, true);
+  const snapshot = () => ({
+    targets: db.prepare("SELECT * FROM analytics_producer_generation WHERE producer_generation=? ORDER BY domain").all(generation),
+    gaps: db.prepare("SELECT * FROM analytics_signal_coverage_gap WHERE producer_generation=? ORDER BY domain").all(generation),
+  });
+  const before = snapshot();
+  assert.equal(before.gaps.length, 1);
+  assert.equal(acceptAnalyticsSignal(db, first, 31).accepted, true);
+  assert.equal(acceptAnalyticsSignal(db, exitBeforeRegister(generation, 2), 32).accepted, true);
+  assert.deepEqual(snapshot(), before);
+  assert.equal((db.prepare("SELECT lifecycle FROM analytics_producer_generation WHERE producer_generation='replacement'").get() as { lifecycle: string }).lifecycle, "registered");
+  assert.equal((db.prepare("SELECT lifecycle FROM analytics_producer_generation WHERE domain='worker' AND producer_generation='early-exit-observer'").get() as { lifecycle: string }).lifecycle, "registered");
+});
+
+test("local fallback recovery before register guards both old domains and preserves replacement generation", async (t) => {
+  const root = await dataDir(); t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const db = await openAnalyticsDb(root, 1); t.after(() => closeAnalyticsDb(db));
+  assert.equal(acceptAnalyticsSignal(db, {
+    kind: "expected_slots_config", sentAt: 0, requestId: "local-before-register-source", sourceConfigVersion: 1, effectiveAt: 0,
+    enabledFactDomains: ["execution", "model"],
+    slots: (["execution", "model"] as const).map((domain) => ({ domain, producerNamespace: "api_local_fallback" as const, producerId: "api_local_fallback" })),
+  }, 0).accepted, true);
+  const before = db.prepare("SELECT domain, collection_started_at, reconciled_through, last_succeeded_at FROM analytics_domain_state WHERE domain IN ('execution','model') ORDER BY domain").all();
+  assert.equal(abandonLocalFallbackGeneration(db, "local-before-register", 20), true);
+  const oldRows = () => db.prepare("SELECT * FROM analytics_producer_generation WHERE producer_generation='local-before-register' ORDER BY domain").all();
+  const initial = oldRows();
+  assert.equal(initial.length, 2);
+  assert.ok(initial.every((row: any) => row.lifecycle === "abandoned" && row.max_observed_at === null && row.committed_sequence === 0));
+  const gapCount = (db.prepare("SELECT COUNT(*) AS n FROM analytics_signal_coverage_gap WHERE producer_generation='local-before-register'").get() as { n: number }).n;
+  assert.equal(abandonLocalFallbackGeneration(db, "local-before-register", 21), true);
+  assert.deepEqual(oldRows(), initial);
+  assert.equal((db.prepare("SELECT COUNT(*) AS n FROM analytics_signal_coverage_gap WHERE producer_generation='local-before-register'").get() as { n: number }).n, gapCount);
+  assert.deepEqual(db.prepare("SELECT domain, collection_started_at, reconciled_through, last_succeeded_at FROM analytics_domain_state WHERE domain IN ('execution','model') ORDER BY domain").all(), before);
+  for (const domain of ["execution", "model"] as const) {
+    const oldControl = checkpoint({ domain, producerNamespace: "api_local_fallback", producerId: "api_local_fallback", producerGeneration: "local-before-register", sentAt: 30, committedSequence: 0, maxObservedAt: 30 } as any);
+    assert.equal(acceptAnalyticsSignal(db, oldControl, 30).accepted, false);
+    assert.equal(acceptAnalyticsSignal(db, { ...oldControl, kind: "register", producerGeneration: "local-replacement", maxObservedAt: null } as AnalyticsControlSignal, 30).accepted, true);
+    assert.deepEqual(db.prepare("SELECT gap_from, gap_to, cause FROM analytics_signal_coverage_gap WHERE domain=? AND producer_generation='local-before-register'").get(domain), { gap_from: 30, gap_to: null, cause: "abandoned_exit" });
+    assert.equal(acceptAnalyticsSignal(db, { ...oldControl, producerGeneration: "local-replacement", sentAt: 40, controlSequence: 40, maxObservedAt: 40 } as AnalyticsControlSignal, 40).accepted, true);
+    assert.deepEqual(db.prepare("SELECT status, reconciled_through FROM analytics_domain_state WHERE domain=?").get(domain), { status: "healthy", reconciled_through: 40 });
+    assert.deepEqual(db.prepare("SELECT gap_from, gap_to FROM analytics_signal_coverage_gap WHERE domain=? AND producer_generation='local-before-register'").get(domain), { gap_from: 30, gap_to: 40 });
+  }
+  assert.deepEqual(oldRows(), initial);
+});
+
+test("missing exact targets use an existing real coverage boundary without modifying it", async (t) => {
+  const root = await dataDir(); t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const db = await openAnalyticsDb(root, 1); t.after(() => closeAnalyticsDb(db));
+  enableWorkerFactDomains(db);
+  for (const domain of ["execution", "model"] as const)
+    assert.equal(acceptAnalyticsSignal(db, checkpoint({ domain, producerGeneration: "live-replacement", sentAt: 10, committedSequence: 0, maxObservedAt: 10 } as any), 10).accepted, true);
+  const boundaries = () => db.prepare("SELECT domain, collection_started_at, reconciled_through, last_succeeded_at FROM analytics_domain_state WHERE domain IN ('execution','model') ORDER BY domain").all();
+  const before = boundaries();
+  assert.equal(acceptAnalyticsSignal(db, exitBeforeRegister("unregistered-dead", 1), 30).accepted, true);
+  assert.deepEqual(boundaries(), before);
+  assert.deepEqual(db.prepare("SELECT domain, gap_from, gap_to, cause FROM analytics_signal_coverage_gap WHERE producer_generation='unregistered-dead' ORDER BY domain").all(), ["execution", "model"].map((domain) => ({ domain, gap_from: 10, gap_to: null, cause: "abandoned_exit" })));
+  assert.deepEqual(db.prepare("SELECT domain, lifecycle FROM analytics_producer_generation WHERE producer_generation='live-replacement' ORDER BY domain").all(), ["execution", "model"].map((domain) => ({ domain, lifecycle: "registered" })));
+});
+
+test("a genuinely accepted replacement event establishes the real boundary for old exit guards", async (t) => {
+  const root = await dataDir(); t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const db = await openAnalyticsDb(root, 1); t.after(() => closeAnalyticsDb(db));
+  enableWorkerFactDomains(db);
+  assert.equal(acceptAnalyticsSignal(db, exitBeforeRegister("before-real-event", 1), 30).accepted, true);
+  const observed = event({ producerGeneration: "event-replacement", eventType: "execution_finished", observedAt: 100,
+    payload: { executionId: "actual-event", runId: "actual-run", runtimeKind: "agent_worker", runKind: "user", parentRunId: null, queuedAt: null, startedAt: 90, endedAt: 100, endTimeQuality: "observed", endReason: "completed" } as any });
+  assert.equal(acceptAnalyticsSignal(db, observed, 100).accepted, true);
+  assert.deepEqual(db.prepare("SELECT collection_started_at, reconciled_through, last_succeeded_at FROM analytics_domain_state WHERE domain='execution'").get(), { collection_started_at: 100, reconciled_through: null, last_succeeded_at: null });
+  assert.deepEqual(db.prepare("SELECT gap_from, gap_to FROM analytics_signal_coverage_gap WHERE domain='execution' AND producer_generation='before-real-event'").get(), { gap_from: 100, gap_to: null });
+  assert.equal(acceptAnalyticsSignal(db, checkpoint({ producerGeneration: "event-replacement", sentAt: 120, controlSequence: 2, committedSequence: 1, maxObservedAt: 120 } as any), 120).accepted, true);
+  assert.deepEqual(db.prepare("SELECT status, reconciled_through FROM analytics_domain_state WHERE domain='execution'").get(), { status: "healthy", reconciled_through: 120 });
+  assert.deepEqual(db.prepare("SELECT gap_from, gap_to FROM analytics_signal_coverage_gap WHERE domain='execution' AND producer_generation='before-real-event'").get(), { gap_from: 100, gap_to: 120 });
+  assert.equal((db.prepare("SELECT lifecycle FROM analytics_producer_generation WHERE domain='execution' AND producer_generation='before-real-event'").get() as { lifecycle: string }).lifecycle, "abandoned");
+});
+
+test("abandoned gap repair never rewrites an existing non-exit uncertainty gap", async (t) => {
+  const root = await dataDir(); t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const db = await openAnalyticsDb(root, 1); t.after(() => closeAnalyticsDb(db));
+  enableWorkerFactDomains(db);
+  const old = checkpoint({ producerGeneration: "existing-loss", sentAt: 10, committedSequence: 0, maxObservedAt: 10, knownDrop: true, droppedSinceSequence: 1, lossEpoch: 1 } as any);
+  assert.equal(acceptAnalyticsSignal(db, old, 10).accepted, true);
+  assert.equal(abandonGeneration(db, old as any, 11), true);
+  const existing = db.prepare("SELECT * FROM analytics_signal_coverage_gap WHERE producer_generation='existing-loss'").all();
+  assert.equal(existing.length, 1);
+  assert.equal((existing[0] as any).cause, "known_drop");
+  assert.equal(acceptAnalyticsSignal(db, checkpoint({ producerGeneration: "live-after-loss", sentAt: 20, committedSequence: 0, maxObservedAt: 20 } as any), 20).accepted, true);
+  assert.deepEqual(db.prepare("SELECT * FROM analytics_signal_coverage_gap WHERE producer_generation='existing-loss'").all(), existing);
+  assert.equal((db.prepare("SELECT last_error_code FROM analytics_domain_state WHERE domain='execution'").get() as { last_error_code: string }).last_error_code, "SIGNAL_ABANDONED_GAP_UNRECORDED");
+});
+
+test("legal delayed execution start cannot overwrite observed finish in a nonterminal generation", async (t) => {
+  const root = await dataDir(); t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const db = await openAnalyticsDb(root, 1); t.after(() => closeAnalyticsDb(db));
+  enableWorkerFactDomains(db);
+  const finished = event({ eventId: "active-observed-finish", sequence: 1, eventType: "execution_finished", observedAt: 30,
+    payload: { executionId: "active-finish", runId: "active-run", runtimeKind: "agent_worker", runKind: "user", parentRunId: null, queuedAt: null, startedAt: 10, endedAt: 30, endTimeQuality: "observed", endReason: "completed" } as any });
+  assert.equal(acceptAnalyticsSignal(db, finished, 30).accepted, true);
+  assert.equal(acceptAnalyticsSignal(db, event({ eventId: "active-delayed-start", sequence: 2, observedAt: 20,
+    payload: { executionId: "active-finish", runId: "active-run", runtimeKind: "agent_worker", runKind: "user", parentRunId: null, queuedAt: null, startedAt: 10, endedAt: null, endTimeQuality: "unknown", endReason: null } as any }), 40).accepted, true);
+  assert.deepEqual(db.prepare("SELECT status, ended_at, effective_ended_at, end_time_quality, end_reason FROM analytics_execution_fact WHERE execution_id='active-finish'").get(), { status: "ended", ended_at: 30, effective_ended_at: 30, end_time_quality: "observed", end_reason: "completed" });
+  assert.equal((db.prepare("SELECT lifecycle FROM analytics_producer_generation WHERE domain='execution' AND producer_generation='g1'").get() as { lifecycle: string }).lifecycle, "registered");
 });

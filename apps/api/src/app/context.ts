@@ -1,3 +1,4 @@
+import type { AnalyticsSignal, AnalyticsSignalResult } from "@agent-workbench/shared";
 import type { Db } from "../infra/db/db.js";
 import type { AppLogLevel } from "../config/env.js";
 import type { CredentialMasterKeySource } from "../infra/crypto/credentialMasterKey.js";
@@ -45,6 +46,8 @@ export type AppContext = {
     collectorIntervalMs?: number;
     collectorBatchSize?: number;
   };
+  /** API-owned producer transport; remains available until Analytics onClose. */
+  analyticsSignal?: (signal: AnalyticsSignal) => Promise<AnalyticsSignalResult>;
   /** In-process only capability; never exposed as an HTTP producer credential. */
   analyticsDiagnostics?: {
     outboxCorrupt(input: { producerGeneration: string; recordedAt?: number }): Promise<boolean>;

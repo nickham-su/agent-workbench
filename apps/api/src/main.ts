@@ -6,6 +6,7 @@ import { ensureDir } from "./infra/fs/fs.js";
 import { pluginsRoot, reposRoot, workspacesRoot } from "./infra/fs/paths.js";
 import { openDb } from "./infra/db/db.js";
 import { createApp } from "./app/createApp.js";
+import { installApiShutdownHooks } from "./app/process-shutdown.js";
 import { createPreviewApp } from "./modules/preview/preview-app.js";
 import { createWorkspacePreviewFileService } from "./modules/preview/preview-file.service.js";
 import { startPreviewListenerLifecycle } from "./modules/preview/preview-lifecycle.js";
@@ -53,14 +54,9 @@ if (env.preview.enabled) {
       previewListen: { host: env.preview.host, port: env.preview.port },
       mainListen: { host: env.host, port: env.port }
     });
-    let shuttingDown = false;
-    const shutdown = () => {
-      if (shuttingDown) return;
-      shuttingDown = true;
-      void lifecycle.close();
-    };
-    process.once("SIGINT", shutdown);
-    process.once("SIGTERM", shutdown);
+    installApiShutdownHooks(() => lifecycle.close(), () => {
+      app.log.error({ errorCode: "API_SHUTDOWN_FAILED" }, "API shutdown failed");
+    });
   } catch (error) {
     if (!listenerLifecycleAttempted) {
       await previewApp?.close().catch(() => undefined);
@@ -99,5 +95,13 @@ if (env.preview.enabled) {
     preview: { enabled: false, runtime: null }
   });
 
-  await app.listen({ host: env.host, port: env.port });
+  try {
+    await app.listen({ host: env.host, port: env.port });
+    installApiShutdownHooks(() => app.close(), () => {
+      app.log.error({ errorCode: "API_SHUTDOWN_FAILED" }, "API shutdown failed");
+    });
+  } catch (error) {
+    await app.close().catch(() => undefined);
+    throw error;
+  }
 }
