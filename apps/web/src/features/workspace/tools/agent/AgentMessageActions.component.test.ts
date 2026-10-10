@@ -101,6 +101,14 @@ test("真实 AgentMessageActions：在操作按钮左侧展示消息元数据，
     },
   });
 
+  const actionClasses = wrapper.get('[data-testid="agent-message-actions"]').classes();
+  for (const className of [
+    "opacity-0", "pointer-events-none",
+    "group-hover:opacity-100", "group-hover:pointer-events-auto",
+    "group-focus-within:opacity-100", "group-focus-within:pointer-events-auto",
+  ]) {
+    assert.ok(actionClasses.includes(className), `保留文本行 hover/focus 控制：${className}`);
+  }
   const buttons = wrapper.findAll("button");
   assert.equal(buttons.length, 3);
   assert.equal(buttons[0]!.text(), "message-123");

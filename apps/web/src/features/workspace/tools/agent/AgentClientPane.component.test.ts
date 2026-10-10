@@ -114,6 +114,19 @@ function agentMessage(overrides: Partial<AgentMessage> & Pick<AgentMessage, "id"
   } as AgentMessage;
 }
 
+function textPart(messageId: string, position = 0, text = "正文") {
+  return {
+    id: `${messageId}-text-${position}`, messageId, position, type: "text" as const,
+    text, updatedRevision: 1, createdAt: 1, updatedAt: 1,
+  };
+}
+
+function textMessage(overrides: Partial<AgentMessage> & Pick<AgentMessage, "id">): AgentMessage {
+  const message = agentMessage(overrides);
+  if (overrides.parts === undefined) message.parts = [{ ...textPart(overrides.id), position: 0 }];
+  return message;
+}
+
 function timelineSnapshot(messages: AgentMessage[]) {
   return {
     session: {
@@ -1107,12 +1120,12 @@ test("真实 AgentClientPane：历史与当前消息分别渲染 Fork/Revert 操
       input: {}, providerToolCallId: null, updatedRevision: 1, createdAt: 1_000, updatedAt: 1_000,
     });
     const timelineMessages = [
-      agentMessage({ id: "old-user", type: "user", inCurrentOperationRange: false }),
-      agentMessage({
+      textMessage({ id: "old-user", type: "user", inCurrentOperationRange: false }),
+      textMessage({
         id: "old-assistant", type: "assistant", inCurrentOperationRange: false,
         createdAt: 1, updatedAt: 2_501,
       }),
-      agentMessage({ id: "current-user", type: "user", inCurrentOperationRange: true }),
+      textMessage({ id: "current-user", type: "user", inCurrentOperationRange: true }),
       agentMessage({
         id: "current-assistant", type: "assistant", inCurrentOperationRange: true,
         createdAt: 1, updatedAt: 3_201,
@@ -1120,9 +1133,11 @@ test("真实 AgentClientPane：历史与当前消息分别渲染 Fork/Revert 操
           toolPart("call-bash-a", 0, "bash"),
           toolPart("call-bash-b", 1, "bash"),
           toolPart("call-read", 2, "read"),
+          textPart("current-assistant", 3),
         ],
       }),
-      agentMessage({ id: "summary", type: "compaction", inCurrentOperationRange: true }),
+      textMessage({ id: "summary", type: "compaction", inCurrentOperationRange: true }),
+      textMessage({ id: "system", type: "system", inCurrentOperationRange: true }),
     ];
     await setTimeline(wrapper, timelineMessages);
     assert.deepEqual((wrapper.vm as unknown as { timelineState: { messages: AgentMessage[] } }).timelineState.messages.map((item) => [item.id, item.inCurrentOperationRange]), [...timelineMessages].sort((left, right) => left.id.localeCompare(right.id)).map((item) => [item.id, item.inCurrentOperationRange]));
@@ -1142,6 +1157,7 @@ test("真实 AgentClientPane：历史与当前消息分别渲染 Fork/Revert 操
     assert.deepEqual(actionByMessageId.get("current-user"), { messageId: "current-user", showFork: true, showRevert: true });
     assert.deepEqual(actionByMessageId.get("current-assistant"), { messageId: "current-assistant", showFork: true, showRevert: false });
     assert.equal(actionByMessageId.has("summary"), false);
+    assert.equal(actionByMessageId.has("system"), false);
 
     const actionFor = (messageId: string) => actionComponents.find(
       (action) => action.element.parentElement?.getAttribute("data-message-id") === messageId,
@@ -1154,16 +1170,13 @@ test("真实 AgentClientPane：历史与当前消息分别渲染 Fork/Revert 操
   }
 });
 
-test("真实 AgentClientPane：无内容 Assistant 保留单个 Fork 的可交互锚点", async () => {
+test("真实 AgentClientPane：无内容 Assistant 不渲染工具栏或专用操作空白", async () => {
   const { wrapper } = mountPane({ sessionReady: false });
   try {
     await setTimeline(wrapper, [agentMessage({ id: "empty-assistant", type: "assistant", parts: [] })]);
     const row = wrapper.get('article[data-message-id="empty-assistant"]');
-    assert.equal(row.attributes("style"), "min-height: 1.75rem;");
-    assert.equal(row.findAllComponents({ name: "AgentMessageActions" }).length, 1);
-    const action = row.getComponent({ name: "AgentMessageActions" });
-    assert.equal(action.props("showFork"), true);
-    assert.equal(action.props("showRevert"), false);
+    assert.equal(row.attributes("style"), undefined);
+    assert.equal(row.findAllComponents({ name: "AgentMessageActions" }).length, 0);
   } finally {
     wrapper.unmount();
   }
@@ -1188,6 +1201,8 @@ test("真实 AgentClientPane：同一消息的图片以无边框纯文字汇总�
     assert.equal(rows.length, 2);
     assert.match(rows[0]!.classes().join(" "), /border-blue-500\/60/);
     assert.equal(rows[1]!.classes().includes("border"), false);
+    assert.equal(rows[0]!.findAllComponents({ name: "AgentMessageActions" }).length, 1);
+    assert.equal(rows[1]!.findAllComponents({ name: "AgentMessageActions" }).length, 0);
 
     const imageText = rows[1]!.get("button");
     assert.equal(imageText.text(), "2 张图片");
@@ -1229,7 +1244,98 @@ test("真实 AgentClientPane：连续思考链合并展示，工具调用会断�
   }
 });
 
-test("真实 AgentClientPane：多 Part 消息只在排序首行渲染一个操作锚点", async () => {
+for (const firstPartType of ["reasoning", "tool_call"] as const) {
+  test(`真实 AgentClientPane：Assistant 首 Part 为 ${firstPartType} 时工具栏跟随后续正文`, async () => {
+    const { wrapper } = mountPane({ sessionReady: false });
+    try {
+      const id = `first-${firstPartType}`;
+      const base = { id: `${id}-first`, messageId: id, position: 0, updatedRevision: 1, createdAt: 1, updatedAt: 1 };
+      const firstPart = firstPartType === "reasoning"
+        ? { ...base, type: "reasoning" as const, text: "" }
+        : { ...base, type: "tool_call" as const, toolName: "read", input: {}, providerToolCallId: null };
+      await setTimeline(wrapper, [agentMessage({ id, parts: [textPart(id, 1), firstPart] })]);
+      const rows = wrapper.findAll(`article[data-message-id="${id}"]`);
+      assert.equal(rows.length, 2);
+      assert.equal(rows[0]!.findAllComponents({ name: "AgentMessageActions" }).length, 0);
+      assert.equal(rows[1]!.findAllComponents({ name: "AgentMessageActions" }).length, 1);
+      assert.ok(rows[1]!.classes().includes("group"), "正文与工具栏处于同一个 hover group");
+      assert.equal(rows[1]!.getComponent({ name: "AssistantMarkdownMessage" }).props("text"), "正文");
+      assert.equal(rows[1]!.getComponent({ name: "AgentMessageActions" }).props("messageId"), id);
+    } finally {
+      wrapper.unmount();
+    }
+  });
+}
+
+for (const type of ["user", "assistant"] as const) {
+  test(`真实 AgentClientPane：${type} 每个非空 TextPart 独立展示消息级工具栏，原文与空行保留`, async () => {
+    const { wrapper } = mountPane({ sessionReady: false });
+    try {
+      const id = `multiple-${type}`;
+      await setTimeline(wrapper, [agentMessage({
+        id, type, inCurrentOperationRange: true,
+        parts: [
+          textPart(id, 0, ""),
+          textPart(id, 1, "  first\n"),
+          textPart(id, 2, " \t\n　"),
+          textPart(id, 3, "second"),
+        ],
+      })]);
+      const rows = wrapper.findAll(`article[data-message-id="${id}"]`);
+      assert.equal(rows.length, 4, "空白 TextPart 不删除或过滤");
+      assert.deepEqual(rows.map((row) => row.findAllComponents({ name: "AgentMessageActions" }).length), [0, 1, 0, 1]);
+      for (const index of [1, 3]) {
+        const row = rows[index]!;
+        assert.ok(row.classes().includes("group"));
+        const action = row.getComponent({ name: "AgentMessageActions" });
+        assert.equal(action.element.parentElement, row.element);
+        assert.equal(action.props("messageId"), id);
+        assert.equal(action.props("showFork"), true);
+        assert.equal(action.props("showRevert"), type === "user");
+        assert.equal(action.props("outside"), type === "user");
+      }
+      const textComponents = wrapper.findAllComponents({ name: type === "user" ? "AgentUserMessage" : "AssistantMarkdownMessage" });
+      assert.deepEqual(textComponents.map((item) => item.props("text")), ["", "  first\n", " \t\n　", "second"]);
+    } finally {
+      wrapper.unmount();
+    }
+  });
+}
+
+test("真实 AgentClientPane：空文本、无 Part 和纯思考或工具消息均不展示工具栏", async () => {
+  const { wrapper } = mountPane({ sessionReady: false });
+  try {
+    const messages = (["user", "assistant"] as const).flatMap((type) => [
+      agentMessage({ id: `no-parts-${type}`, type }),
+      textMessage({ id: `blank-${type}`, type, parts: [textPart(`blank-${type}`, 0, " \n\t　")] }),
+      textMessage({ id: `empty-${type}`, type, parts: [textPart(`empty-${type}`, 0, "")] }),
+    ]);
+    messages.push(
+      agentMessage({ id: "reasoning-only", parts: [{ id: "reason", messageId: "reasoning-only", position: 0, type: "reasoning", text: "think", updatedRevision: 1, createdAt: 1, updatedAt: 1 }] }),
+      agentMessage({ id: "tool-only", parts: [{ id: "call", messageId: "tool-only", position: 0, type: "tool_call", toolName: "read", input: {}, providerToolCallId: null, updatedRevision: 1, createdAt: 1, updatedAt: 1 }] }),
+    );
+    await setTimeline(wrapper, messages);
+    assert.equal(wrapper.findAllComponents({ name: "AgentMessageActions" }).length, 0);
+    assert.equal(wrapper.findAll("article[data-message-id]").length, messages.length);
+  } finally {
+    wrapper.unmount();
+  }
+});
+
+test("真实 AgentClientPane：流式 TextPart 从空白变为正文时展示工具栏", async () => {
+  const { wrapper } = mountPane({ sessionReady: false });
+  try {
+    for (const text of ["", " \n", "回答"]) {
+      await setTimeline(wrapper, [agentMessage({ id: "streaming-text", status: "streaming", parts: [textPart("streaming-text", 0, text)] })]);
+      assert.equal(wrapper.findAllComponents({ name: "AgentMessageActions" }).length, text.trim() ? 1 : 0);
+      assert.equal(wrapper.getComponent({ name: "AssistantMarkdownMessage" }).props("text"), text);
+    }
+  } finally {
+    wrapper.unmount();
+  }
+});
+
+test("真实 AgentClientPane：无 TextPart 的思考、工具与图片消息不渲染工具栏", async () => {
   const { wrapper } = mountPane({ sessionReady: false });
   try {
     const toolParts = [
@@ -1243,9 +1349,7 @@ test("真实 AgentClientPane：多 Part 消息只在排序首行渲染一个操�
     for (const messageId of ["tool-assistant", "image-assistant"]) {
       const rows = wrapper.findAll(`article[data-message-id="${messageId}"]`);
       assert.equal(rows.length, messageId === "tool-assistant" ? 2 : 1);
-      assert.equal(rows.flatMap((row) => row.findAllComponents({ name: "AgentMessageActions" })).length, 1);
-      assert.equal(rows[0]!.findAllComponents({ name: "AgentMessageActions" }).length, 1);
-      assert.equal(rows.slice(1).flatMap((row) => row.findAllComponents({ name: "AgentMessageActions" })).length, 0);
+      assert.equal(rows.flatMap((row) => row.findAllComponents({ name: "AgentMessageActions" })).length, 0);
     }
   } finally {
     wrapper.unmount();
@@ -1257,8 +1361,8 @@ test("真实 AgentClientPane：Subtask Session 不显示任何结构操作", asy
   try {
     await subtask.wrapper.setProps({ sessionKind: "subtask" });
     await setTimeline(subtask.wrapper, [
-      agentMessage({ id: "subtask-user", type: "user", inCurrentOperationRange: true }),
-      agentMessage({ id: "subtask-assistant", type: "assistant", inCurrentOperationRange: true }),
+      textMessage({ id: "subtask-user", type: "user", inCurrentOperationRange: true }),
+      textMessage({ id: "subtask-assistant", type: "assistant", inCurrentOperationRange: true }),
     ]);
     assert.equal(subtask.wrapper.findAllComponents({ name: "AgentMessageActions" }).length, 0);
   } finally {
@@ -1317,8 +1421,11 @@ test("真实 AgentClientPane：点击历史 Fork 构造请求、pending 禁用�
   modal.confirm = (() => { confirmCalls += 1; return { destroy() {}, update() {} }; }) as typeof Modal.confirm;
   const wrapper = mountForkPane(async (request) => { requests.push(request); return await completion.promise; });
   try {
-    await setTimeline(wrapper, [agentMessage({ id: "historical-user", type: "user", inCurrentOperationRange: false })]);
-    const action = wrapper.get('[data-testid="fork-action"]');
+    await setTimeline(wrapper, [textMessage({
+      id: "historical-user", type: "user", inCurrentOperationRange: false,
+      parts: [textPart("historical-user"), textPart("historical-user", 1, "后续正文")],
+    })]);
+    const action = wrapper.findAll('[data-testid="fork-action"]')[1]!;
     await action.trigger("click");
     await nextTick();
     assert.deepEqual(requests, [{ fromSessionId: "session-a", fromMessageId: "historical-user" }]);
@@ -1339,7 +1446,7 @@ test("真实 AgentClientPane：Fork 失败不 emit、恢复 pending 且不改写
   const completion = deferred<import("@agent-workbench/shared").AgentSessionRecord>();
   const wrapper = mountForkPane(async () => await completion.promise);
   try {
-    await setTimeline(wrapper, [agentMessage({ id: "historical-assistant", type: "assistant", inCurrentOperationRange: false })]);
+    await setTimeline(wrapper, [textMessage({ id: "historical-assistant", type: "assistant", inCurrentOperationRange: false })]);
     const action = wrapper.get('[data-testid="fork-action"]');
     await action.trigger("click");
     await nextTick();
@@ -1355,12 +1462,15 @@ test("真实 AgentClientPane：Fork 失败不 emit、恢复 pending 且不改写
   }
 });
 
-test("真实 AgentClientPane：点击 Revert 仍打开确认框", async () => {
+test("真实 AgentClientPane：后续 TextPart 的 Revert 确认后仍作用于整条消息", async () => {
+  const http = mockContextRequests();
   const originalConfirm = Modal.confirm;
   let confirmCalls = 0;
+  let confirmOnOk: (() => Promise<void>) | undefined;
   const modal = Modal as unknown as { confirm: typeof Modal.confirm };
-  modal.confirm = (() => {
+  modal.confirm = ((options: { onOk: () => Promise<void> }) => {
     confirmCalls += 1;
+    confirmOnOk = options.onOk;
     return { destroy() {}, update() {} };
   }) as unknown as typeof Modal.confirm;
   const wrapper = mountForkPane(async () => ({ ...timelineSnapshot([]).session, id: "unused" }));
@@ -1369,13 +1479,23 @@ test("真实 AgentClientPane：点击 Revert 仍打开确认框", async () => {
       id: "current-user",
       type: "user",
       inCurrentOperationRange: true,
-      parts: [{ id: "draft", messageId: "current-user", position: 3, type: "text", text: "draft", updatedRevision: 1, createdAt: 1, updatedAt: 1 }],
+      parts: [textPart("current-user", 3, "draft"), textPart("current-user", 4, " continuation")],
     })]);
-    await wrapper.get('[data-testid="revert-action"]').trigger("click");
+    await wrapper.findAll('[data-testid="revert-action"]')[1]!.trigger("click");
     assert.equal(confirmCalls, 1);
+    assert.equal(http.requests.length, 0, "确认前不能请求 Revert");
+    assert.ok(confirmOnOk);
+    const reverting = confirmOnOk();
+    const request = await http.waitFor(0);
+    assert.equal(request.url, "/agent/sessions/session-a/revert");
+    assert.deepEqual(JSON.parse(request.data as string), { workspaceId: "ws-a", messageId: "current-user" });
+    http.respond(0, {});
+    await reverting;
+    assert.equal((wrapper.vm as unknown as { draft: string }).draft, "draft continuation");
   } finally {
     modal.confirm = originalConfirm;
     wrapper.unmount();
+    http.restore();
   }
 });
 
@@ -1525,8 +1645,11 @@ test("真实 AgentClientPane：Session 与消息 ID 复制在 Clipboard API reje
   try {
     const before = document.body.querySelectorAll("textarea").length;
     await wrapper.get('a-button[aria-label="agent.client.copySessionId"]').trigger("click");
-    await setTimeline(wrapper, [agentMessage({ id: "message-copy", type: "user" })]);
-    wrapper.getComponent({ name: "AgentMessageActions" }).vm.$emit("copy-message-id");
+    await setTimeline(wrapper, [textMessage({
+      id: "message-copy", type: "user",
+      parts: [textPart("message-copy"), textPart("message-copy", 1, "后续正文")],
+    })]);
+    wrapper.findAllComponents({ name: "AgentMessageActions" })[1]!.vm.$emit("copy-message-id");
     await new Promise((resolve) => setImmediate(resolve));
 
     assert.deepEqual(copiedContents, ["session-a", "message-copy"]);
@@ -1680,7 +1803,7 @@ test("真实pane Fork在请求发起时捕获激活意图，较新用户意图�
     captureActivationGuard: () => () => current,
   });
   try {
-    await setTimeline(wrapper, [agentMessage({ id: "historical-user", type: "user", inCurrentOperationRange: false })]);
+    await setTimeline(wrapper, [textMessage({ id: "historical-user", type: "user", inCurrentOperationRange: false })]);
     await wrapper.get('[data-testid="fork-action"]').trigger("click");
     current = false;
     completion.resolve(forkRecord);

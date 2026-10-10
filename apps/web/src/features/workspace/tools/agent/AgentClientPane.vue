@@ -85,11 +85,10 @@
             :key="row.id"
             class="group relative rounded"
             :class="messageClass(row)"
-            :style="messageActionAnchorStyle(row)"
             :data-message-id="row.message.id"
           >
             <AgentMessageActions
-              v-if="isMessageActionAnchor(row) && (showFork(row.message) || showRevert(row.message))"
+              v-if="isMessageActionTextRow(row) && (showFork(row.message) || showRevert(row.message))"
               :disabled="isSessionMessageMutationPending"
               :message-id="row.message.id"
               :copy-message-id-label="t('agent.client.copyMessageId')"
@@ -824,19 +823,12 @@ function messageClass(row: ConversationPart) {
             ? "px-2 py-0"
             : "p-2";
 }
-function isMessageActionAnchor(row: ConversationPart) {
-  return row.isFirstRowForMessage;
-}
-function messageActionAnchorStyle(row: ConversationPart) {
-  if (
-    isMessageActionAnchor(row) &&
-    row.message.type === "assistant" &&
-    row.part === null &&
-    showFork(row.message)
-  ) {
-    return { minHeight: "1.75rem" };
-  }
-  return undefined;
+function isMessageActionTextRow(row: ConversationPart) {
+  return (
+    (row.message.type === "user" || row.message.type === "assistant") &&
+    row.part?.type === "text" &&
+    row.part.text.trim().length > 0
+  );
 }
 function showFork(targetMessage: AgentMessage) {
   return !isSubtaskSession.value && canForkAgentTimelineMessage(targetMessage);
