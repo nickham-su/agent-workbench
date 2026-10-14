@@ -1362,6 +1362,15 @@ export default {
     reason: { coverage_gap: "Coverage gap", range_not_reconciled: "Range not reconciled", collector_degraded: "Collector degraded", signal_loss: "Signal loss", dirty_hour: "Hour is being refreshed", open_fact: "Open fact", configuration_changed: "Configuration changed", domain_disabled: "Domain disabled", domain_unavailable: "Domain unavailable", no_safe_data: "No safe data", invalid_metric_state: "Invalid metric state" }
   },
   editor: {
+    image: {
+      loading: "Loading image…",
+      tooLarge: "Image exceeds 20 MiB and cannot be previewed",
+      loadFailed: "Image failed to load or its format is unsupported"
+    },
+    htmlPreview: {
+      open: "Preview in browser",
+      saveFirst: "Finish saving and resolve conflicts before opening the preview"
+    },
     placeholder: {
       empty: "No content opened",
       fileEditorComingSoon: "File editing will be connected in a later stage"

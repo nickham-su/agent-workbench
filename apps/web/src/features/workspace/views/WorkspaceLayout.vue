@@ -1041,7 +1041,8 @@ function toolViewProps(toolId: ToolId) {
   if (toolId === "editor") {
     return {
       workspaceId: props.workspaceId,
-      toolId
+      toolId,
+      previewEnabled: props.previewEnabled
     };
   }
   return { workspaceId: props.workspaceId, toolId };

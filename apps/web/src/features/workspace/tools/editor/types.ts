@@ -1,5 +1,6 @@
 import type * as monaco from "monaco-editor/esm/vs/editor/editor.api.js";
 import type { FileVersion } from "@agent-workbench/shared";
+import type { EditorImageFailure } from "./editorImages";
 
 export type EditorOpenAtHighlight =
   | { kind: "none" }
@@ -50,6 +51,14 @@ export type FileEditorTab = {
   readOnly: boolean;
   disposable?: monaco.IDisposable;
   viewState?: monaco.editor.ICodeEditorViewState | null;
+  image?: {
+    status: "loading" | "ready" | "error";
+    url?: string;
+    reason?: EditorImageFailure;
+  };
+  /** Invalidates reads when the Tab is closed, renamed or refreshed. */
+  loadVersion?: number;
+  needsReload?: boolean;
 };
 
 export type PreviewEditorTab = {

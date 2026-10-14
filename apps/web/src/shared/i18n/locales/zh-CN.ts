@@ -1360,6 +1360,15 @@ export default {
     reason: { coverage_gap: "覆盖缺口", range_not_reconciled: "范围尚未对账", collector_degraded: "采集器降级", signal_loss: "信号丢失", dirty_hour: "小时数据刷新中", open_fact: "事实尚未关闭", configuration_changed: "配置已变化", domain_disabled: "域已禁用", domain_unavailable: "域不可用", no_safe_data: "没有安全数据", invalid_metric_state: "无效指标状态" }
   },
   editor: {
+    image: {
+      loading: "正在加载图片…",
+      tooLarge: "图片超过 20 MiB，暂不支持预览",
+      loadFailed: "图片加载失败或格式不受支持"
+    },
+    htmlPreview: {
+      open: "在浏览器中预览",
+      saveFirst: "请先完成保存并解决冲突，再打开预览"
+    },
     placeholder: {
       empty: "暂无打开内容",
       fileEditorComingSoon: "文件编辑能力将在后续阶段接入"

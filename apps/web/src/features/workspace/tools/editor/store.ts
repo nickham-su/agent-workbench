@@ -1,5 +1,6 @@
 import { computed, markRaw, reactive, ref, type ComputedRef, type Ref } from "vue";
 import * as monaco from "monaco-editor/esm/vs/editor/editor.api.js";
+import { getWorkspacePreviewResourceDescriptor } from "@agent-workbench/shared";
 import { inferLanguageFromPath } from "@/shared/monaco/languageUtils";
 import type { DiffEditorTab, EditorOpenFileRequest, EditorTab, PreviewEditorTab, QueuedEditorOpenFileRequest } from "./types";
 
@@ -28,8 +29,16 @@ export type EditorStore = {
 
 const stores = new Map<string, EditorStore>();
 
+/** All image URL replacement/disposal goes through this single release point. */
+export function releaseEditorImage(tab: Extract<EditorTab, { kind: "file" }>) {
+  if (tab.image?.url) URL.revokeObjectURL(tab.image.url);
+  if (tab.image) tab.image.url = undefined;
+}
+
 function disposeTab(tab: EditorTab) {
   if (tab.kind !== "file") return;
+  tab.loadVersion = (tab.loadVersion ?? 0) + 1;
+  releaseEditorImage(tab);
   tab.disposable?.dispose();
   tab.disposable = undefined;
   tab.model?.dispose();
@@ -37,6 +46,17 @@ function disposeTab(tab: EditorTab) {
 }
 
 function updateFileTabPath(tab: Extract<EditorTab, { kind: "file" }>, nextPath: string) {
+  tab.loadVersion = (tab.loadVersion ?? 0) + 1;
+  // Conflict dialogs belong to the old path/version. Release that state now;
+  // stale callbacks remain invalid and cannot clear a later conflict.
+  tab.conflictOpen = false;
+  const becomesImage = getWorkspacePreviewResourceDescriptor(nextPath)?.kind === "image";
+  if (tab.image || (becomesImage && !tab.dirty && !tab.saving)) {
+    releaseEditorImage(tab);
+    tab.needsReload = true;
+    if (tab.image) tab.image = { status: "loading" };
+  }
+  // Dirty text is retained across a format-changing rename until explicitly reloaded.
   tab.path = nextPath;
   tab.key = `file:${nextPath}`;
   tab.title = nextPath.split("/").filter(Boolean).pop() || nextPath;

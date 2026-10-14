@@ -75,8 +75,10 @@ export type WorkspaceFilesRouteTestHooks = {
 };
 
 function attachmentHeader(filename: string) {
-  const safeName = filename.replace(/"/g, '\\"');
-  const encoded = encodeURIComponent(filename);
+  // Keep the legacy parameter ASCII-only; Unicode belongs in RFC 8187 filename*.
+  const safeName = filename.replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "\\$&");
+  const encoded = encodeURIComponent(filename)
+    .replace(/['()*]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
   return `attachment; filename="${safeName}"; filename*=UTF-8''${encoded}`;
 }
 
@@ -309,10 +311,8 @@ export async function registerWorkspaceFilesRoutes(app: FastifyInstance, ctx: Ap
         archive.file(entry.absPath, { name: rel });
       }
 
-      reply.hijack();
-      archive.pipe(reply.raw);
       void archive.finalize();
-      return reply;
+      return reply.send(archive);
     }
   );
 }
