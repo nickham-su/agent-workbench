@@ -11,7 +11,7 @@ const profile = (npm = "@ai-sdk/anthropic", retries = 0) => ({
 const run = { workspaceId: "ws", sessionId: "session", runId: "run", workspacePath: process.cwd(), workspaceRepoDirNames: [], inputText: "hello" };
 const context = (messages: unknown[] = []) => ({ pendingTools: [], tools: [], headMessageId: null, sessionRevision: 0,
   system: "", messages, providerReplay: [{ assistantOrdinal: 1, assistantProvenance: null, parts: [] }],
-  lastResponseTotalTokens: null, uiLocale: null, externalSkills: [] });
+  lastResponseTotalTokens: null, uiLocale: null, workspaceRepoNames: [], externalSkills: [] });
 const step = (runner: AgentRunner, npm: string, retries = 0, messages: unknown[] = []) => (runner as any).runModelStep({
   profile: profile(npm, retries), run, context: context(messages), step: 1, signal: new AbortController().signal,
   recoveryContinuation: { messageId: null }, repeatedToolCallCounter: new Map(),

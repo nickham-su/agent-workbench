@@ -1,5 +1,8 @@
 import path from "node:path";
+import { Value } from "@sinclair/typebox/value";
+import { GitRepoNameSchema } from "@agent-workbench/shared/internal-contracts/agent-api";
 import type { AppContext } from "../../app/context.js";
+import type { Db } from "../../infra/db/db.js";
 import { getWorkspace, listWorkspaceRepos } from "../workspaces/workspace.store.js";
 
 export type AgentWorkspaceRunContext = {
@@ -14,6 +17,28 @@ function isSafeWorkspaceRepoDirName(value: string): boolean {
     return false;
   }
   return !path.isAbsolute(value) && !path.win32.isAbsolute(value);
+}
+
+/** Current registered names, with no queued-run normalization or count limit. */
+export function listAgentWorkspaceRepoNames(
+  db: Db,
+  workspaceId: string,
+  onInvalidNames?: (count: number) => void,
+): string[] {
+  const names: string[] = [];
+  const seen = new Set<string>();
+  let invalidCount = 0;
+  for (const { dirName } of listWorkspaceRepos(db, workspaceId)) {
+    if (!Value.Check(GitRepoNameSchema, dirName)) {
+      invalidCount += 1;
+      continue;
+    }
+    if (seen.has(dirName)) continue;
+    seen.add(dirName);
+    names.push(dirName);
+  }
+  if (invalidCount > 0) onInvalidNames?.(invalidCount);
+  return names;
 }
 
 /**

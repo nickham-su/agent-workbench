@@ -721,8 +721,8 @@ test("all public client methods are explicitly classified", () => {
     getPluginRuntimeSnapshots: "controlRead",
     listPluginTools: "controlRead",
     executePluginTool: "excluded",
-    prepareGitEnvForBash: "excluded",
-    cleanupGitEnvLease: "excluded",
+    prepareRepoGitEnvLease: "controlWrite",
+    releaseRepoGitEnvLease: "idempotentControlWrite",
   });
 });
 
@@ -1681,6 +1681,7 @@ const validPromptContextResponse = {
   ],
   lastResponseTotalTokens: null,
   uiLocale: "zh-CN",
+  workspaceRepoNames: [],
   externalSkills: [{ skillId: ".agents/review", skillDirectoryPath: "/workspace/.agents/review" }],
 };
 
@@ -1816,6 +1817,7 @@ test("read-side methods reject strict schema mismatches and warn without leaking
   const origin = await startServer((request) => ({
     status: 200,
     body: {
+      workspaceRepoNames: [],
       apiKey: "apiKey secret",
       prompt: "prompt secret",
       messages: "messages secret",
@@ -2220,3 +2222,114 @@ for (const sourceSessionId of [null, 8, {}]) {
     await assert.rejects(createShortTimeoutClient(fixture.origin).startSubtaskRun(subtaskStartInput), InternalRpcInvalidResponseError);
   });
 }
+
+const repoGitOwner = { workspaceId: "workspace-git", sessionId: "session-git", runId: "run-git", toolExecutionId: "execution-git" };
+const repoGitPrepareInput = { ...repoGitOwner, repo: "repo-git", timeoutMs: 120000 };
+const repoGitReleaseInput = { ...repoGitOwner, leaseId: "lease_00000000000000000000000000", stopEvidence: "managed_group_absent" as const };
+const repoGitPrepared = {
+  ok: true, repo: "repo-git", kind: "none", env: { GIT_TERMINAL_PROMPT: "0" },
+  leaseId: repoGitReleaseInput.leaseId, expiresAt: "2026-10-14T14:00:00.000Z", sensitiveFilePaths: [],
+};
+
+test("repo Git RPCs use shared endpoints, exact owner payload and strict success schemas", async () => {
+  const fixture = await startTestServer((request) => ({
+    status: 200, body: request.url === AgentApiEndpoints.prepareRepoGitEnvLease.path ? repoGitPrepared : { ok: true },
+  }));
+  const client = createShortTimeoutClient(fixture.origin, { timing: { internalRpcTimeoutMs: 1000 } });
+  assert.deepEqual(await client.prepareRepoGitEnvLease(repoGitPrepareInput), repoGitPrepared);
+  assert.deepEqual(await client.releaseRepoGitEnvLease(repoGitReleaseInput), { ok: true });
+  assert.deepEqual(fixture.attempts.map(({ url, method, body }) => ({ url, method, body })), [
+    { ...AgentApiEndpoints.prepareRepoGitEnvLease, url: AgentApiEndpoints.prepareRepoGitEnvLease.path, body: repoGitPrepareInput },
+    { ...AgentApiEndpoints.releaseRepoGitEnvLease, url: AgentApiEndpoints.releaseRepoGitEnvLease.path, body: repoGitReleaseInput },
+  ].map(({ path: _path, ...entry }) => entry));
+  for (const request of fixture.attempts) assert.equal(request.headers["x-awb-agent-internal-token"], "TOKEN");
+});
+
+test("repo Git prepare/release have bounded deadlines and never retry 503, network loss or timeout", async () => {
+  for (const mode of ["prepare", "release"] as const) {
+    for (const response of [
+      { status: 503, body: { message: "sentinel-response-secret" } },
+      { status: 200, destroySocket: true },
+      { status: 200, end: false },
+    ]) {
+      const fixture = await startTestServer(() => response);
+      const recorder = createWarningRecorder();
+      const client = createShortTimeoutClient(fixture.origin, { logger: recorder.logger, timing: { internalRpcTimeoutMs: 150 } });
+      await assert.rejects(() => mode === "prepare"
+        ? client.prepareRepoGitEnvLease(repoGitPrepareInput)
+        : client.releaseRepoGitEnvLease(repoGitReleaseInput));
+      assert.equal(fixture.attempts.length, 1, `${mode} must not retry`);
+      assert(!recorder.warnings.some((warning) => warning.includes("sentinel-response-secret")));
+    }
+  }
+});
+
+test("cancelled prepare cannot send a request and independent release works after run cancellation", async () => {
+  const fixture = await startTestServer(() => ({ status: 200, body: { ok: true } }));
+  const client = createShortTimeoutClient(fixture.origin, { timing: { internalRpcTimeoutMs: 1000 } });
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(() => client.prepareRepoGitEnvLease(repoGitPrepareInput, { abortSignal: controller.signal }), { name: "AbortError" });
+  assert.equal(fixture.attempts.length, 0);
+  await client.releaseRepoGitEnvLease(repoGitReleaseInput);
+  assert.equal(fixture.attempts.length, 1);
+  assert.equal(fixture.attempts[0]?.url, AgentApiEndpoints.releaseRepoGitEnvLease.path);
+});
+
+test("in-flight prepare follows caller cancellation while release has its own bounded deadline", async () => {
+  const fixture = await startTestServer(() => ({ status: 200, end: false }));
+  const client = createShortTimeoutClient(fixture.origin, { timing: { internalRpcTimeoutMs: 1000 } });
+  const controller = new AbortController();
+  const pending = client.prepareRepoGitEnvLease(repoGitPrepareInput, { abortSignal: controller.signal });
+  const timer = setTimeout(() => controller.abort(), 30);
+  try { await assert.rejects(() => pending); } finally { clearTimeout(timer); }
+  assert.equal(fixture.attempts.length, 1);
+  await assert.rejects(() => client.releaseRepoGitEnvLease(repoGitReleaseInput, { timeoutMs: 100 }), InternalRpcTimeoutError);
+  assert.equal(fixture.attempts.length, 2);
+});
+
+test("Git RPC response validation remains strict in warn mode and never returns arbitrary environment or body secrets", async () => {
+  for (const body of [
+    { ...repoGitPrepared, env: { GIT_TERMINAL_PROMPT: "0", AWB_PRIVATE_SENTINEL: "sentinel-response-secret" } },
+    { ...repoGitPrepared, kind: "https" },
+    { ...repoGitPrepared, sensitiveFilePaths: ["/private/sentinel-response-secret"] },
+    { ...repoGitPrepared, leaseId: null },
+  ]) {
+    const fixture = await startTestServer(() => ({ status: 200, body }));
+    const recorder = createWarningRecorder();
+    const client = new AgentApiClient({ apiOrigin: fixture.origin, internalToken: "TOKEN", internalRpcTimeoutMs: 1000, responseValidation: "warn", logger: recorder.logger });
+    await assert.rejects(() => client.prepareRepoGitEnvLease(repoGitPrepareInput), (error: unknown) => {
+      assert(error instanceof InternalRpcInvalidResponseError);
+      assert(!error.message.includes("sentinel-response-secret"));
+      assert.equal(error.leaseId, typeof body.leaseId === "string" ? body.leaseId : undefined);
+      assert.equal(Object.prototype.propertyIsEnumerable.call(error, "leaseId"), false);
+      assert(!JSON.stringify(error).includes("sentinel-response-secret"));
+      assert(!JSON.stringify(error).includes(repoGitReleaseInput.leaseId));
+      return true;
+    });
+    assert.equal(fixture.attempts.length, 1);
+    assert(!recorder.warnings.some((warning) => warning.includes("sentinel-response-secret")));
+  }
+});
+
+test("Git client rejects invalid owner/extra input before transport and missing dynamic context even in warn mode", async () => {
+  const fixture = await startTestServer(() => {
+    const { workspaceRepoNames: _names, ...legacyPrompt } = validPromptContextResponse;
+    return { status: 200, body: legacyPrompt };
+  });
+  const client = new AgentApiClient({ apiOrigin: fixture.origin, internalToken: "TOKEN", internalRpcTimeoutMs: 1000, responseValidation: "warn", logger: { warn() {} } });
+  await assert.rejects(() => client.prepareRepoGitEnvLease({ ...repoGitPrepareInput, cwd: "/private" } as any), /invalid repo Git environment prepare request/);
+  await assert.rejects(() => client.releaseRepoGitEnvLease({ ...repoGitReleaseInput, pgid: 1 } as any), /invalid repo Git environment release request/);
+  assert.equal(fixture.attempts.length, 0);
+  await assert.rejects(() => client.getPromptContext({ workspaceId: "WORKSPACE", sessionId: "SESSION", runId: "RUN" }), InternalRpcInvalidResponseError);
+  assert.equal(fixture.attempts.length, 1);
+});
+
+test("AC-BASH-EXIT-SOURCE: retired Bash credential methods and policies are not public client surface", () => {
+  for (const method of ["prepareGitEnvForBash", "cleanupGitEnvLease"]) {
+    assert.equal(Object.hasOwn(AgentApiClient.prototype, method), false);
+    assert.equal(Object.hasOwn(AgentApiClient.publicMethodPolicies, method), false);
+  }
+  assert.equal(AgentApiClient.publicMethodPolicies.prepareRepoGitEnvLease, "controlWrite");
+  assert.equal(AgentApiClient.publicMethodPolicies.releaseRepoGitEnvLease, "idempotentControlWrite");
+});

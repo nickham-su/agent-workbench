@@ -8,6 +8,7 @@ const require = createRequire(import.meta.url);
 export const componentTests = [
   "src/features/dashboard/Dashboard.component.test.ts",
   "src/features/settings/components/AgentProvidersSettingsPanel.component.test.ts",
+  "src/features/settings/components/AgentProfilesSettingsPanel.component.test.ts",
   "src/features/workspace/tools/agent/agentArtifactCards.component.test.ts",
   "src/features/workspace/tools/agent/agentMarkdownFileLinks.component.test.ts",
   "src/features/workspace/tools/agent/agentRichToolCards.component.test.ts",

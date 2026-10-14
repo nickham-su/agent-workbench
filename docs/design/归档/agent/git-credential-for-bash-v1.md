@@ -1,6 +1,8 @@
 # Git 凭证接入 bash 工具（V1）
 
-Status: draft
+Status: retired
+
+> 本文仅保留历史设计。Bash 的 Git 命令识别、项目凭证注入和旧 prepare/cleanup RPC 已退场，不再作为有效产品契约或 fallback。需要项目 Git 认证时，请显式启用 [Git 专用工具](../../0032-Git专用工具与Bash凭证注入退场/requirements.md)；界面 Git API 和交互式终端认证保持独立。
 
 > 本文档描述“让 agent-worker 的内置 `bash` 工具在执行 `git` 命令时，复用项目现有 Credentials 体系”的 V1 方案。
 >

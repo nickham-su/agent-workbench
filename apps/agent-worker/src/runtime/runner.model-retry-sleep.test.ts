@@ -66,7 +66,7 @@ function fixture(deps: Deps = {}, options: { failures?: number; failNoticeOnce?:
         run: { workspaceId: "ws", sessionId: "session", runId: "run", workspacePath: process.cwd(),
           workspaceRepoDirNames: [], inputText: "hello" },
         context: { pendingTools: [], tools: [], headMessageId: null, sessionRevision: 0, system: "", messages: [],
-          providerReplay: [], lastResponseTotalTokens: null, uiLocale: null, externalSkills: [] },
+          providerReplay: [], lastResponseTotalTokens: null, uiLocale: null, workspaceRepoNames: [], externalSkills: [] },
         step: 1, signal, repeatedToolCallCounter: new Map(),
       });
     },

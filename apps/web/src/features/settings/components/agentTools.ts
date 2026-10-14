@@ -9,6 +9,7 @@ export const DEFAULT_AGENT_TOOLS: AgentToolName[] = [
 
 const CONFIGURABLE_AGENT_TOOLS: AgentToolName[] = [
   ...DEFAULT_AGENT_TOOLS,
+  "git",
   "scratchpad",
   "todolist",
   "view_image",
@@ -37,6 +38,7 @@ export function toAgentToolOptions(translate: (key: string) => string) {
 
 export function agentToolLabelKey(tool: AgentToolName) {
   if (tool === "bash") return "settings.agentProfiles.tools.bash";
+  if (tool === "git") return "settings.agentProfiles.tools.git";
   if (tool === "write") return "settings.agentProfiles.tools.write";
   if (tool === "apply_patch") return "settings.agentProfiles.tools.applyPatch";
   if (tool === "scratchpad") return "settings.agentProfiles.tools.scratchpad";

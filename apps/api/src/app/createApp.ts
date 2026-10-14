@@ -99,8 +99,9 @@ export async function createApp(ctx: AppContext) {
   await registerGitModule(app, ctx);
   await registerFilesModule(app, ctx);
   try {
-    await registerAgentModule(app, ctx);
+    // Lease routes/cleanup are present before Agent startup can resume deletion.
     await registerGitEnvModule(app, ctx);
+    await registerAgentModule(app, ctx);
     await registerWebUi(app, ctx);
   } catch (error) {
     // Agent startup can fail after Analytics and other owned resources started.

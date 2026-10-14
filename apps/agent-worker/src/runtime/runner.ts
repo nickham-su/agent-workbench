@@ -37,6 +37,7 @@ import {
   type AgentApiFlushAssistantPartsRequest,
   type AgentApiPromptAttachmentRefPart,
   AgentViewImageResultSchema,
+  GitToolResultSchema,
   AgentToolResultOutputSchema,
   viewImagePathPreview,
 } from "@agent-workbench/shared/internal-contracts/agent-api";
@@ -49,6 +50,8 @@ import { McpToolProvider } from "./tools/providers/mcp.js";
 import type { ToolExecutionContext } from "./tools/types.js";
 import { isMcpToolName, isPluginToolName } from "./tools/types.js";
 import { createToolFailureCaptureIfEnabled, extractPartialToolResults, type ToolFailureCapture } from "./toolErrorCapture.js";
+import { diagnosticToolArgs, diagnosticToolRequest } from "./gitDiagnostic.js";
+import { gitSafeErrorCode, gitSafeErrorText } from "./gitErrors.js";
 import type { AgentAttachmentStorage } from "./agentAttachmentStorage.js";
 import { formatToolErrorStoreWarning } from "./toolErrorStore.js";
 import {
@@ -435,6 +438,28 @@ function buildToolSuccessText(params: {
     return content === "" ? headers.join("\n") : `${headers.join("\n")}\n\n${content}`;
   }
 
+  if (params.toolName === "git") {
+    if (!Value.Check(GitToolResultSchema, params.result)) throw new Error("invalid git result");
+    const result = params.result;
+    return buildToolText({
+      toolName: "git", status: params.status,
+      headers: [
+        ["completed_at", completedAtText], ["repo", result.repo],
+        ["ok", String(result.ok)], ["exit_code", String(result.exitCode)],
+        ["signal", result.signal ?? "null"], ["timed_out", String(result.timedOut)],
+        ["cancelled", String(result.cancelled)], ["output_limit_exceeded", String(result.outputLimitExceeded)],
+        ["process_stop_confirmed", String(result.processStopConfirmed)],
+        ["failure_code", result.failureCode ?? "none"], ["lease_disposition", result.leaseDisposition],
+        ["output_redacted", String(result.outputRedacted)], ["duration_ms", String(result.durationMs)],
+        ["warnings", result.warnings.length ? result.warnings.join(",") : "none"],
+      ],
+      body: [result.stdout ? `stdout:\n${result.stdout}` : "", result.stderr ? `stderr:\n${result.stderr}` : "",
+        !result.processStopConfirmed ? "Managed group stop is unconfirmed; the lease remains protected and may require maintenance." : "",
+        result.leaseDisposition === "release_unconfirmed" ? "Lease cleanup was not confirmed. Do not repeat Git solely to retry cleanup." : "",
+      ].filter(Boolean).join("\n\n") || "(no output)",
+    });
+  }
+
   if (params.toolName === "bash") {
     const command = typeof resultObj?.command === "string" ? resultObj.command : "";
     const exitCode = toIntOrNull(resultObj?.exitCode);
@@ -798,7 +823,7 @@ type QueuedRun = {
   workspaceRepoDirNames: string[];
 };
 
-const STRUCTURED_RESULT_TOOL_NAMES = new Set(["apply_patch", "todolist", "subtask", "write", "scratchpad", "view_image"]);
+const STRUCTURED_RESULT_TOOL_NAMES = new Set(["apply_patch", "todolist", "subtask", "write", "scratchpad", "view_image", "git"]);
 
 type PendingTool = {
   toolExecutionId: string;
@@ -934,6 +959,7 @@ const EMPTY_PROMPT_CONTEXT: PromptContext = {
   pendingTools: [],
   lastResponseTotalTokens: null,
   uiLocale: null,
+  workspaceRepoNames: [],
   externalSkills: []
 };
 
@@ -1579,6 +1605,8 @@ export async function materializePromptAttachments(params: {
 }
 
 type AgentRunnerDeps = {
+  /** Trusted shared data directory for the native Git credential lease guard. */
+  dataDir?: string;
   streamText?: RuntimeStreamText;
   nowMs?: () => number;
   warningNowMs?: () => number;
@@ -1643,7 +1671,7 @@ export class AgentRunner {
     const pluginProvider = REMOTE_PLUGIN_TOOLS_ENABLED
       ? new RemotePluginToolProvider()
       : new LocalPluginToolProvider(this.pluginRuntimeManager);
-    this.toolRegistry = new ToolRegistry([new BuiltinToolProvider(), new McpToolProvider(this.mcpManager), pluginProvider]);
+    this.toolRegistry = new ToolRegistry([new BuiltinToolProvider({ dataDir: deps.dataDir }), new McpToolProvider(this.mcpManager), pluginProvider]);
   }
 
   private async retryControlRead<T>(
@@ -1956,7 +1984,7 @@ export class AgentRunner {
       type: "tool" as const,
       toolName: tool.toolName,
       toolCallId: tool.toolCallId,
-      args: tool.args
+      args: diagnosticToolArgs(tool.toolName, tool.args)
     };
     const writeback = async (role: string, input: {
       status: "running" | "completed" | "failed";
@@ -2065,6 +2093,9 @@ export class AgentRunner {
       };
       capture?.recordProviderStarted();
       providerResult = await this.toolRegistry.execute(tool.toolName, tool.args, toolCtx);
+      if (tool.toolName === "git" && !Value.Check(GitToolResultSchema, providerResult)) {
+        throw new Error("invalid git result");
+      }
       if (tool.toolName === "view_image" && !Value.Check(AgentViewImageResultSchema, providerResult)) {
         throw new Error("invalid view_image result");
       }
@@ -2128,7 +2159,7 @@ export class AgentRunner {
         recordId: tool.toolExecutionId,
         payload: {
           meta: { workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId, toolExecutionId: tool.toolExecutionId },
-          request: { toolName: tool.toolName, toolCallId: tool.toolCallId, args: tool.args },
+          request: diagnosticToolRequest(tool.toolName, tool.toolCallId, tool.args),
           status: "completed",
           response: providerResult
         }
@@ -2151,9 +2182,11 @@ export class AgentRunner {
       } else if (phase === "completed_output_build") capture?.recordEvent("completed_output_build_failed", err);
       else capture?.recordEvent("completed_writeback_failed", err);
 
-      const error = tool.toolName === "subtask"
-        ? formatSubtaskStartError(err, tool.args)
-        : toolErrorMessage(err);
+      const error = tool.toolName === "git"
+        ? gitSafeErrorText(err)
+        : tool.toolName === "subtask"
+          ? formatSubtaskStartError(err, tool.args)
+          : toolErrorMessage(err);
       const errorRecord = toErrorRecord(err);
       const subtaskSessionId = String(errorRecord?.subtaskSessionId || "").trim();
       const subtaskResultText = typeof errorRecord?.subtaskResultText === "string"
@@ -2185,9 +2218,9 @@ export class AgentRunner {
         recordId: tool.toolExecutionId,
         payload: {
           meta: { workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId, toolExecutionId: tool.toolExecutionId },
-          request: { toolName: tool.toolName, toolCallId: tool.toolCallId, args: tool.args },
+          request: diagnosticToolRequest(tool.toolName, tool.toolCallId, tool.args),
           status: "failed",
-          error
+          error: tool.toolName === "git" ? gitSafeErrorCode(err) : error
         }
       });
       return { paused: false as const };
@@ -2224,12 +2257,12 @@ export class AgentRunner {
       }
       if (err instanceof FencedWriteIgnoredError || err instanceof FencedWriteMissingError || err instanceof ControlWritePermanentError) throw err;
       capture?.recordEvent("runner_outer_unhandled", err);
-      const error = toolErrorMessage(err);
+      const error = params.tool.toolName === "git" ? gitSafeErrorText(err) : toolErrorMessage(err);
       const output = {
         type: "tool" as const,
         toolName: params.tool.toolName,
         toolCallId: params.tool.toolCallId,
-        args: params.tool.args,
+        args: diagnosticToolArgs(params.tool.toolName, params.tool.args),
         text: buildToolErrorText({ toolName: params.tool.toolName, status: "failed", error }),
         error
       };
@@ -2262,9 +2295,9 @@ export class AgentRunner {
         recordId: params.tool.toolExecutionId,
         payload: {
           meta: { workspaceId: params.run.workspaceId, sessionId: params.run.sessionId, runId: params.run.runId, toolExecutionId: params.tool.toolExecutionId },
-          request: { toolName: params.tool.toolName, toolCallId: params.tool.toolCallId, args: params.tool.args },
+          request: diagnosticToolRequest(params.tool.toolName, params.tool.toolCallId, params.tool.args),
           status: "failed",
-          error
+          error: params.tool.toolName === "git" ? gitSafeErrorCode(err) : error
         }
       });
       return { paused: false as const };
@@ -2349,7 +2382,7 @@ export class AgentRunner {
           type: "tool" as const,
           toolName: item.toolName,
           toolCallId: item.toolCallId,
-          args: item.args,
+          args: diagnosticToolArgs(item.toolName, item.args),
           text: buildToolErrorText({ toolName: item.toolName, status: "failed", error }),
           error
         };

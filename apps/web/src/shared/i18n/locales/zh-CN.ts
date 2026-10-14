@@ -1080,8 +1080,10 @@ export default {
         defaultModel: "默认模型",
         customDefaultModel: "使用自定义默认模型"
       },
+      gitToolHelp: "Git 需显式开启并在新运行中生效。repo 必须填写当前登记仓库名，args 为 git 后的原生参数数组（不含 git，不支持 Shell 命令链）。项目认证按登记仓库配置准备；系统 helper、SSH agent 或宿主配置仍可能参与认证。Bash 不再自动注入项目 Git 凭证；终端凭证开关仍只控制交互式终端。Git 不是沙箱；开启工具不等于授权提交、强推、删除或覆盖，仍须遵守已有授权。",
       tools: {
         bash: "Bash",
+        git: "Git",
         read: "Read",
         write: "Write",
         applyPatch: "Apply Patch",

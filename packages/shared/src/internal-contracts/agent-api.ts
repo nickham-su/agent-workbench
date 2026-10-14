@@ -1,4 +1,7 @@
+import { AgentGitToolEndpoints } from "./agent-git-tool.js";
+
 export const AgentApiEndpoints = {
+  ...AgentGitToolEndpoints,
   createStreamingAssistant: {
     method: "POST",
     path: "/api/internal/agent/messages/assistant",
@@ -103,3 +106,4 @@ export * from "./agent-api-subtask.js";
 export * from "./agent-api-read.js";
 export * from "./agent-image.js";
 export * from "./agent-provider-replay.js";
+export * from "./agent-git-tool.js";

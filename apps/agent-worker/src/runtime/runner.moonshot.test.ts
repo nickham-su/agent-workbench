@@ -20,7 +20,7 @@ const run = { workspaceId: "ws", sessionId: "session", runId: "run", workspacePa
   workspaceRepoDirNames: [], inputText: "hello" };
 const context = (messages: unknown[] = [], providerReplay: unknown[] = []) => ({
   pendingTools: [], tools: [], headMessageId: null, sessionRevision: 0, system: "", messages,
-  providerReplay, lastResponseTotalTokens: null, uiLocale: null, externalSkills: [],
+  providerReplay, lastResponseTotalTokens: null, uiLocale: null, workspaceRepoNames: [], externalSkills: [],
 });
 const invoke = (runner: AgentRunner, activeProfile: ExecutionProfile, messages: unknown[] = [], replay: unknown[] = []) =>
   (runner as any).runModelStep({ profile: activeProfile, run, context: context(messages, replay), step: 1,

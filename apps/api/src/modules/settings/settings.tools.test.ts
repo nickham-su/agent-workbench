@@ -336,3 +336,26 @@ test("saving new Provider models strips reserved options without dropping legal 
     ?.models[0]?.options?.providerOptionsByKey?.moonshotai;
   assert.deepEqual(options, { parallelToolCalls: true, custom: { thinking: "ordinary" } });
 });
+
+test("AC-ENABLEMENT-DEFAULT/EXPLICIT: Git survives explicit settings round-trip, but never migrates defaults or existing agents", async () => {
+  const { ctx, db } = await createFixture();
+  try {
+    const existing = { id: "agent_1", name: "Agent", summary: "", prompt: "", globalPromptIds: [],
+      mcpServers: [], pluginTools: [], defaultModel: { providerId: "provider_1", modelId: "model_1" }, scope: "both" as const, order: 0 };
+    const defaultProfile = { ...existing };
+    setSettingJson(db, AGENT_SETTINGS_KEY, { agents: [defaultProfile] }, 1);
+    assert.deepEqual(getAgentSettings(ctx).agents[0]?.tools, ["bash", "write", "apply_patch", "subtask"]);
+    assert.deepEqual(getSettingJson(db, AGENT_SETTINGS_KEY)?.value, { agents: [defaultProfile] }, "reading old settings must not grant or rewrite Git");
+    const oldProfile = { ...existing, tools: ["bash"] };
+    setSettingJson(db, AGENT_SETTINGS_KEY, { agents: [oldProfile] }, 2);
+    assert.deepEqual(getAgentSettings(ctx).agents[0]?.tools, ["bash"]);
+    assert.deepEqual(getSettingJson(db, AGENT_SETTINGS_KEY)?.value, { agents: [oldProfile] });
+    for (const tools of [["bash", "git", "git"], ["bash"], []] as const) {
+      const expected = [...new Set(tools)];
+      const updated = updateAgentSettings(ctx, createLogger(), { agents: [{ ...existing, tools: [...tools] }] });
+      assert.deepEqual(updated.agents[0]?.tools, expected);
+      assert.deepEqual(getAgentSettings(ctx).agents[0]?.tools, expected);
+      assert.deepEqual((getSettingJson(db, AGENT_SETTINGS_KEY)?.value as { agents: Array<{ tools: string[] }> }).agents[0]?.tools, expected);
+    }
+  } finally { db.close(); }
+});

@@ -188,6 +188,7 @@
 
         <a-form-item :label="t('settings.agentProfiles.fields.tools')">
           <a-select v-model:value="agentFormTools" mode="multiple" :options="toolOptions" />
+          <div class="mt-1 text-xs text-[color:var(--text-tertiary)]">{{ t("settings.agentProfiles.gitToolHelp") }}</div>
         </a-form-item>
 
         <a-form-item :label="t('settings.agentProfiles.fields.mcpServers')">

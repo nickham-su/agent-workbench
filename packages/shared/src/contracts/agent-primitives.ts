@@ -9,6 +9,7 @@ export const AgentMcpToolNameSchema = Type.String({ pattern: "^mcp_[A-Za-z0-9_-]
 /** New callable context tools; the historical visual_analyze name is intentionally absent. */
 export const AgentCallableContextToolNameSchema = Type.Union([
   Type.Literal("bash"),
+  Type.Literal("git"),
   Type.Literal("read"),
   Type.Literal("write"),
   Type.Literal("apply_patch"),

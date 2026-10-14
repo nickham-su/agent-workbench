@@ -287,7 +287,8 @@ type RepoGitEnvLeaseMeta = LeaseOwner & {
 
 - provider只返回已脱敏数据，首版不输出raw运行chunk。秘密文件仅从已验证v2路径有界读取，单文件最多1MiB；失败报GIT_OUTPUT_GUARD_FAILED、不spawn。
 - 已知secret和路径均跨各自stdout/stderr chunk匹配；安全处理UTF8、预算裁剪与终止尾部，不输出被截断的已知秘密/路径前缀。空秘密不作空串匹配。
-- 原始读取与最终输出均合计512KiB；有限尾部不能变成无限缓存。超过预算结束并标记超限。
+- stdout+stderr原始接收预算合计512KiB（524288字节），正好达到上限不算超限；第524289字节触发一次有界收尾并标记超限。后续数据仅排空，不再接收进匹配器；重复秘密被替换也不能绕过此预算。
+- 脱敏后各流仅保留首64KiB和尾8KiB的安全摘要，不是放大原始预算。摘要的固定截断标记也计入最终输出字节数；两流摘要连同标记均须合计不超过512KiB，有限匹配尾部不能变成无限缓存。
 - 替换发生标记outputRedacted；不保存raw附件。已编码/变形秘密或任意其他私有路径不是万能识别范围，不宣传为沙箱。
 - result/preview/artifact/structuredResult/capture/item/debug都接收安全结果；原生异常对象、env和raw输出不得绕过该路径。
 

@@ -28,7 +28,7 @@ const runner = new AgentRunner(
   mcpManager,
   console,
   env.concurrency,
-  { attachmentStorage, analyticsSignals },
+  { attachmentStorage, analyticsSignals, dataDir: env.dataDir },
 );
 startBashToolProbe(console);
 const server = createWorkerServer({

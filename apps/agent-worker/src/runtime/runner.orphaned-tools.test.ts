@@ -16,7 +16,7 @@ function contextFor(tools: Tool[], revision = 0) {
   return {
     pendingTools: tools.map((tool) => ({ ...tool, args: { ...tool.args } })), tools: [],
     headMessageId: null, sessionRevision: revision, system: "", messages: [],
-    lastResponseTotalTokens: null, uiLocale: null, externalSkills: [],
+    lastResponseTotalTokens: null, uiLocale: null, workspaceRepoNames: [], externalSkills: [],
   };
 }
 

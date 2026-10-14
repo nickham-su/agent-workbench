@@ -67,7 +67,7 @@ function harness(options: {
     run: { workspaceId: "workspace", sessionId: "caller", runId: "caller-run", workspacePath: process.cwd(), workspaceRepoDirNames: [] },
     pendingTool: { toolExecutionId: "tool", callPartId: "part", assistantMessageId: "message", status: "queued", toolName: "subtask", toolCallId: "call", args: {} },
     signal: controller.signal,
-    promptContext: { headMessageId: null, sessionRevision: 0, system: "", messages: [], tools: [], pendingTools: [], lastResponseTotalTokens: 999_999, uiLocale: null, externalSkills: [] },
+    promptContext: { headMessageId: null, sessionRevision: 0, system: "", messages: [], tools: [], pendingTools: [], lastResponseTotalTokens: 999_999, uiLocale: null, workspaceRepoNames: [], externalSkills: [] },
     async processNestedRun() {
       calls.nested++;
       fail("nested");

@@ -32,6 +32,7 @@ function createToolListContext(): ToolListContext {
       pendingTools: [],
       lastResponseTotalTokens: null,
       uiLocale: null,
+      workspaceRepoNames: [],
       externalSkills: [],
     },
     apiClient: {} as any,

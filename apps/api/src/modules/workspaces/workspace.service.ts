@@ -62,6 +62,7 @@ import { clearTerminalAuthCleanupIntent, listTerminalAuthCleanupIntents } from "
 import { withWorkspaceRepoLock } from "../../infra/locks/workspaceRepoLock.js";
 import { withWorkspaceLock } from "../../infra/locks/workspaceLock.js";
 import { workspaceLifecycleCoordinator } from "../../infra/locks/workspace-lifecycle-coordinator.js";
+import { assertNoRepoGitEnvLeaseHold } from "../git-env/git-env.lease.js";
 import {
   deleteWorkspaceSessionTabStateOverride,
   findAgentSessionKindInWorkspace,
@@ -526,6 +527,7 @@ export async function detachRepoFromWorkspace(
     const row = getWorkspaceRepoByRepoId(ctx.db, ws.id, id);
     if (!row) throw new HttpError(404, "Repo not attached to workspace");
 
+    await assertNoRepoGitEnvLeaseHold({ dataDir: ctx.dataDir, workspaceId: ws.id, repoId: id });
     const nextRows = listWorkspaceRepos(ctx.db, ws.id).filter((r) => r.repoId !== id);
     const nextTerminalCredentialId = resolveTerminalCredentialId({
       repoCredentialIds: nextRows.map((item) => getRepo(ctx.db, item.repoId)?.credentialId ?? null),
@@ -562,6 +564,9 @@ function listWorkspaceSessionIds(ctx: AppContext, workspaceId: string) {
 }
 
 async function removeWorkspaceFileDomains(ctx: AppContext, ws: WorkspaceRecord) {
+  // Durable filesystem guard covers Worker and local-fallback startup recovery alike.
+  // Run/session idle and Worker process exit are not managed-group stop evidence.
+  await assertNoRepoGitEnvLeaseHold({ dataDir: ctx.dataDir, workspaceId: ws.id });
   const dataRoot = await openSecureRootDirectory(ctx.dataDir);
   try {
     const domains = [

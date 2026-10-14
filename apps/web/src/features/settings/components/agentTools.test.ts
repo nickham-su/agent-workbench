@@ -29,7 +29,7 @@ test("DEFAULT_AGENT_TOOLS 默认不包含 todolist 和 view_image", () => {
 
 test("toAgentToolOptions 包含可配置工具并复用标签 key", () => {
   const options = toAgentToolOptions((key) => key);
-  assert.deepEqual(options.map((item) => item.value), ["bash", "write", "apply_patch", "subtask", "scratchpad", "todolist", "view_image", "archive_read", "archive_search"]);
+  assert.deepEqual(options.map((item) => item.value), ["bash", "write", "apply_patch", "subtask", "git", "scratchpad", "todolist", "view_image", "archive_read", "archive_search"]);
   const scratchpad = options.find((item) => item.value === "scratchpad");
   const todolist = options.find((item) => item.value === "todolist");
   const viewImage = options.find((item) => item.value === "view_image");
@@ -52,4 +52,25 @@ test("Agent 配置工具列表在中英文下显示 View Image，工具值仍为
       value: "view_image"
     });
   }
+});
+
+test("Git is explicitly configurable but never silently added to new or existing profiles", () => {
+  assert.equal(DEFAULT_AGENT_TOOLS.includes("git"), false);
+  assert.deepEqual(DEFAULT_AGENT_TOOLS, ["bash", "write", "apply_patch", "subtask"]);
+  assert.deepEqual(normalizeAgentTools(DEFAULT_AGENT_TOOLS), DEFAULT_AGENT_TOOLS);
+  assert.deepEqual(normalizeAgentTools(["bash"]), ["bash"]);
+  assert.deepEqual(normalizeAgentTools(["bash", "git", "git"]), ["bash", "git"]);
+  assert.deepEqual(normalizeAgentTools([]), []);
+  for (const locale of [zhCN, enUS]) {
+    const options = toAgentToolOptions((key) => key === agentToolLabelKey("git") ? locale.settings.agentProfiles.tools.git : key);
+    assert.deepEqual(options.find((item) => item.value === "git"), { label: "Git", value: "git" });
+    const help = locale.settings.agentProfiles.gitToolHelp;
+    for (const token of ["repo", "args", "Bash", "Git", "SSH", "helper"]) assert(help.includes(token));
+  }
+  assert.match(zhCN.settings.agentProfiles.gitToolHelp, /显式开启.*新运行/);
+  assert.match(zhCN.settings.agentProfiles.gitToolHelp, /不再自动注入项目 Git 凭证/);
+  assert.match(zhCN.settings.agentProfiles.gitToolHelp, /不等于授权提交、强推、删除或覆盖/);
+  assert.match(enUS.settings.agentProfiles.gitToolHelp, /Enable Git explicitly.*new run/);
+  assert.match(enUS.settings.agentProfiles.gitToolHelp, /Bash no longer injects project Git credentials/);
+  assert.match(enUS.settings.agentProfiles.gitToolHelp, /does not authorize commits, force pushes, deletion or overwrites/);
 });

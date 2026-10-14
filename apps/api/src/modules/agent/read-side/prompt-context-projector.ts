@@ -18,6 +18,7 @@ export type PromptContextProjectorDependencies<Message> = {
     profile: PromptStaticProfile;
     uiLocale: AgentUiLocale | null;
   }) => Promise<RunPromptStatic>;
+  readWorkspaceRepoNames: (workspaceId: string) => string[];
   buildRuntimeInstruction: (input: { uiLocale: AgentUiLocale | null }) => string;
   appendRuntimeConstraints: (systemStatic: string, runtimeInstruction: string) => string;
   resolveDynamicContext: (input: {
@@ -53,6 +54,7 @@ export class PromptContextProjector<Message> {
     const dynamic = await this.dependencies.resolveDynamicContext({
       workspaceId: input.workspaceId, sessionId: input.sessionId, runId: input.run.runId,
     });
+    const workspaceRepoNames = this.dependencies.readWorkspaceRepoNames(input.workspaceId);
     const profile = this.dependencies.resolveProfile({
       surface: input.session.kind === "subtask" ? "subtask" : "user",
       workspaceId: input.workspaceId,
@@ -78,6 +80,7 @@ export class PromptContextProjector<Message> {
       sessionRevision: dynamic.sessionRevision,
       system,
       messages: dynamic.messages,
+      workspaceRepoNames,
       ...(dynamic.providerReplay == null ? {} : { providerReplay: dynamic.providerReplay }),
       tools: staticPrompt.tools,
       pendingTools: dynamic.pendingTools,

@@ -13,6 +13,7 @@ import { AgentMessageSchema } from "../contracts/agent-message.js";
 import { PluginToolCanonicalNameSchema } from "../contracts/plugin.js";
 import { AgentProviderReplayEnvelopeSchema } from "./agent-provider-replay.js";
 import { AgentAssistantProvenanceSchema } from "./agent-provider-provenance.js";
+import { GitRepoNameSchema } from "./agent-git-tool.js";
 import {
   AgentImageRefSchema,
   AgentToolResultOutputSchema,
@@ -283,6 +284,7 @@ export const AgentApiPromptContextResponseSchema = Type.Object({
   headMessageId: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
   sessionRevision: Type.Integer({ minimum: 0 }),
   system: Type.String(),
+  workspaceRepoNames: Type.Array(GitRepoNameSchema),
   messages: Type.Array(AgentApiPromptMessageSchema),
   providerReplay: Type.Optional(Type.Array(AgentApiPromptProviderReplaySourceSchema)),
   tools: Type.Array(Type.Object({

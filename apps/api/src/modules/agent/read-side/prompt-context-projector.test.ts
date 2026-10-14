@@ -34,6 +34,7 @@ test("PromptContextProjector composes cached static data with dynamic locale, me
         externalSkills: [{ skillId: "skills/review", skillDirectoryPath: "/workspace/skills/review" }]
       };
     },
+    readWorkspaceRepoNames: () => [],
     buildRuntimeInstruction: ({ uiLocale }) => `runtime:${uiLocale}`,
     appendRuntimeConstraints: (system, runtime) => `${system}|${runtime}`,
   });
@@ -58,6 +59,7 @@ test("PromptContextProjector composes cached static data with dynamic locale, me
     pendingTools: [{ toolExecutionId: "execution-7", callPartId: "part-7", assistantMessageId: "message-7", status: "running", toolName: "bash", toolCallId: "call", args: { command: "pwd" } }],
     lastResponseTotalTokens: 42,
     uiLocale: "en-US",
+    workspaceRepoNames: [],
     externalSkills: [{ skillId: "skills/review", skillDirectoryPath: "/workspace/skills/review" }]
   });
   assert.deepEqual(second, first);
@@ -106,6 +108,7 @@ test("PromptContextProjector passes every pending Assistant ID so transcript pro
     async assembleStatic() {
       return { systemStatic: "static", tools: [], externalSkills: [] };
     },
+    readWorkspaceRepoNames: () => [],
     buildRuntimeInstruction: () => "runtime",
     appendRuntimeConstraints: (system, runtime) => `${system}|${runtime}`,
   });
@@ -137,6 +140,7 @@ test("PromptContextProjector refuses a response when terminal invalidation races
       await new Promise<void>((done) => { releaseAssembly = done; });
       return { systemStatic: "static", tools: [], externalSkills: [] };
     },
+    readWorkspaceRepoNames: () => [],
     buildRuntimeInstruction: () => "runtime",
     appendRuntimeConstraints: (system, runtime) => `${system}|${runtime}`,
   });
@@ -149,4 +153,45 @@ test("PromptContextProjector refuses a response when terminal invalidation races
   releaseAssembly();
   await assert.rejects(request, /invalidated while assembling context/);
   assert.equal(cache.has("run"), false);
+});
+
+
+test("PromptContextProjector reads fresh registered names on every request despite a same-run static-cache hit", async () => {
+  let names = ["old-repo"];
+  let assembled = 0;
+  const reads: string[] = [];
+  const projector = new PromptContextProjector(new RunPromptStaticCache(), {
+    async resolveDynamicContext() {
+      return {
+        headMessageId: "head", sessionRevision: 1,
+        run: { runId: "run", subtaskDepth: null, agentId: "agent", providerId: "provider", modelId: "model", triggerMessageId: null, runKind: "user", executionPhase: "work_pending", uiLocale: null },
+        pendingTools: [], lastResponseTotalTokens: null, uiLocale: null, messages: [],
+      };
+    },
+    resolveProfile: () => ({ agent: { name: "Agent", tools: ["git"] } }),
+    async assembleStatic() {
+      assembled += 1;
+      return { systemStatic: "static", tools: [{ name: "git", description: "Git base", inputSchema: {} }], externalSkills: [] };
+    },
+    readWorkspaceRepoNames(workspaceId) { reads.push(workspaceId); return [...names]; },
+    buildRuntimeInstruction: () => "runtime",
+    appendRuntimeConstraints: (system) => system,
+  });
+  const input = {
+    workspaceId: "workspace", sessionId: "session", session: { kind: "primary" as const, headMessageId: "head", revision: 1 },
+    run: { runId: "run", subtaskDepth: null, agentId: "agent", providerId: "provider", modelId: "model", triggerMessageId: null },
+  };
+  const first = await projector.getPromptContextForRun(input);
+  names = Array.from({ length: 101 }, (_, i) => `new-repo-${i}`);
+  const second = await projector.getPromptContextForRun(input);
+  names = [];
+  const third = await projector.getPromptContextForRun(input);
+  assert.deepEqual(first.workspaceRepoNames, ["old-repo"]);
+  assert.equal(second.workspaceRepoNames.length, 101);
+  assert.equal(second.workspaceRepoNames[100], "new-repo-100");
+  assert.deepEqual(third.workspaceRepoNames, []);
+  assert.equal(assembled, 1);
+  assert.deepEqual(reads, ["workspace", "workspace", "workspace"]);
+  assert.equal(first.tools, second.tools);
+  assert.equal(second.tools[0]?.description, "Git base");
 });

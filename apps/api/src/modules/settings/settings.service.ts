@@ -795,6 +795,7 @@ function normalizeAgentTools(raw: unknown): AgentToolName[] {
   for (const item of raw) {
     if (
       item !== "bash" &&
+      item !== "git" &&
       item !== "write" &&
       item !== "apply_patch" &&
       item !== "subtask" &&

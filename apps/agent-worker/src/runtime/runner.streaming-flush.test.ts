@@ -119,6 +119,7 @@ function baseContext() {
     messages: [],
     lastResponseTotalTokens: null,
     uiLocale: null,
+    workspaceRepoNames: [],
     externalSkills: []
   };
 }

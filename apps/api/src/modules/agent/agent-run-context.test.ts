@@ -5,7 +5,7 @@ import type { AppContext } from "../../app/context.js";
 import type { Db } from "../../infra/db/db.js";
 import { insertRepo } from "../repos/repo.store.js";
 import { insertWorkspace, insertWorkspaceRepo } from "../workspaces/workspace.store.js";
-import { getAgentWorkspaceRunContext } from "./agent-run-context.js";
+import { getAgentWorkspaceRunContext, listAgentWorkspaceRepoNames } from "./agent-run-context.js";
 import { createAgentTestFixture, type AgentTestFixture } from "./testkit/agent-testkit.js";
 
 const fixtures: AgentTestFixture[] = [];
@@ -103,4 +103,33 @@ test("getAgentWorkspaceRunContext keeps registered safe directory names in stabl
     workspacePath: path.join(ctx.dataDir, "workspaces", "workspace-a"),
     workspaceRepoDirNames: ["repo-z", "repo-a"]
   });
+});
+
+
+test("dynamic registered names retain all >100 entries and refresh without filesystem scanning", async () => {
+  const { db, workspacePath } = await createContext();
+  for (let i = 0; i < 101; i += 1) addRepo(db, { id: `repo-${i}`, dirName: `repo-${i}`, repoPath: path.join(workspacePath, `repo-${i}`) });
+  const first = listAgentWorkspaceRepoNames(db, "ws-a");
+  assert.equal(first.length, 101);
+  assert.equal(first[100], "repo-100");
+  db.prepare("delete from workspace_repos where workspace_id = ? and dir_name = ?").run("ws-a", "repo-0");
+  addRepo(db, { id: "new-repo", dirName: "new-repo", repoPath: path.join(workspacePath, "new-repo") });
+  const second = listAgentWorkspaceRepoNames(db, "ws-a");
+  assert.equal(second.length, 101);
+  assert(!second.includes("repo-0"));
+  assert.equal(second[100], "new-repo");
+  assert.deepEqual(listAgentWorkspaceRepoNames(db, "different-workspace"), []);
+});
+
+test("dynamic names reject every ASCII control and exact unsafe spelling without changing the legacy snapshot", async () => {
+  const { db } = await createContext();
+  for (const [i, dirName] of ["safe", "other safe", "bad\tname", "bad\u007fname", "a/b", "a\\b", ".", "..", " leading", "trailing ", "bad\0name"].entries()) {
+    addRepo(db, { id: `repo-${i}`, dirName, repoPath: `/not-scanned/${i}` });
+  }
+  db.exec("drop index idx_workspace_repos_workspace_dir");
+  addRepo(db, { id: "duplicate", dirName: "safe", repoPath: "/not-scanned/duplicate" });
+  const invalidCounts: number[] = [];
+  assert.deepEqual(listAgentWorkspaceRepoNames(db, "ws-a", (count) => invalidCounts.push(count)), ["safe", "other safe"]);
+  assert.deepEqual(invalidCounts, [9], "diagnostics report only one safe count, not corrupt name contents");
+  assert.deepEqual(listAgentWorkspaceRepoNames(db, "empty-workspace"), []);
 });

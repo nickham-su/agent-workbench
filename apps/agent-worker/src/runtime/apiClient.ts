@@ -9,6 +9,13 @@ import { Value } from "@sinclair/typebox/value";
 import type { TSchema } from "@sinclair/typebox";
 import {
   AgentApiEndpoints,
+  PrepareRepoGitEnvRequestSchema,
+  PrepareRepoGitEnvResponseSchema,
+  ReleaseRepoGitEnvRequestSchema,
+  RepoGitEnvLeaseIdSchema,
+  ReleaseRepoGitEnvResponseSchema,
+  type PrepareRepoGitEnvRequest, type PrepareRepoGitEnvResponse,
+  type ReleaseRepoGitEnvRequest, type ReleaseRepoGitEnvResponse,
   type AgentApiExecutionProfileRequest,
   type AgentApiExecutionProfileResponse,
   AgentApiExecutionProfileResponseSchema,
@@ -168,9 +175,10 @@ export class InternalRpcInvalidResponseError extends Error {
   readonly method: InternalRpcMethod;
   readonly endpoint: string;
   readonly stage: "body-or-json" | "schema";
+  declare readonly leaseId?: string;
 
   constructor(
-    details: InternalRpcSafeErrorDetails & { stage: "body-or-json" | "schema" },
+    details: InternalRpcSafeErrorDetails & { stage: "body-or-json" | "schema"; leaseId?: string },
   ) {
     super(
       `internal rpc invalid response: ${details.method} ${details.endpoint} stage=${details.stage}`,
@@ -179,6 +187,7 @@ export class InternalRpcInvalidResponseError extends Error {
     this.method = details.method;
     this.endpoint = details.endpoint;
     this.stage = details.stage;
+    if (details.leaseId) Object.defineProperty(this, "leaseId", { value: details.leaseId, enumerable: false });
   }
 }
 
@@ -281,20 +290,6 @@ async function readSafeBusinessErrorDetails(response: Response): Promise<Interna
 export type MessagesContext = AgentApiMessagesContextResponse;
 export type ExecutionProfile = AgentApiExecutionProfileResponse;
 
-export type GitEnvPrepareResponse =
-  | {
-      ok: true;
-      kind: "https" | "ssh" | "none";
-      env: Record<string, string>;
-      leaseId: string | null;
-      expiresAt: string | null;
-    }
-  | {
-      ok: false;
-      errorCode: string;
-      error: string;
-    };
-
 export type PromptContext = AgentApiPromptContextResponse;
 
 export type AgentMcpSettingsPayload = {
@@ -353,8 +348,8 @@ export class AgentApiClient {
     getPluginRuntimeSnapshots: "controlRead",
     listPluginTools: "controlRead",
     executePluginTool: "excluded",
-    prepareGitEnvForBash: "excluded",
-    cleanupGitEnvLease: "excluded",
+    prepareRepoGitEnvLease: "controlWrite",
+    releaseRepoGitEnvLease: "idempotentControlWrite",
   } as const satisfies Record<string, AgentApiClientPolicyName>;
 
   private resolvePolicy(name: AgentApiClientPolicyName): AgentApiClientPolicy {
@@ -445,6 +440,7 @@ export class AgentApiClient {
       responseSchema?: TSchema;
       responseEndpoint?: string;
       policy: AgentApiClientPolicyName;
+      forceStrictResponseValidation?: boolean;
       abortSignal?: AbortSignal;
       timeoutMs?: number;
     },
@@ -554,6 +550,7 @@ export class AgentApiClient {
       responseEndpoint?: string;
       policy: AgentApiClientPolicyName;
       abortSignal?: AbortSignal;
+      forceStrictResponseValidation?: boolean;
     },
     method: InternalRpcMethod,
     endpoint: string,
@@ -612,7 +609,7 @@ export class AgentApiClient {
               `path=${formatSafeResponseSchemaErrorPath(error.path)} type=${error.type}`,
           )
           .join("; ");
-        if (this.params.responseValidation === "warn") {
+        if (this.params.responseValidation === "warn" && !options.forceStrictResponseValidation) {
           this.logger.warn(
             `[agent-api] response schema mismatch endpoint=${endpoint} method=${method}: ${errors}`,
           );
@@ -621,6 +618,10 @@ export class AgentApiClient {
             method,
             endpoint,
             stage: "schema",
+            ...(endpoint === AgentApiEndpoints.prepareRepoGitEnvLease.path
+              && parsed && typeof parsed === "object" && !Array.isArray(parsed)
+              && Value.Check(RepoGitEnvLeaseIdSchema, (parsed as Record<string, unknown>).leaseId)
+              ? { leaseId: (parsed as { leaseId: string }).leaseId } : {}),
           });
         }
       }
@@ -818,7 +819,7 @@ export class AgentApiClient {
   }
 
   async getPromptContext(input: AgentApiPromptContextRequest) {
-    return this.request<AgentApiPromptContextResponse>(
+    const response = await this.request<AgentApiPromptContextResponse>(
       AgentApiEndpoints.getPromptContext.path,
       {
         method: AgentApiEndpoints.getPromptContext.method,
@@ -828,6 +829,16 @@ export class AgentApiClient {
         policy: AgentApiClient.publicMethodPolicies.getPromptContext,
       },
     );
+    // This mandatory deployment contract cannot degrade to a stale run snapshot
+    // even when legacy response validation is configured to warn for other fields.
+    if (!Value.Check(AgentApiPromptContextResponseSchema.properties.workspaceRepoNames, response?.workspaceRepoNames)) {
+      throw new InternalRpcInvalidResponseError({
+        method: AgentApiEndpoints.getPromptContext.method,
+        endpoint: AgentApiEndpoints.getPromptContext.path,
+        stage: "schema",
+      });
+    }
+    return response;
   }
 
   async archiveRead(input: AgentApiArchiveReadRequest) {
@@ -1021,27 +1032,42 @@ export class AgentApiClient {
     );
   }
 
-  async prepareGitEnvForBash(input: {
-    workspaceId: string;
-    cwd: string;
-    purpose?: string;
-    timeoutMs?: number;
-  }) {
-    return this.request<GitEnvPrepareResponse>(
-      "/api/internal/git-env/prepare",
-      {
-        method: "POST",
-        body: input,
-        policy: AgentApiClient.publicMethodPolicies.prepareGitEnvForBash,
-      },
-    );
-  }
-
-  async cleanupGitEnvLease(input: { leaseId: string }) {
-    return this.request<{ ok: true }>("/api/internal/git-env/cleanup", {
-      method: "POST",
+  async prepareRepoGitEnvLease(
+    input: PrepareRepoGitEnvRequest,
+    options?: { abortSignal?: AbortSignal; timeoutMs?: number },
+  ) {
+    if (!Value.Check(PrepareRepoGitEnvRequestSchema, input)) {
+      throw new Error("invalid repo Git environment prepare request");
+    }
+    if (options?.abortSignal?.aborted) throw new DOMException("Git environment preparation cancelled", "AbortError");
+    return this.request<PrepareRepoGitEnvResponse>(AgentApiEndpoints.prepareRepoGitEnvLease.path, {
+      method: AgentApiEndpoints.prepareRepoGitEnvLease.method,
       body: input,
-      policy: AgentApiClient.publicMethodPolicies.cleanupGitEnvLease,
+      responseSchema: PrepareRepoGitEnvResponseSchema,
+      forceStrictResponseValidation: true,
+      policy: AgentApiClient.publicMethodPolicies.prepareRepoGitEnvLease,
+      abortSignal: options?.abortSignal,
+      timeoutMs: options?.timeoutMs,
     });
   }
+
+  // Deliberately does not accept the run's AbortSignal. Its own bounded deadline
+  // must remain usable after cancellation has already stopped the managed group.
+  async releaseRepoGitEnvLease(
+    input: ReleaseRepoGitEnvRequest,
+    options?: { timeoutMs?: number },
+  ) {
+    if (!Value.Check(ReleaseRepoGitEnvRequestSchema, input)) {
+      throw new Error("invalid repo Git environment release request");
+    }
+    return this.request<ReleaseRepoGitEnvResponse>(AgentApiEndpoints.releaseRepoGitEnvLease.path, {
+      method: AgentApiEndpoints.releaseRepoGitEnvLease.method,
+      body: input,
+      responseSchema: ReleaseRepoGitEnvResponseSchema,
+      forceStrictResponseValidation: true,
+      policy: AgentApiClient.publicMethodPolicies.releaseRepoGitEnvLease,
+      timeoutMs: options?.timeoutMs,
+    });
+  }
+
 }

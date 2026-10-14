@@ -155,7 +155,7 @@
 | AC-EXECUTOR-EARLY-ABORT | prepare前/prepare后/spawn前已abort | 不spawn；已知ID用not_started release，释放失败/未知ID保持默认保护，不假定必然回收 |
 | AC-EXECUTOR-CANCEL | 运行中取消，父子进程fixture | 停止流程有界，cancelled=true；正常进程组后代停止 |
 | AC-EXECUTOR-TIMEOUT | 超过timeout | timedOut=true；原始退出码/信号如实记录，未伪造成功 |
-| AC-EXECUTOR-OUTPUT-LIMIT | stdout+stderr合计超512KiB | outputLimitExceeded=true，结束进程，结果内存有界 |
+| AC-EXECUTOR-OUTPUT-LIMIT | stdout+stderr原始接收合计正好512KiB或512KiB+1字节；分别覆盖单流和两流累加 | 正好524288字节不超限；第524289字节outputLimitExceeded=true，触发一次有界收尾，之后只排空，结果内存有界 |
 | AC-EXECUTOR-PARENT-EXIT | 父正常退出0，后代持stdio | 仍探测/TERM/KILL同组，确认组不存在前不release/成功；保留父exitCode=0 |
 | AC-EXECUTOR-PARENT-EXIT-NO-STDIO | 父正常退出0，同组后代不持stdio | close提前发生仍不漏收尾，确认组停止后才release；不能靠输出管道证明停止 |
 | AC-EXECUTOR-REASONS | 取消/超限/退出竞争 | 最多一次终止流程；flags保留实际原因；不重执行 |
@@ -183,7 +183,7 @@
 | AC-OUTPUT-TAIL | 超限/取消时匹配器有秘密残留尾部 | 尾部安全收敛，没有绕过脱敏的finally输出 |
 | AC-OUTPUT-URL | 原生诊断含带userinfo的URL | 输出移除userinfo，仍保留可操作的非秘密诊断 |
 | AC-OUTPUT-GUARD | 秘密文件不存在、路径不可信、读取失败或超过1MiB | 有界读取、不spawn；GIT_OUTPUT_GUARD_FAILED；lease回收 |
-| AC-OUTPUT-BUDGET | 持续重复秘密被替换，或替换文本膨胀 | 原始读取和最终输出均有512KiB合计上限，超限结束，不能靠脱敏绕过预算 |
+| AC-OUTPUT-BUDGET | 持续重复秘密被替换，或替换文本膨胀；秘密/已知路径跨chunk和512KiB边界 | 原始接收和最终输出均有512KiB合计上限；脱敏后每流64KiB head+8KiB tail只是较小安全摘要，固定截断标记计入最终合计字节数；超限一次有界收尾，不泄露完整原文或终止尾部前缀，不能靠脱敏绕过预算 |
 | AC-OUTPUT-SINKS | result/preview/artifact/debug/errorcapture/itemlog | 所有sink只接收已脱敏结果；无raw备份 |
 | AC-OUTPUT-ARGV | capture创建/event detail/writeback output/item-debug request | 全部使用同一Git安全投影，覆盖成功/前置失败/写回失败/禁用pending；正常tool_call原始args仍按协议保存 |
 | AC-OUTPUT-LIMITATION | hook输出任意编码/变形内容 | 不把有限匹配测试通过宣传为万能secret识别/沙箱 |

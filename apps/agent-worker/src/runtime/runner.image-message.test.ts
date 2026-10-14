@@ -39,6 +39,7 @@ function imageContext() {
     }],
     lastResponseTotalTokens: null,
     uiLocale: null,
+    workspaceRepoNames: [],
     externalSkills: []
   };
 }

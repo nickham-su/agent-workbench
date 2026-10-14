@@ -1,5 +1,6 @@
 import { captureLosslessSnapshot, type LosslessSnapshot } from "./losslessValueGraph.js";
 import { readSubtaskSourceSessionId } from "./subtaskSource.js";
+import { projectGitDiagnostic, projectGitDiagnosticDetail } from "./gitDiagnostic.js";
 import {
   storeToolErrorArtifact,
   type FailureKind,
@@ -140,7 +141,8 @@ export function createToolFailureCaptureIfEnabled(identity: ToolErrorCaptureIden
   const eventsByKind = new Map<FailureKind, CapturedEvent[]>();
   const writebacks: CapturedWriteback[] = [];
   const errors: CapturedError[] = [];
-  const argsSnapshot = captureLosslessSnapshot(args, createdAt);
+  const git = identity.toolName === "git";
+  const argsSnapshot = captureLosslessSnapshot(git ? projectGitDiagnostic(args) : args, createdAt);
   const errorIds = new Map<unknown, string>();
   let nextErrorId = 1;
   let providerResult: LosslessSnapshot | undefined;
@@ -153,14 +155,14 @@ export function createToolFailureCaptureIfEnabled(identity: ToolErrorCaptureIden
     if (existing) return existing;
     const id = `error-${nextErrorId++}`;
     if (value && (typeof value === "object" || typeof value === "function")) errorIds.set(value, id);
-    errors.push({ id, capturedAt: now(), value: captureLosslessSnapshot(value, now()) });
+    errors.push({ id, capturedAt: now(), value: captureLosslessSnapshot(git ? projectGitDiagnostic(args, { error: value }) : value, now()) });
     return id;
   };
   const event = (stage: ToolErrorStage, error?: unknown, detail?: unknown) => {
     const kind = FAILURE_KIND_BY_STAGE[stage];
     const list = eventsByKind.get(kind) ?? [];
     const errorId = error === undefined ? undefined : captureError(error);
-    list.push({ stage, occurredAt: now(), ...(errorId ? { errorId } : {}), ...(detail === undefined ? {} : { detail: captureLosslessSnapshot(detail, now()) }) });
+    list.push({ stage, occurredAt: now(), ...(errorId ? { errorId } : {}), ...(detail === undefined ? {} : { detail: captureLosslessSnapshot(git ? projectGitDiagnosticDetail(args, detail, stage) : detail, now()) }) });
     eventsByKind.set(kind, list);
   };
   const pendingWriteback = (role: string) => [...writebacks].reverse().find((item) => item.role === role && item.outcome === "pending");
@@ -170,20 +172,20 @@ export function createToolFailureCaptureIfEnabled(identity: ToolErrorCaptureIden
       providerStarted = true;
     },
     recordProviderResult(result) {
-      providerResult = captureLosslessSnapshot(result, now());
+      providerResult = captureLosslessSnapshot(git ? projectGitDiagnostic(args, { result }) : result, now());
     },
     recordPartialResult(source, result) {
-      partialResults.push({ source, value: captureLosslessSnapshot(result, now()) });
+      partialResults.push({ source, value: captureLosslessSnapshot(git ? projectGitDiagnostic(args, { result }) : result, now()) });
       event("provider_partial_result", undefined, { source });
     },
     recordWritebackAttempt(role, output) {
-      writebacks.push({ role, attemptedAt: now(), output: captureLosslessSnapshot(output, now()), outcome: "pending" });
+      writebacks.push({ role, attemptedAt: now(), output: captureLosslessSnapshot(git ? projectGitDiagnosticDetail(args, output, "writeback") : output, now()), outcome: "pending" });
     },
     recordWritebackSuccess(role, response) {
       const item = pendingWriteback(role);
       if (!item) return;
       item.outcome = "succeeded";
-      item.response = captureLosslessSnapshot(response, now());
+      item.response = captureLosslessSnapshot(git ? projectGitDiagnostic(args, { stage: "writeback_response" }) : response, now());
     },
     recordWritebackFailure(role, error) {
       const item = pendingWriteback(role);

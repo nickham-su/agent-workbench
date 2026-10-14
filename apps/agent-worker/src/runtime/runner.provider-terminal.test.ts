@@ -14,7 +14,7 @@ const profile = (npm: string) => ({
 const run = { workspaceId: "ws", sessionId: "session", runId: "run", workspacePath: process.cwd(),
   workspaceRepoDirNames: [], inputText: "hello", runKind: "user" as const };
 const context = { pendingTools: [], tools: [], headMessageId: null, sessionRevision: 0, system: "",
-  messages: [], providerReplay: [], lastResponseTotalTokens: null, uiLocale: null, externalSkills: [] };
+  messages: [], providerReplay: [], lastResponseTotalTokens: null, uiLocale: null, workspaceRepoNames: [], externalSkills: [] };
 
 function providerHttpError(statusCode: number) {
   return new APICallError({ statusCode, message: secret, url: `https://${secret}.invalid/v1`,
