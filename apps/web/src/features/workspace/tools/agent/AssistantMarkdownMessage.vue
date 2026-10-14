@@ -8,6 +8,7 @@ import MarkdownIt from "markdown-it";
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { sanitizeAgentMarkdown } from "./assistantMarkdownSanitizer";
+import { agentMarkdownFileHref, parseAgentMarkdownFileLink, type AgentMarkdownFileLink, type AgentMarkdownFileLinkError } from "./agentMarkdownFileLinks";
 
 const props = defineProps<{
   text: string;
@@ -15,6 +16,11 @@ const props = defineProps<{
   streaming?: boolean;
   tone?: "normal" | "error";
   sectionKey?: string;
+}>();
+
+const emit = defineEmits<{
+  "open-file": [link: AgentMarkdownFileLink, isCurrent: () => boolean];
+  "invalid-file-link": [reason: AgentMarkdownFileLinkError];
 }>();
 
 const MARKDOWN_DEBOUNCE_MS = 280;
@@ -36,6 +42,20 @@ const markdown = new MarkdownIt({
 function escapeHtml(value: string) {
   return markdown.utils.escapeHtml(value);
 }
+
+markdown.renderer.rules.link_open = (tokens, idx, options, _env, renderer) => {
+  const token = tokens[idx];
+  // Only explicit Markdown links; linkify/autolinks retain their browser behavior.
+  if (token.markup !== "linkify" && token.info !== "auto") {
+    const href = token.attrGet("href") || "";
+    const parsed = parseAgentMarkdownFileLink(href);
+    if (parsed.kind !== "other") {
+      token.attrSet("data-agent-file-link", href);
+      token.attrSet("href", parsed.kind === "file" ? agentMarkdownFileHref(parsed.link) : "#");
+    }
+  }
+  return renderer.renderToken(tokens, idx, options);
+};
 
 // 当前版本不支持图片渲染.
 markdown.renderer.rules.image = () => "";
@@ -90,6 +110,7 @@ const toneClass = computed(() => (props.tone === "error" ? "is-error" : ""));
 
 let markdownTimer: number | null = null;
 let renderSeq = 0;
+let fileLinkClickSequence = 0;
 
 function clearMarkdownTimer() {
   if (markdownTimer == null) return;
@@ -142,6 +163,21 @@ async function onCopyCode(code: string) {
 function onMarkdownClick(event: MouseEvent) {
   const target = event.target as HTMLElement | null;
   if (!target) return;
+  const link = target.closest<HTMLAnchorElement>("a[data-agent-file-link]");
+  if (link && rootEl.value?.contains(link)) {
+    event.preventDefault();
+    event.stopPropagation();
+    const parsed = parseAgentMarkdownFileLink(link.getAttribute("data-agent-file-link") || "");
+    const sequence = ++fileLinkClickSequence;
+    const messageId = props.messageId;
+    const sectionKey = props.sectionKey;
+    if (parsed.kind === "file") {
+      emit("open-file", parsed.link, () => sequence === fileLinkClickSequence && props.messageId === messageId && props.sectionKey === sectionKey);
+    } else if (parsed.kind === "invalid") {
+      emit("invalid-file-link", parsed.reason);
+    }
+    return;
+  }
   const button = target.closest<HTMLElement>("[data-copy-code='1']");
   if (!button || !rootEl.value?.contains(button)) return;
   const block = button.closest<HTMLElement>("[data-assistant-code-block='1']");
@@ -171,6 +207,7 @@ watch(
 onBeforeUnmount(() => {
   clearMarkdownTimer();
   renderSeq += 1;
+  fileLinkClickSequence += 1;
 });
 </script>
 

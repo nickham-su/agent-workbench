@@ -9,6 +9,7 @@ export const componentTests = [
   "src/features/dashboard/Dashboard.component.test.ts",
   "src/features/settings/components/AgentProvidersSettingsPanel.component.test.ts",
   "src/features/workspace/tools/agent/agentArtifactCards.component.test.ts",
+  "src/features/workspace/tools/agent/agentMarkdownFileLinks.component.test.ts",
   "src/features/workspace/tools/agent/agentRichToolCards.component.test.ts",
   "src/features/workspace/tools/agent/agentSystemMessage.component.test.ts",
   "src/features/workspace/tools/agent/AgentAttachmentPreviewModal.component.test.ts",
@@ -19,6 +20,7 @@ export const componentTests = [
   "src/features/workspace/tools/agent/useAgentSessionStatusStore.component.test.ts",
   "src/features/workspace/tools/scheduled-tasks/ScheduledTaskDrawer.component.test.ts",
   "src/features/workspace/tools/scheduled-tasks/ScheduledTasksToolView.component.test.ts",
+  "src/features/workspace/tools/terminal/TerminalView.component.test.ts",
 ];
 
 export function parseConcurrency(args) {

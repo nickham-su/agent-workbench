@@ -111,6 +111,8 @@
               :message-id="row.message.id"
               :streaming="row.message.status === 'streaming'"
               :tone="row.message.status === 'failed' ? 'error' : 'normal'"
+              @open-file="onOpenMarkdownFile"
+              @invalid-file-link="onInvalidMarkdownFileLink"
             />
             <AgentSystemMessage
               v-else-if="
@@ -132,6 +134,8 @@
                 color: 'var(--text-tertiary)',
               }"
               section-key="reasoning"
+              @open-file="onOpenMarkdownFile"
+              @invalid-file-link="onInvalidMarkdownFileLink"
             />
             <AgentUserMessage
               v-else-if="
@@ -448,6 +452,9 @@ import AgentMessageActions from "./AgentMessageActions.vue";
 import AgentSystemMessage from "./AgentSystemMessage.vue";
 import AgentUserMessage from "./AgentUserMessage.vue";
 import AssistantMarkdownMessage from "./AssistantMarkdownMessage.vue";
+import { workspaceContextKey } from "../../context";
+import { workspaceHostKey } from "../../host";
+import { resolveAgentMarkdownFileLink, type AgentMarkdownFileLink, type AgentMarkdownFileLinkError } from "./agentMarkdownFileLinks";
 import {
   agentUserMessageDraftText,
   buildConversationParts,
@@ -540,6 +547,7 @@ import {
   revertAgentSession,
   sendAgentMessage,
   sendAgentMessageMultipart,
+  statWorkspaceFile,
   suggestWorkspaceFilePaths,
   updateAgentSessionModelOverride,
   updateWorkspaceAgentEnablementSettings,
@@ -591,6 +599,8 @@ const props = defineProps<{
   } | null;
 }>();
 const metadataReadContext = inject(agentSessionMetadataReadContextKey, null);
+const workspaceContext = inject(workspaceContextKey, null);
+const workspaceHost = inject(workspaceHostKey, null);
 const emit = defineEmits<{
   "update:modelValue": [value: string | null];
   forked: [session: AgentSessionRecord, mayActivate: boolean];
@@ -694,6 +704,45 @@ const collapsedTodoPartIds = ref(new Set<string>());
 let refreshTimer: number | null = null;
 let timelineRequestSequence = 0;
 let disposed = false;
+let markdownFileRequestSequence = 0;
+
+watch(() => props.workspaceId, () => {
+  markdownFileRequestSequence++;
+}, { flush: "sync" });
+
+function onInvalidMarkdownFileLink(reason: AgentMarkdownFileLinkError) {
+  markdownFileRequestSequence++;
+  message.warning(t(reason === "invalid_position" ? "agent.client.fileLinkInvalidPosition" : "agent.client.fileLinkInvalidPath"));
+}
+
+async function onOpenMarkdownFile(link: AgentMarkdownFileLink, isSourceCurrent: () => boolean) {
+  const sequence = ++markdownFileRequestSequence;
+  const workspaceId = props.workspaceId;
+  if (!workspaceHost || !workspaceContext) {
+    message.error(t("agent.client.fileLinkProbeFailed"));
+    return;
+  }
+  const result = await resolveAgentMarkdownFileLink({
+    path: link.path,
+    repoDirNames: workspaceContext.repos.value.map((repo) => repo.dirName),
+    stat: (path) => statWorkspaceFile({ workspaceId, path }),
+  });
+  if (disposed || sequence !== markdownFileRequestSequence || workspaceId !== props.workspaceId || !isSourceCurrent()) return;
+  if (result.kind !== "file") {
+    message.warning(t(result.kind === "failed" ? "agent.client.fileLinkProbeFailed" : "agent.client.fileLinkUnresolved"));
+    return;
+  }
+  workspaceHost.callFrom(props.toolId, "editor", {
+    type: "editor.openFile",
+    payload: {
+      path: result.path,
+      mode: "preview",
+      ...(link.line !== undefined ? { line: link.line, highlight: { kind: "line" } } : {}),
+      ...(link.column !== undefined ? { column: link.column } : {}),
+    },
+  });
+}
+
 let requestScope = createAgentRequestScope(props.workspaceId, props.sessionId);
 let loadingPreviousPageScope: AgentRequestScope | null = null;
 const detailLoadingScopeByExecutionId = new Map<string, AgentRequestScope>();
