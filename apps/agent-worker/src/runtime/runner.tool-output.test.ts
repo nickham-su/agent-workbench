@@ -2054,6 +2054,63 @@ test("中间工具仍会打断并发段", async () => {
   ]);
 });
 
+for (const names of [["todolist", "subtask"], ["subtask", "todolist"]]) {
+  test(`todolist 与长 subtask 保持输入顺序：${names.join(" → ")}`, async () => {
+    const events: string[] = [];
+    let releaseSubtask!: () => void;
+    const subtaskGate = new Promise<void>((resolve) => { releaseSubtask = resolve; });
+    let markSubtaskStarted!: () => void;
+    const subtaskStarted = new Promise<void>((resolve) => { markSubtaskStarted = resolve; });
+    const runner = new AgentRunner(
+      { async updateRunNotice() {} } as any,
+      {} as any,
+      { info() {}, warn() {}, error() {} },
+      1,
+    );
+    stubListedTools(runner, names);
+    (runner as any).executeTool = async ({ tool }: { tool: { toolName: string } }) => {
+      events.push(`start:${tool.toolName}`);
+      if (tool.toolName === "subtask") {
+        markSubtaskStarted();
+        await subtaskGate;
+      }
+      events.push(`done:${tool.toolName}`);
+      return { paused: false as const };
+    };
+
+    const completion = (runner as any).executePendingTools({
+      profile: { agent: { tools: names } },
+      run: {
+        workspaceId: "ws_test",
+        sessionId: "ses_test",
+        runId: "run_test",
+        workspacePath: isolatedExecutionWorkspacePath,
+        workspaceRepoDirNames: [],
+      },
+      context: {
+        pendingTools: names.map((toolName, index) => pendingTool({
+          executionId: `execution-${index}`,
+          toolName,
+        })),
+      },
+      signal: new AbortController().signal,
+    });
+    try {
+      await Promise.race([
+        subtaskStarted,
+        completion.then(() => { throw new Error("subtask did not wait at its gate"); }),
+      ]);
+      assert.deepEqual(events, names[0] === "todolist"
+        ? ["start:todolist", "done:todolist", "start:subtask"]
+        : ["start:subtask"]);
+    } finally {
+      releaseSubtask();
+      await completion;
+    }
+    assert.deepEqual(events, names.flatMap((name) => [`start:${name}`, `done:${name}`]));
+  });
+}
+
 test("纯非并发多工具保持原有串行语义", async () => {
   const executionOrder: string[] = [];
   const runner = new AgentRunner(

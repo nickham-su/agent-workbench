@@ -28,7 +28,7 @@ type MessagePart =
       id: string;
       position: number;
       type: "tool_call";
-      toolName: "bash" | "view_image";
+      toolName: "bash" | "view_image" | "todolist" | "subtask";
       input: Record<string, unknown>;
       providerToolCallId: string;
     }
@@ -86,6 +86,43 @@ function append(
     }],
     createdAt: current.revision + 2,
   });
+}
+
+function createPendingFixture(): Fixture {
+  const fixture = createFixture();
+  append(fixture.db, { id: "user", text: "request" });
+  createMessageRunRecord(fixture.db, {
+    runId: "run",
+    workspaceId: "ws",
+    sessionId: "session",
+    triggerMessageId: "user",
+    agentId: "agent",
+    providerId: "provider",
+    modelId: "model",
+    status: "running",
+    createdAt: 4,
+  });
+  startMessageRun(fixture.db, { workspaceId: "ws", sessionId: "session", runId: "run", updatedAt: 4 });
+  return fixture;
+}
+
+function appendPendingAssistant(db: Database.Database, id: string, parts: MessagePart[], executionIds: string[]) {
+  append(db, { id, type: "assistant", originRunId: "run", parts });
+  const calls = parts.filter((part) => part.type === "tool_call");
+  assert.equal(executionIds.length, calls.length);
+  const insert = db.prepare(`
+    insert into agent_tool_execution (
+      id, call_part_id, origin_session_id, origin_run_id, status, result_truncated,
+      updated_revision, created_at, updated_at
+    ) values (?, ?, 'session', 'run', 'queued', 0, ?, 50, 50)
+  `);
+  for (const [index, call] of calls.entries()) {
+    insert.run(executionIds[index], call.id, head(db).revision);
+  }
+}
+
+function toolCall(id: string, position: number, toolName: Extract<MessagePart, { type: "tool_call" }>["toolName"]): MessagePart {
+  return { id, position, type: "tool_call", toolName, input: {}, providerToolCallId: `provider-${id}` };
 }
 
 function clearContextRoot(db: Database.Database) {
@@ -228,6 +265,70 @@ test("pending tool executions remain in the source but stop model transcript bef
     stopBeforeAssistantMessageIds: new Set(["assistant"]),
   });
   assert.deepEqual(projected.messages, [{ role: "user", content: "request" }]);
+});
+
+test("pending tools preserve Part.position when same-time execution IDs are reversed", (t) => {
+  const { db, resolver } = createPendingFixture();
+  t.after(() => db.close());
+  appendPendingAssistant(db, "assistant", [
+    { id: "intro", position: 0, type: "text", text: "plan first" },
+    toolCall("todo", 1, "todolist"),
+    { id: "between", position: 2, type: "text", text: "then delegate" },
+    toolCall("subtask", 3, "subtask"),
+    toolCall("bash", 4, "bash"),
+  ], ["execution-z", "execution-m", "execution-a"]);
+
+  const resolved = resolver.resolve({ workspaceId: "ws", sessionId: "session", runId: "run" });
+  assert.deepEqual(resolved.pendingTools.map((tool) => tool.callPartId), ["todo", "subtask", "bash"]);
+  assert.deepEqual(resolved.pendingTools.map((tool) => tool.toolExecutionId), ["execution-z", "execution-m", "execution-a"]);
+  assert.deepEqual(resolved.pendingTools.map((tool) => tool.toolName), ["todolist", "subtask", "bash"]);
+});
+
+test("pending tools follow the physical message chain before per-message positions", (t) => {
+  const { db, resolver } = createPendingFixture();
+  t.after(() => db.close());
+  appendPendingAssistant(db, "z-first-assistant", [
+    { id: "first-text", position: 0, type: "text", text: "first turn" },
+    toolCall("first-bash", 1, "bash"),
+    { id: "second-text", position: 2, type: "text", text: "same turn" },
+    toolCall("first-image", 3, "view_image"),
+  ], ["execution-z", "execution-m"]);
+  appendPendingAssistant(db, "a-second-assistant", [
+    toolCall("second-todo", 0, "todolist"),
+  ], ["execution-a"]);
+  db.prepare("update agent_tool_execution set status='running', started_at=50 where id='execution-m'").run();
+
+  const resolved = resolver.resolve({ workspaceId: "ws", sessionId: "session", runId: "run" });
+  assert.deepEqual(resolved.pendingTools.map((tool) => tool.callPartId), ["first-bash", "first-image", "second-todo"]);
+  assert.deepEqual(resolved.pendingTools.map((tool) => tool.assistantMessageId), [
+    "z-first-assistant", "z-first-assistant", "a-second-assistant",
+  ]);
+  assert.deepEqual(resolved.pendingTools.map((tool) => tool.status), ["queued", "running", "queued"]);
+});
+
+test("pending tools use the current replacement branch and reject off-chain pending calls", (t) => {
+  const { db, resolver } = createPendingFixture();
+  t.after(() => db.close());
+  appendPendingAssistant(db, "a-original-assistant", [toolCall("old-call", 0, "bash")], ["execution-a"]);
+  appendPendingAssistant(db, "z-replacement-assistant", [toolCall("current-call", 0, "subtask")], ["execution-z"]);
+  // Replacement siblings share a depth, but only the replacement is on the current ancestry.
+  db.prepare(`
+    update agent_message set previous_message_id='user', depth=1,
+      replaces_message_id='a-original-assistant' where id='z-replacement-assistant'
+  `).run();
+  db.prepare("update agent_message set status='superseded' where id='a-original-assistant'").run();
+  db.prepare("update agent_tool_execution set status='completed', completed_at=50 where id='execution-a'").run();
+
+  const resolved = resolver.resolve({ workspaceId: "ws", sessionId: "session", runId: "run" });
+  assert.deepEqual(resolved.pendingTools.map((tool) => tool.callPartId), ["current-call"]);
+
+  // An inconsistent pending execution on the old sibling must not be silently discarded.
+  db.prepare("update agent_tool_execution set status='queued', completed_at=null where id='execution-a'").run();
+  assert.throws(
+    () => resolver.resolve({ workspaceId: "ws", sessionId: "session", runId: "run" }),
+    (error: unknown) => error instanceof ModelContextInvariantError
+      && error.message === "pending tool call is not on the current session message chain",
+  );
 });
 
 test("Resolver rejects stale compaction-source reads and validates a current run", () => {
