@@ -819,7 +819,7 @@ test("workspace delete 对 tmux 未知错误保留 tombstone/fence，部分 kill
   try {
     await assert.rejects(
       () => deleteWorkspace(fixture.ctx, logger, fixture.workspaceId, {
-        hasSession: async ({ sessionName }) => sessionName === "term_second" ? Promise.reject(new Error("tmux timeout")) : "exists",
+        hasSession: async ({ sessionName }) => sessionName === "term_second" ? Promise.reject(new Error("tmux timeout")) : killed.includes(sessionName) ? "not_found" : "exists",
         killSession: async ({ sessionName }) => { killed.push(sessionName); },
       }),
       (error: unknown) => error instanceof HttpError && error.code === "TERMINAL_KILL_FAILED",

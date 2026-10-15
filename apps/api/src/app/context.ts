@@ -4,10 +4,13 @@ import type { AppLogLevel } from "../config/env.js";
 import type { CredentialMasterKeySource } from "../infra/crypto/credentialMasterKey.js";
 import type { PreviewRuntime } from "../modules/preview/preview-runtime.js";
 import type { AnalyticsWorkerFactory } from "../modules/analytics/analytics-supervisor.js";
+import type { WorkspaceEnvironmentService } from "../modules/workspaces/workspace-environment.service.js";
 
 
 export type AppContext = {
   db: Db;
+  /** Application-owned Workspace overrides; created lazily without changing process.env. */
+  workspaceEnvironment?: WorkspaceEnvironmentService;
   repoRoot: string;
   dataDir: string;
   fileMaxBytes: number;

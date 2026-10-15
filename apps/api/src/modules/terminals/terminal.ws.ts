@@ -2,11 +2,9 @@ import type { FastifyInstance } from "fastify";
 import type { AppContext } from "../../app/context.js";
 import { HttpError } from "../../app/errors.js";
 import { AUTH_COOKIE_NAME, parseCookieHeader, verifySessionCookieValue } from "../../infra/auth/sessionCookie.js";
-import { tmuxCountClients, tmuxHasSession } from "../../infra/tmux/session.js";
+import { tmuxCountClients } from "../../infra/tmux/session.js";
 import { nowMs } from "../../utils/time.js";
-import { getTerminal } from "./terminal.store.js";
-import { getWorkspace } from "../workspaces/workspace.store.js";
-import { settleTerminalAfterSessionStopped } from "./terminal.service.js";
+import { getTerminalForAttachment } from "./terminal.service.js";
 import * as pty from "node-pty";
 
 type WsClientMessage =
@@ -97,18 +95,8 @@ export async function registerTerminalWsRoute(app: FastifyInstance, ctx: AppCont
           if (!ok) throw new HttpError(401, "Unauthorized");
         }
 
-        const term = getTerminal(ctx.db, params.terminalId);
-        if (!term) throw new HttpError(404, "Terminal not found");
+        const { term, workspace: ws } = await getTerminalForAttachment(ctx, app.log, params.terminalId);
         termId = term.id;
-
-        const ws = getWorkspace(ctx.db, term.workspaceId);
-        if (!ws) throw new HttpError(404, "Workspace not found");
-
-        const presence = await tmuxHasSession({ sessionName: term.sessionName, cwd: ctx.dataDir });
-        if (presence === "not_found") {
-          await settleTerminalAfterSessionStopped(ctx, app.log, term.id);
-          throw new HttpError(410, "tmux session not found (may have exited)");
-        }
 
         if (!force) {
           const clients = await tmuxCountClients({ sessionName: term.sessionName, cwd: ctx.dataDir });
@@ -176,11 +164,8 @@ export async function registerTerminalWsRoute(app: FastifyInstance, ctx: AppCont
           return;
         }
 
-        const message = (err instanceof Error ? err.message : String(err))
-          .trim()
-          .replace(/\s+/g, " ");
-        app.log.warn({ err, terminalId: params.terminalId }, "terminal ws handler failed");
-        sendErrorAndClose(`Internal error: ${message}`, { code: 4500, reason: "internal" });
+        app.log.warn({ terminalId: params.terminalId, code: "TERMINAL_ATTACH_FAILED" }, "terminal ws handler failed");
+        sendErrorAndClose("Terminal connection failed.", { code: 4500, reason: "internal" });
       }
 
       socket.on("close", () => {

@@ -6,6 +6,8 @@ export * from "./contracts/analytics-signals.js";
 export * from "./contracts/health.js";
 export * from "./contracts/repos.js";
 export * from "./contracts/workspaces.js";
+export * from "./contracts/workspace-environment.js";
+export * from "./workspace-environment-policy.js";
 export * from "./contracts/terminals.js";
 export * from "./contracts/git.js";
 export * from "./contracts/files.js";

@@ -8,6 +8,7 @@ import Fastify from "fastify";
 import multipart from "@fastify/multipart";
 import { createApp } from "../../app/createApp.js";
 import { HttpError } from "../../app/errors.js";
+import { workspaceLifecycleCoordinator } from "../../infra/locks/workspace-lifecycle-coordinator.js";
 import { workspaceDeletingFence } from "../agent/lifecycle/workspace-deleting-fence.js";
 import { createIntegrationFixture } from "../agent/integration/context-writeback.helpers.js";
 import { createAgentTestFixture, createTestWorkspace } from "../agent/testkit/agent-testkit.js";
@@ -80,19 +81,34 @@ test("真实 multipart upload 在 production gate 内完成后，delete 才建�
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(getWorkspaceDeletionIntent(fixture.db, workspace.id), null, "upload 未完成前不得建立 delete intent");
 
-  release();
-  const firstResponse = await firstUpload;
-  assert.equal(firstResponse.statusCode, 200, firstResponse.body);
-  assert.equal(await fs.readFile(path.join(workspace.path, "first.txt"), "utf8"), "first");
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.ok(getWorkspaceDeletionIntent(fixture.db, workspace.id), "upload 完成后 delete 应建立 intent");
-
+  // Deletion now holds admission through terminal/filesystem/final DB cleanup. Queue this
+  // observer and the second upload BEFORE final cleanup can take the gate; otherwise the
+  // request may legitimately observe a completed deletion (404), not a pending one (409).
+  let pendingObserved!: () => void;
+  let finishObservation!: () => void;
+  const pendingWait = new Promise<void>((resolve) => { pendingObserved = resolve; });
+  const finishWait = new Promise<void>((resolve) => { finishObservation = resolve; });
+  t.after(() => { release(); finishObservation(); });
+  const observation = workspaceLifecycleCoordinator.withAdmission(workspace.id, async () => {
+    pendingObserved();
+    await finishWait;
+  });
   const secondTarget = path.join(workspace.path, "second.txt");
-  const secondResponse = await app.inject({
+  const secondUpload = app.inject({
     method: "POST",
     url: `/api/workspaces/${workspace.id}/files/upload`,
     ...multipartUpload("second.txt", "second"),
-  });
+  }).then((response) => response);
+  await new Promise((resolve) => setImmediate(resolve));
+  release();
+  const firstResponse = await firstUpload;
+  assert.equal(firstResponse.statusCode, 200, firstResponse.body);
+  await pendingWait;
+  assert.equal(await fs.readFile(path.join(workspace.path, "first.txt"), "utf8"), "first");
+  assert.ok(getWorkspaceDeletionIntent(fixture.db, workspace.id), "upload 完成后 delete 应建立 intent");
+  finishObservation();
+  await observation;
+  const secondResponse = await secondUpload;
   assert.equal(secondResponse.statusCode, 409, secondResponse.body);
   assert.equal(secondResponse.json().code, "WORKSPACE_DELETING");
   await assert.rejects(() => fs.access(secondTarget));

@@ -5,6 +5,11 @@ import type {
   PluginToolRpcListRequest,
   PluginToolRpcListResponse,
 } from "@agent-workbench/shared/internal-contracts/agent-api-session";
+import {
+  WorkspaceEnvironmentResponseSchema,
+  type WorkspaceEnvironmentResponse,
+} from "@agent-workbench/shared/internal-contracts/workspace-environment";
+import { validateWorkspaceEnvironmentCollection } from "@agent-workbench/shared";
 import { Value } from "@sinclair/typebox/value";
 import type { TSchema } from "@sinclair/typebox";
 import {
@@ -78,7 +83,7 @@ import {
 
 export class ApiConflictError extends Error {}
 
-type InternalRpcMethod = "POST" | "PATCH";
+type InternalRpcMethod = "GET" | "POST" | "PATCH";
 
 export type AgentApiClientPolicyName =
   "controlRead" | "controlWrite" | "idempotentControlWrite" | "subtaskStart" | "terminalControl" | "excluded";
@@ -333,6 +338,7 @@ export class AgentApiClient {
     persistRunTerminalIntent: "terminalControl",
     convergeRunTerminal: "terminalControl",
     getExecutionProfile: "controlRead",
+    getWorkspaceEnvironment: "controlRead",
     getPromptContext: "controlRead",
     getMessagesContext: "controlRead",
     getCompactionSource: "controlRead",
@@ -558,6 +564,7 @@ export class AgentApiClient {
   ) {
     const controller = timeoutMs == null && !options.abortSignal ? null : new AbortController();
     const abortFromCaller = () => controller?.abort();
+    if (options.abortSignal?.aborted) controller?.abort();
     options.abortSignal?.addEventListener("abort", abortFromCaller, { once: true });
     let localTimedOut = false;
     let knownHttpStatus: number | null = null;
@@ -865,6 +872,29 @@ export class AgentApiClient {
         policy: AgentApiClient.publicMethodPolicies.archiveSearch,
       },
     );
+  }
+
+  async getWorkspaceEnvironment(workspaceId: string, options?: { abortSignal?: AbortSignal }): Promise<WorkspaceEnvironmentResponse> {
+    if (options?.abortSignal?.aborted) throw new Error("aborted");
+    const endpoint = "/api/internal/workspaces/:workspaceId/environment";
+    const response = await this.request<WorkspaceEnvironmentResponse>(
+      `/api/internal/workspaces/${encodeURIComponent(workspaceId)}/environment`,
+      {
+        method: "GET",
+        body: undefined,
+        responseSchema: WorkspaceEnvironmentResponseSchema,
+        responseEndpoint: endpoint,
+        policy: AgentApiClient.publicMethodPolicies.getWorkspaceEnvironment,
+        forceStrictResponseValidation: true,
+        abortSignal: options?.abortSignal,
+      },
+    );
+    if (options?.abortSignal?.aborted) throw new Error("aborted");
+    const variables = Object.entries(response.env).map(([name, value]) => ({ name, value, remark: "", enabled: true }));
+    if (response.workspaceId !== workspaceId || validateWorkspaceEnvironmentCollection(variables)) {
+      throw new InternalRpcInvalidResponseError({ method: "GET", endpoint, stage: "schema" });
+    }
+    return response;
   }
 
   async getMessagesContext(input: AgentApiMessagesContextRequest, options?: { abortSignal?: AbortSignal }) {

@@ -15,6 +15,7 @@ async function fixture(t: TestContext) {
   const calls: string[] = [];
   const forbidden = (name: string) => async () => { calls.push(name); throw new Error("Bash must not request a project Git lease"); };
   const apiClient = {
+    getWorkspaceEnvironment: async (workspaceId: string) => ({ workspaceId, env: {} }),
     prepareGitEnvForBash: forbidden("legacy-prepare"),
     cleanupGitEnvLease: forbidden("legacy-cleanup"),
     prepareRepoGitEnvLease: forbidden("repo-prepare"),
@@ -58,7 +59,7 @@ for (const command of commands) test(`AC-BASH-EXIT-COMMANDS: no project lease fo
   assert.deepEqual(await fs.readdir(f.root), []);
 });
 
-for (const inherited of [undefined, "fixture-host-value"]) test(`AC-BASH-EXIT-PROMPT/AC-ENV-BASH: plain Bash retains host environment (${inherited ?? "unset"})`, async (t) => {
+for (const inherited of [undefined, "fixture-host-value"]) test(`AC-BASH-EXIT-PROMPT/AC-ENV-BASH: plain Bash retains ordinary host environment but excludes AWB controls (${inherited ?? "unset"})`, async (t) => {
   const f = await fixture(t);
   const before = process.env.GIT_TERMINAL_PROMPT;
   const beforeInternal = process.env.AWB_STAGE4_ENV_SENTINEL;
@@ -68,7 +69,7 @@ for (const inherited of [undefined, "fixture-host-value"]) test(`AC-BASH-EXIT-PR
   try {
     const result = await f.provider.execute("bash", { command: "git --version >/dev/null; printf '%s|%s' \"${GIT_TERMINAL_PROMPT-unset}\" \"$AWB_STAGE4_ENV_SENTINEL\"", timeout: 5 }, f.context) as { stdout: string; exitCode: number };
     assert.equal(result.exitCode, 0);
-    assert.equal(result.stdout, `${inherited ?? "unset"}|fixture-normal-bash-environment`);
+    assert.equal(result.stdout, `${inherited ?? "unset"}|`);
     assert.deepEqual(f.calls, []);
   } finally {
     if (before === undefined) delete process.env.GIT_TERMINAL_PROMPT; else process.env.GIT_TERMINAL_PROMPT = before;

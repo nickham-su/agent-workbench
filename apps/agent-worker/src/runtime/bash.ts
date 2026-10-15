@@ -9,6 +9,24 @@ export type BashRunResult = {
   outputLimitExceeded: boolean;
 };
 
+/** Copy only own string values, preserving empty strings without exposing internal controls. */
+export function buildBashEnvironment(extraEnv?: NodeJS.ProcessEnv, baseEnv: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = Object.create(null);
+  for (const layer of [baseEnv, extraEnv]) {
+    for (const [name, value] of Object.entries(layer ?? {})) {
+      if (!name.startsWith("AWB_") && typeof value === "string") env[name] = value;
+    }
+  }
+  return env;
+}
+
+function safeSpawnError(error: unknown): Error {
+  const tooLarge = (error as NodeJS.ErrnoException | null)?.code === "E2BIG";
+  return Object.assign(new Error(tooLarge ? "Bash environment exceeds the operating system limit." : "Bash could not be started."), {
+    code: tooLarge ? "BASH_ENV_TOO_LARGE" : "BASH_SPAWN_FAILED"
+  });
+}
+
 export async function runBashCommand(params: {
   command: string;
   cwd: string;
@@ -18,25 +36,21 @@ export async function runBashCommand(params: {
   /** 子进程级 env 增量：会与 process.env 合并；不会污染 worker 进程环境 */
   extraEnv?: NodeJS.ProcessEnv;
 }): Promise<BashRunResult> {
+  if (params.signal?.aborted) throw new Error("aborted");
   return new Promise<BashRunResult>((resolve, reject) => {
     const maxOutputBytes = params.maxOutputBytes ?? 512 * 1024;
 
-    // Ensure env values are strings (Node requires string values in spawn env).
-    const extraEnv: NodeJS.ProcessEnv = {};
-    if (params.extraEnv) {
-      for (const [k, v] of Object.entries(params.extraEnv)) {
-        if (typeof v === "string") extraEnv[k] = v;
-      }
-    }
-
-    // POSIX: detached=true creates a new process group so we can kill the entire command tree.
-    // Windows: detached does not give us killpg semantics; we use taskkill to kill the process tree.
-    const child = spawn("bash", ["-lc", params.command], {
-      cwd: params.cwd,
-      stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, ...extraEnv },
-      detached: process.platform !== "win32"
-    });
+    // POSIX detached mode retains the existing process-group cancellation semantics.
+    const child = (() => {
+      try {
+        return spawn("bash", ["-lc", params.command], {
+          cwd: params.cwd,
+          stdio: ["ignore", "pipe", "pipe"],
+          env: buildBashEnvironment(params.extraEnv),
+          detached: process.platform !== "win32"
+        });
+      } catch (error) { throw safeSpawnError(error); }
+    })();
 
     let stdout = "";
     let stderr = "";
@@ -231,7 +245,7 @@ export async function runBashCommand(params: {
     });
 
     child.on("error", (err) => {
-      fail(err);
+      fail(safeSpawnError(err));
     });
 
     child.on("exit", (code) => {

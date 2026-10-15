@@ -132,6 +132,7 @@ import WorkspaceHeader from "@/features/workspace/components/WorkspaceHeader.vue
 import WorkspaceDock from "@/features/workspace/components/WorkspaceDock.vue";
 import type { HeaderAction, ToolId } from "@/features/workspace/types";
 import CodeReviewIcon from "../icons/CodeReviewIcon.vue";
+import EnvironmentVariablesIcon from "../icons/EnvironmentVariablesIcon.vue";
 import CodeReviewToolView from "../tools/code-review/CodeReviewToolView.vue";
 import { createSearchRuntime } from "../tools/search/runtime";
 import FileExplorerToolView from "../tools/file-explorer/FileExplorerToolView.vue";
@@ -139,6 +140,7 @@ import SearchToolView from "../tools/search/SearchToolView.vue";
 import TerminalToolView from "../tools/terminal/TerminalToolView.vue";
 import AgentToolView from "../tools/agent/AgentToolView.vue";
 import ScheduledTasksToolView from "../tools/scheduled-tasks/ScheduledTasksToolView.vue";
+import EnvironmentVariablesToolView from "../tools/environment-variables/EnvironmentVariablesToolView.vue";
 import EditorToolView from "../tools/editor/EditorToolView.vue";
 import GitIdentityModal from "@/shared/components/GitIdentityModal.vue";
 import { createCodeReviewRuntime } from "@/features/workspace/tools/code-review/runtime";
@@ -149,7 +151,7 @@ const props = defineProps<{ workspaceId: string; previewEnabled: boolean }>();
 const { t } = useI18n();
 type PushParams = Omit<GitPushRequest, "target">;
 
-const TOOL_IDS: ToolId[] = ["files", "search", "codeReview", "terminal", "agent", "scheduledTasks", "editor"];
+const TOOL_IDS: ToolId[] = ["files", "search", "codeReview", "terminal", "agent", "scheduledTasks", "environmentVariables", "editor"];
 const DOCK_AREAS: DockArea[] = ["leftTop", "leftBottom", "rightTop"];
 type ToolDefinition = {
   toolId: ToolId;
@@ -255,6 +257,16 @@ const tools = computed<ToolDefinition[]>(() => [
     keepAlive: true
   },
   {
+    toolId: "environmentVariables",
+    title: () => t("workspace.tools.environmentVariables"),
+    icon: EnvironmentVariablesIcon,
+    view: EnvironmentVariablesToolView,
+    defaultArea: "leftTop",
+    allowedAreas: ["leftTop", "leftBottom"],
+    // Release plaintext and in-flight UI state when leaving this tool.
+    keepAlive: false
+  },
+  {
     toolId: "agent",
     title: () => t("workspace.tools.agent"),
     icon: RobotOutlined,
@@ -335,6 +347,7 @@ const toolArea = reactive<Record<ToolId, DockArea>>({
   search: "leftTop",
   agent: "leftTop",
   scheduledTasks: "leftTop",
+  environmentVariables: "leftTop",
   editor: "rightTop"
 });
 
@@ -351,6 +364,7 @@ const toolMinimized = reactive<Record<ToolId, boolean>>({
   search: true,
   agent: false,
   scheduledTasks: false,
+  environmentVariables: false,
   editor: true
 });
 const toolDots = reactive<Record<ToolId, boolean>>({
@@ -360,6 +374,7 @@ const toolDots = reactive<Record<ToolId, boolean>>({
   search: false,
   agent: false,
   scheduledTasks: false,
+  environmentVariables: false,
   editor: false
 });
 const toolRuntimes = new Map<ToolId, ToolRuntime>();
@@ -502,6 +517,7 @@ function loadDockLayout(workspaceId: string): DockLayoutV3 | null {
       search: "leftTop",
       agent: "leftTop",
       scheduledTasks: "leftTop",
+      environmentVariables: "leftTop",
       editor: "rightTop"
     };
     for (const toolId of TOOL_IDS) {
@@ -516,6 +532,7 @@ function loadDockLayout(workspaceId: string): DockLayoutV3 | null {
       search: true,
       agent: false,
       scheduledTasks: false,
+      environmentVariables: false,
       editor: true
     };
     for (const toolId of TOOL_IDS) {
@@ -588,6 +605,7 @@ function saveDockLayout(workspaceId: string) {
         search: toolArea.search,
         agent: toolArea.agent,
         scheduledTasks: toolArea.scheduledTasks,
+        environmentVariables: toolArea.environmentVariables,
         editor: toolArea.editor
       },
       toolMinimized: {
@@ -597,6 +615,7 @@ function saveDockLayout(workspaceId: string) {
         search: toolMinimized.search,
         agent: toolMinimized.agent,
         scheduledTasks: toolMinimized.scheduledTasks,
+        environmentVariables: toolMinimized.environmentVariables,
         editor: toolMinimized.editor
       },
       activeToolIdByArea: {
@@ -635,6 +654,7 @@ function resetDockLayoutDefaults() {
   toolArea.files = "leftTop";
   toolArea.search = "leftTop";
   toolArea.agent = "leftTop";
+  toolArea.environmentVariables = "leftTop";
   toolArea.editor = "rightTop";
   activeToolIdByArea.leftTop = "files";
   activeToolIdByArea.leftBottom = "terminal";
@@ -644,6 +664,7 @@ function resetDockLayoutDefaults() {
   toolMinimized.files = false;
   toolMinimized.search = true;
   toolMinimized.agent = false;
+  toolMinimized.environmentVariables = false;
   toolMinimized.editor = true;
   setToolOrderByArea(defaultToolOrderByArea());
   topBottomRatio.value = 2 / 3;
@@ -890,7 +911,7 @@ const keepAliveIncludeByArea = computed(() => {
 });
 
 const toolVisibleById = computed(() => {
-  const out: Record<ToolId, boolean> = { codeReview: false, terminal: false, files: false, search: false, agent: false, scheduledTasks: false, editor: false };
+  const out: Record<ToolId, boolean> = { codeReview: false, terminal: false, files: false, search: false, agent: false, scheduledTasks: false, environmentVariables: false, editor: false };
   for (const id of TOOL_IDS) out[id] = isToolEnabled(id) && isToolVisible(id);
   return out;
 });

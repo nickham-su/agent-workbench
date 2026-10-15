@@ -14,6 +14,7 @@ import type {
 import type { WorkspaceRecord } from "@agent-workbench/shared";
 import { HttpError } from "../../app/errors.js";
 import type { AppContext } from "../../app/context.js";
+import { getWorkspaceEnvironmentService } from "./workspace-environment.service.js";
 import { newId } from "../../utils/ids.js";
 import { nowMs } from "../../utils/time.js";
 import { getSettingJson, setSettingJson } from "../settings/settings.store.js";
@@ -59,6 +60,8 @@ import {
 import { tmuxHasSession, tmuxKillSession } from "../../infra/tmux/session.js";
 import { assertTerminalGitAuthCleanupRootAnchors, cleanupTerminalGitAuthArtifacts } from "../terminals/terminal.gitAuth.js";
 import { clearTerminalAuthCleanupIntent, listTerminalAuthCleanupIntents } from "../terminals/terminal-auth-cleanup-intent.store.js";
+import { cleanupTerminalEnvironmentAttempts, stopTerminalSession } from "../terminals/terminal.service.js";
+import { clearTerminalEnvironmentLaunchAttempt } from "../terminals/terminal-env-launch-attempt.store.js";
 import { withWorkspaceRepoLock } from "../../infra/locks/workspaceRepoLock.js";
 import { withWorkspaceLock } from "../../infra/locks/workspaceLock.js";
 import { workspaceLifecycleCoordinator } from "../../infra/locks/workspace-lifecycle-coordinator.js";
@@ -78,6 +81,7 @@ export type WorkspaceDeletionTerminalOperations = {
   hasSession: (params: { sessionName: string; cwd: string }) => Promise<"exists" | "not_found">;
   killSession: (params: { sessionName: string; cwd: string }) => Promise<void>;
   cleanupAuthArtifacts?: (dataDir: string, terminalId: string, intents?: import("../terminals/terminal-auth-cleanup-intent.store.js").TerminalAuthCleanupIntent[]) => Promise<void>;
+  cleanupEnvironmentLaunch?: typeof import("../terminals/terminal-env-launch.js").cleanupTerminalEnvironmentLaunch;
 };
 
 const defaultWorkspaceDeletionTerminalOperations: WorkspaceDeletionTerminalOperations = {
@@ -655,53 +659,50 @@ export async function deleteWorkspace(
       });
     }
 
-    const terms = listTerminalsByWorkspace(ctx.db, ws.id);
-    for (const term of terms) {
-      try {
-        const presence = await terminalOperations.hasSession({ sessionName: term.sessionName, cwd: ctx.dataDir });
-        if (presence === "exists") {
-          await terminalOperations.killSession({ sessionName: term.sessionName, cwd: ctx.dataDir });
-        }
-      } catch (err) {
-        logger.warn({ workspaceId: ws.id, terminalId: term.id, sessionName: term.sessionName, err }, "tmux kill-session failed");
-        throw new HttpError(409, "Failed to kill one or more terminal sessions; deletion remains pending.", "TERMINAL_KILL_FAILED");
-      }
-    }
-
-    for (const term of terms) {
-      try {
-        const intents = listTerminalAuthCleanupIntents(ctx.db, term.id);
-        if (intents.some((intent) => intent.phase !== "recoverable")) {
-          throw new Error("auth cleanup locator is not recoverable");
-        }
-        await assertTerminalGitAuthCleanupRootAnchors(ctx.dataDir, intents);
-        await (terminalOperations.cleanupAuthArtifacts ?? cleanupTerminalGitAuthArtifacts)(ctx.dataDir, term.id, intents);
-        // 仅 recoverable 经过实际 root-slot cleanup 后可移除 latch；同时和最终
-        // terminal/Workspace record 删除位于下面同一 SQLite transaction。
-        const current = listTerminalAuthCleanupIntents(ctx.db, term.id);
-        if (current.some((intent) => intent.phase !== "recoverable")) throw new Error("auth cleanup locator is not recoverable");
-      } catch (err) {
-        logger.warn({ workspaceId: ws.id, terminalId: term.id, err }, "terminal Git auth artifact cleanup failed");
-        throw new HttpError(409, "Failed to clean terminal Git authentication artifacts; deletion remains pending.", "TERMINAL_AUTH_CLEANUP_FAILED");
-      }
-    }
-
-    await removeWorkspaceFileDomains(ctx, ws);
-    ctx.db.transaction(() => {
+    // Cleanup is allowed after the durable deletion fence, but serialized with all terminal mutations.
+    await workspaceLifecycleCoordinator.withAdmission(ws.id, async () => {
+      const terms = listTerminalsByWorkspace(ctx.db, ws.id);
       for (const term of terms) {
-        const intents = listTerminalAuthCleanupIntents(ctx.db, term.id);
-        if (intents.some((intent) => intent.phase !== "recoverable")) throw new Error("auth cleanup locator is not recoverable");
-        for (const intent of intents) clearTerminalAuthCleanupIntent(ctx.db, term.id, intent.artifactKind);
+        try { await stopTerminalSession(ctx, term, terminalOperations); }
+        catch {
+          logger.warn({ workspaceId: ws.id, terminalId: term.id, code: "TERMINAL_KILL_FAILED" }, "terminal stop remains pending");
+          throw new HttpError(409, "Failed to stop one or more terminal sessions; deletion remains pending.", "TERMINAL_KILL_FAILED");
+        }
       }
-      // Task history is scoped to this Workspace and cascades with its Task.
-      // Remove it before the Agent graph and the Workspace FK are deleted.
-      ctx.db.prepare("delete from scheduled_agent_task where workspace_id=?").run(ws.id);
-      deleteWorkspaceAgentData(ctx.db, ws.id);
-      deleteWorkspaceReposByWorkspace(ctx.db, ws.id);
-      deleteTerminalRecordsByWorkspace(ctx.db, ws.id);
-      deleteWorkspaceRecord(ctx.db, ws.id);
-    })();
-    workspaceDeletingFence.end(ws.id);
+      const cleanAttempts = new Map<string, string[]>();
+      for (const term of terms) {
+        cleanAttempts.set(term.id, await cleanupTerminalEnvironmentAttempts(ctx, term.id, "stopped", terminalOperations));
+        try {
+          const intents = listTerminalAuthCleanupIntents(ctx.db, term.id);
+          if (intents.some((intent) => intent.phase !== "recoverable")) {
+            throw new Error("auth cleanup locator is not recoverable");
+          }
+          await assertTerminalGitAuthCleanupRootAnchors(ctx.dataDir, intents);
+          await (terminalOperations.cleanupAuthArtifacts ?? cleanupTerminalGitAuthArtifacts)(ctx.dataDir, term.id, intents);
+          const current = listTerminalAuthCleanupIntents(ctx.db, term.id);
+          if (current.some((intent) => intent.phase !== "recoverable")) throw new Error("auth cleanup locator is not recoverable");
+        } catch {
+          logger.warn({ workspaceId: ws.id, terminalId: term.id, code: "TERMINAL_AUTH_CLEANUP_FAILED" }, "terminal Git auth artifact cleanup failed");
+          throw new HttpError(409, "Failed to clean terminal Git authentication artifacts; deletion remains pending.", "TERMINAL_AUTH_CLEANUP_FAILED");
+        }
+      }
+      await removeWorkspaceFileDomains(ctx, ws);
+      ctx.db.transaction(() => {
+        for (const term of terms) {
+          const intents = listTerminalAuthCleanupIntents(ctx.db, term.id);
+          if (intents.some((intent) => intent.phase !== "recoverable")) throw new Error("auth cleanup locator is not recoverable");
+          for (const id of cleanAttempts.get(term.id)!) clearTerminalEnvironmentLaunchAttempt(ctx.db, id);
+          for (const intent of intents) clearTerminalAuthCleanupIntent(ctx.db, term.id, intent.artifactKind);
+        }
+        ctx.db.prepare("delete from scheduled_agent_task where workspace_id=?").run(ws.id);
+        deleteWorkspaceAgentData(ctx.db, ws.id);
+        deleteWorkspaceReposByWorkspace(ctx.db, ws.id);
+        deleteTerminalRecordsByWorkspace(ctx.db, ws.id);
+        deleteWorkspaceRecord(ctx.db, ws.id);
+      })();
+      getWorkspaceEnvironmentService(ctx).invalidate(ws.id);
+      workspaceDeletingFence.end(ws.id);
+    });
     logger.info({ workspaceId: ws.id }, "workspace deleted");
   } catch (error) {
     const code = deletionFailureCode(error);

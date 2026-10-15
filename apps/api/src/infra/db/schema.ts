@@ -274,6 +274,20 @@ function createBaseSchema(db: Db) {
       updated_at integer not null
     );
 
+    create table if not exists workspace_environment_variables (
+      id text primary key,
+      workspace_id text not null references workspaces(id) on delete cascade,
+      name text not null collate binary,
+      value_enc text not null,
+      remark text not null default '',
+      enabled integer not null check (enabled in (0, 1)),
+      created_at integer not null,
+      updated_at integer not null,
+      unique (workspace_id, name)
+    );
+    create index if not exists idx_workspace_environment_variables_list
+      on workspace_environment_variables(workspace_id, created_at, id);
+
     create table if not exists workspace_deletion (
       workspace_id text primary key,
       dir_name text not null,
@@ -333,8 +347,60 @@ function createBaseSchema(db: Db) {
   ensureColumn(db, { table: "workspaces", column: "dir_name", ddl: "dir_name text" });
   ensureColumn(db, { table: "workspaces", column: "terminal_credential_id", ddl: "terminal_credential_id text" });
   ensureColumn(db, { table: "workspaces", column: "last_used_at", ddl: "last_used_at integer" });
+  ensureTerminalEnvironmentLaunchAttemptSchema(db);
   ensureTerminalAuthCleanupIntentSchema(db);
   createScheduledTaskSchema(db);
+}
+
+/** Independent non-Agent locator table. Unknown layouts must never be repaired by dropping authority. */
+function ensureTerminalEnvironmentLaunchAttemptSchema(db: Db) {
+  const identityChecks = ["data_root", "launch_root", "attempt_dir", "payload", "status"].map((prefix) => `
+    check ((${prefix}_dev is null and ${prefix}_ino is null) or (
+      ${prefix}_dev is not null and ${prefix}_ino is not null
+      and typeof(${prefix}_dev) = 'text' and typeof(${prefix}_ino) = 'text'
+      and length(${prefix}_dev) > 0 and length(${prefix}_ino) > 0
+      and ${prefix}_dev not glob '*[^0-9]*' and ${prefix}_ino not glob '*[^0-9]*'
+      and (${prefix}_dev = '0' or substr(${prefix}_dev, 1, 1) between '1' and '9')
+      and (${prefix}_ino = '0' or substr(${prefix}_ino, 1, 1) between '1' and '9')
+    ))`).join(",");
+  const ddl = `create table terminal_env_launch_attempts (
+    id text not null primary key,
+    terminal_id text not null references terminals(id) on delete restrict,
+    directory_name text not null,
+    phase text not null check (phase in ('armed', 'prepared', 'launching', 'cleanup_pending')),
+    owner_uid integer not null check (owner_uid >= 0),
+    data_root_dev text not null, data_root_ino text not null,
+    launch_root_dev text, launch_root_ino text,
+    attempt_dir_dev text, attempt_dir_ino text,
+    payload_dev text, payload_ino text, status_dev text, status_ino text,
+    directory_armed integer not null default 0 check (directory_armed in (0, 1)),
+    payload_armed integer not null default 0 check (payload_armed in (0, 1)),
+    status_armed integer not null default 0 check (status_armed in (0, 1)),
+    error_code text check (error_code is null or error_code in (
+      'TERMINAL_ENV_PREPARE_FAILED', 'TERMINAL_ENV_PROTOCOL_FAILED', 'TERMINAL_ENV_START_TIMEOUT',
+      'TERMINAL_ENV_SHELL_NOT_FOUND', 'TERMINAL_ENV_SPAWN_FAILED', 'TERMINAL_ENV_CLEANUP_PENDING')),
+    created_at integer not null, updated_at integer not null,
+    check (attempt_dir_dev is null or (directory_armed = 1 and launch_root_dev is not null)),
+    check (payload_armed = 0 or attempt_dir_dev is not null),
+    check (status_armed = 0 or attempt_dir_dev is not null),
+    check (payload_dev is null or payload_armed = 1),
+    check (status_dev is null or status_armed = 1),
+    check (phase not in ('prepared', 'launching') or (
+      launch_root_dev is not null and attempt_dir_dev is not null and payload_dev is not null and status_dev is not null
+      and directory_armed = 1 and payload_armed = 1 and status_armed = 1)),
+    ${identityChecks}
+  )`;
+  const normalize = (sql: string) => sql.replace(/\s+/g, "").replace(/;$/, "").toLowerCase();
+  db.transaction(() => {
+    const existing = db.prepare("select sql from sqlite_master where name = 'terminal_env_launch_attempts'").get() as { sql: string | null } | undefined;
+    if (existing) {
+      if (!existing.sql || normalize(existing.sql) !== normalize(ddl)) {
+        throw new Error("Unsupported terminal environment launch attempt schema. Refusing unsafe repair.");
+      }
+    } else db.exec(ddl);
+    db.exec(`create index if not exists idx_terminal_env_launch_attempts_terminal
+      on terminal_env_launch_attempts(terminal_id, created_at, id)`);
+  })();
 }
 
 /** Independent non-Agent tables: Agent rebuild must never drop task configuration or history. */

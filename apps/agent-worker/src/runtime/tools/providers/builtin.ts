@@ -345,13 +345,24 @@ export class BuiltinToolProvider implements ToolProvider {
           throw err;
         }
 
+        if (ctx.signal.aborted) throw new Error("aborted");
+        let environment;
+        try {
+          environment = await ctx.apiClient.getWorkspaceEnvironment(ctx.run.workspaceId, { abortSignal: ctx.signal });
+        } catch {
+          if (ctx.signal.aborted) throw new Error("aborted");
+          throw Object.assign(new Error("Workspace environment configuration is unavailable."), { code: "WORKSPACE_ENV_UNAVAILABLE" });
+        }
+        if (ctx.signal.aborted) throw new Error("aborted");
+
         const timeoutMs = Math.min(ENV_TIMEOUT_MS_MAX, (timeoutSeconds ?? 120) * 1000);
         const bash = await runBashCommand({
           command,
           cwd,
           timeoutMs,
           maxOutputBytes: 512 * 1024,
-          signal: ctx.signal
+          signal: ctx.signal,
+          extraEnv: environment.env
         });
 
         return {

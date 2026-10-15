@@ -16,8 +16,8 @@ import { gitAskpassScriptV1 } from "../../infra/git/askpass.js";
 import { shQuote } from "../../infra/git/shQuote.js";
 import { getCredentialWithSecret } from "../credentials/credentials.store.js";
 import { getSettingJson } from "../settings/settings.store.js";
-import { workspaceDeletingFence } from "../agent/lifecycle/workspace-deleting-fence.js";
 import { workspaceLifecycleCoordinator } from "../../infra/locks/workspace-lifecycle-coordinator.js";
+import { getWorkspaceEnvironmentService } from "../workspaces/workspace-environment.service.js";
 import { listWorkspaces } from "../workspaces/workspace.store.js";
 import {
   insertTerminal,
@@ -46,19 +46,40 @@ import {
   type TerminalAuthArtifactKind,
   type TerminalAuthCleanupPhase,
 } from "./terminal-auth-cleanup-intent.store.js";
+import {
+  prepareTerminalEnvironmentLaunch, markTerminalEnvironmentLaunchStarting,
+  waitTerminalEnvironmentLaunch, cleanupTerminalEnvironmentLaunch,
+} from "./terminal-env-launch.js";
+import {
+  listTerminalEnvironmentLaunchAttempts, clearTerminalEnvironmentLaunchAttempt,
+  updateTerminalEnvironmentLaunchAttempt,
+} from "./terminal-env-launch-attempt.store.js";
+import {
+  TerminalEnvironmentLaunchError, copyTerminalEnvironmentLayer, assertTerminalLaunchStatus,
+} from "./terminal-env-launch.protocol.js";
 
 export type TerminalRuntimeOperations = {
   hasSession: (params: { sessionName: string; cwd: string }) => Promise<"exists" | "not_found">;
   killSession: (params: { sessionName: string; cwd: string }) => Promise<void>;
   newSession: (params: { sessionName: string; cwd: string; command: string[] }) => Promise<void>;
   cleanupAuthArtifacts: (dataDir: string, terminalId: string, intents?: import("./terminal-auth-cleanup-intent.store.js").TerminalAuthCleanupIntent[]) => Promise<void>;
+  prepareEnvironmentLaunch?: typeof prepareTerminalEnvironmentLaunch;
+  waitEnvironmentLaunch?: typeof waitTerminalEnvironmentLaunch;
+  cleanupEnvironmentLaunch?: typeof cleanupTerminalEnvironmentLaunch;
 };
+
+type TerminalSettlementOperations = Pick<TerminalRuntimeOperations, "hasSession" | "cleanupAuthArtifacts" | "cleanupEnvironmentLaunch">;
+type TerminalStopOperations = Pick<TerminalRuntimeOperations, "hasSession" | "killSession">;
+export type TerminalSettlement = "closed" | "cleanup_pending" | "env_cleanup_pending" | "session_exists" | "session_unknown";
 
 const defaultTerminalRuntimeOperations: TerminalRuntimeOperations = {
   hasSession: tmuxHasSession,
   killSession: tmuxKillSession,
   newSession: tmuxNewSession,
   cleanupAuthArtifacts: cleanupTerminalGitAuthArtifacts,
+  prepareEnvironmentLaunch: prepareTerminalEnvironmentLaunch,
+  waitEnvironmentLaunch: waitTerminalEnvironmentLaunch,
+  cleanupEnvironmentLaunch: cleanupTerminalEnvironmentLaunch,
 };
 
 class TmuxNewSessionMayExistError extends Error {
@@ -272,6 +293,104 @@ async function buildTerminalGitEnv(params: {
   };
 }
 
+function terminalCreateError(error: unknown): HttpError {
+  if (error instanceof HttpError && error.code !== "TERMINAL_ENV_CLEANUP_PENDING") return error;
+  const code = error instanceof TerminalEnvironmentLaunchError ? error.code
+    : error instanceof HttpError && error.code === "TERMINAL_ENV_CLEANUP_PENDING" ? error.code : "TERMINAL_ENV_PREPARE_FAILED";
+  const messages = {
+    TERMINAL_ENV_PREPARE_FAILED: "Terminal environment preparation failed.",
+    TERMINAL_ENV_PROTOCOL_FAILED: "Terminal environment launch protocol failed.",
+    TERMINAL_ENV_START_TIMEOUT: "Terminal environment launch timed out.",
+    TERMINAL_ENV_SHELL_NOT_FOUND: "Terminal shell was not found.",
+    TERMINAL_ENV_SPAWN_FAILED: "Terminal shell could not be started.",
+    TERMINAL_ENV_CLEANUP_PENDING: "Terminal creation cleanup pending.",
+  };
+  return new HttpError(500, messages[code], code);
+}
+
+/** A successful kill response alone is not absence evidence. Must run under Workspace admission. */
+export async function stopTerminalSession(
+  ctx: AppContext, term: TerminalRecord, runtimeOperations: TerminalStopOperations = defaultTerminalRuntimeOperations,
+): Promise<void> {
+  try {
+    const request = { sessionName: term.sessionName, cwd: ctx.dataDir };
+    if (await runtimeOperations.hasSession(request) === "not_found") return;
+    await runtimeOperations.killSession(request);
+    if (await runtimeOperations.hasSession(request) === "not_found") return;
+  } catch { /* Never expose tmux stderr or spawn arguments. */ }
+  throw new HttpError(503, "Terminal session could not be confirmed stopped.", "TERMINAL_SESSION_STOP_UNCONFIRMED");
+}
+
+/** Returns only precisely converged IDs; caller clears them in its activation/settlement/delete transaction. */
+export async function cleanupTerminalEnvironmentAttempts(
+  ctx: AppContext, terminalId: string, consumption: "stopped" | "spawned",
+  runtimeOperations: Pick<TerminalRuntimeOperations, "cleanupEnvironmentLaunch"> = defaultTerminalRuntimeOperations,
+): Promise<string[]> {
+  try {
+    const clean: string[] = [];
+    for (const attempt of listTerminalEnvironmentLaunchAttempts(ctx.db, terminalId)) {
+      const result = await (runtimeOperations.cleanupEnvironmentLaunch ?? cleanupTerminalEnvironmentLaunch)({
+        db: ctx.db, dataDir: ctx.dataDir, attemptId: attempt.id, consumption,
+      });
+      if (result !== "clean") throw new TerminalEnvironmentLaunchError("TERMINAL_ENV_CLEANUP_PENDING");
+      clean.push(attempt.id);
+    }
+    return clean;
+  } catch {
+    throw new HttpError(409, "Terminal environment cleanup remains pending.", "TERMINAL_ENV_CLEANUP_PENDING");
+  }
+}
+
+/** Only called in this module after current absence evidence (or before any tmux side effect). */
+async function settleStoppedTerminal(
+  ctx: AppContext, logger: FastifyBaseLogger, terminalId: string,
+  runtimeOperations: Pick<TerminalRuntimeOperations, "cleanupAuthArtifacts" | "cleanupEnvironmentLaunch">,
+): Promise<"closed" | "cleanup_pending" | "env_cleanup_pending"> {
+  try { updateTerminalStatus(ctx.db, terminalId, "errored", nowMs()); }
+  catch { return "env_cleanup_pending"; }
+  let cleanAttempts: string[];
+  try {
+    cleanAttempts = await cleanupTerminalEnvironmentAttempts(ctx, terminalId, "stopped", runtimeOperations);
+  } catch {
+    logger.warn({ terminalId, code: "TERMINAL_ENV_CLEANUP_PENDING" }, "terminal environment cleanup remains pending");
+    return "env_cleanup_pending";
+  }
+  let gitCleanupComplete = false;
+  try {
+    const intents = listTerminalAuthCleanupIntents(ctx.db, terminalId);
+    if (intents.some((intent) => intent.phase !== "recoverable")) {
+      throw new TerminalGitAuthCleanupPendingError("terminal auth cleanup locator is not recoverable");
+    }
+    await assertTerminalGitAuthCleanupRootAnchors(ctx.dataDir, intents);
+    await runtimeOperations.cleanupAuthArtifacts(ctx.dataDir, terminalId, intents);
+    gitCleanupComplete = true;
+    ctx.db.transaction(() => {
+      const current = listTerminalAuthCleanupIntents(ctx.db, terminalId);
+      if (current.some((intent) => intent.phase !== "recoverable")) {
+        throw new TerminalGitAuthCleanupPendingError("terminal auth cleanup locator is not recoverable");
+      }
+      for (const id of cleanAttempts) clearTerminalEnvironmentLaunchAttempt(ctx.db, id);
+      for (const intent of current) clearTerminalAuthCleanupIntent(ctx.db, terminalId, intent.artifactKind);
+      updateTerminalStatus(ctx.db, terminalId, "closed", nowMs());
+    })();
+    return "closed";
+  } catch {
+    if (gitCleanupComplete) return "env_cleanup_pending";
+    // Clean env resources must not turn an existing Git-only pending into a new env deletion error.
+    // A failed transaction retains its durable rows, so a retry revalidates convergence again.
+    try {
+      ctx.db.transaction(() => {
+        for (const id of cleanAttempts) clearTerminalEnvironmentLaunchAttempt(ctx.db, id);
+      })();
+    } catch {
+      logger.warn({ terminalId, code: "TERMINAL_ENV_CLEANUP_PENDING" }, "terminal environment settlement remains pending");
+      return "env_cleanup_pending";
+    }
+    logger.warn({ terminalId, code: "TERMINAL_AUTH_CLEANUP_PENDING" }, "terminal Git auth cleanup remains pending");
+    return "cleanup_pending";
+  }
+}
+
 export async function createTerminal(
   ctx: AppContext,
   logger: FastifyBaseLogger,
@@ -290,35 +409,27 @@ export async function createTerminal(
   return workspaceLifecycleCoordinator.withMutation(workspaceId, async () => {
     const ws = getWorkspace(ctx.db, workspaceId);
     if (!ws) throw new HttpError(404, "Workspace not found");
-
+    // Capture both layers once, before the first asynchronous preparation; fallback reuses them.
+    const workspaceEnv = getWorkspaceEnvironmentService(ctx).readEnvironment(workspaceId);
+    let baseEnv: Record<string, string>;
+    try { baseEnv = copyTerminalEnvironmentLayer(process.env, true); }
+    catch (error) { throw terminalCreateError(error); }
     const terminalId = newId("term");
     const sessionName = `term_${terminalId}`;
     const ts = nowMs();
     const term: TerminalRecord = {
-      id: terminalId,
-      workspaceId: ws.id,
-      sessionName,
-      status: "creating",
-      createdAt: ts,
-      updatedAt: ts
+      id: terminalId, workspaceId: ws.id, sessionName, status: "creating", createdAt: ts, updatedAt: ts,
     };
-
-    const shell = params.shell?.trim() || "bash";
-    let tmuxCreated = false;
+    const specifiedShell = params.shell?.trim();
+    const runtimeOperations = params.runtimeOperations ?? defaultTerminalRuntimeOperations;
     let intentPersisted = false;
     let authArtifactWriteStarted = false;
-    let tmuxStateIndeterminate = false;
-    const runtimeOperations = params.runtimeOperations ?? defaultTerminalRuntimeOperations;
+    let tmuxMayExist = false;
     try {
-      // terminal record 必须先于逐 artifact latch 存在；每一行会在其 writer 前单独 arm。
-      ctx.db.transaction(() => {
-        insertTerminal(ctx.db, term);
-      })();
+      ctx.db.transaction(() => { insertTerminal(ctx.db, term); })();
       intentPersisted = true;
       const { envPairs } = await buildTerminalGitEnv({
-        ctx,
-        terminalId,
-        workspaceId: ws.id,
+        ctx, terminalId, workspaceId: ws.id,
         writeAuthArtifact: params.writeAuthArtifactForTest,
         buildNetworkEnv: params.buildNetworkEnvForTest,
         getCredentialWithSecret: params.getCredentialWithSecretForTest,
@@ -326,105 +437,108 @@ export async function createTerminal(
         onIntentPhaseUpdateFailed: () => { authArtifactWriteStarted = true; },
         onAuthArtifactWriteStarted: () => { authArtifactWriteStarted = true; },
       });
-      const command = envPairs.length > 0 ? ["env", ...envPairs, shell] : [shell];
+      const systemEnv: Record<string, string> = Object.create(null);
+      for (const pair of envPairs) {
+        const separator = pair.indexOf("=");
+        if (separator <= 0) throw new TerminalEnvironmentLaunchError("TERMINAL_ENV_PREPARE_FAILED");
+        systemEnv[pair.slice(0, separator)] = pair.slice(separator + 1);
+      }
       const cwd = await resolveTerminalCwd(ctx, ws);
-      try {
-        const firstAttempt = await newTmuxSessionWithPresence(runtimeOperations, { sessionName, cwd, command });
-        if (firstAttempt === "created") tmuxCreated = true;
-        else if (!params.shell) {
-          // 仅首次请求被明确证实未创建时，才可尝试默认 shell 的 sh fallback。
-          const fallback = envPairs.length > 0 ? ["env", ...envPairs, "sh"] : ["sh"];
-          const fallbackAttempt = await newTmuxSessionWithPresence(runtimeOperations, { sessionName, cwd, command: fallback });
-          if (fallbackAttempt !== "created") throw new Error("tmux fallback session was not created");
-          tmuxCreated = true;
-        } else throw new Error("tmux session was not created");
-      } catch (err) {
-        if (err instanceof TmuxNewSessionMayExistError) {
-          tmuxCreated = true;
-          tmuxStateIndeterminate = err.presenceIndeterminate;
-          throw err;
+      for (let index = 0; index < 2; index++) {
+        const shell = index === 0 ? specifiedShell || "bash" : "sh";
+        const launch = await (runtimeOperations.prepareEnvironmentLaunch ?? prepareTerminalEnvironmentLaunch)({
+          db: ctx.db, dataDir: ctx.dataDir, terminalId, shell, workspaceEnv, systemEnv, baseEnv,
+        });
+        const attempt = markTerminalEnvironmentLaunchStarting(ctx.db, launch.attempt.id);
+        // Arm before the side effect: a response loss may still have created a live launcher.
+        tmuxMayExist = true;
+        const result = await newTmuxSessionWithPresence(runtimeOperations, { sessionName, cwd, command: launch.command });
+        if (result === "not_found") {
+          tmuxMayExist = false;
+          throw new TerminalEnvironmentLaunchError("TERMINAL_ENV_SPAWN_FAILED");
         }
-        if (!params.shell) {
-          // firstAttempt 已明确 not_found 后的 fallback 错误直接进入补偿，不可再盲试。
-          throw err;
-        } else {
-          throw err;
-        }
-      }
-      const activeRoot = await fs.lstat(ctx.dataDir);
-      if (activeRoot.isSymbolicLink() || !activeRoot.isDirectory()) throw new TerminalGitAuthCleanupPendingError("terminal Git auth root anchor is invalid during activation");
-      // active Terminal 保留逐 artifact recoverable locator，供重启后的删除/清理使用。
-      ctx.db.transaction(() => {
-        const intents = listTerminalAuthCleanupIntents(ctx.db, terminalId);
-        if (ws.terminalCredentialId) {
-          const expectedKinds: TerminalAuthArtifactKind[] = getCredentialWithSecret(ctx.db, String(ws.terminalCredentialId))?.record.kind === "ssh"
-            ? ["ssh-key"] : ["askpass", "askpass-token"];
-          if (intents.length !== expectedKinds.length || intents.some((intent) => intent.phase !== "recoverable" || !expectedKinds.includes(intent.artifactKind) || intent.expectedDev === null || intent.expectedIno === null || intent.rootDev !== activeRoot.dev || intent.rootIno !== activeRoot.ino)) {
-            throw new TerminalGitAuthCleanupPendingError("terminal auth cleanup locator is incomplete");
-          }
-        }
-        updateTerminalStatus(ctx.db, terminalId, "active", nowMs());
-      })();
-      const active = getTerminal(ctx.db, terminalId);
-      if (!active || active.status !== "active") throw new Error("terminal activation was not persisted");
-      logger.info({ terminalId, workspaceId }, "terminal created");
-      return active;
-    } catch (err) {
-      let cleanupError: unknown = null;
-      const initialIntents = intentPersisted ? listTerminalAuthCleanupIntents(ctx.db, terminalId) : [];
-      // writer 尚未进入时没有 secret；已 arm 的行可能是 arm 后、writer 前失败，必须清除。
-      if (intentPersisted && !authArtifactWriteStarted && !tmuxCreated && !tmuxStateIndeterminate) {
-        try {
-          ctx.db.transaction(() => {
-            for (const intent of listTerminalAuthCleanupIntents(ctx.db, terminalId)) clearTerminalAuthCleanupIntent(ctx.db, terminalId, intent.artifactKind);
-            updateTerminalStatus(ctx.db, terminalId, "closed", nowMs());
-          })();
-          throw err;
-        } catch (settleError) {
-          // 上面的 throw err 也会进入此处；它是预期的原始业务错误，不能包装。
-          if (settleError === err) throw err;
-          cleanupError = settleError;
-        }
-      }
-      if (tmuxCreated) {
-        try {
-          await runtimeOperations.killSession({ sessionName, cwd: ctx.dataDir });
-        } catch (error) {
-          cleanupError = error;
-        }
-      }
-      if (initialIntents.length > 0 && !(err instanceof TerminalGitAuthCleanupPendingError)) {
-        try {
-          await runtimeOperations.cleanupAuthArtifacts(ctx.dataDir, terminalId, initialIntents);
-        } catch (error) {
-          cleanupError ??= error;
-        }
-      }
-      const cleanupIntents = intentPersisted ? listTerminalAuthCleanupIntents(ctx.db, terminalId) : [];
-      if (cleanupIntents.some((intent) => intent.phase !== "recoverable") || cleanupError) {
-        cleanupError ??= new TerminalGitAuthCleanupPendingError("terminal auth cleanup remains pending");
-      }
-      if (err instanceof TerminalGitAuthCleanupPendingError) cleanupError ??= err;
-      // presence probe 不确定时，即使 kill 表面成功也不能证明没有 orphan；保持 intent。
-      if (tmuxStateIndeterminate) cleanupError ??= err;
-      // 只有 intent 已成功落库才更新状态；insert 失败不得以不存在的 record 掩盖原始错误。
-      if (intentPersisted) {
-        try {
-          if (cleanupError) {
-            updateTerminalStatus(ctx.db, terminalId, "errored", nowMs());
-          } else {
+        const status = await (runtimeOperations.waitEnvironmentLaunch ?? waitTerminalEnvironmentLaunch)({ dataDir: ctx.dataDir, attempt });
+        assertTerminalLaunchStatus(status, attempt.id);
+        if (status.state === "spawn-error") {
+          if (status.code === "SHELL_NOT_FOUND" && !specifiedShell && index === 0) {
+            await stopTerminalSession(ctx, term, runtimeOperations);
+            tmuxMayExist = false;
+            const cleaned = await cleanupTerminalEnvironmentAttempts(ctx, terminalId, "stopped", runtimeOperations);
             ctx.db.transaction(() => {
-              const current = listTerminalAuthCleanupIntents(ctx.db, terminalId);
-              for (const intent of current) clearTerminalAuthCleanupIntent(ctx.db, terminalId, intent.artifactKind);
-              updateTerminalStatus(ctx.db, terminalId, "closed", nowMs());
+              for (const id of cleaned) clearTerminalEnvironmentLaunchAttempt(ctx.db, id);
             })();
+            continue;
           }
-        } catch (error) {
-          cleanupError ??= error;
+          throw new TerminalEnvironmentLaunchError(status.code === "SHELL_NOT_FOUND"
+            ? "TERMINAL_ENV_SHELL_NOT_FOUND" : status.code === "SNAPSHOT_INVALID" || status.code === "STATUS_WRITE_FAILED"
+              ? "TERMINAL_ENV_PROTOCOL_FAILED" : "TERMINAL_ENV_SPAWN_FAILED");
         }
+        if (status.state !== "spawned") {
+          throw new TerminalEnvironmentLaunchError("TERMINAL_ENV_PROTOCOL_FAILED");
+        }
+        if (await runtimeOperations.hasSession({ sessionName, cwd: ctx.dataDir }) !== "exists") {
+          tmuxMayExist = false;
+          throw new TerminalEnvironmentLaunchError("TERMINAL_ENV_SPAWN_FAILED");
+        }
+        const liveAttempts = listTerminalEnvironmentLaunchAttempts(ctx.db, terminalId);
+        if (liveAttempts.length !== 1 || liveAttempts[0]!.id !== attempt.id) {
+          throw new TerminalEnvironmentLaunchError("TERMINAL_ENV_PROTOCOL_FAILED");
+        }
+        const cleaned = await cleanupTerminalEnvironmentAttempts(ctx, terminalId, "spawned", runtimeOperations);
+        const activeRoot = await fs.lstat(ctx.dataDir);
+        if (activeRoot.isSymbolicLink() || !activeRoot.isDirectory()) {
+          throw new TerminalGitAuthCleanupPendingError("terminal Git auth root anchor is invalid during activation");
+        }
+        ctx.db.transaction(() => {
+          const intents = listTerminalAuthCleanupIntents(ctx.db, terminalId);
+          if (ws.terminalCredentialId) {
+            const expectedKinds: TerminalAuthArtifactKind[] = getCredentialWithSecret(ctx.db, String(ws.terminalCredentialId))?.record.kind === "ssh"
+              ? ["ssh-key"] : ["askpass", "askpass-token"];
+            if (intents.length !== expectedKinds.length || intents.some((intent) => intent.phase !== "recoverable"
+              || !expectedKinds.includes(intent.artifactKind) || intent.expectedDev === null || intent.expectedIno === null
+              || intent.rootDev !== activeRoot.dev || intent.rootIno !== activeRoot.ino)) {
+              throw new TerminalGitAuthCleanupPendingError("terminal auth cleanup locator is incomplete");
+            }
+          }
+          for (const id of cleaned) clearTerminalEnvironmentLaunchAttempt(ctx.db, id);
+          updateTerminalStatus(ctx.db, terminalId, "active", nowMs());
+        })();
+        const active = getTerminal(ctx.db, terminalId);
+        if (!active || active.status !== "active") throw new TerminalEnvironmentLaunchError("TERMINAL_ENV_PREPARE_FAILED");
+        logger.info({ terminalId, workspaceId }, "terminal created");
+        return active;
       }
-      if (cleanupError) throw new Error("terminal creation cleanup pending", { cause: cleanupError });
-      throw err;
+      throw new TerminalEnvironmentLaunchError("TERMINAL_ENV_SHELL_NOT_FOUND");
+    } catch (error) {
+      if (!intentPersisted) throw terminalCreateError(error);
+      // A failed invocation can never be resumed as a new launch, including uncertain tmux stop.
+      try {
+        for (const attempt of listTerminalEnvironmentLaunchAttempts(ctx.db, terminalId)) {
+          updateTerminalEnvironmentLaunchAttempt(ctx.db, attempt.id, {
+            phase: "cleanup_pending", errorCode: "TERMINAL_ENV_CLEANUP_PENDING",
+          });
+        }
+      } catch { /* Original durable identity remains the authority if storage is unavailable. */ }
+      let settlement: "closed" | "cleanup_pending" | "env_cleanup_pending" = "env_cleanup_pending";
+      try {
+        if (tmuxMayExist) await stopTerminalSession(ctx, term, runtimeOperations);
+        // No writer entered means these armed rows cannot have produced auth artifacts.
+        if (!authArtifactWriteStarted) {
+          ctx.db.transaction(() => {
+            for (const intent of listTerminalAuthCleanupIntents(ctx.db, terminalId)) {
+              clearTerminalAuthCleanupIntent(ctx.db, terminalId, intent.artifactKind);
+            }
+          })();
+        }
+        settlement = await settleStoppedTerminal(ctx, logger, terminalId, runtimeOperations);
+      } catch {
+        try { updateTerminalStatus(ctx.db, terminalId, "errored", nowMs()); } catch { /* Retain durable authority. */ }
+      }
+      if (settlement !== "closed") {
+        throw terminalCreateError(new TerminalEnvironmentLaunchError("TERMINAL_ENV_CLEANUP_PENDING"));
+      }
+      throw terminalCreateError(error instanceof TmuxNewSessionMayExistError
+        ? new TerminalEnvironmentLaunchError("TERMINAL_ENV_SPAWN_FAILED") : error);
     }
   });
 }
@@ -435,90 +549,115 @@ export async function getTerminalById(ctx: AppContext, terminalId: string): Prom
   return term;
 }
 
-/**
- * 会话已经被明确证实不存在或已成功终止后，先将其移出 active，再进行凭证清理。
- * 清理失败必须保留 intent 以供后续恢复，但不能让已停止的 terminal 继续被当作 active。
- */
-export async function settleTerminalAfterSessionStopped(
-  ctx: AppContext,
-  logger: FastifyBaseLogger,
-  terminalId: string,
-  runtimeOperations: Pick<TerminalRuntimeOperations, "cleanupAuthArtifacts"> = defaultTerminalRuntimeOperations,
-): Promise<"closed" | "cleanup_pending"> {
-  ctx.db.transaction(() => {
-    updateTerminalStatus(ctx.db, terminalId, "errored", nowMs());
-  })();
-
-  try {
-    const intents = listTerminalAuthCleanupIntents(ctx.db, terminalId);
-    // armed/unresolved 均不得根据当前路径推断身份或删除文件。
-    if (intents.some((intent) => intent.phase !== "recoverable")) {
-      throw new TerminalGitAuthCleanupPendingError("terminal auth cleanup locator is not recoverable");
-    }
-    await assertTerminalGitAuthCleanupRootAnchors(ctx.dataDir, intents);
-    await runtimeOperations.cleanupAuthArtifacts(ctx.dataDir, terminalId, intents);
-    ctx.db.transaction(() => {
-      const current = listTerminalAuthCleanupIntents(ctx.db, terminalId);
-      if (current.some((intent) => intent.phase !== "recoverable")) {
-        throw new TerminalGitAuthCleanupPendingError("terminal auth cleanup locator is not recoverable");
+/** Short attach admission; no configuration read or environment reinjection on reconnect. */
+export async function getTerminalForAttachment(
+  ctx: AppContext, logger: FastifyBaseLogger, terminalId: string,
+  runtimeOperations: TerminalSettlementOperations = defaultTerminalRuntimeOperations,
+) {
+  const candidate = await getTerminalById(ctx, terminalId);
+  return workspaceLifecycleCoordinator.withAdmission(candidate.workspaceId, async () => {
+    const term = getTerminal(ctx.db, terminalId);
+    if (!term) throw new HttpError(404, "Terminal not found");
+    const workspace = getWorkspace(ctx.db, term.workspaceId);
+    if (!workspace) throw new HttpError(404, "Workspace not found");
+    if (term.status !== "active") throw new HttpError(410, "Terminal session is not active.");
+    let presence: "exists" | "not_found";
+    try { presence = await runtimeOperations.hasSession({ sessionName: term.sessionName, cwd: ctx.dataDir }); }
+    catch { throw new HttpError(503, "Terminal session presence could not be confirmed.", "TERMINAL_SESSION_PRESENCE_UNKNOWN"); }
+    if (presence === "not_found") {
+      const settlement = await settleTerminalAfterSessionStopped(ctx, logger, terminalId, runtimeOperations);
+      if (settlement === "session_unknown") {
+        throw new HttpError(503, "Terminal session presence could not be confirmed.", "TERMINAL_SESSION_PRESENCE_UNKNOWN");
       }
-      for (const intent of current) clearTerminalAuthCleanupIntent(ctx.db, terminalId, intent.artifactKind);
-      updateTerminalStatus(ctx.db, terminalId, "closed", nowMs());
-    })();
-    return "closed";
-  } catch (err) {
-    logger.warn({ terminalId, err }, "terminal cleanup remains pending");
-    return "cleanup_pending";
-  }
+      if (settlement !== "session_exists") throw new HttpError(410, "tmux session not found (may have exited)");
+    }
+    return { term, workspace };
+  });
 }
 
-export async function deleteTerminal(ctx: AppContext, logger: FastifyBaseLogger, terminalId: string, runtimeOperations: Pick<TerminalRuntimeOperations, "hasSession" | "killSession" | "cleanupAuthArtifacts"> = defaultTerminalRuntimeOperations) {
-  const term = await getTerminalById(ctx, terminalId);
-  return workspaceLifecycleCoordinator.withMutation(term.workspaceId, async () => {
-    const presence = await runtimeOperations.hasSession({ sessionName: term.sessionName, cwd: ctx.dataDir });
-    if (presence === "exists") await runtimeOperations.killSession({ sessionName: term.sessionName, cwd: ctx.dataDir });
+/** Revalidates current session absence in the same gate; stale external probes never authorize cleanup. */
+export async function settleTerminalAfterSessionStopped(
+  ctx: AppContext, logger: FastifyBaseLogger, terminalId: string,
+  runtimeOperations: TerminalSettlementOperations = defaultTerminalRuntimeOperations,
+): Promise<TerminalSettlement> {
+  const candidate = getTerminal(ctx.db, terminalId);
+  if (!candidate) return "closed";
+  return workspaceLifecycleCoordinator.withAdmission(candidate.workspaceId, async () => {
+    const term = getTerminal(ctx.db, terminalId);
+    if (!term) return "closed";
+    try {
+      if (await runtimeOperations.hasSession({ sessionName: term.sessionName, cwd: ctx.dataDir }) === "exists") return "session_exists";
+    } catch {
+      logger.warn({ terminalId, code: "TERMINAL_SESSION_PRESENCE_UNKNOWN" }, "terminal presence remains unknown");
+      return "session_unknown";
+    }
+    return settleStoppedTerminal(ctx, logger, term.id, runtimeOperations);
+  });
+}
 
+export async function deleteTerminal(
+  ctx: AppContext, logger: FastifyBaseLogger, terminalId: string,
+  runtimeOperations: Pick<TerminalRuntimeOperations, "hasSession" | "killSession" | "cleanupAuthArtifacts" | "cleanupEnvironmentLaunch"> = defaultTerminalRuntimeOperations,
+) {
+  const candidate = await getTerminalById(ctx, terminalId);
+  return workspaceLifecycleCoordinator.withAdmission(candidate.workspaceId, async () => {
+    const term = getTerminal(ctx.db, terminalId);
+    if (!term) return;
+    await stopTerminalSession(ctx, term, runtimeOperations);
     const settlement = await settleTerminalAfterSessionStopped(ctx, logger, term.id, runtimeOperations);
+    if (settlement === "env_cleanup_pending") {
+      throw new HttpError(409, "Terminal environment cleanup remains pending.", "TERMINAL_ENV_CLEANUP_PENDING");
+    }
     if (settlement === "cleanup_pending") {
-      logger.info({ terminalId: term.id }, "terminal logically deleted with cleanup pending");
+      logger.info({ terminalId: term.id }, "terminal logically deleted with Git auth cleanup pending");
       return;
     }
-    ctx.db.transaction(() => {
-      deleteTerminalRecord(ctx.db, term.id);
-    })();
+    if (settlement !== "closed") {
+      throw new HttpError(503, "Terminal session could not be confirmed stopped.", "TERMINAL_SESSION_STOP_UNCONFIRMED");
+    }
+    ctx.db.transaction(() => { deleteTerminalRecord(ctx.db, term.id); })();
     logger.info({ terminalId: term.id }, "terminal deleted");
   });
 }
 
-/** 恢复创建/清理失败的 terminal intent；未知 tmux 错误保留记录等待下次重试。 */
+/** A scan is only a set of candidate IDs, including each Worker-ready recovery pass. */
 export async function reconcilePendingTerminals(ctx: AppContext, logger: FastifyBaseLogger, runtimeOperations = defaultTerminalRuntimeOperations) {
   for (const workspace of listWorkspaces(ctx.db)) {
-    const terminals = listTerminalsByWorkspace(ctx.db, workspace.id).filter((term) => term.status === "creating" || term.status === "errored");
-    for (const term of terminals) {
-      try {
-        const presence = await runtimeOperations.hasSession({ sessionName: term.sessionName, cwd: ctx.dataDir });
-        if (presence === "exists") await runtimeOperations.killSession({ sessionName: term.sessionName, cwd: ctx.dataDir });
-        await settleTerminalAfterSessionStopped(ctx, logger, term.id, runtimeOperations);
-      } catch (error) {
-        logger.warn({ terminalId: term.id, workspaceId: term.workspaceId, err: error }, "terminal cleanup remains pending");
-      }
+    const candidates = listTerminalsByWorkspace(ctx.db, workspace.id).filter((term) => term.status === "creating" || term.status === "errored");
+    for (const candidate of candidates) {
+      await workspaceLifecycleCoordinator.withAdmission(workspace.id, async () => {
+        const term = getTerminal(ctx.db, candidate.id);
+        if (!term) return;
+        try {
+          if (term.status === "active") {
+            await settleTerminalAfterSessionStopped(ctx, logger, term.id, runtimeOperations);
+            return;
+          }
+          if (term.status !== "creating" && term.status !== "errored") return;
+          await stopTerminalSession(ctx, term, runtimeOperations);
+          await settleTerminalAfterSessionStopped(ctx, logger, term.id, runtimeOperations);
+        } catch {
+          logger.warn({ terminalId: term.id, workspaceId: workspace.id, code: "TERMINAL_CLEANUP_PENDING" }, "terminal cleanup remains pending");
+        }
+      });
     }
   }
 }
 
-export async function reconcileWorkspaceActiveTerminals(ctx: AppContext, logger: FastifyBaseLogger, workspaceId: string, runtimeOperations: Pick<TerminalRuntimeOperations, "hasSession" | "cleanupAuthArtifacts"> = defaultTerminalRuntimeOperations) {
-  const active = listActiveTerminalsByWorkspace(ctx.db, workspaceId);
-  if (active.length === 0) return;
-
-  await Promise.all(
-    active.map(async (t) => {
-      try {
-        const presence = await runtimeOperations.hasSession({ sessionName: t.sessionName, cwd: ctx.dataDir });
-        if (presence === "exists") return;
-        await settleTerminalAfterSessionStopped(ctx, logger, t.id, runtimeOperations);
-      } catch (err) {
-        logger.warn({ terminalId: t.id, err }, "reconcile terminal failed");
+export async function reconcileWorkspaceActiveTerminals(
+  ctx: AppContext, logger: FastifyBaseLogger, workspaceId: string,
+  runtimeOperations: TerminalSettlementOperations = defaultTerminalRuntimeOperations,
+) {
+  const candidates = listActiveTerminalsByWorkspace(ctx.db, workspaceId);
+  // Sequential await also applies to the ALS-reentrant case; Promise.all would bypass exclusion.
+  for (const candidate of candidates) {
+    await workspaceLifecycleCoordinator.withAdmission(workspaceId, async () => {
+      const term = getTerminal(ctx.db, candidate.id);
+      if (!term || term.status !== "active") return;
+      try { await settleTerminalAfterSessionStopped(ctx, logger, term.id, runtimeOperations); }
+      catch {
+        logger.warn({ terminalId: term.id, code: "TERMINAL_CLEANUP_PENDING" }, "reconcile terminal failed");
       }
-    })
-  );
+    });
+  }
 }

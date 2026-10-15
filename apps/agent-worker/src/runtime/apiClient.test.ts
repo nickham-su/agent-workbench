@@ -706,6 +706,7 @@ test("all public client methods are explicitly classified", () => {
     persistRunTerminalIntent: "terminalControl",
     convergeRunTerminal: "terminalControl",
     getExecutionProfile: "controlRead",
+    getWorkspaceEnvironment: "controlRead",
     getPromptContext: "controlRead",
     getMessagesContext: "controlRead",
     getCompactionSource: "controlRead",
@@ -2332,4 +2333,98 @@ test("AC-BASH-EXIT-SOURCE: retired Bash credential methods and policies are not 
   }
   assert.equal(AgentApiClient.publicMethodPolicies.prepareRepoGitEnvLease, "controlWrite");
   assert.equal(AgentApiClient.publicMethodPolicies.releaseRepoGitEnvLease, "idempotentControlWrite");
+});
+
+function workspaceEnvironmentClient(origin: string, recorder = createWarningRecorder(), timeoutMs = 100) {
+  return { client: new AgentApiClient({ apiOrigin: origin, internalToken: "fixture-internal-token", internalRpcTimeoutMs: timeoutMs, responseValidation: "warn", sleepFn: async () => undefined, logger: recorder.logger }), recorder };
+}
+
+test("Workspace environment GET uses bounded controlRead, strict shared response, and no Worker cache", async () => {
+  const env = Object.fromEntries([["EMPTY", ""], ["LITERAL", "  $PATH\r\n$(printf no)  "], ["__proto__", "prototype"], ["constructor", "constructor"], ["toString", "string"]]);
+  const fixture = await startTestServer(() => ({ status: 200, body: { workspaceId: "workspace/fixture", env } }));
+  const { client } = workspaceEnvironmentClient(fixture.origin);
+  const a = await client.getWorkspaceEnvironment("workspace/fixture");
+  const b = await client.getWorkspaceEnvironment("workspace/fixture");
+  assert.deepEqual(a, { workspaceId: "workspace/fixture", env });
+  assert.deepEqual(b, a); assert.notEqual(a.env, b.env);
+  assert.equal(fixture.attempts.length, 2);
+  assert.equal(AgentApiClient.publicMethodPolicies.getWorkspaceEnvironment, "controlRead");
+  for (const request of fixture.attempts) {
+    assert.equal(request.method, "GET");
+    assert.equal(request.url, "/api/internal/workspaces/workspace%2Ffixture/environment");
+    assert.equal(request.body, null);
+    assert.equal(request.headers["x-awb-agent-internal-token"], "fixture-internal-token");
+  }
+});
+
+for (const invalid of [
+  { workspaceId: "wrong-workspace", env: {} },
+  { workspaceId: "workspace", env: {}, unknown: "private-fixture" },
+  { workspaceId: "workspace", env: { VALUE: 1 } },
+  { workspaceId: "workspace", env: { AWB_INTERNAL_TOKEN: "private-fixture" } },
+  { workspaceId: "workspace", env: { GIT_ASKPASS: "private-fixture" } },
+  { workspaceId: "workspace", env: { GIT_CONFIG_KEY_0: "private-fixture" } },
+  { workspaceId: "workspace", env: { "invalid-name": "private-fixture" } },
+  { workspaceId: "workspace", env: { VALUE: "\ud800" } },
+  { workspaceId: "workspace", env: { VALUE: "\udc00" } },
+  { workspaceId: "workspace", env: { VALUE: "bad\0value" } },
+  { workspaceId: "workspace", env: { VALUE: "x".repeat(16385) } },
+  { workspaceId: "workspace", env: Object.fromEntries(Array.from({ length: 129 }, (_, i) => [`VAR_${i}`, ""])) },
+  { workspaceId: "workspace", env: Object.fromEntries(Array.from({ length: 5 }, (_, i) => [`VAR_${i}`, "x".repeat(16384)])) },
+]) test("Workspace environment response fails closed on invalid structure, identity, or semantic policy", async () => {
+  const fixture = await startTestServer(() => ({ status: 200, body: invalid }));
+  const { client, recorder } = workspaceEnvironmentClient(fixture.origin);
+  await assert.rejects(client.getWorkspaceEnvironment("workspace"), (error: unknown) => {
+    assert(error instanceof InternalRpcInvalidResponseError);
+    assert(!error.message.includes("private-fixture"));
+    assert(!JSON.stringify(error).includes("private-fixture"));
+    return true;
+  });
+  assert.equal(fixture.attempts.length, 1);
+  assert(!recorder.warnings.join("\n").includes("private-fixture"));
+});
+
+test("Workspace environment retries one transient HTTP failure and never logs the sensitive response", async () => {
+  const fixture = await startTestServer(({ attempt }) => attempt === 1
+    ? { status: 503, body: { message: "private-config-response", env: { SECRET: "private-config-value" } } }
+    : { status: 200, body: { workspaceId: "workspace", env: { VALUE: "next" } } });
+  const { client, recorder } = workspaceEnvironmentClient(fixture.origin);
+  assert.deepEqual(await client.getWorkspaceEnvironment("workspace"), { workspaceId: "workspace", env: { VALUE: "next" } });
+  assert.equal(fixture.attempts.length, 2);
+  assert(recorder.warnings.some((line) => line.includes("policy=controlRead")));
+  assert(!recorder.warnings.join("\n").includes("private-config"));
+});
+
+for (const status of [401, 404, 409, 500]) test(`Workspace environment HTTP ${status} is not an empty configuration or a retry`, async () => {
+  const fixture = await startTestServer(() => ({ status, body: { message: "private-config-response" } }));
+  const { client, recorder } = workspaceEnvironmentClient(fixture.origin);
+  await assert.rejects(client.getWorkspaceEnvironment("workspace"), (error: unknown) => {
+    assert(error instanceof InternalRpcHttpError);
+    assert.equal(error.status, status);
+    assert(!error.message.includes("private-config-response"));
+    return true;
+  });
+  assert.equal(fixture.attempts.length, 1);
+  assert(!recorder.warnings.join("\n").includes("private-config-response"));
+});
+
+test("Workspace environment timeout is bounded to two attempts", async () => {
+  const fixture = await startTestServer(() => ({ status: 200, end: false }));
+  const { client } = workspaceEnvironmentClient(fixture.origin, createWarningRecorder(), 30);
+  await assert.rejects(client.getWorkspaceEnvironment("workspace"), InternalRpcTimeoutError);
+  assert.equal(fixture.attempts.length, 2);
+});
+
+test("Workspace environment caller cancellation before/during RPC never retries", async () => {
+  const fixture = await startTestServer(() => ({ status: 200, end: false }));
+  const { client } = workspaceEnvironmentClient(fixture.origin, createWarningRecorder(), 5000);
+  const pre = new AbortController(); pre.abort();
+  await assert.rejects(client.getWorkspaceEnvironment("workspace", { abortSignal: pre.signal }));
+  assert.equal(fixture.attempts.length, 0);
+  const controller = new AbortController();
+  const request = client.getWorkspaceEnvironment("workspace", { abortSignal: controller.signal });
+  while (fixture.attempts.length === 0) await new Promise((resolve) => setTimeout(resolve, 1));
+  controller.abort();
+  await assert.rejects(request);
+  assert.equal(fixture.attempts.length, 1);
 });
