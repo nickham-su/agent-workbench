@@ -44,6 +44,7 @@ export type AgentMessageDomainErrorCode =
   | "FORK_TARGET_INVALID"
   | "FORK_TARGET_BEFORE_CONTEXT_ROOT"
   | "FORK_TARGET_HAS_NON_TERMINAL_EXECUTIONS"
+  | "FORK_HISTORY_NOT_STABLE"
   | "SESSION_NOT_IDLE";
 
 export class AgentMessageDomainError extends Error {
@@ -963,11 +964,10 @@ export function forkMessageSession(db: Db, input: {
     const source = assertCurrent(db, { workspaceId: input.workspaceId, sessionId: input.sourceSessionId, expectedHeadMessageId: input.expectedHeadMessageId, expectedRevision: input.expectedRevision });
     const state = getMessageRunState(db, input.workspaceId, input.sourceSessionId);
     const sourceHasActiveRun = state?.status === "running" && state.activeRunId != null;
+    // Internal resolved forks keep their active-run contract. Public forks only
+    // require the selected history to be closed, not the source's later work.
     if (!state
-      || (!input.allowSourceWithActiveRun && state.status !== "idle")
-      || (input.allowSourceWithActiveRun && !sourceHasActiveRun)
-      || state.nonTerminalMessageIds.length
-      || (!input.allowSourceWithActiveRun && state.nonTerminalToolExecutionIds.length)
+      || (input.allowSourceWithActiveRun && (!sourceHasActiveRun || state.nonTerminalMessageIds.length))
     ) {
       throw new AgentMessageDomainError("SESSION_NOT_IDLE");
     }
@@ -979,6 +979,9 @@ export function forkMessageSession(db: Db, input: {
     });
     const target = ancestry.target;
     if (ancestry.contextRootMessageId) assertForkContextRoot(db, input.workspaceId, ancestry.contextRootMessageId);
+    if (!input.allowSourceWithActiveRun && (target.type === "user" || target.type === "assistant")) {
+      assertForkHistoryStable(db, target.id, ancestry.contextRootMessageId);
+    }
     if (!messageTerminal(target.status) || (target.type !== "user" && target.type !== "assistant")) throw new AgentMessageDomainError("FORK_TARGET_INVALID");
     if (target.type === "assistant") {
       const pending = db.prepare(`select 1 from agent_tool_execution execution join agent_message_part part on part.id = execution.call_part_id where part.message_id = ? and execution.status in ('queued','running') limit 1`).get(target.id);
@@ -1238,6 +1241,32 @@ function assertValidForkAncestryRows(rows: ForkAncestryRow[]) {
 }
 
 class ForkContextRootStructureError extends Error {}
+
+/** Inspect the original inherited interval before projection can hide unfinished rows. */
+function assertForkHistoryStable(db: Db, targetMessageId: string, contextRootMessageId: string | null) {
+  const root = contextRootMessageId == null ? null : messageRow(db, contextRootMessageId)!;
+  // Ancestry and retained-anchor integrity were checked in this same transaction.
+  // Without retained history, nothing before the summary is inherited.
+  const stopMessageId = root ? root.retainedFromMessageId ?? root.id : null;
+  const unfinished = db.prepare(`
+    with recursive inherited(id, previous_message_id, status) as (
+      select id, previous_message_id, status from agent_message where id = @targetMessageId
+      union all
+      select message.id, message.previous_message_id, message.status
+      from inherited join agent_message message on message.id = inherited.previous_message_id
+      where inherited.id is not @stopMessageId
+    )
+    select 1 from inherited
+    where status not in (select value from json_each(@terminalStatuses))
+      or exists (
+        select 1 from agent_message_part part
+        join agent_tool_execution execution on execution.call_part_id = part.id
+        where part.message_id = inherited.id and execution.status in ('queued','running')
+      )
+    limit 1
+  `).get({ targetMessageId, stopMessageId, terminalStatuses: JSON.stringify([...TERMINAL_MESSAGE_STATUSES]) });
+  if (unfinished) throw new AgentMessageDomainError("FORK_HISTORY_NOT_STABLE");
+}
 
 function assertForkContextRoot(db: Db, workspaceId: string, rootMessageId: string) {
   try {

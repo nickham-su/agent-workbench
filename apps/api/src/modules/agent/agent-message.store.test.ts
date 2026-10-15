@@ -821,7 +821,7 @@ test("head and fork reject context-root violations and unsettled execution witho
   );
   assert.throws(
     () => forkMessageSession(db, { id: "fork", workspaceId: "ws-a", sourceSessionId: "s-a", expectedHeadMessageId: current.headMessageId, expectedRevision: current.revision, targetMessageId: root.id, title: "fork", kind: "primary", createdAt: 8 }),
-    (error) => error instanceof AgentMessageDomainError && error.code === "SESSION_NOT_IDLE"
+    (error) => error instanceof AgentMessageDomainError && error.code === "FORK_TARGET_INVALID"
   );
   assert.equal((db.prepare("select count(*) as count from agent_session where id='fork'").get() as { count: number }).count, 0);
 });
@@ -860,15 +860,140 @@ test("Fork restores target-time roots across historical compactions and preserve
   assert.throws(() => revertBeforeUserMessage(db, { workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: source.headMessageId, expectedRevision: source.revision, targetMessageId: "m1", updatedAt: 10 }), (error) => error instanceof AgentMessageDomainError && error.code === "MESSAGE_TARGET_BEFORE_CONTEXT_ROOT");
 });
 
+for (const tail of ["streaming", "queued", "running"] as const) {
+  test(`public Fork inherits stable user/assistant history while the source tail is ${tail}`, () => {
+    const db = createDb(); session(db);
+    appendMessage(db, { id: "user", workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: null, expectedRevision: 0, type: "user", status: "completed", parts: [], createdAt: 2 });
+    appendMessage(db, { id: "stable", workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: "user", expectedRevision: 1, type: "assistant", status: "completed", parts: [], createdAt: 3 });
+    activate(db);
+    appendStreamingAssistant(db, { id: "tail", workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: "stable", expectedRevision: 2, runId: "run-a", createdAt: 4 });
+    if (tail !== "streaming") {
+      flushStreamingParts(db, { workspaceId: "ws-a", sessionId: "s-a", runId: "run-a", messageId: "tail", parts: [{ id: "call", position: 0, type: "tool_call", toolName: "bash", input: {} }], updatedAt: 5 });
+      completeAssistantWithExecutions(db, { workspaceId: "ws-a", sessionId: "s-a", runId: "run-a", messageId: "tail", executions: [{ id: "execution", callPartId: "call", originSessionId: "s-a", originRunId: "run-a", status: "queued" }], updatedAt: 6 });
+      if (tail === "running") updateToolExecution(db, { workspaceId: "ws-a", sessionId: "s-a", runId: "run-a", executionId: "execution", status: "running", updatedAt: 7 });
+    }
+    const source = getMessageSession(db, "ws-a", "s-a")!;
+    const state = getMessageRunState(db, "ws-a", "s-a")!;
+    const run = getRunRecord(db, "run-a");
+    const fork = (id: string, targetMessageId: string) => forkMessageSession(db, {
+      id, workspaceId: "ws-a", sourceSessionId: "s-a", expectedHeadMessageId: source.headMessageId,
+      expectedRevision: source.revision, targetMessageId, title: id, kind: "primary", createdAt: 8,
+    });
+    for (const target of ["user", "stable"]) {
+      const child = fork(`child-${target}`, target);
+      assert.equal(child.headMessageId, target);
+      assert.equal(child.contextRootMessageId, null);
+      const childState = getMessageRunState(db, "ws-a", child.id)!;
+      assert.equal(childState.status, "idle");
+      assert.equal(childState.activeRunId, null);
+      assert.deepEqual(childState.nonTerminalMessageIds, []);
+      assert.deepEqual(childState.nonTerminalToolExecutionIds, []);
+    }
+    assert.deepEqual(getMessageSession(db, "ws-a", "s-a"), source);
+    assert.deepEqual(getMessageRunState(db, "ws-a", "s-a"), state);
+    assert.deepEqual(getRunRecord(db, "run-a"), run);
+    assert.throws(() => fork("unfinished-child", "tail"), (error) => error instanceof AgentMessageDomainError && error.code === "FORK_HISTORY_NOT_STABLE");
+    if (tail === "streaming") {
+      assert.throws(() => forkMessageSession(db, { id: "internal-child", workspaceId: "ws-a", sourceSessionId: "s-a", expectedHeadMessageId: source.headMessageId, expectedRevision: source.revision, targetMessageId: "user", title: "internal", kind: "subtask", allowSourceWithActiveRun: true, createdAt: 8 }),
+        (error) => error instanceof AgentMessageDomainError && error.code === "SESSION_NOT_IDLE");
+    }
+    assert.equal(getMessageSession(db, "ws-a", "unfinished-child"), null);
+    assert.equal(getMessageRunState(db, "ws-a", "unfinished-child"), null);
+
+    // The original run can continue writing, without pulling its tail into either child.
+    if (tail === "streaming") {
+      assert.equal(flushStreamingParts(db, { workspaceId: "ws-a", sessionId: "s-a", runId: "run-a", messageId: "tail", parts: [{ id: "text", position: 0, type: "text", text: "continued" }], updatedAt: 10 }), "updated");
+      assert.equal(completeAssistantWithExecutions(db, { workspaceId: "ws-a", sessionId: "s-a", runId: "run-a", messageId: "tail", executions: [], updatedAt: 11 }), "updated");
+    } else {
+      if (tail === "queued") assert.equal(updateToolExecution(db, { workspaceId: "ws-a", sessionId: "s-a", runId: "run-a", executionId: "execution", status: "running", updatedAt: 10 }), "updated");
+      assert.equal(updateToolExecution(db, { workspaceId: "ws-a", sessionId: "s-a", runId: "run-a", executionId: "execution", status: "completed", updatedAt: 11 }), "updated");
+    }
+    const next = getMessageSession(db, "ws-a", "s-a")!;
+    appendStreamingAssistant(db, { id: "next", workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: next.headMessageId, expectedRevision: next.revision, runId: "run-a", createdAt: 12 });
+    for (const target of ["user", "stable"]) {
+      const child = getMessageSession(db, "ws-a", `child-${target}`)!;
+      assert.equal(child.headMessageId, target);
+      assert.equal(isAncestor(db, "ws-a", child.headMessageId, "tail"), false);
+      assert.equal(isAncestor(db, "ws-a", child.headMessageId, "next"), false);
+    }
+    assert.equal(getMessageRunState(db, "ws-a", "s-a")!.activeRunId, "run-a");
+    db.close();
+  });
+}
+
+for (const retained of [false, true]) {
+  for (const unfinished of ["streaming", "queued", "running"] as const) {
+    test(`public Fork rejects ${unfinished} in the inherited ${retained ? "retained range" : "prefix"}`, () => {
+      const db = createDb(); session(db);
+      const append = (id: string, type: "user" | "assistant" = "user") => {
+        const current = getMessageSession(db, "ws-a", "s-a")!;
+        appendMessage(db, { id, workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: current.headMessageId, expectedRevision: current.revision, type, status: "completed", parts: [], createdAt: 2 });
+      };
+      append("anchor");
+      activate(db);
+      appendStreamingAssistant(db, { id: "ancestor", workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: "anchor", expectedRevision: 1, runId: "run-a", createdAt: 3 });
+      flushStreamingParts(db, { workspaceId: "ws-a", sessionId: "s-a", runId: "run-a", messageId: "ancestor", parts: [{ id: "call", position: 0, type: "tool_call", toolName: "bash", input: {} }], updatedAt: 4 });
+      completeAssistantWithExecutions(db, { workspaceId: "ws-a", sessionId: "s-a", runId: "run-a", messageId: "ancestor", executions: [{ id: "execution", callPartId: "call", originSessionId: "s-a", originRunId: "run-a", status: "queued" }], updatedAt: 5 });
+      updateToolExecution(db, { workspaceId: "ws-a", sessionId: "s-a", runId: "run-a", executionId: "execution", status: "running", updatedAt: 6 });
+      updateToolExecution(db, { workspaceId: "ws-a", sessionId: "s-a", runId: "run-a", executionId: "execution", status: "completed", updatedAt: 7 });
+      if (retained) {
+        const source = getMessageSession(db, "ws-a", "s-a")!;
+        commitCompactionMessageForTest(db, { id: "summary", workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: source.headMessageId, expectedRevision: source.revision, textPartId: "summary-part", text: "summary", retainedFromMessageId: "anchor", createdAt: 8 });
+      }
+      append("target");
+      // Simulate an inconsistent prefix despite the target being completed.
+      // Do not rely on session_run_state arrays to find unfinished inherited rows.
+      db.prepare("update session_run_state set status='idle',active_run_id=null,non_terminal_message_ids_json='[]',non_terminal_tool_execution_ids_json='[]' where session_id='s-a'").run();
+      if (unfinished === "streaming") db.prepare("update agent_message set status='streaming' where id='ancestor'").run();
+      else {
+        db.prepare("update agent_message set status='failed' where id='ancestor'").run();
+        db.prepare("update agent_tool_execution set status=? where id='execution'").run(unfinished);
+      }
+      const source = getMessageSession(db, "ws-a", "s-a")!;
+      const input = { id: "child", workspaceId: "ws-a", sourceSessionId: "s-a", expectedHeadMessageId: source.headMessageId, expectedRevision: source.revision, targetMessageId: "target", title: "child", kind: "primary" as const, createdAt: 9 };
+      assert.throws(() => forkMessageSession(db, input), (error) => error instanceof AgentMessageDomainError && error.code === "FORK_HISTORY_NOT_STABLE");
+      assert.equal(getMessageSession(db, "ws-a", "child"), null);
+      assert.equal(getMessageRunState(db, "ws-a", "child"), null);
+      assert.deepEqual(getMessageSession(db, "ws-a", "s-a"), source);
+      // Preserve accepted terminal message statuses, including failed ancestors.
+      db.prepare("update agent_message set status='failed' where id='ancestor'").run();
+      db.prepare("update agent_tool_execution set status='failed' where id='execution'").run();
+      assert.equal(forkMessageSession(db, input).headMessageId, "target");
+      db.close();
+    });
+  }
+}
+
+test("public Fork checks only inherited compaction history and preserves terminal target statuses", () => {
+  for (const retainedFromMessageId of [null, "anchor"]) {
+    for (const status of ["completed", "failed", "cancelled", "superseded"] as const) {
+      const db = createDb(); session(db);
+      appendMessage(db, { id: "old", workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: null, expectedRevision: 0, type: "user", status: "completed", parts: [], createdAt: 2 });
+      appendMessage(db, { id: "anchor", workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: "old", expectedRevision: 1, type: "user", status: "completed", parts: [], createdAt: 3 });
+      commitCompactionMessageForTest(db, { id: "summary", workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: "anchor", expectedRevision: 2, textPartId: "summary-part", text: "summary", retainedFromMessageId, createdAt: 4 });
+      appendMessage(db, { id: "target", workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: "summary", expectedRevision: 3, type: "assistant", status, parts: [], createdAt: 5 });
+      // This physical ancestor is outside the inherited summary/retained interval.
+      db.prepare("update agent_message set status='streaming' where id='old'").run();
+      activate(db);
+      appendStreamingAssistant(db, { id: "tail", workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: "target", expectedRevision: 4, runId: "run-a", createdAt: 6 });
+      const source = getMessageSession(db, "ws-a", "s-a")!;
+      const child = forkMessageSession(db, { id: "child", workspaceId: "ws-a", sourceSessionId: "s-a", expectedHeadMessageId: source.headMessageId, expectedRevision: source.revision, targetMessageId: "target", title: "child", kind: "primary", createdAt: 7 });
+      assert.equal(child.headMessageId, "target");
+      assert.equal(child.contextRootMessageId, "summary");
+      assert.deepEqual(getMessageSession(db, "ws-a", "s-a"), source);
+      db.close();
+    }
+  }
+});
+
 test("Fork keeps target-time roots unchanged for an allowed active source", () => {
   const db = createDb(); session(db);
   appendMessage(db, { id: "before", workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: null, expectedRevision: 0, type: "user", status: "completed", parts: [], createdAt: 2 });
   activate(db);
   let source = getMessageSession(db, "ws-a", "s-a")!;
-  assert.throws(
-    () => forkMessageSession(db, { id: "public-rejected", workspaceId: "ws-a", sourceSessionId: "s-a", expectedHeadMessageId: source.headMessageId, expectedRevision: source.revision, targetMessageId: "before", title: "public", kind: "primary", createdAt: 3 }),
-    (error) => error instanceof AgentMessageDomainError && error.code === "SESSION_NOT_IDLE",
-  );
+  const publicFork = forkMessageSession(db, { id: "public", workspaceId: "ws-a", sourceSessionId: "s-a", expectedHeadMessageId: source.headMessageId, expectedRevision: source.revision, targetMessageId: "before", title: "public", kind: "primary", createdAt: 3 });
+  assert.equal(publicFork.headMessageId, "before");
+  assert.equal(publicFork.contextRootMessageId, null);
   const noCompaction = forkMessageSession(db, { id: "active-no-compaction", workspaceId: "ws-a", sourceSessionId: "s-a", expectedHeadMessageId: source.headMessageId, expectedRevision: source.revision, targetMessageId: "before", title: "subtask", kind: "subtask", createdAt: 3, allowSourceWithActiveRun: true });
   assert.equal(noCompaction.headMessageId, "before");
   assert.equal(noCompaction.contextRootMessageId, null);

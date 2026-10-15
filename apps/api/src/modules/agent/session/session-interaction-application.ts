@@ -156,7 +156,10 @@ export class SessionInteractionApplication {
         if (error.code === "FORK_TARGET_INVALID" || error.code === "FORK_TARGET_BEFORE_CONTEXT_ROOT") {
           throw new HttpError(400, "fromMessageId is invalid", `AGENT_${error.code}`);
         }
-        if (error.code === "FORK_TARGET_HAS_NON_TERMINAL_EXECUTIONS" || error.code === "SESSION_NOT_IDLE") {
+        if (error.code === "FORK_HISTORY_NOT_STABLE" || error.code === "FORK_TARGET_HAS_NON_TERMINAL_EXECUTIONS") {
+          throw new HttpError(409, "selected fork history contains unfinished messages or tool executions", `AGENT_${error.code}`);
+        }
+        if (error.code === "SESSION_NOT_IDLE") {
           throw new HttpError(409, "session cannot fork while work is in flight", `AGENT_${error.code}`);
         }
       }
