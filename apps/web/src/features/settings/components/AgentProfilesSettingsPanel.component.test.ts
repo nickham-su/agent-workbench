@@ -54,9 +54,10 @@ for (const [locale, messages] of [["zh-CN", zhCN], ["en-US", enUS]] as const) {
       assert.deepEqual(form.toolOptions.find((option) => option.value === "git"), { label: "Git", value: "git" });
       form.openCreateAgent(); await nextTick();
       assert.deepEqual(form.agentFormTools, ["bash", "write", "apply_patch", "subtask"]);
-      assert(wrapper.text().includes(messages.settings.agentProfiles.gitToolHelp));
+      assert.equal(wrapper.get(`[label="${messages.settings.agentProfiles.fields.tools}"]`).text(), "", "the tool selector must not display helper text");
       form.openEditAgent("existing-agent"); await nextTick();
       assert.deepEqual(form.agentFormTools, ["bash"]);
+      assert.equal(wrapper.get(`[label="${messages.settings.agentProfiles.fields.tools}"]`).text(), "", "editing must not display helper text either");
       form.agentFormTools = ["bash", "git"]; form.submitAgent(); await flushPromises();
       assert.deepEqual(saved.at(-1)?.agents[0]?.tools, ["bash", "git"]);
       assert.deepEqual(settings.agents[0]?.tools, ["bash", "git"]);

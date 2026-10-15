@@ -1146,7 +1146,6 @@ export default {
         defaultModel: "Default model",
         customDefaultModel: "Use custom default model"
       },
-      gitToolHelp: "Enable Git explicitly, then start a new run. repo must be the current registered repository name; args are native arguments after git (omit git; no shell command chains). Project authentication is prepared from the registered repository configuration; system helpers, SSH agents or host configuration may still authenticate. Bash no longer injects project Git credentials; the terminal credential switch still controls interactive terminals only. Git is not a sandbox. Enabling it does not authorize commits, force pushes, deletion or overwrites; existing authorization still applies.",
       tools: {
         bash: "Bash",
         git: "Git",

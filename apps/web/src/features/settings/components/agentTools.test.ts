@@ -64,13 +64,5 @@ test("Git is explicitly configurable but never silently added to new or existing
   for (const locale of [zhCN, enUS]) {
     const options = toAgentToolOptions((key) => key === agentToolLabelKey("git") ? locale.settings.agentProfiles.tools.git : key);
     assert.deepEqual(options.find((item) => item.value === "git"), { label: "Git", value: "git" });
-    const help = locale.settings.agentProfiles.gitToolHelp;
-    for (const token of ["repo", "args", "Bash", "Git", "SSH", "helper"]) assert(help.includes(token));
   }
-  assert.match(zhCN.settings.agentProfiles.gitToolHelp, /显式开启.*新运行/);
-  assert.match(zhCN.settings.agentProfiles.gitToolHelp, /不再自动注入项目 Git 凭证/);
-  assert.match(zhCN.settings.agentProfiles.gitToolHelp, /不等于授权提交、强推、删除或覆盖/);
-  assert.match(enUS.settings.agentProfiles.gitToolHelp, /Enable Git explicitly.*new run/);
-  assert.match(enUS.settings.agentProfiles.gitToolHelp, /Bash no longer injects project Git credentials/);
-  assert.match(enUS.settings.agentProfiles.gitToolHelp, /does not authorize commits, force pushes, deletion or overwrites/);
 });
