@@ -442,7 +442,6 @@ export default {
       sessionRestoreUnconfirmed: "会话打开可能已提交，恢复隐藏尚未确认。请稍后核实或手动关闭。",
       retryTitleSync: '重试同步会话标题',
       retrySessionSelection: '重试选择',
-      reloadTabs: "重新核实会话标签",
       refreshSessionList: "刷新列表",
       sessionListExpired: "列表已失效，请重新加载。",
       sessionListFailed: "加载会话列表失败，请重试。",

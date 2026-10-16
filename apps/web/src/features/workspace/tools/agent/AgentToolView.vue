@@ -17,7 +17,6 @@
     <a-tabs v-else class="agent-tabs h-full" size="small" :animated="false" :activeKey="effectiveActiveKey" @update:activeKey="onChangeTab">
       <template #rightExtra>
         <div class="flex items-center gap-1 pr-1">
-          <a-button size="small" data-testid="agent-tabs-reload" :loading="reloadingTabs" @click="reloadTabsSnapshot">{{ t("agent.client.reloadTabs") }}</a-button>
           <a-tooltip :title="t('agent.actions.minimize')">
             <a-button size="small" type="text" @click="minimizeSelf">
               <template #icon><MinusOutlined /></template>
@@ -263,7 +262,6 @@ const creating = ref(false);
 // Loaded metadata is a cache, not the full workspace inventory.
 const serverSessions = ref<AgentSessionRecord[]>([]);
 const visibleServerSessionIds = ref(new Set<string>());
-const reloadingTabs = ref(false);
 let activeSnapshotAbort: AbortController | null = null;
 const draftSessions = ref<DraftAgentSession[]>([]);
 const activeKey = ref<string>("");
@@ -1472,27 +1470,6 @@ function commitTabsSnapshot(
   visibleServerSessionIds.value = members;
 }
 
-async function reloadTabsSnapshot() {
-  if (initializationState.value !== "ready" || reloadingTabs.value) return;
-  const context = currentTabVisibilityContext();
-  const readSnapshot = metadataReads.captureSnapshot();
-  const visibilitySnapshot = tabVisibilityController.captureSnapshot();
-  const abort = new AbortController();
-  activeSnapshotAbort = abort;
-  reloadingTabs.value = true;
-  try {
-    const snapshot = await getAgentTabsSnapshot(context.workspaceId, abort.signal);
-    if (!isTabVisibilityContextCurrent(context) || activeSnapshotAbort !== abort) return;
-    commitTabsSnapshot(snapshot, readSnapshot, visibilitySnapshot, context.workspaceId);
-    reconcileTabNoMap({ workspaceId: props.workspaceId, sessions: allSessions.value });
-    await ensureVisibleSessionFallback(context);
-  } catch {
-    if (isTabVisibilityContextCurrent(context) && activeSnapshotAbort === abort) message.warning(t("agent.client.tabStateLoadFailed"));
-  } finally {
-    if (isTabVisibilityContextCurrent(context) && activeSnapshotAbort === abort) { reloadingTabs.value = false; activeSnapshotAbort = null; }
-  }
-}
-
 async function initializeWorkspace() {
   const attemptId = ++initializationAttemptId;
   const requestGeneration = workspaceGeneration;
@@ -1557,7 +1534,6 @@ watch(
     visibleServerSessionIds.value.clear();
     activeSnapshotAbort?.abort();
     activeSnapshotAbort = null;
-    reloadingTabs.value = false;
     serverSessionsLoaded.value = false;
     draftSessions.value = [];
     const emptyAgentPresentation = createEmptyAgentPresentation();

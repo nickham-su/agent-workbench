@@ -444,7 +444,6 @@ export default {
       sessionRestoreUnconfirmed: "Opening may have been saved; restoring the hidden state is unconfirmed. Check again or close the tab manually.",
       retryTitleSync: 'Retry session title sync',
       retrySessionSelection: 'Retry selection',
-      reloadTabs: "Reload tabs",
       refreshSessionList: "Refresh list",
       sessionListExpired: "The list has expired. Reload from the beginning.",
       sessionListFailed: "Could not load sessions. Please retry.",
