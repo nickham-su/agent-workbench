@@ -1,0 +1,459 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>环境变量原型 · Agent Workbench</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --app-bg: #000000; --panel-bg: #141414; --panel-bg-elevated: #1f1f1f; --panel-bg-soft: #191919;
+      --border-color: #424242; --border-color-secondary: #303030;
+      --text-color: rgba(255,255,255,.88); --text-secondary: rgba(255,255,255,.65); --text-tertiary: rgba(255,255,255,.45);
+      --primary: #1677ff; --primary-hover: #4096ff; --success: #49aa19; --success-text: #95de64;
+      --warning: #d89614; --warning-text: #ffd666; --danger-text: #ff7875; --info-text: #69b1ff;
+      --radius: 2px; --radius-lg: 4px; --shadow: 0 6px 16px rgba(0,0,0,.48);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      font-size: 13px;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; width: 100%; height: 100%; background: var(--app-bg); color: var(--text-color); }
+    body { overflow: auto; }
+    button, input, select, textarea { font: inherit; }
+    button { color: inherit; }
+    button, input, select, textarea { outline: none; }
+    button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+    svg { width: 1em; height: 1em; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+    [hidden] { display: none !important; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .app { height: 100vh; min-height: 630px; min-width: 1080px; display: flex; flex-direction: column; }
+    .workspace-header { height: 48px; flex: none; display: flex; align-items: center; gap: 12px; padding: 0 12px; background: var(--panel-bg-elevated); border-bottom: 1px solid var(--border-color-secondary); }
+    .workspace-title { font-size: 14px; font-weight: 600; white-space: nowrap; }
+    .repo-select { min-width: 210px; height: 24px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 8px; background: var(--panel-bg); border: 1px solid var(--border-color); border-radius: var(--radius); }
+    .branch { color: var(--text-secondary); font-size: 12px; }
+    .header-divider { width: 1px; height: 20px; background: var(--border-color-secondary); }
+    .grow { flex: 1; }
+    .prototype-badge { font-size: 12px; color: var(--text-tertiary); }
+    .body { flex: 1; min-height: 0; display: flex; }
+    .dock { width: 40px; flex: none; display: flex; flex-direction: column; align-items: center; padding: 4px 0; background: var(--panel-bg-elevated); border-right: 1px solid var(--border-color-secondary); }
+    .dock-btn { width: 32px; height: 32px; margin-bottom: 4px; border: 0; border-radius: 4px; background: transparent; color: var(--text-secondary); display: grid; place-items: center; cursor: pointer; position: relative; }
+    .dock-btn:hover { background: rgba(255,255,255,.08); color: var(--text-color); }
+    .dock-btn svg { width: 18px; height: 18px; }
+    .dock-btn.active { color: var(--text-color); background: rgba(255,255,255,.12); }
+    .dock-btn.active::before { content: ""; position: absolute; left: -4px; top: 6px; bottom: 6px; width: 2px; background: var(--primary); }
+    .dock-bottom { margin-top: auto; }
+    .tool { flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--panel-bg); }
+    .btn { height: 28px; padding: 0 10px; border: 1px solid var(--border-color); border-radius: var(--radius); background: var(--panel-bg-elevated); display: inline-flex; align-items: center; justify-content: center; gap: 6px; cursor: pointer; white-space: nowrap; }
+    .btn:hover { color: var(--primary-hover); border-color: var(--primary-hover); }
+    .btn.primary { color: #fff; background: var(--primary); border-color: var(--primary); }
+    .btn.primary:hover { background: var(--primary-hover); border-color: var(--primary-hover); }
+    .btn.text { padding: 0 6px; border-color: transparent; background: transparent; color: var(--text-secondary); }
+    .btn.text:hover { color: var(--text-color); background: rgba(255,255,255,.08); }
+    .btn.danger { color: var(--danger-text); }
+    .btn.danger:hover { color: var(--danger-text); border-color: var(--danger-text); }
+    .btn.icon { width: 28px; padding: 0; }
+    .btn.small { height: 24px; padding: 0 8px; font-size: 12px; }
+    .btn:disabled { opacity: .4; cursor: not-allowed; color: var(--text-tertiary); background: var(--panel-bg-elevated); border-color: var(--border-color); }
+    .input, .select, .textarea { width: 100%; color: var(--text-color); background: var(--panel-bg); border: 1px solid var(--border-color); border-radius: var(--radius); }
+    .input, .select { height: 28px; padding: 0 8px; }
+    .textarea { min-height: 116px; padding: 8px; line-height: 1.6; resize: vertical; }
+    .input:hover, .select:hover, .textarea:hover { border-color: var(--primary-hover); }
+    .content { display: flex; flex: 1; min-height: 0; }
+    .main-scroll { flex: 1; min-width: 0; overflow: auto; padding: 20px; }
+    .page-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-width: 0; }
+    .page-heading .btn { flex: none; }
+    .page-title { font-size: 18px; line-height: 28px; font-weight: 600; margin: 0 0 5px; }
+    .page-heading .page-title { min-width: 0; }
+    .page-description { margin: 0; color: var(--text-secondary); line-height: 22px; }
+    .filters { display: flex; align-items: center; gap: 8px; margin: 20px 0 12px; }
+    .search-wrap { width: 270px; position: relative; }
+    .search-wrap svg { position: absolute; left: 8px; top: 7px; color: var(--text-tertiary); width: 14px; height: 14px; }
+    .search-wrap input { padding-left: 28px; }
+    .filter-select { width: 102px; }
+    .count { font-size: 12px; color: var(--text-tertiary); }
+    .table-panel { border: 1px solid var(--border-color-secondary); border-radius: 4px; overflow: hidden; }
+    table { width: 100%; table-layout: fixed; border-collapse: collapse; }
+    th { height: 36px; text-align: left; font-weight: 400; font-size: 12px; color: var(--text-secondary); background: var(--panel-bg-elevated); }
+    th, td { padding: 0 12px; border-bottom: 1px solid var(--border-color-secondary); }
+    td { height: 57px; }
+    tbody tr:last-child td { border-bottom: 0; }
+    tbody tr:hover { background: var(--panel-bg-soft); }
+    tbody tr.off { color: var(--text-tertiary); }
+    .name-cell { font-size: 12px; font-weight: 500; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+    .value-cell { display: flex; gap: 6px; align-items: center; min-width: 0; }
+    .value-text { min-width: 0; font-size: 12px; line-height: 19px; white-space: pre-wrap; overflow-wrap: anywhere; flex: 1; color: var(--text-secondary); }
+    .empty-tag { font-family: inherit; font-size: 11px; padding: 1px 6px; letter-spacing: 0; color: var(--text-tertiary); border: 1px solid var(--border-color); border-radius: 2px; }
+    .remark-cell { font-size: 12px; color: var(--text-tertiary); line-height: 18px; overflow-wrap: anywhere; }
+    .actions { display: flex; gap: 2px; }
+    .switch { width: 28px; height: 16px; padding: 0; border: 0; background: #434343; border-radius: 8px; cursor: pointer; position: relative; flex: none; }
+    .switch::after { content: ""; width: 12px; height: 12px; background: #fff; border-radius: 50%; position: absolute; top: 2px; left: 2px; transition: left .15s; }
+    .switch[aria-checked="true"] { background: var(--primary); }
+    .switch[aria-checked="true"]::after { left: 14px; }
+    .empty { text-align: center; padding: 42px 18px; color: var(--text-secondary); }
+    .empty-title { margin-bottom: 8px; }
+    .empty-subtitle { font-size: 12px; color: var(--text-tertiary); margin-bottom: 14px; }
+    .demo-note { color: var(--text-tertiary); font-size: 12px; display: flex; gap: 7px; align-items: center; margin: 16px 0; }
+    .side { width: 270px; flex: none; padding: 20px 18px; border-left: 1px solid var(--border-color-secondary); overflow: auto; background: var(--panel-bg-soft); }
+    .side-title { margin: 0 0 14px; font-size: 13px; font-weight: 600; }
+    .effect-item { display: flex; gap: 10px; margin-bottom: 17px; }
+    .effect-icon { width: 27px; height: 27px; border: 1px solid var(--border-color-secondary); border-radius: 4px; background: var(--panel-bg-elevated); color: var(--info-text); display: grid; place-items: center; flex: none; }
+    .effect-icon svg { width: 15px; height: 15px; }
+    .effect-title { margin: 0 0 4px; line-height: 18px; }
+    .effect-desc { margin: 0; color: var(--text-tertiary); font-size: 12px; line-height: 19px; }
+    .side-divider { height: 1px; background: var(--border-color-secondary); margin: 22px 0; }
+    .rules { padding-left: 14px; margin: 0; font-size: 12px; color: var(--text-secondary); line-height: 20px; }
+    .rules li { margin-bottom: 11px; padding-left: 2px; }
+    .rules code { color: var(--text-color); font-size: 11px; }
+    .security { font-size: 12px; line-height: 20px; color: var(--text-tertiary); }
+    .security-heading { display: flex; align-items: center; gap: 6px; margin-bottom: 5px; color: var(--text-secondary); }
+    .overlay { position: fixed; inset: 0; background: rgba(0,0,0,.52); z-index: 50; }
+    .drawer { position: absolute; top: 0; right: 0; height: 100%; width: 560px; background: var(--panel-bg); border-left: 1px solid var(--border-color); box-shadow: var(--shadow); display: flex; flex-direction: column; }
+    .drawer-head { height: 52px; padding: 0 18px; display: flex; align-items: center; border-bottom: 1px solid var(--border-color-secondary); }
+    .drawer-title { font-size: 16px; font-weight: 600; margin: 0; }
+    .drawer-body { flex: 1; min-height: 0; overflow: auto; padding: 20px; }
+    .drawer-foot { height: 56px; padding: 0 18px; display: flex; align-items: center; justify-content: flex-end; gap: 8px; border-top: 1px solid var(--border-color-secondary); background: var(--panel-bg-elevated); }
+    .drawer-intro { font-size: 12px; color: var(--text-tertiary); line-height: 20px; margin: 0 0 22px; }
+    .field { margin-bottom: 22px; }
+    .field-label { display: block; color: var(--text-secondary); margin-bottom: 7px; }
+    .optional-label { font-size: 12px; color: var(--text-tertiary); }
+    .required { color: var(--danger-text); }
+    .field-help { color: var(--text-tertiary); font-size: 12px; line-height: 19px; margin: 6px 0 0; }
+    .field-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 7px; }
+    .field-head .field-label { margin: 0; }
+    .field-error { color: var(--danger-text); font-size: 12px; line-height: 20px; margin-top: 6px; }
+    [aria-invalid="true"] { border-color: var(--danger-text); }
+    .enable-field { display: flex; align-items: center; gap: 10px; }
+    .enable-field .field-label { margin: 0; }
+    .drawer-tip { border-top: 1px solid var(--border-color-secondary); margin-top: 24px; padding-top: 16px; font-size: 12px; color: var(--text-tertiary); line-height: 20px; }
+    .confirm-overlay { z-index: 80; display: grid; place-items: center; }
+    .confirm-dialog { width: 440px; background: var(--panel-bg-elevated); border: 1px solid var(--border-color); border-radius: 4px; box-shadow: var(--shadow); padding: 22px; }
+    .confirm-title { font-size: 16px; font-weight: 600; margin: 0 0 12px; }
+    .confirm-body { color: var(--text-secondary); font-size: 13px; line-height: 22px; white-space: pre-line; margin: 0 0 22px; }
+    .confirm-actions { display: flex; justify-content: flex-end; gap: 8px; }
+    .toast { position: fixed; top: 64px; left: 50%; transform: translateX(-50%); z-index: 100; background: var(--panel-bg-elevated); box-shadow: var(--shadow); border: 1px solid var(--border-color); border-radius: 4px; padding: 10px 16px; font-size: 12px; max-width: 640px; line-height: 20px; }
+    @media (max-width: 1220px) { .main-scroll { padding: 18px 16px; } .side { width: 250px; padding: 18px 14px; } .remark-cell { font-size: 11px; } }
+  </style>
+</head>
+<body>
+  <svg aria-hidden="true" style="display:none" xmlns="http://www.w3.org/2000/svg">
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7h6l2-3h4l2 3h4v13H3z"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></symbol>
+    <symbol id="i-git" viewBox="0 0 24 24"><circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="6" r="2"/><path d="M6 7v10M18 8v3c0 4-12 1-12 6"/></symbol>
+    <symbol id="i-terminal" viewBox="0 0 24 24"><path d="m5 6 6 6-6 6m8 0h6"/></symbol>
+    <symbol id="i-bot" viewBox="0 0 24 24"><rect x="4" y="7" width="16" height="13" rx="2"/><path d="M12 3v4M8 12v2m8-2v2m-7 3h6M2 11v5m20-5v5"/></symbol>
+    <symbol id="i-edit" viewBox="0 0 24 24"><path d="m15 4 5 5-11 11H4v-5zM13 6l5 5"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+    <symbol id="i-env" viewBox="0 0 24 24"><path d="M8 4H6v6l-2 2 2 2v6h2m8-16h2v6l2 2-2 2v6h-2M10 9l4 6m0-6-4 6"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/><circle cx="9" cy="6" r="2"/><circle cx="16" cy="12" r="2"/><circle cx="7" cy="18" r="2"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6m0-10v.1"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 6h16M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7m4-7v7"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M6 18 18 6"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6zM9 12l2 2 4-4"/></symbol>
+  </svg>
+  <div class="app" id="app">
+    <header class="workspace-header">
+      <div class="workspace-title">Agent Workbench</div>
+      <button class="repo-select" data-demo aria-label="当前仓库 agent-workbench，仅原型展示"><span class="mono">agent-workbench</span><svg aria-hidden="true"><use href="#i-chevron"/></svg></button>
+      <span class="branch mono">main*</span><span class="header-divider"></span>
+      <button class="btn small" data-demo>拉取</button><button class="btn small" data-demo>推送</button>
+      <span class="grow"></span><span class="prototype-badge">UI 原型 · 环境变量 · 仅内存演示</span>
+    </header>
+    <div class="body">
+      <nav class="dock" aria-label="工作区工具栏">
+        <button class="dock-btn" data-demo title="文件" aria-label="文件"><svg aria-hidden="true"><use href="#i-folder"/></svg></button>
+        <button class="dock-btn" data-demo title="搜索" aria-label="搜索"><svg aria-hidden="true"><use href="#i-search"/></svg></button>
+        <button class="dock-btn" data-demo title="代码审查" aria-label="代码审查"><svg aria-hidden="true"><use href="#i-git"/></svg></button>
+        <button class="dock-btn" data-demo title="终端" aria-label="终端"><svg aria-hidden="true"><use href="#i-terminal"/></svg></button>
+        <button class="dock-btn" data-demo title="Agent" aria-label="Agent"><svg aria-hidden="true"><use href="#i-bot"/></svg></button>
+        <button class="dock-btn" data-demo title="编辑器" aria-label="编辑器"><svg aria-hidden="true"><use href="#i-edit"/></svg></button>
+        <button class="dock-btn" data-demo title="定时任务" aria-label="定时任务"><svg aria-hidden="true"><use href="#i-clock"/></svg></button>
+        <button class="dock-btn active" data-demo title="环境变量" aria-label="环境变量" aria-current="page"><svg aria-hidden="true"><use href="#i-env"/></svg></button>
+        <div class="dock-bottom"><button class="dock-btn" data-demo title="设置" aria-label="设置"><svg aria-hidden="true"><use href="#i-settings"/></svg></button></div>
+      </nav>
+      <main class="tool">
+        <div class="content">
+          <section class="main-scroll" aria-labelledby="pageTitle">
+            <div class="page-heading">
+              <h1 class="page-title" id="pageTitle">Workspace 环境变量</h1>
+              <button class="btn primary" id="addVariable"><svg aria-hidden="true"><use href="#i-plus"/></svg>新增变量</button>
+            </div>
+            <p class="page-description">为 bash 工具和终端配置同一套环境变量，仅作用于当前 Workspace。</p>
+            <div class="filters">
+              <div class="search-wrap"><svg aria-hidden="true"><use href="#i-search"/></svg><input id="search" class="input" type="search" placeholder="搜索变量名或备注" aria-label="搜索变量名或备注" /></div>
+              <select id="statusFilter" class="select filter-select" aria-label="启用状态筛选"><option value="all">全部状态</option><option value="enabled">已启用</option><option value="disabled">已停用</option></select>
+              <span class="grow"></span><span class="count" id="count" aria-live="polite"></span>
+            </div>
+            <div class="table-panel">
+              <table aria-label="Workspace 环境变量列表"><colgroup><col style="width:66px"/><col style="width:24%"/><col/><col style="width:19%"/><col style="width:84px"/></colgroup>
+                <thead><tr><th scope="col">启用</th><th scope="col">变量名</th><th scope="col">值</th><th scope="col">备注</th><th scope="col">操作</th></tr></thead><tbody id="rows"></tbody>
+              </table>
+              <div class="empty" id="empty" hidden><div class="empty-title" id="emptyTitle"></div><div class="empty-subtitle" id="emptySubtitle"></div><button class="btn" id="emptyAction"></button></div>
+            </div>
+            <p class="demo-note"><svg aria-hidden="true"><use href="#i-info"/></svg>全部为虚构示例。本原型仅在内存中模拟保存，刷新后恢复初始数据。</p>
+          </section>
+          <aside class="side" aria-label="环境变量生效范围和配置规则">
+            <h2 class="side-title">生效范围</h2>
+            <div class="effect-item"><div class="effect-icon"><svg aria-hidden="true"><use href="#i-terminal"/></svg></div><div><p class="effect-title">bash 工具</p><p class="effect-desc">下一次调用使用新配置。<br/>运行中的命令保持原环境。</p></div></div>
+            <div class="effect-item"><div class="effect-icon"><svg aria-hidden="true"><use href="#i-terminal"/></svg></div><div><p class="effect-title">终端</p><p class="effect-desc">新建会话使用新配置。<br/>已有会话重连不会更新。</p></div></div>
+            <div class="side-divider"></div>
+            <h2 class="side-title">配置规则</h2>
+            <ul class="rules">
+              <li>bash 和终端共享当前 Workspace 的配置，不修改服务进程环境。</li>
+              <li>空字符串是合法值，与未配置不同。</li>
+              <li>删除或停用仅移除覆盖，回到基础环境继承，不等同于 unset。</li>
+              <li>值按字面处理，不展开 <code>$PATH</code>，不执行命令替换。</li>
+              <li><code>AWB_*</code> 和系统托管的 Git 鉴权变量受保护，不允许覆盖。</li>
+            </ul>
+            <div class="side-divider"></div>
+            <div class="security"><div class="security-heading"><svg aria-hidden="true"><use href="#i-shield"/></svg>安全提醒</div>命令可以读取并输出变量；请勿将敏感值写入日志。<br/><br/>本原型不保存真实配置，也不实际执行 bash 或创建终端。</div>
+          </aside>
+        </div>
+      </main>
+    </div>
+  </div>
+  <div class="overlay" id="drawerOverlay" hidden>
+    <section class="drawer" id="drawer" role="dialog" aria-modal="true" aria-labelledby="drawerTitle" aria-describedby="drawerIntro">
+      <header class="drawer-head"><h2 class="drawer-title" id="drawerTitle">新增变量</h2><span class="grow"></span><button class="btn text icon" id="closeDrawer" aria-label="关闭变量编辑器"><svg aria-hidden="true"><use href="#i-close"/></svg></button></header>
+      <form class="drawer-body" id="variableForm" novalidate autocomplete="off">
+        <p class="drawer-intro" id="drawerIntro">点击保存后，配置仅在本原型内存中模拟保存。</p>
+        <div class="field"><label class="field-label" for="variableName"><span class="required">*</span> 变量名</label><input class="input mono" id="variableName" name="name" maxlength="128" required spellcheck="false" placeholder="例如 NODE_ENV" aria-describedby="nameHelp nameError"/><p class="field-help" id="nameHelp">仅允许字母、数字和下划线，不能以数字开头。名称区分大小写。</p><div class="field-error" id="nameError" role="alert" hidden></div></div>
+        <div class="field"><label class="field-label" for="variableValue">值</label><textarea class="textarea mono" id="variableValue" name="value" spellcheck="false" placeholder="输入字面值；留空表示空字符串" aria-describedby="valueHelp"></textarea><p class="field-help" id="valueHelp">保留空格与换行，不自动展开 $PATH。编辑时值在此可见；请勿填写真实秘密。</p></div>
+        <div class="field"><label class="field-label" for="variableRemark">备注 <span class="optional-label">（可选）</span></label><input class="input" id="variableRemark" name="remark" maxlength="160" placeholder="例如 本地开发接口地址" /></div>
+        <div class="field enable-field"><button class="switch" id="variableEnabled" type="button" role="switch" aria-checked="true" aria-label="启用此变量"></button><span class="field-label">启用此变量</span></div>
+        <div class="drawer-tip">同一套配置用于 bash 和新建终端。<br/>不允许覆盖 AWB_* 及系统托管的 Git 鉴权变量。<br/>这里只是内存演示，不会写入磁盘或修改任何运行环境。</div>
+      </form>
+      <footer class="drawer-foot"><button class="btn" id="cancelDrawer">取消</button><button class="btn primary" id="applyVariable" type="submit" form="variableForm">保存</button></footer>
+    </section>
+  </div>
+  <div class="overlay confirm-overlay" id="confirmOverlay" hidden>
+    <section class="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="confirmTitle" aria-describedby="confirmBody">
+      <h2 class="confirm-title" id="confirmTitle"></h2><p class="confirm-body" id="confirmBody"></p><div class="confirm-actions"><button class="btn" id="confirmCancel">取消</button><button class="btn primary" id="confirmAccept">确认</button></div>
+    </section>
+  </div>
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+  <script>
+    'use strict';
+    // 仅使用虚构示例；所有保存都只更新当前页面内存，不访问后端或浏览器存储。
+    let variables = [
+      { id: 1, name: 'NODE_ENV', value: 'development', remark: '开发模式', enabled: true },
+      { id: 2, name: 'API_BASE_URL', value: 'https://api.example.test', remark: '本地开发接口地址', enabled: true },
+      { id: 3, name: 'HTTP_PROXY', value: 'http://127.0.0.1:7890', remark: '本地代理 · 暂不启用', enabled: false },
+      { id: 4, name: 'DEMO_API_TOKEN', value: 'prototype-placeholder-not-a-real-secret', remark: '虚构敏感值示例', enabled: true },
+      { id: 5, name: 'EMPTY_VALUE', value: '', remark: '显式保留空字符串', enabled: true }
+    ];
+    const $ = (id) => document.getElementById(id);
+    let nextId = 6;
+    let editingId = null;
+    let drawerOpener = null;
+    let confirmOpener = null;
+    let confirmCallback = null;
+    let toastTimer;
+
+    function icon(name) {
+      const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      svg.setAttribute('aria-hidden', 'true');
+      const use = document.createElementNS('http://www.w3.org/2000/svg', 'use');
+      use.setAttribute('href', '#i-' + name);
+      svg.append(use);
+      return svg;
+    }
+    function element(tag, className, text) {
+      const node = document.createElement(tag);
+      if (className) node.className = className;
+      if (text !== undefined) node.textContent = text;
+      return node;
+    }
+    function actionButton(label, iconName, action) {
+      const button = element('button', 'btn text icon');
+      button.type = 'button';
+      button.title = label;
+      button.setAttribute('aria-label', label);
+      button.append(icon(iconName));
+      button.addEventListener('click', action);
+      return button;
+    }
+    function toast(message) {
+      clearTimeout(toastTimer);
+      $('toast').textContent = message;
+      $('toast').hidden = false;
+      toastTimer = setTimeout(() => { $('toast').hidden = true; }, 3600);
+    }
+    function render() {
+      const query = $('search').value.toLowerCase();
+      const status = $('statusFilter').value;
+      const filtered = variables.filter((row) =>
+        (row.name.toLowerCase().includes(query) || row.remark.toLowerCase().includes(query)) &&
+        (status === 'all' || (status === 'enabled' ? row.enabled : !row.enabled))
+      );
+      $('count').textContent = filtered.length === variables.length
+        ? variables.length + ' 个变量 · ' + variables.filter((row) => row.enabled).length + ' 个启用'
+        : '显示 ' + filtered.length + ' / ' + variables.length + ' 个变量';
+      $('rows').replaceChildren();
+      for (const row of filtered) {
+        const tr = element('tr', row.enabled ? '' : 'off');
+        tr.dataset.id = String(row.id);
+        const enabledCell = element('td');
+        const toggle = element('button', 'switch');
+        toggle.type = 'button'; toggle.setAttribute('role', 'switch');
+        toggle.setAttribute('aria-checked', String(row.enabled));
+        toggle.setAttribute('aria-label', '启用 ' + row.name);
+        toggle.addEventListener('click', () => {
+          row.enabled = !row.enabled;
+          render();
+          const replacement = $('rows').querySelector('tr[data-id="' + row.id + '"] [role="switch"]');
+          (replacement || $('statusFilter')).focus();
+          toast('变量已' + (row.enabled ? '启用' : '停用') + '，已保存（演示）。');
+        });
+        enabledCell.append(toggle);
+        const nameCell = element('td', 'name-cell mono', row.name);
+        nameCell.title = row.name;
+        const valueCell = element('td');
+        const valueWrap = element('div', 'value-cell');
+        const valueText = element('span', 'value-text mono');
+        if (row.value === '') {
+          valueText.append(element('span', 'empty-tag', '空字符串'));
+        } else {
+          valueText.textContent = row.value;
+        }
+        valueWrap.append(valueText); valueCell.append(valueWrap);
+        const remarkCell = element('td', 'remark-cell', row.remark || '—');
+        const actionsCell = element('td');
+        const actions = element('div', 'actions');
+        actions.append(actionButton('编辑 ' + row.name, 'edit', () => openDrawer(row.id)), actionButton('删除 ' + row.name + ' 的覆盖', 'trash', () => requestDelete(row)));
+        actionsCell.append(actions);
+        tr.append(enabledCell, nameCell, valueCell, remarkCell, actionsCell);
+        $('rows').append(tr);
+      }
+      $('empty').hidden = filtered.length !== 0;
+      if (filtered.length === 0) {
+        const noRows = variables.length === 0;
+        $('emptyTitle').textContent = noRows ? '还没有 Workspace 环境变量' : '没有匹配的变量';
+        $('emptySubtitle').textContent = noRows ? '添加变量，为 bash 和新建终端提供共享配置。' : '试试其他变量名、备注或启用状态。';
+        $('emptyAction').textContent = noRows ? '新增变量' : '清除筛选';
+      }
+    }
+    function formState() {
+      return { name: $('variableName').value, value: $('variableValue').value, remark: $('variableRemark').value, enabled: $('variableEnabled').getAttribute('aria-checked') === 'true' };
+    }
+    function syncInert() {
+      $('app').inert = !$('drawerOverlay').hidden || !$('confirmOverlay').hidden;
+      $('drawer').inert = !$('confirmOverlay').hidden;
+    }
+    function restoreFocus(node) {
+      if (node && node.isConnected && !node.disabled && !node.closest('[hidden]')) node.focus();
+      else $('addVariable').focus();
+    }
+    function clearNameError() {
+      $('nameError').hidden = true;
+      $('nameError').textContent = '';
+      $('variableName').removeAttribute('aria-invalid');
+    }
+    function openDrawer(id = null) {
+      editingId = id;
+      drawerOpener = document.activeElement;
+      const row = variables.find((item) => item.id === id);
+      $('drawerTitle').textContent = row ? '编辑变量' : '新增变量';
+      $('variableName').value = row ? row.name : '';
+      $('variableValue').value = row ? row.value : '';
+      $('variableRemark').value = row ? row.remark : '';
+      $('variableEnabled').setAttribute('aria-checked', String(row ? row.enabled : true));
+      clearNameError();
+      $('drawerOverlay').hidden = false;
+      syncInert();
+      $('variableName').focus();
+    }
+    function closeDrawer() {
+      $('drawerOverlay').hidden = true;
+      // 关闭后清理编辑值，避免隐藏抽屉残留本次明文。
+      $('variableForm').reset();
+      editingId = null;
+      syncInert();
+      restoreFocus(drawerOpener);
+    }
+    function ask(title, message, acceptText, action, danger = false) {
+      confirmOpener = document.activeElement;
+      confirmCallback = action;
+      $('confirmTitle').textContent = title;
+      $('confirmBody').textContent = message;
+      $('confirmAccept').textContent = acceptText;
+      $('confirmAccept').className = danger ? 'btn danger' : 'btn primary';
+      $('confirmOverlay').hidden = false;
+      syncInert();
+      $('confirmCancel').focus();
+    }
+    function dismissConfirm() {
+      $('confirmOverlay').hidden = true;
+      confirmCallback = null;
+      syncInert();
+      restoreFocus(confirmOpener);
+    }
+    function requestDelete(row) {
+      ask('删除变量覆盖？', '确认后，将删除 ' + row.name + ' 的 Workspace 覆盖。\n删除后，新命令与新建终端回到基础环境继承；不会强制关闭已有终端。此操作仅为内存演示。', '删除覆盖', () => {
+        variables = variables.filter((item) => item.id !== row.id);
+        render();
+        restoreFocus(null);
+        toast('覆盖已删除，已保存（演示）。');
+      }, true);
+    }
+    function applyVariable(event) {
+      event.preventDefault();
+      const next = formState();
+      let error = '';
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(next.name)) error = '请输入合法变量名：以字母或下划线开头，仅包含字母、数字和下划线。';
+      else if (next.name.startsWith('AWB_') || ['GIT_ASKPASS', 'SSH_ASKPASS', 'GIT_SSH_COMMAND', 'GIT_CONFIG_COUNT'].includes(next.name) || /^GIT_CONFIG_(KEY|VALUE)_/.test(next.name)) error = '此名称属于受保护的系统变量，不允许覆盖。';
+      else if (variables.some((row) => row.name === next.name && row.id !== editingId)) error = '变量名已存在，请使用其他名称。';
+      if (error) {
+        $('nameError').textContent = error; $('nameError').hidden = false;
+        $('variableName').setAttribute('aria-invalid', 'true'); $('variableName').focus(); return;
+      }
+      const id = editingId === null ? nextId++ : editingId;
+      const index = variables.findIndex((row) => row.id === id);
+      const nextRow = { id, ...next };
+      if (index === -1) variables.push(nextRow); else variables[index] = nextRow;
+      closeDrawer();
+      render();
+      restoreFocus(null);
+      toast('变量已保存（演示），仅更新本原型内存。');
+    }
+    $('addVariable').addEventListener('click', () => openDrawer());
+    $('search').addEventListener('input', render);
+    $('statusFilter').addEventListener('change', render);
+    $('emptyAction').addEventListener('click', () => {
+      if (variables.length === 0) openDrawer();
+      else { $('search').value = ''; $('statusFilter').value = 'all'; render(); $('search').focus(); }
+    });
+    $('variableEnabled').addEventListener('click', () => {
+      $('variableEnabled').setAttribute('aria-checked', String($('variableEnabled').getAttribute('aria-checked') !== 'true'));
+    });
+    $('variableName').addEventListener('input', clearNameError);
+    $('variableForm').addEventListener('submit', applyVariable);
+    $('closeDrawer').addEventListener('click', closeDrawer);
+    $('cancelDrawer').addEventListener('click', closeDrawer);
+    $('drawerOverlay').addEventListener('click', (event) => { if (event.target === $('drawerOverlay')) closeDrawer(); });
+    $('confirmCancel').addEventListener('click', dismissConfirm);
+    $('confirmOverlay').addEventListener('click', (event) => { if (event.target === $('confirmOverlay')) dismissConfirm(); });
+    $('confirmAccept').addEventListener('click', () => {
+      const action = confirmCallback;
+      dismissConfirm();
+      if (action) action();
+    });
+    document.querySelectorAll('[data-demo]').forEach((button) => button.addEventListener('click', () => toast('仅原型展示，不执行真实操作。')));
+    document.addEventListener('keydown', (event) => {
+      const modal = !$('confirmOverlay').hidden ? $('confirmOverlay') : !$('drawerOverlay').hidden ? $('drawerOverlay') : null;
+      if (!modal) return;
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        if (!$('confirmOverlay').hidden) dismissConfirm(); else closeDrawer();
+      } else if (event.key === 'Tab') {
+        const controls = [...modal.querySelectorAll('button:not(:disabled), input, textarea, select, [tabindex="0"]')].filter((node) => !node.closest('[hidden]'));
+        const first = controls[0], last = controls[controls.length - 1];
+        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+        else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+      }
+    });
+    render();
+  </script>
+</body>
+</html>
