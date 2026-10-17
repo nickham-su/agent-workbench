@@ -15,6 +15,7 @@ import type {
   FileStatResponse,
   FileVersion,
   FileWriteResponse,
+  WorkspaceFileExtractResponse,
   WorkspaceFileCreateRequest,
   WorkspaceFileDeleteRequest,
   WorkspaceFileUploadResult,
@@ -34,6 +35,8 @@ import { workspaceRoot } from "../../infra/fs/paths.js";
 import { withWorkspaceRepoLock } from "../../infra/locks/workspaceRepoLock.js";
 import { withWorkspaceLock } from "../../infra/locks/workspaceLock.js";
 import { workspaceLifecycleCoordinator } from "../../infra/locks/workspace-lifecycle-coordinator.js";
+import { runWorkspaceArchiveOperation, type ArchiveOperationOptions } from "./workspace-archive-operation.js";
+import { archiveError, safeArchiveError, validateArchiveSourcePath } from "./workspace-archive-policy.js";
 import { getWorkspace, getWorkspaceRepoByDirName, listWorkspaceRepos } from "./workspace.store.js";
 import { getSearchSettings } from "../settings/settings.service.js";
 import { runFileSearch, SEARCH_FORCED_EXCLUDES } from "../files/file-search.js";
@@ -1065,6 +1068,53 @@ export async function deleteWorkspacePath(ctx: AppContext, workspaceIdRaw: strin
     return deleteUnderRoot(scope.rootAbs, rel, parseBool((body as any).recursive, true));
   });
   });
+}
+
+export type WorkspaceArchiveExtractOptions = ArchiveOperationOptions & {
+  /** In-process integration-test barrier, not an HTTP request option. */
+  afterSlotAcquired?: () => void;
+  afterMutationAdmitted?: () => Promise<void> | void;
+};
+
+// Process-wide, including lifecycle/region lock waits and the entire cleanup phase.
+let archiveExtractionActive = false;
+
+export async function extractWorkspaceArchive(
+  ctx: AppContext, workspaceIdRaw: string, bodyRaw: unknown, options: WorkspaceArchiveExtractOptions = {}
+): Promise<WorkspaceFileExtractResponse> {
+  const body = bodyRaw as { path?: unknown } | null;
+  const sourcePath = validateArchiveSourcePath(typeof body?.path === "string" ? body.path : "");
+  const workspaceId = parseWorkspaceId(workspaceIdRaw);
+  if (archiveExtractionActive) throw archiveError("ARCHIVE_BUSY", 429);
+  archiveExtractionActive = true;
+  try {
+    options.afterSlotAcquired?.();
+    return await workspaceLifecycleCoordinator.withMutation(workspaceId, async () => {
+      await options.afterMutationAdmitted?.();
+      const scope = buildWorkspaceScope(ctx, workspaceId);
+      const domain = resolveWorkspaceDomain(sourcePath, scope.repoDirNames);
+      if (domain.kind === "repo" && !domain.rel) throw archiveError("ARCHIVE_PATH_INVALID");
+      const run = async () => {
+        // Re-read the mapping under the selected region lock; never trust lock-external FS checks.
+        const lockedScope = buildWorkspaceScope(ctx, workspaceId);
+        if (domain.kind === "repo") resolveWorkspaceRepoRootAbs(ctx, lockedScope, domain.dirName);
+        // A repo is only a lock/namespace region, not an independent filesystem trust root.
+        // Keep the Workspace root in the operation's guard for publication and rollback too.
+        return runWorkspaceArchiveOperation({
+          rootAbs: lockedScope.rootAbs, regionInWorkspace: domain.kind === "repo" ? domain.dirName : "",
+          sourceInRegion: domain.rel, sourcePath,
+          protectedTopLevelNames: domain.kind === "workspaceRoot" ? lockedScope.repoDirNames : new Set<string>(), options
+        });
+      };
+      return domain.kind === "repo"
+        ? withWorkspaceRepoLock({ workspaceId, dirName: domain.dirName }, run)
+        : withWorkspaceLock({ workspaceId }, run);
+    });
+  } catch (error) {
+    throw safeArchiveError(error);
+  } finally {
+    archiveExtractionActive = false;
+  }
 }
 
 export async function resolveWorkspaceUploadTarget(

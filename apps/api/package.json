@@ -26,14 +26,18 @@
     "@sinclair/typebox": "^0.34.47",
     "archiver": "^6.0.2",
     "better-sqlite3": "^11.8.1",
+    "buffer-crc32": "1.0.0",
     "fastify": "^5.2.0",
     "node-pty": "^1.1.0",
-    "pino-pretty": "^11.3.0"
+    "pino-pretty": "^11.3.0",
+    "tar": "7.5.22",
+    "yauzl": "3.4.0"
   },
   "devDependencies": {
     "@types/archiver": "^6.0.3",
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^22.10.2",
+    "@types/yauzl": "3.4.0",
     "ssh2": "1.17.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.3"

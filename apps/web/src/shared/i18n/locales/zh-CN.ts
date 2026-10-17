@@ -693,6 +693,7 @@ export default {
       copyPath: "复制仓库内路径",
       copyRepoPath: "复制仓库内路径",
       copyWorkspacePath: "复制工作区路径",
+      extract: "解压",
       download: "下载",
       preview: "预览",
       rename: "重命名",
@@ -713,6 +714,38 @@ export default {
       uploading: "正在上传…",
       success: "上传完成",
       partialFailed: "以下文件上传失败: {names}"
+    },
+    extract: {
+      extracting: "正在解压…",
+      success: "解压完成",
+      empty: "压缩包为空，没有新增文件",
+      refreshFailed: "解压已完成，目录刷新失败，请手动刷新",
+      resultUnknown: "请求结果未知，解压可能已完成，请刷新目录确认；不会自动重试",
+      errors: {
+        invalidPath: "压缩包路径无效，或源文件不是可解压的普通文件",
+        unsupportedFormat: "不支持此压缩包格式",
+        invalidArchive: "压缩包损坏、格式不符或内容校验失败",
+        unsupportedFeature: "暂不支持加密包、分卷包或此压缩方法",
+        unsupportedEntry: "压缩包包含不支持的链接、特殊文件或扩展条目",
+        invalidEntry: "压缩包包含不安全路径、重复文件或冲突条目",
+        permissionDenied: "没有读取压缩包或写入目标目录的权限",
+        sourceNotFound: "压缩包不存在，请刷新目录确认",
+        targetConflict: "目标已有同名文件或目录，未覆盖或合并；请处理冲突后再试",
+        sourceChanged: "压缩包在解压期间发生变化，请刷新目录确认",
+        targetChanged: "目标目录或本次产物在解压期间发生变化，请刷新目录确认",
+        unsupportedFilesystem: "当前文件系统不支持安全解压所需的操作",
+        limitExceeded: "压缩包超过解压大小、文件数量、路径或元数据限制",
+        timeout: "解压处理超时，请刷新目录确认",
+        busy: "服务正在处理其他解压请求，请稍后再试",
+        storageExhausted: "磁盘空间或可用文件节点不足，请检查存储空间",
+        ioFailed: "解压遇到文件读写错误，请刷新目录确认",
+        cleanupIncomplete: "文件可能已解压，存在未清理内容，请刷新目录确认并检查残留",
+        workspaceDeleting: "工作区正在删除，无法解压",
+        workspaceInvalid: "工作区路径异常，无法安全解压",
+        unauthorized: "登录状态已失效，请重新登录",
+        unavailable: "工作区或压缩包不可用，请刷新目录确认",
+        invalidRequest: "解压请求无效，请刷新目录后重试"
+      }
     },
     status: {
       saving: "正在保存…"

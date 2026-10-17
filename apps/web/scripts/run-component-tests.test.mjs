@@ -89,9 +89,10 @@ test("bootstrap file URL safely handles spaces and preserves inherited Node opti
   assert.equal(env.NODE_OPTIONS, "--trace-warnings");
 });
 
-test("default component list contains eighteen unique files including Git settings and editor regressions", () => {
-  assert.equal(componentTests.length, 18);
-  assert.equal(new Set(componentTests).size, 18);
+test("default component list contains nineteen unique files including extraction and editor regressions", () => {
+  assert.equal(componentTests.length, 19);
+  assert.equal(new Set(componentTests).size, 19);
+  assert.ok(componentTests.includes("src/features/workspace/tools/file-explorer/FileExplorerToolView.component.test.ts"));
   assert.ok(componentTests.includes("src/features/settings/components/AgentProfilesSettingsPanel.component.test.ts"));
   assert.ok(componentTests.includes("src/features/workspace/tools/terminal/TerminalView.component.test.ts"));
   assert.ok(componentTests.includes("src/features/workspace/tools/agent/agentMarkdownFileLinks.component.test.ts"));

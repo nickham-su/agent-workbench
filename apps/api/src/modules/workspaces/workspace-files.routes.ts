@@ -16,6 +16,8 @@ import {
   FileSearchResponseSchema,
   FileStatResponseSchema,
   FileWriteResponseSchema,
+  WorkspaceFileExtractRequestSchema,
+  WorkspaceFileExtractResponseSchema,
   WorkspaceFileDownloadRequestSchema,
   WorkspaceFileCreateRequestSchema,
   WorkspaceFileDeleteRequestSchema,
@@ -35,6 +37,8 @@ import {
   WorkspaceFileConflictError,
   createWorkspaceFile,
   deleteWorkspacePath,
+  extractWorkspaceArchive,
+  type WorkspaceArchiveExtractOptions,
   listWorkspaceFiles,
   mkdirWorkspacePath,
   readWorkspaceFileText,
@@ -72,6 +76,7 @@ type MultipartRequest = FastifyRequest & {
 
 export type WorkspaceFilesRouteTestHooks = {
   afterUploadMutationAdmitted?: (params: { workspaceId: string }) => Promise<void> | void;
+  archiveExtract?: WorkspaceArchiveExtractOptions;
 };
 
 function attachmentHeader(filename: string) {
@@ -83,6 +88,28 @@ function attachmentHeader(filename: string) {
 }
 
 export async function registerWorkspaceFilesRoutes(app: FastifyInstance, ctx: AppContext, hooks: WorkspaceFilesRouteTestHooks = {}) {
+  app.post(
+    "/api/workspaces/:workspaceId/files/extract",
+    {
+      schema: {
+        tags: ["workspaces"],
+        body: WorkspaceFileExtractRequestSchema,
+        response: {
+          200: WorkspaceFileExtractResponseSchema, 400: ErrorResponseSchema, 401: ErrorResponseSchema,
+          403: ErrorResponseSchema, 404: ErrorResponseSchema, 408: ErrorResponseSchema, 409: ErrorResponseSchema,
+          413: ErrorResponseSchema, 429: ErrorResponseSchema, 500: ErrorResponseSchema, 507: ErrorResponseSchema
+        }
+      }
+    },
+    async (req) => {
+      const { workspaceId } = req.params as { workspaceId: string };
+      return extractWorkspaceArchive(ctx, workspaceId, req.body, {
+        ...hooks.archiveExtract,
+        onFailure: (summary) => { req.log.warn(summary, "Workspace archive extraction failed"); }
+      });
+    }
+  );
+
   app.post(
     "/api/workspaces/:workspaceId/files/list",
     {

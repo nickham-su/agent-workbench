@@ -30,6 +30,8 @@ import type {
   FileWriteResponse,
   WorkspaceFileCreateRequest,
   WorkspaceFileDeleteRequest,
+  WorkspaceFileExtractRequest,
+  WorkspaceFileExtractResponse,
   WorkspaceFileListRequest,
   WorkspaceFileMkdirRequest,
   WorkspaceFileReadRequest,
@@ -912,6 +914,16 @@ export async function deleteWorkspacePath(params: { workspaceId: string } & Work
   try {
     const { workspaceId, ...body } = params;
     const res = await client.post<FileDeleteResponse>(`/workspaces/${workspaceId}/files/delete`, body);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function extractWorkspaceArchive(params: { workspaceId: string } & WorkspaceFileExtractRequest) {
+  try {
+    const { workspaceId, ...body } = params;
+    const res = await client.post<WorkspaceFileExtractResponse>(`/workspaces/${encodeURIComponent(workspaceId)}/files/extract`, body);
     return res.data;
   } catch (err) {
     throw toApiError(err);

@@ -53,6 +53,9 @@
                 <a-menu-item v-if="selectedNode" key="download">
                   {{ t("files.actions.download") }}
                 </a-menu-item>
+                <a-menu-item v-if="canExtract" key="extract" :disabled="extracting">
+                  {{ t("files.actions.extract") }}
+                </a-menu-item>
                 <a-menu-item v-if="canOpenPreview" key="preview">
                   {{ t("files.actions.preview") }}
                 </a-menu-item>
@@ -96,6 +99,8 @@ const props = defineProps<{
   selectedNode: TreeNode | null;
   canRenameDelete: boolean;
   canOpenPreview: boolean;
+  canExtract: boolean;
+  extracting: boolean;
   showRepoPathAction: boolean;
   showWorkspacePathAction: boolean;
   refreshRoot: () => void;

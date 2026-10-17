@@ -12,6 +12,7 @@ export * from "./contracts/terminals.js";
 export * from "./contracts/git.js";
 export * from "./contracts/files.js";
 export * from "./contracts/workspace-files.js";
+export * from "./workspace-archive-formats.js";
 export * from "./contracts/workspace-preview.js";
 export * from "./contracts/credentials.js";
 export * from "./contracts/plugin.js";

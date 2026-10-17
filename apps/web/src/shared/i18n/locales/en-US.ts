@@ -695,6 +695,7 @@ export default {
       copyPath: "Copy repo path",
       copyRepoPath: "Copy repo path",
       copyWorkspacePath: "Copy workspace path",
+      extract: "Extract",
       download: "Download",
       preview: "Preview",
       rename: "Rename",
@@ -715,6 +716,38 @@ export default {
       uploading: "Uploading…",
       success: "Upload complete",
       partialFailed: "Upload failed: {names}"
+    },
+    extract: {
+      extracting: "Extracting…",
+      success: "Extraction complete",
+      empty: "The archive is empty; no files were added",
+      refreshFailed: "Extraction completed, but the folder could not be refreshed. Please refresh manually",
+      resultUnknown: "The result is unknown; extraction may have completed. Refresh the folder to check. No automatic retry will be made",
+      errors: {
+        invalidPath: "The archive path is invalid, or the source is not a regular file",
+        unsupportedFormat: "This archive format is not supported",
+        invalidArchive: "The archive is damaged, has the wrong format, or failed integrity checks",
+        unsupportedFeature: "Encrypted, multi-volume archives or this compression method are not supported",
+        unsupportedEntry: "The archive contains unsupported links, special files or extended entries",
+        invalidEntry: "The archive contains unsafe paths, duplicate files or conflicting entries",
+        permissionDenied: "Permission denied when reading the archive or writing to the destination",
+        sourceNotFound: "The archive no longer exists. Refresh the folder to check",
+        targetConflict: "A destination name already exists. Nothing was overwritten or merged; resolve the conflict before retrying",
+        sourceChanged: "The archive changed during extraction. Refresh the folder to check",
+        targetChanged: "The destination or extracted files changed during extraction. Refresh the folder to check",
+        unsupportedFilesystem: "This filesystem does not support the operations required for safe extraction",
+        limitExceeded: "The archive exceeds extraction size, entry count, path or metadata limits",
+        timeout: "Extraction timed out. Refresh the folder to check",
+        busy: "The server is processing another extraction. Please try again later",
+        storageExhausted: "Disk space or available file nodes are exhausted. Please check storage",
+        ioFailed: "A file read or write error occurred. Refresh the folder to check",
+        cleanupIncomplete: "Files may have been extracted and some content could not be cleaned up. Refresh the folder and inspect remaining content",
+        workspaceDeleting: "The workspace is being deleted and cannot extract files",
+        workspaceInvalid: "The workspace path is invalid; safe extraction is not possible",
+        unauthorized: "Your session has expired. Please sign in again",
+        unavailable: "The workspace or archive is unavailable. Refresh the folder to check",
+        invalidRequest: "The extraction request is invalid. Refresh the folder before retrying"
+      }
     },
     status: {
       saving: "Saving…"

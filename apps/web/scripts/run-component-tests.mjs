@@ -19,6 +19,7 @@ export const componentTests = [
   "src/features/workspace/tools/agent/AgentMessageActions.component.test.ts",
   "src/features/workspace/tools/agent/AgentToolView.component.test.ts",
   "src/features/workspace/tools/agent/useAgentSessionStatusStore.component.test.ts",
+  "src/features/workspace/tools/file-explorer/FileExplorerToolView.component.test.ts",
   "src/features/workspace/tools/editor/EditorToolView.component.test.ts",
   "src/features/workspace/tools/environment-variables/EnvironmentVariablesToolView.component.test.ts",
   "src/features/workspace/tools/scheduled-tasks/ScheduledTaskDrawer.component.test.ts",
