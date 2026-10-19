@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test, { afterEach } from "node:test";
 import { defineComponent, h, KeepAlive, nextTick, ref } from "vue";
-import { mount, shallowMount, type VueWrapper } from "@vue/test-utils";
+import { mount, type VueWrapper } from "@vue/test-utils";
 import { AxiosError, type InternalAxiosRequestConfig } from "axios";
 import { createI18n } from "vue-i18n";
 import type { WorkspaceEnvironmentVariable } from "@agent-workbench/shared";
@@ -13,14 +13,6 @@ import {
 } from "@/shared/api";
 import EnvironmentVariablesToolView from "./EnvironmentVariablesToolView.vue";
 import EnvironmentVariablesIcon from "../../icons/EnvironmentVariablesIcon.vue";
-
-// vite-node closes its transformer after entry evaluation, so load the Layout before tests run.
-Object.defineProperties(globalThis, {
-  self: { value: window, configurable: true },
-  UIEvent: { value: window.UIEvent, configurable: true },
-  CSS: { value: window.CSS, configurable: true }
-});
-const { default: WorkspaceLayout } = await import("../../views/WorkspaceLayout.vue");
 
 // Native controls keep real form/input semantics; only Ant overlay/visual plumbing is stubbed.
 const Button = {
@@ -482,55 +474,6 @@ test("environment icon inherits the toolbar color and scales with its font size"
     }
   } finally {
     wrapper.unmount();
-  }
-});
-
-test("old Dock layouts gain the environment entry without losing existing preferences and reset it for another Workspace", async () => {
-  const globals = ["localStorage", "UIEvent", "CSS"] as const;
-  const descriptors = globals.map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)] as const);
-  Object.defineProperties(globalThis, {
-    localStorage: { value: window.localStorage, configurable: true },
-    UIEvent: { value: window.UIEvent, configurable: true },
-    CSS: { value: window.CSS, configurable: true }
-  });
-  const key = "agent-workbench.workspace.dockLayout.v3.dock-fixture";
-  const old = {
-    version: 3, updatedAt: 1, ratios: { topBottom: 0.6, topLeft: 0.4 },
-    toolArea: { files: "leftBottom", terminal: "leftBottom", search: "leftTop", agent: "leftTop", codeReview: "leftTop", scheduledTasks: "leftTop", editor: "rightTop" },
-    toolMinimized: { files: true, terminal: false, search: true, agent: false, codeReview: false, scheduledTasks: false, editor: true },
-    activeToolIdByArea: { leftTop: "agent", leftBottom: "terminal", rightTop: null },
-    toolOrderByArea: { leftTop: ["agent", "search", "scheduledTasks", "codeReview"], leftBottom: ["terminal", "files"], rightTop: ["editor"] }
-  };
-  window.localStorage.setItem(key, JSON.stringify(old));
-  let wrapper: VueWrapper | undefined;
-  try {
-    apiClient.defaults.adapter = async (config) => ok(config, { id: "dock-fixture", title: "Fixture", dirName: "fixture", repos: [], createdAt: 1, updatedAt: 1, terminalCredentialId: null });
-    wrapper = shallowMount(WorkspaceLayout, { props: { workspaceId: "dock-fixture", previewEnabled: false }, global: { plugins: [createI18n({ legacy: false, locale: "zh-CN", messages: { "zh-CN": zhCN } })], stubs: { "a-layout": { template: "<div><slot /></div>" }, "a-layout-content": { template: "<div><slot /></div>" }, "a-select": true, "a-button": true, "a-form": true, "a-form-item": true, "a-modal": true } } });
-    wrappers.push(wrapper); await settle();
-    const dock = wrapper.findComponent({ name: "WorkspaceDock" });
-    assert.ok(dock.exists());
-    const props = dock.props() as any;
-    assert.deepEqual([...props.leftTopToolbarToolIds], ["agent", "search", "scheduledTasks", "environmentVariables"]);
-    assert.deepEqual([...props.leftBottomToolbarToolIds], ["terminal", "files"]);
-    assert.equal(props.toolMinimized.files, true);
-    assert.equal(props.activeToolIdByArea.leftTop, "agent");
-    assert.equal(props.toolTitle("environmentVariables"), "环境变量");
-    assert.equal(props.toolIcon("environmentVariables"), EnvironmentVariablesIcon);
-    assert.equal(props.isKeepAlive("environmentVariables"), false);
-    props.moveTool("environmentVariables", "leftBottom"); await tick();
-    assert.ok((dock.props("leftBottomToolbarToolIds") as string[]).includes("environmentVariables"));
-    await wrapper.setProps({ workspaceId: "dock-fixture-next" }); await settle();
-    assert.ok((dock.props("leftTopToolbarToolIds") as string[]).includes("environmentVariables"));
-    assert.equal((dock.props("leftBottomToolbarToolIds") as string[]).includes("environmentVariables"), false);
-    assert.equal((dock.props("toolMinimized") as Record<string, boolean>).environmentVariables, false);
-  } finally {
-    if (wrapper) { wrapper.unmount(); wrappers.splice(wrappers.indexOf(wrapper), 1); }
-    window.localStorage.removeItem(key);
-    window.localStorage.removeItem("agent-workbench.workspace.dockLayout.v3.dock-fixture-next");
-    for (const [key, descriptor] of descriptors) {
-      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
-      else Reflect.deleteProperty(globalThis, key);
-    }
   }
 });
 
