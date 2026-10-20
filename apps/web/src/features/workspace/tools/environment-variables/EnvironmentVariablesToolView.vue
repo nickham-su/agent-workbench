@@ -386,6 +386,6 @@ onBeforeUnmount(() => { disposed = true; release(); });
 .environment-field-help { color: var(--text-tertiary); font-size: 12px; line-height: 1.7; margin: 6px 0 16px; }
 .environment-form .environment-enabled-field { display: flex; align-items: center; gap: 10px; }
 .environment-drawer-actions { display: flex; justify-content: flex-end; gap: 8px; }
-@media (max-width: 850px) { .environment-side { width: 220px; padding: 18px 14px; } .environment-main { padding: 18px 16px; } }
-@media (max-width: 620px) { .workspace-environment { flex-direction: column; overflow: auto; } .environment-main { flex: none; overflow: visible; } .environment-side { width: auto; overflow: visible; border-left: 0; border-top: 1px solid var(--border-color-secondary); } }
+@media (max-width: 850px) { .environment-side { padding: 18px 14px; } .environment-main { padding: 18px 16px; } }
+@media (max-width: 1023.98px) { .workspace-environment { flex-direction: column; overflow: auto; } .environment-main { flex: none; overflow: visible; } .environment-side { width: auto; overflow: visible; border-left: 0; border-top: 1px solid var(--border-color-secondary); } }
 </style>
