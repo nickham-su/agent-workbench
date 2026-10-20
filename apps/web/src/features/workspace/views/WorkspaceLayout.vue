@@ -98,7 +98,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, provide, reactive, ref, watch, type ComponentPublicInstance } from "vue";
 import { Modal, message } from "ant-design-vue";
-import { ClockCircleOutlined, CodeOutlined, DownOutlined, EditOutlined, FolderOpenOutlined, RobotOutlined, SearchOutlined, UpOutlined } from "@ant-design/icons-vue";
+import { ClockCircleOutlined, CodeOutlined, EditOutlined, FolderOpenOutlined, RobotOutlined, SearchOutlined } from "@ant-design/icons-vue";
 import { useI18n } from "vue-i18n";
 import type { GitBranchesResponse, GitPushRequest, GitStatusResponse, GitTarget, WorkspaceDetail, WorkspaceGitStatusResponse } from "@agent-workbench/shared";
 import {
@@ -165,7 +165,6 @@ const currentTarget = computed(() => {
   if (!currentRepo.value) return null;
   return { kind: "workspaceRepo", workspaceId: props.workspaceId, dirName: currentRepo.value.dirName } as const;
 });
-const editorDiffTabActive = ref(false);
 
 const tools = computed<ToolDefinition[]>(() => [
   {
@@ -227,28 +226,6 @@ const tools = computed<ToolDefinition[]>(() => [
     icon: EditOutlined,
     view: EditorToolView,
     createRuntime: (ctx) => createEditorRuntime(ctx),
-    headerActions: () => [
-      ...(editorDiffTabActive.value ? [
-      {
-        id: "editor.prevDiff",
-        tooltip: t("workspace.actions.previousChange"),
-        groupKey: "editor.diffNav",
-        icon: UpOutlined,
-        onClick: () => {
-          void toolCommands.get("editor")?.goToPreviousDiff?.();
-        }
-      },
-      {
-        id: "editor.nextDiff",
-        tooltip: t("workspace.actions.nextChange"),
-        groupKey: "editor.diffNav",
-        icon: DownOutlined,
-        onClick: () => {
-          void toolCommands.get("editor")?.goToNextDiff?.();
-        }
-      }
-      ] : [])
-    ],
     keepAlive: true
   }
 ]);
@@ -874,10 +851,7 @@ function toolViewProps(toolId: ToolId) {
   return { workspaceId: props.workspaceId, toolId };
 }
 
-function toolViewListeners(toolId: ToolId) {
-  if (toolId === "editor") {
-    return { diffTabActiveChange: (active: boolean) => { editorDiffTabActive.value = Boolean(active); } };
-  }
+function toolViewListeners() {
   return {};
 }
 

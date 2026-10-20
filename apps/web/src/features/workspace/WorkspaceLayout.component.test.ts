@@ -103,6 +103,21 @@ test("a fresh page loads saved browser-wide order and areas without writing stor
   assert.deepEqual(startupWrites, []);
 });
 
+test("编辑器导航不再注册全局页头按钮或订阅 Diff 标签状态", async () => {
+  store(layoutKey("editor-actions"), localLayout({
+    toolMinimized: { ...localLayout().toolMinimized, editor: false },
+    activeToolIdByArea: { leftTop: "files", leftBottom: "terminal", rightTop: "editor" }
+  }));
+  const wrapper = mountLayout("editor-actions");
+  await settle();
+  assert.equal(props(wrapper).visibleToolIdByArea.rightTop, "editor");
+  assert.deepEqual(props(wrapper).toolViewListeners("editor"), {});
+  assert.deepEqual(
+    wrapper.findComponent({ name: "WorkspaceHeader" }).props("headerActionGroups"),
+    []
+  );
+});
+
 test("without new global settings old workspace layouts are ignored and no configuration is created", async () => {
   const oldKey = "agent-workbench.workspace.dockLayout.v3.old";
   const old = { version: 3, toolArea: { files: "leftBottom" }, toolOrderByArea: { leftTop: ["agent"], leftBottom: ["files"] } };

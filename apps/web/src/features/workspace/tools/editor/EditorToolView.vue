@@ -41,21 +41,51 @@
           {{ activeTab.error }}
         </span>
       </div>
-      <div v-if="htmlPreviewTab" class="absolute right-8 top-20 z-10">
-        <Tooltip placement="left" :title="htmlPreviewBlocked ? t('editor.htmlPreview.saveFirst') : t('editor.htmlPreview.open')">
+      <div v-if="htmlPreviewTab || activeTab?.kind === 'diff'" data-editor-floating-actions class="absolute right-8 top-20 z-10 flex flex-col gap-1">
+        <Tooltip
+          v-if="htmlPreviewTab"
+          placement="left"
+          :title="htmlPreviewBlocked ? t('editor.htmlPreview.saveFirst') : t('editor.htmlPreview.open')"
+        >
           <span class="inline-flex w-7 h-7">
             <button
               type="button"
               data-editor-html-preview
               :aria-label="t('editor.htmlPreview.open')"
               :disabled="htmlPreviewBlocked"
-              class="w-7 h-7 flex items-center justify-center rounded border border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)] text-[color:var(--text-secondary)] hover:text-[color:var(--text-primary)] disabled:opacity-40 disabled:cursor-not-allowed focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
+              :class="floatingActionClass"
               @click="openHtmlPreview"
             >
               <GlobalOutlined />
             </button>
           </span>
         </Tooltip>
+        <template v-else>
+          <Tooltip placement="left" :title="t('workspace.actions.previousChange')">
+            <button
+              type="button"
+              data-editor-diff-previous
+              :aria-label="t('workspace.actions.previousChange')"
+              :class="floatingActionClass"
+              @mousedown.prevent
+              @click="goToPreviousDiff"
+            >
+              <UpOutlined />
+            </button>
+          </Tooltip>
+          <Tooltip placement="left" :title="t('workspace.actions.nextChange')">
+            <button
+              type="button"
+              data-editor-diff-next
+              :aria-label="t('workspace.actions.nextChange')"
+              :class="floatingActionClass"
+              @mousedown.prevent
+              @click="goToNextDiff"
+            >
+              <DownOutlined />
+            </button>
+          </Tooltip>
+        </template>
       </div>
       <div v-if="activeTab?.kind === 'preview'" class="h-full min-h-0 overflow-hidden">
         <MonacoCodeViewer class="h-full" :value="activeTab.text" :language="activeTab.language" :read-only="true" />
@@ -85,7 +115,7 @@ export default {
 <script setup lang="ts">
 import { computed, markRaw, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { Modal, Tooltip, message } from "ant-design-vue";
-import { GlobalOutlined } from "@ant-design/icons-vue";
+import { DownOutlined, GlobalOutlined, UpOutlined } from "@ant-design/icons-vue";
 import { useI18n } from "vue-i18n";
 import * as monaco from "monaco-editor/esm/vs/editor/editor.api.js";
 import "monaco-editor/esm/vs/editor/contrib/find/browser/findController.js";
@@ -109,9 +139,7 @@ import MonacoDiffViewer from "@/shared/components/MonacoDiffViewer.vue";
 
 const props = defineProps<{ workspaceId: string; toolId: string; previewEnabled?: boolean }>();
 const { t } = useI18n();
-const emit = defineEmits<{
-  (e: "diffTabActiveChange", active: boolean): void;
-}>();
+const floatingActionClass = "w-7 h-7 flex items-center justify-center rounded border border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)] text-[color:var(--text-secondary)] hover:text-[color:var(--text-primary)] disabled:opacity-40 disabled:cursor-not-allowed focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2";
 
 const host = useWorkspaceHost(props.toolId);
 const store = computed(() => getEditorStore(props.workspaceId));
@@ -853,14 +881,6 @@ watch(
 );
 
 watch(
-  () => activeTab.value?.kind,
-  (kind) => {
-    emit("diffTabActiveChange", kind === "diff");
-  },
-  { immediate: true }
-);
-
-watch(
   () => store.value.tabs.length,
   (next, prev) => {
     if (next !== 0) return;
@@ -885,9 +905,7 @@ function goToNextDiff() {
 
 onMounted(() => {
   unregisterToolCommands = host.registerToolCommands(props.toolId, {
-    refresh: () => refreshActiveFileTab(),
-    goToPreviousDiff,
-    goToNextDiff
+    refresh: () => refreshActiveFileTab()
   });
   scheduleApplyEditor();
   requestAnimationFrame(() => maybeMinimizeEditorWhenEmpty());

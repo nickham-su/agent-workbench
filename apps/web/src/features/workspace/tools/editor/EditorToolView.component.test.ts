@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test, { afterEach } from "node:test";
-import { markRaw, nextTick } from "vue";
+import { defineComponent, markRaw, nextTick } from "vue";
 import { AxiosError } from "axios";
 import { createI18n } from "vue-i18n";
 import { mount } from "@vue/test-utils";
@@ -40,6 +40,21 @@ const requests: Array<{ type: string; path: string; workspaceId: string; data: a
 const forms: Array<{ target: string; action: string; path: string }> = [];
 const editorOptions: any[] = [];
 const editorActionRuns: string[] = [];
+const diffNavigationCalls: Array<{ direction: "previous" | "next"; original: string; modified: string }> = [];
+let registeredEditorCommands: Record<string, unknown> | undefined;
+const DiffViewerStub = defineComponent({
+  props: ["original", "modified"],
+  methods: {
+    goToFirstDiff() {},
+    goToPreviousDiff() {
+      diffNavigationCalls.push({ direction: "previous", original: this.original, modified: this.modified });
+    },
+    goToNextDiff() {
+      diffNavigationCalls.push({ direction: "next", original: this.original, modified: this.modified });
+    }
+  },
+  template: '<pre data-diff>{{ original }}→{{ modified }}</pre>'
+});
 let editorActionsAvailable = true;
 let modelsCreated = 0;
 let refresh: (() => unknown) | undefined;
@@ -107,9 +122,9 @@ function setup(workspaceId = `editor-test-${++id}`, previewEnabled = true) {
     global: {
       plugins: [createI18n({ legacy: false, locale: "zh-CN", messages: { "zh-CN": zhCN } })],
       provide: { [workspaceHostKey as symbol]: {
-        minimizeTool(toolId: string) { minimized.push(toolId); }, registerToolCommands(_toolId: string, commands: any) { refresh = commands.refresh; return () => {}; },
+        minimizeTool(toolId: string) { minimized.push(toolId); }, registerToolCommands(_toolId: string, commands: any) { refresh = commands.refresh; registeredEditorCommands = commands; return () => {}; },
       } },
-      stubs: { EditorTabs: { name: "EditorTabs", props: ["tabs", "requestCloseTab", "requestCloseOtherTabs", "requestCloseAllTabs"], template: '<div data-editor-tabs></div>' }, MonacoCodeViewer: { props: ["value"], template: '<pre data-memory-preview>{{ value }}</pre>' }, MonacoDiffViewer: { props: ["original", "modified"], methods: { goToFirstDiff() {}, goToPreviousDiff() {}, goToNextDiff() {} }, template: '<pre data-diff>{{ original }}→{{ modified }}</pre>' } },
+      stubs: { EditorTabs: { name: "EditorTabs", props: ["tabs", "requestCloseTab", "requestCloseOtherTabs", "requestCloseAllTabs"], template: '<div data-editor-tabs></div>' }, MonacoCodeViewer: { props: ["value"], template: '<pre data-memory-preview>{{ value }}</pre>' }, MonacoDiffViewer: DiffViewerStub },
     },
   });
   wrappers.push(wrapper);
@@ -134,6 +149,8 @@ afterEach(async () => {
   confirmations.length = 0;
   createdUrls.length = revokedUrls.length = requests.length = forms.length = editorOptions.length = 0;
   editorActionRuns.length = 0;
+  diffNavigationCalls.length = 0;
+  registeredEditorCommands = undefined;
   editorActionsAvailable = true;
   modelsCreated = 0;
   refresh = blur = save = undefined;
@@ -221,6 +238,7 @@ for (const kind of ["image", "preview", "diff"] as const) {
     await settle();
     assert.equal(dispatchFindShortcut(element).defaultPrevented, false);
     assert.deepEqual(editorActionRuns, []);
+    assert.equal(wrapper.find("button[data-editor-diff-previous]").exists(), kind === "diff");
   });
 }
 
@@ -503,15 +521,73 @@ test("previewEnabled 关闭隐藏按钮，内存预览和 diff 不进入文件�
   assert.equal(wrapper.find("button[data-editor-html-preview]").exists(), false);
   await wrapper.setProps({ previewEnabled: true });
   assert.equal(wrapper.find("button[data-editor-html-preview]").exists(), true);
+  assert.equal(wrapper.find("button[data-editor-diff-next]").exists(), false);
   store.upsertTab({ kind: "preview", key: "preview", path: "page.html", title: "Memory", text: "unsaved memory", readOnly: true });
   await settle();
   assert.equal(wrapper.get("[data-memory-preview]").text(), "unsaved memory");
   assert.equal(wrapper.find("button[data-editor-html-preview]").exists(), false);
+  assert.equal(wrapper.find("[data-editor-floating-actions]").exists(), false);
   store.upsertTab({ kind: "diff", key: "diff", title: "Diff", path: "page.html", original: "before", modified: "after", readOnly: true });
   await settle();
   assert.equal(wrapper.get("[data-diff]").text(), "before→after");
   assert.equal(wrapper.find("button[data-editor-html-preview]").exists(), false);
-  assert.deepEqual(wrapper.emitted("diffTabActiveChange")?.at(-1), [true]);
+  assert.equal(wrapper.findAll("[data-editor-floating-actions] button").length, 2);
+  const fileTab = store.tabs.find((item) => item.kind === "file");
+  assert.ok(fileTab);
+  store.setActiveTabKey(fileTab.key);
+  await settle();
+  assert.equal(wrapper.find("button[data-editor-html-preview]").exists(), true);
+  assert.equal(wrapper.find("button[data-editor-diff-next]").exists(), false);
+});
+
+test("Diff 悬浮导航直接操作当前文件的前后版本，切换标签不会导航到旧 Diff", async () => {
+  const { wrapper, store } = setup(undefined, false);
+  assert.equal(wrapper.find("[data-editor-floating-actions]").exists(), false);
+  await open(store, "notes.txt");
+  assert.equal(wrapper.find("[data-editor-floating-actions]").exists(), false);
+  assert.deepEqual(Object.keys(registeredEditorCommands ?? {}), ["refresh"]);
+
+  store.upsertTab({ kind: "diff", key: "diff:a", title: "a.ts", original: "old a", modified: "new a", readOnly: true });
+  await settle();
+  const actions = wrapper.get("[data-editor-floating-actions]");
+  assert.ok(actions.classes().includes("absolute"));
+  assert.ok(actions.classes().includes("right-8"));
+  assert.ok(actions.classes().includes("top-20"));
+  assert.ok(actions.classes().includes("flex-col"));
+  const previous = wrapper.get("button[data-editor-diff-previous]");
+  const next = wrapper.get("button[data-editor-diff-next]");
+  assert.equal(previous.attributes("aria-label"), "上一处变更");
+  assert.equal(next.attributes("aria-label"), "下一处变更");
+  assert.equal(previous.attributes("type"), "button");
+  assert.equal(next.attributes("type"), "button");
+  assert.equal(wrapper.find("button[data-editor-html-preview]").exists(), false);
+
+  const diff = wrapper.get("[data-diff]").element as HTMLElement;
+  diff.tabIndex = 0;
+  diff.focus();
+  for (const button of [previous, next]) {
+    const event = new window.MouseEvent("mousedown", { bubbles: true, cancelable: true });
+    button.element.dispatchEvent(event);
+    assert.equal(event.defaultPrevented, true);
+    assert.equal(document.activeElement, diff);
+    await button.trigger("click");
+  }
+  assert.deepEqual(diffNavigationCalls, [
+    { direction: "previous", original: "old a", modified: "new a" },
+    { direction: "next", original: "old a", modified: "new a" }
+  ]);
+
+  store.upsertTab({ kind: "diff", key: "diff:b", title: "b.ts", original: "old b", modified: "new b", readOnly: true });
+  await settle();
+  await wrapper.get("button[data-editor-diff-next]").trigger("click");
+  assert.deepEqual(diffNavigationCalls.at(-1), { direction: "next", original: "old b", modified: "new b" });
+  store.setActiveTabKey("diff:a");
+  await settle();
+  await wrapper.get("button[data-editor-diff-previous]").trigger("click");
+  assert.deepEqual(diffNavigationCalls.at(-1), { direction: "previous", original: "old a", modified: "new a" });
+  store.setActiveTabKey("");
+  await settle();
+  assert.equal(wrapper.find("[data-editor-floating-actions]").exists(), false);
 });
 
 for (const [reason, text] of [["too_large", "文件过大"], ["binary", "二进制文件"], ["decode_failed", "文件无法解码"]] as const) {
