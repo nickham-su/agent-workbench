@@ -66,7 +66,7 @@ const stubs = {
   "a-layout": { template: "<div><slot /></div>" }, "a-layout-content": { template: "<div><slot /></div>" },
   "a-select": true, "a-menu": true, "a-menu-item": true, "a-menu-divider": true, "a-divider": true, WorkspaceDock: true
 };
-function mountTool(overrides: Record<string, unknown> = {}) {
+function mountTool(overrides: Record<string, unknown> = {}, renderPanel = false) {
   const calls: Array<{ action: string; target: GitTarget }> = [];
   const selected: string[] = [];
   const wrapper = mount(Tool, {
@@ -77,7 +77,7 @@ function mountTool(overrides: Record<string, unknown> = {}) {
       pull: async (target) => { calls.push({ action: "pull", target }); },
       push: async (target) => { calls.push({ action: "push", target }); }, ...overrides },
     global: { plugins: [i18n()], components: { ADropdown: Dropdown, AMenu: Menu, AMenuItem: Menu.Item },
-      stubs: { CodeReviewPanel: true }, provide: { [workspaceHostKey as symbol]: host } }
+      stubs: renderPanel ? { ...stubs, GitIdentityModal: true, CodeReviewPanel: false } : { CodeReviewPanel: true }, provide: { [workspaceHostKey as symbol]: host } }
   });
   wrappers.push(wrapper);
   return { wrapper, calls, selected };
@@ -107,11 +107,11 @@ function repositoryStyle(wrapper: VueWrapper) {
   element.classList.remove("css-contract-probe");
   return getComputedStyle(element);
 }
-function mountPanel(overrides: Record<string, unknown> = {}) {
+function mountPanel(overrides: Record<string, unknown> = {}, locale = "zh-CN") {
   const wrapper = shallowMount(Panel, {
     attachTo: document.body,
     props: { workspaceId: wsId, toolId: "codeReview", target: target(), gitBusy: false, beginGitOp: () => () => {}, ...overrides },
-    global: { plugins: [i18n()], stubs, provide: { [workspaceHostKey as symbol]: host } }
+    global: { plugins: [i18n(locale)], stubs, provide: { [workspaceHostKey as symbol]: host } }
   });
   wrappers.push(wrapper); return wrapper;
 }
@@ -320,6 +320,121 @@ test("仓库行复用文件行的整行矩形、间距、hover及选中蓝线样
   }
 });
 
+test("长目录、超长文件名和重命名在两组内均可收缩省略，标题及操作保留自身宽度", async () => {
+  const longDir = `${"directory_without_breakpoints_".repeat(12)}/nested/`;
+  const longBase = `${"filename_without_breakpoints_".repeat(12)}.component.test.ts`;
+  const cases: ChangeItem[] = [
+    { path: `${longDir}short.ts`, status: "M" },
+    { path: `src/${longBase}`, status: "M" },
+    { path: `${longDir}${longBase}`, oldPath: `old/${longDir}previous_${longBase}`, status: "R" }
+  ];
+  files = { unstaged: cases, staged: cases };
+  for (const locale of ["zh-CN", "en-US"]) {
+    const panel = mountPanel({}, locale); await settle();
+    const gridStyle = getComputedStyle(panel.get(".review-change-groups").element);
+    assert.equal(gridStyle.gridTemplateColumns, "minmax(0, 1fr)", "the inner Grid cannot acquire an auto/min-content column");
+    assert.equal(gridStyle.gridTemplateRows, "minmax(0, 1fr) minmax(0, 1fr)");
+    const groups = panel.findAll(".review-change-groups > div");
+    assert.equal(groups.length, 2);
+    for (const group of groups) {
+      assert.equal(getComputedStyle(group.element).minWidth, "0px", "direct Grid items must permit shrinking");
+      const heading = group.get(".review-change-heading");
+      const title = heading.get("div:first-child");
+      assert.equal(getComputedStyle(title.element).minWidth, "0px");
+      assert.equal(getComputedStyle(title.element).textOverflow, "ellipsis");
+      assert.equal(title.attributes("title"), title.text());
+      assert.equal(getComputedStyle(heading.get("div:last-child").element).flexShrink, "0", "header buttons do not shrink");
+      const listStyle = getComputedStyle(group.get(".review-file-list").element);
+      assert.equal(parseFloat(listStyle.minWidth), 0);
+      assert.equal(listStyle.overflowX, "hidden");
+      assert.equal(listStyle.overflowY, "auto", "independent vertical scrolling is retained");
+      const rows = group.findAll(".review-file-list .group");
+      assert.equal(rows.length, cases.length);
+      assert.deepEqual(
+        rows.map((row) => row.get(".font-mono.flex").attributes("title")).sort(),
+        cases.map((entry) => entry.path).sort()
+      );
+      for (const row of rows) {
+        const line = row.get(".font-mono.flex");
+        const entry = cases.find((entry) => entry.path === line.attributes("title"));
+        assert.ok(entry);
+        assert.equal(line.attributes("title"), entry.path, "the full path remains available on hover");
+        assert.equal(
+          line.findAll("span").map((part) => part.text()).join(""),
+          entry.path,
+          "truncation must not replace the actual path text"
+        );
+        const [directory, basename] = line.findAll("span");
+        const dirStyle = getComputedStyle(directory!.element);
+        const baseStyle = getComputedStyle(basename!.element);
+        assert.equal(dirStyle.minWidth, "0px");
+        assert.equal(dirStyle.flexShrink, "1", "the directory still yields before the basename");
+        assert.equal(dirStyle.textOverflow, "ellipsis");
+        assert.equal(baseStyle.flexShrink, "0", "normal basenames retain their display priority");
+        assert.equal(baseStyle.maxWidth, "100%", "a basename cannot exceed its own text area");
+        assert.equal(baseStyle.overflow, "hidden");
+        assert.equal(baseStyle.textOverflow, "ellipsis");
+        assert.equal(baseStyle.whiteSpace, "nowrap");
+        assert.equal(getComputedStyle(row.get(".min-w-0.flex-1").element).minWidth, "0px");
+        assert.equal(getComputedStyle(row.get(".ml-auto").element).flexShrink, "0", "row actions keep their width");
+        const oldPath = row.find(".font-mono.truncate");
+        assert.equal(oldPath.exists(), Boolean(entry.oldPath));
+        if (entry.oldPath) {
+          assert.equal(oldPath.attributes("title"), entry.oldPath);
+          assert.ok(oldPath.text().includes(entry.oldPath));
+          assert.equal(getComputedStyle(oldPath.element).textOverflow, "ellipsis");
+        }
+      }
+    }
+  }
+  // Exact paths (including rename sources) still reach the existing Git actions.
+  const panel = wrappers.at(-1)!;
+  const renameRow = (group: number) => panel.findAll(".review-file-list")[group]!
+    .findAll(".group")
+    .find((row) => row.get(".font-mono.flex").attributes("title") === cases[2]!.path)!;
+  await renameRow(0).get(`[aria-label="${enUS.codeReview.actions.stage}"]`).trigger("click");
+  await settle();
+  await renameRow(1).get(`[aria-label="${enUS.codeReview.actions.unstage}"]`).trigger("click");
+  await settle();
+  const actions = requests.filter((request) => request.path === "/git/stage" || request.path === "/git/unstage");
+  assert.deepEqual(actions.map((request) => request.path), ["/git/stage", "/git/unstage"]);
+  for (const action of actions) assert.deepEqual(action.body, { target: target(), items: [{ path: cases[2]!.path, oldPath: cases[2]!.oldPath }] });
+});
+
+test("真实审查组件在200px变更区及479/480切换时保留内部尺寸约束", async () => {
+  const entry = { path: `src/${"very_long_filename_".repeat(18)}.ts`, status: "M" };
+  files = { unstaged: [entry], staged: [entry] };
+  const { wrapper } = mountTool({}, true); await settle();
+  resize(wrapper, 480); await nextTick();
+  // These are component/CSS contracts, not happy-dom pixel or scroll measurements.
+  for (const width of [480, 479, 480]) {
+    resize(wrapper, width); await nextTick();
+    assert.equal(wrapper.classes().includes("review-wide"), width >= 480);
+    assert.equal(wrapper.find(".review-repo-divider").exists(), width >= 480);
+    if (width >= 480) {
+      dragTo(wrapper, 9999); await nextTick();
+      assert.equal(displayedRepoWidth(wrapper), 280);
+      assert.equal(width - displayedRepoWidth(wrapper), 200, "the existing allocation model reaches the minimum changes width");
+    }
+    const panel = wrapper.findComponent(Panel);
+    assert.equal(panel.exists(), true);
+    assert.equal(parseFloat(getComputedStyle(wrapper.get(".review-changes-region").element).minWidth), 0);
+    assert.equal(getComputedStyle(panel.get(".review-change-groups").element).gridTemplateColumns, "minmax(0, 1fr)");
+    for (const group of panel.findAll(".review-change-groups > div")) {
+      assert.equal(getComputedStyle(group.element).minWidth, "0px");
+      assert.equal(getComputedStyle(group.get(".review-file-list").element).overflowX, "hidden");
+      assert.equal(getComputedStyle(group.get(".review-change-heading > div:last-child").element).flexShrink, "0");
+      const row = group.get(".review-file-list .group");
+      assert.equal(getComputedStyle(row.get(".ml-auto").element).flexShrink, "0");
+      assert.equal(getComputedStyle(row.get(".font-mono.flex > span:last-child").element).maxWidth, "100%");
+      assert.equal(row.get(".font-mono.flex").attributes("title"), entry.path);
+    }
+    // Verify layout constraints without persisting a temporary width into later cache tests.
+    pointer(window, "pointercancel"); await nextTick();
+  }
+  assert.equal(displayedRepoWidth(wrapper), 264, "the repository width preference is unchanged by the overflow fix");
+});
+
 test("窄布局少量仓库按内容自然收缩，上限基于整个标题下区域而非自身网格区", async () => {
   const { wrapper } = mountTool({ repos: repos.slice(0, 1) }); await settle();
   for (const count of [1, 2]) {
@@ -367,7 +482,10 @@ test("多仓库窄布局封顶三分之一且内滚动，切到宽布局解除�
   const panel = mountPanel(); await settle();
   assert.equal(getComputedStyle(panel.get(".review-change-groups").element).gridTemplateRows, "minmax(0, 1fr) minmax(0, 1fr)");
   assert.equal(panel.findAll(".review-file-list").length, 2);
-  for (const list of panel.findAll(".review-file-list")) assert.equal(getComputedStyle(list.element).overflow, "auto");
+  for (const list of panel.findAll(".review-file-list")) {
+    assert.equal(getComputedStyle(list.element).overflowY, "auto");
+    assert.equal(getComputedStyle(list.element).overflowX, "hidden");
+  }
   assert.equal(panel.findAll(".review-change-heading")[0]!.text().includes("未暂存"), true);
   assert.equal(panel.findAll(".review-change-heading")[1]!.text().includes("已暂存"), true);
 });
@@ -594,8 +712,8 @@ test("提交按钮位于已暂存组，弹窗展示冻结仓库及已暂存范�
 test("目录和子模块有非文本图标说明，不能以普通编辑文件入口打开", async () => {
   files = { unstaged: [{ path: "nested", status: "??", kind: "directory" }, { path: "vendor/sub", status: "M", kind: "submodule" }], staged: [] };
   const panel = mountPanel(); await settle(); const vm = state(panel);
-  assert.equal(panel.findAll('span.whitespace-nowrap[title="目录（不支持文本预览）"]').length, 1);
-  assert.equal(panel.findAll('span.whitespace-nowrap[title="子模块（不支持文本预览）"]').length, 1);
+  assert.equal(panel.findAll('span.truncate[title="目录（不支持文本预览）"]').length, 1);
+  assert.equal(panel.findAll('span.truncate[title="子模块（不支持文本预览）"]').length, 1);
   for (const file of files.unstaged!) assert.equal(vm.isOpenFileDisabled(file), true);
 });
 

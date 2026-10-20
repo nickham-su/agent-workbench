@@ -2,11 +2,11 @@
   <div class="code-review-changes">
     <div v-if="noChanges" class="review-clean-state">{{ t("codeReview.status.noChanges") }}</div>
     <div v-else class="review-change-groups">
-      <div class="flex-1 min-h-0 flex flex-col">
+      <div class="flex-1 min-h-0 min-w-0 flex flex-col">
         <div
             class="review-change-heading flex items-center justify-between pl-3 pr-1 py-1.5 border-b border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)]">
-          <div class="text-xs font-semibold">{{ t("codeReview.unstaged") }}</div>
-          <div class="flex items-center gap-1">
+          <div class="min-w-0 truncate text-xs font-semibold" :title="t('codeReview.unstaged')">{{ t("codeReview.unstaged") }}</div>
+          <div class="shrink-0 flex items-center gap-1">
             <a-tooltip :title="t('codeReview.actions.refresh')" :mouseEnterDelay="0" :mouseLeaveDelay="0"
                        placement="top">
               <span class="inline-flex">
@@ -68,15 +68,15 @@
                   </div>
                 </a-tooltip>
                 <div class="min-w-0 flex-1">
-                  <div class="text-xs font-mono min-w-0 flex items-center">
+                  <div class="text-xs font-mono min-w-0 flex items-center" :title="f.path">
                     <span class="text-[color:var(--text-secondary)] min-w-0 flex-initial truncate block">{{ fileDir(f.path) }}</span>
-                    <span class="text-[color:var(--text-color)] shrink-0 whitespace-nowrap" :title="fileKindLabel(f) || undefined">{{ fileBase(f.path) }}</span>
+                    <span class="text-[color:var(--text-color)] shrink-0 max-w-full truncate" :title="fileKindLabel(f) || undefined">{{ fileBase(f.path) }}</span>
                   </div>
-                  <div v-if="f.oldPath" class="mt-0.5 text-[11px] font-mono truncate text-[color:var(--text-tertiary)]">
+                  <div v-if="f.oldPath" class="mt-0.5 text-[11px] font-mono truncate text-[color:var(--text-tertiary)]" :title="f.oldPath">
                     {{ t("codeReview.file.oldPath", {oldPath: f.oldPath}) }}
                   </div>
                 </div>
-                <div class="ml-auto flex items-center gap-1 opacity-0 group-hover:opacity-100">
+                <div class="ml-auto shrink-0 flex items-center gap-1 opacity-0 group-hover:opacity-100">
                   <a-tooltip :title="t('codeReview.actions.stage')" :mouseEnterDelay="0" :mouseLeaveDelay="0" placement="top">
                     <span class="inline-flex">
                       <a-button size="small" type="text" :disabled="gitBusy" @click.stop="stageOne(f)" :aria-label="t('codeReview.actions.stage')">
@@ -109,11 +109,11 @@
         </div>
       </div>
 
-      <div class="flex-1 min-h-0 flex flex-col border-t border-[var(--border-color-secondary)]">
+      <div class="flex-1 min-h-0 min-w-0 flex flex-col border-t border-[var(--border-color-secondary)]">
         <div
             class="review-change-heading flex items-center justify-between pl-3 pr-1 py-1.5 border-b border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)]">
-          <div class="text-xs font-semibold">{{ t("codeReview.staged") }}</div>
-          <div class="flex items-center gap-1">
+          <div class="min-w-0 truncate text-xs font-semibold" :title="t('codeReview.staged')">{{ t("codeReview.staged") }}</div>
+          <div class="shrink-0 flex items-center gap-1">
             <a-button
                 size="small"
                 type="text"
@@ -161,15 +161,15 @@
                   </div>
                 </a-tooltip>
                 <div class="min-w-0 flex-1">
-                  <div class="text-xs font-mono min-w-0 flex items-center">
+                  <div class="text-xs font-mono min-w-0 flex items-center" :title="f.path">
                     <span class="text-[color:var(--text-secondary)] min-w-0 flex-initial truncate block">{{ fileDir(f.path) }}</span>
-                    <span class="text-[color:var(--text-color)] shrink-0 whitespace-nowrap" :title="fileKindLabel(f) || undefined">{{ fileBase(f.path) }}</span>
+                    <span class="text-[color:var(--text-color)] shrink-0 max-w-full truncate" :title="fileKindLabel(f) || undefined">{{ fileBase(f.path) }}</span>
                   </div>
-                  <div v-if="f.oldPath" class="mt-0.5 text-[11px] font-mono truncate text-[color:var(--text-tertiary)]">
+                  <div v-if="f.oldPath" class="mt-0.5 text-[11px] font-mono truncate text-[color:var(--text-tertiary)]" :title="f.oldPath">
                     {{ t("codeReview.file.oldPath", {oldPath: f.oldPath}) }}
                   </div>
                 </div>
-                <div class="ml-auto flex items-center gap-1 opacity-0 group-hover:opacity-100">
+                <div class="ml-auto shrink-0 flex items-center gap-1 opacity-0 group-hover:opacity-100">
                   <a-tooltip :title="t('codeReview.actions.unstage')" :mouseEnterDelay="0" :mouseLeaveDelay="0" placement="top">
                     <span class="inline-flex">
                       <a-button size="small" type="text" :disabled="gitBusy" @click.stop="unstageOne(f)" :aria-label="t('codeReview.actions.unstage')">
@@ -1007,8 +1007,8 @@ function formatBytes(bytes: number) {
 
 <style scoped>
 .code-review-changes { height: 100%; min-height: 0; min-width: 0; overflow: hidden; }
-.review-change-groups { height: 100%; min-height: 0; min-width: 0; display: grid; grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); }
+.review-change-groups { height: 100%; min-height: 0; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); }
 .review-change-heading { flex: none; }
-.review-file-list { flex: 1; min-height: 0; min-width: 0; overflow: auto; }
+.review-file-list { flex: 1; min-height: 0; min-width: 0; overflow-x: hidden; overflow-y: auto; }
 .review-clean-state { height: 100%; display: flex; align-items: center; justify-content: center; padding: 16px; box-sizing: border-box; color: var(--text-tertiary); font-size: 12px; }
 </style>
