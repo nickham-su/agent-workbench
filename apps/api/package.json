@@ -36,7 +36,7 @@
   "devDependencies": {
     "@types/archiver": "^6.0.3",
     "@types/better-sqlite3": "^7.6.12",
-    "@types/node": "^22.10.2",
+    "@types/node": "^24.19.2",
     "@types/yauzl": "3.4.0",
     "ssh2": "1.17.0",
     "tsx": "^4.19.2",

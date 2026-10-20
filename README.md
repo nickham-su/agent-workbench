@@ -193,7 +193,7 @@ Use the mouse wheel to scroll through history. In fullscreen programs like `vim`
 
 **Prerequisites**
 
-- Node.js LTS (20.x or 22.x)
+- Node.js 24 LTS (the repository includes `.nvmrc`; run `nvm use` if using nvm)
 - `git`, `tmux`
 - Build toolchain (macOS requires Xcode Command Line Tools for compiling `better-sqlite3` and `node-pty`)
 
@@ -203,6 +203,14 @@ Use the mouse wheel to scroll through history. In fullscreen programs like `vim`
 npm install
 npm run dev
 ```
+
+After switching Node.js major versions, stop the development services and rebuild native dependencies under Node.js 24 before restarting:
+
+```bash
+npm rebuild better-sqlite3 node-pty
+```
+
+Do not reuse native binaries built under another Node.js major version. Rebuilding dependencies does not require deleting application databases or `package-lock.json`.
 
 **Local env**
 
