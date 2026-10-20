@@ -101,18 +101,19 @@ function setup(workspaceId = `editor-test-${++id}`, previewEnabled = true) {
     const response = requestHandler ? await requestHandler(type, path, ws, data) : fallback;
     return { data: response === undefined ? fallback : response, status: 200, statusText: "OK", headers: {}, config };
   };
+  const minimized: string[] = [];
   const wrapper = mount(EditorToolView, {
     attachTo: document.body, props: { workspaceId, toolId: "editor", previewEnabled },
     global: {
       plugins: [createI18n({ legacy: false, locale: "zh-CN", messages: { "zh-CN": zhCN } })],
       provide: { [workspaceHostKey as symbol]: {
-        minimizeTool() {}, registerToolCommands(_toolId: string, commands: any) { refresh = commands.refresh; return () => {}; },
+        minimizeTool(toolId: string) { minimized.push(toolId); }, registerToolCommands(_toolId: string, commands: any) { refresh = commands.refresh; return () => {}; },
       } },
       stubs: { EditorTabs: { name: "EditorTabs", props: ["tabs", "requestCloseTab", "requestCloseOtherTabs", "requestCloseAllTabs"], template: '<div data-editor-tabs></div>' }, MonacoCodeViewer: { props: ["value"], template: '<pre data-memory-preview>{{ value }}</pre>' }, MonacoDiffViewer: { props: ["original", "modified"], methods: { goToFirstDiff() {}, goToPreviousDiff() {}, goToNextDiff() {} }, template: '<pre data-diff>{{ original }}→{{ modified }}</pre>' } },
     },
   });
   wrappers.push(wrapper);
-  return { wrapper, workspaceId, store: getEditorStore(workspaceId) };
+  return { wrapper, workspaceId, store: getEditorStore(workspaceId), minimized };
 }
 async function open(store: ReturnType<typeof getEditorStore>, path: string, mode: "edit" | "preview" = "edit") {
   store.enqueueOpenFile({ path, mode, line: 12, column: 4, highlight: { kind: "line" } });
@@ -749,3 +750,16 @@ for (const kind of ["file", "tree", "back"] as const) {
     });
   }
 }
+
+
+test("关闭最后一个文件审查Diff标签后自动最小化右侧编辑器", async () => {
+  const { store, minimized } = setup();
+  store.upsertTab({ kind: "diff", key: "review:repo/file.ts", title: "file.ts", original: "old", modified: "new", readOnly: true });
+  await settle();
+  assert.equal(store.tabs.length, 1);
+  const before = minimized.length;
+  store.closeTab("review:repo/file.ts");
+  await settle();
+  assert.equal(store.tabs.length, 0);
+  assert.deepEqual(minimized.slice(before), ["editor"]);
+});

@@ -1,0 +1,433 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="color-scheme" content="dark" />
+  <title>Northstar 工作区 · 多仓库代码审查原型</title>
+  <style>
+    :root{color-scheme:dark;--bg:#101010;--panel:#141414;--raised:#1f1f1f;--line:#303030;--text:#e4e4e7;--muted:#99999f;--faint:#777780;--blue:#1677ff;--red:#ff7875;--green:#95de64;--amber:#e9ba65;font:13px -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text)}button,input,textarea,select{font:inherit}button{color:inherit;cursor:pointer;border:0;background:none}button:disabled{cursor:not-allowed;opacity:.4}button:focus-visible,textarea:focus-visible,select:focus-visible{outline:2px solid #69b1ff;outline-offset:2px}[hidden]{display:none!important}
+    svg{height:17px;width:17px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;flex-shrink:0}.sprite{display:none}.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}.muted{color:var(--muted)}.grow{flex:1}.dot{width:6px;height:6px;border-radius:50%;background:var(--red);display:inline-block;flex:none}.unknown-mark{color:var(--amber)}
+    .primary{background:var(--blue)!important;border-color:var(--blue)!important;color:white!important}.icon-button{display:inline-flex;align-items:center;justify-content:center;width:27px;height:27px;border-radius:3px;color:var(--muted)}.icon-button:hover{background:#ffffff0a;color:var(--text)}.small-button{display:inline-flex;align-items:center;justify-content:center;gap:5px;border:1px solid #3a3a3a;background:#222;min-height:27px;padding:4px 8px;border-radius:3px;white-space:nowrap}.small-button:hover:not(:disabled){border-color:#777}.link{padding:0;color:#69b1ff;text-align:left}.link:hover{text-decoration:underline}
+    .app{height:100dvh;min-height:650px;display:flex;flex-direction:column}.workspace-header{min-height:48px;flex:none;padding:9px 14px 9px 12px;background:var(--raised);border-bottom:1px solid var(--line);display:flex;align-items:center;gap:11px}.brand{color:#7cb5ff;display:flex}.breadcrumb{color:var(--faint)}.workspace-title{font-weight:600;font-size:14px}.header-scope{font-size:12px;color:var(--muted)}.prototype-switch{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:11px}.prototype-switch select{height:27px;max-width:160px;background:#191919;color:var(--text);border:1px solid #3b3b3b;border-radius:3px}.view-switch{display:flex;padding:2px;background:#111;border:1px solid #333;border-radius:5px;gap:2px}.view-switch button{padding:4px 10px;border-radius:3px;font-size:11px;color:var(--muted);white-space:nowrap}.view-switch button[aria-pressed="true"]{background:#303030;color:#f0f0f0;box-shadow:0 1px 3px #0005}
+    .workspace-body{display:flex;flex:1;min-height:0;overflow:hidden}.dock{width:40px;flex:none;display:flex;flex-direction:column;align-items:center;gap:5px;padding:8px 0;border-right:1px solid var(--line);background:#171717}.dock-button{width:32px;height:35px;display:flex;align-items:center;justify-content:center;position:relative;border-radius:4px;color:var(--muted)}.dock-button svg{width:20px;height:20px}.dock-button:hover{background:#ffffff08}.dock-button.active{color:#8dbfff;background:#1677ff15}.dock-dot{position:absolute;top:4px;right:3px;box-shadow:0 0 0 2px #171717}.dock-warning{position:absolute;bottom:1px;right:2px;font-size:11px;color:var(--amber)}
+    .review{width:var(--review-width,374px);flex:none;background:var(--panel);border-right:1px solid var(--line);display:grid;grid-template-columns:minmax(0,1fr);grid-template-rows:43px minmax(0,1fr) minmax(0,2fr);min-height:0}.tool-heading{height:43px;flex:none;display:flex;align-items:center;gap:8px;padding:0 13px;border-bottom:1px solid var(--line);font-weight:600}.repo-section{border-bottom:1px solid var(--line);min-width:0;min-height:0;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:#454545 transparent}.repo-list{padding:8px;display:grid;grid-template-columns:minmax(0,1fr);gap:2px}.repo-row{min-width:0;max-width:100%;display:flex;align-items:center;gap:4px;padding:3px 4px;min-height:34px;width:100%;border:1px solid transparent;border-radius:4px}.repo-row:hover{background:#ffffff05}.repo-row.selected{background:#1677ff13;border-color:#1677ff50}.repo-row.selected .repo-name{color:#a5ceff}.repo-icon{color:var(--faint);width:16px}.repo-copy{min-width:0;flex:1;display:flex;align-items:center;gap:10px;overflow:hidden}.repo-name{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:500;white-space:nowrap;flex:none}.repo-branch{min-width:0;margin-left:auto;text-align:right;font-size:10px;color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .changes{flex:1;min-height:0;display:grid;grid-template-rows:1fr 1fr;overflow:hidden}.change-group{display:flex;flex-direction:column;min-height:0;overflow:hidden}.change-group+.change-group{border-top:1px solid var(--line)}.file-group-heading{height:37px;flex:none;display:flex;align-items:center;gap:6px;padding:0 12px;font-size:11px;font-weight:500;color:var(--muted);background:#191919;border-bottom:1px solid #262626}.file-group-heading .small-button{min-height:23px;font-size:10px;padding:2px 7px}.count{font-size:10px;color:#b8b8be;background:#ffffff0a;border-radius:4px;padding:1px 5px;font-weight:400}.file-list{overflow:auto;flex:1;min-height:0;padding:4px 0}.file-row{display:flex;align-items:center;padding:1px 9px 1px 13px;gap:5px;min-height:32px;border-left:2px solid transparent}.file-row.selected{background:#ffffff05;border-left-color:#1677ff}.file-open{flex:1;min-width:0;text-align:left;display:flex;align-items:center;gap:7px;font-size:11px;height:30px;padding:0}.file-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.file-type{color:#d5b76b;font-family:monospace;font-size:11px;width:17px;flex:none}.file-change{color:var(--amber);font-size:10px}.group-empty{padding:12px 16px;color:var(--faint);font-size:11px}.empty-state{grid-column:1/-1;grid-row:1/-1;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:13px;padding:28px 18px;line-height:1.8;text-align:center;font-size:11px;color:var(--muted)}.empty-state strong{font-size:12px;color:var(--text)}.empty-symbol{height:34px;width:34px;border-radius:50%;background:#ffffff06;display:grid;place-items:center;color:var(--green);font-size:20px}.unknown-state .empty-symbol{color:var(--amber)}
+    .editor{flex:1;min-width:280px;display:flex;flex-direction:column;background:#111214}.editor-tabs{height:43px;flex:none;display:flex;align-items:stretch;background:#171717;border-bottom:1px solid var(--line)}.editor-tab{display:flex;align-items:center;gap:8px;padding:0 10px 0 15px;border-top:2px solid var(--blue);border-right:1px solid var(--line);background:#111214;font-size:12px;min-width:0}.editor-tab>span:nth-child(2){overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.editor-tab .icon-button{width:23px;height:25px}.editor-topnote{display:flex;align-items:center;margin-left:auto;padding:0 14px;font-size:10px;color:var(--faint)}.preview-heading{height:38px;flex:none;display:flex;align-items:center;gap:10px;padding:0 16px;font-size:11px;border-bottom:1px solid #252525}.preview-repo{color:var(--muted)}.diff-stats{display:flex;gap:10px;font-size:10px;color:var(--green)}.deleted{color:var(--red)}.preview-path{padding:11px 17px;font-size:11px;color:var(--muted);overflow-wrap:anywhere;border-bottom:1px solid #252525}.diff-lines{flex:1;overflow:auto;padding:12px 0;font:12px/26px ui-monospace,SFMono-Regular,Consolas,monospace}.diff-line{display:flex;min-width:max-content;padding-right:20px;min-height:26px}.line-number{width:50px;padding-right:14px;text-align:right;flex:none;color:#5f6169;user-select:none}.line-sign{width:22px;flex:none;user-select:none}.diff-code{white-space:pre}.diff-line.add{background:#19352266;color:#b5ddb8}.diff-line.remove{background:#45262766;color:#e7b6b6}.diff-line.hunk{background:#1c2a3a66;color:#80a8d0}.diff-line.context{color:#bec0c6}.diff-empty{padding:55px 28px;color:var(--faint);text-align:center;font:12px/1.8 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.editor-status{padding:7px 14px;border-top:1px solid #252525;color:var(--faint);font-size:10px;display:flex;gap:16px}
+
+    .workspace-body.full-review .review{width:auto;flex:1;border-right:0}
+    /* 布局只由审查工具的实际宽度决定，与编辑器是否打开、浏览器断点无关。 */
+    .review.review-wide{display:grid;grid-template-columns:264px minmax(0,1fr);grid-template-rows:43px minmax(0,1fr)}
+    .review-wide .tool-heading{grid-column:1/-1}
+    .review-wide .repo-section{grid-column:1;grid-row:2;border-right:1px solid var(--line);border-bottom:0}
+
+
+    .review-wide .changes{grid-column:2;grid-row:2;grid-template-columns:1fr;grid-template-rows:1fr 1fr}
+    .repo-select{min-width:0;flex:1;display:flex;align-items:center;gap:8px;text-align:left;padding:4px;min-height:26px;border-radius:2px}
+    .repo-more{flex:none;width:24px;height:26px;color:var(--muted)}
+    .repo-more[aria-expanded="true"]{background:#ffffff12;color:var(--text)}
+    .repo-menu{position:fixed;z-index:35;width:184px;padding:4px;background:#242424;border:1px solid #424242;border-radius:5px;box-shadow:0 6px 24px #0009;outline:none}
+    .repo-menu button{display:flex;align-items:center;gap:9px;width:100%;padding:8px 10px;border-radius:3px;text-align:left;font-size:12px}
+    .repo-menu button:hover:not(:disabled),.repo-menu button:focus-visible{background:#ffffff0b}
+    .repo-menu svg{width:15px;height:15px;color:var(--muted)}
+    .pane-divider{width:6px;flex:none;position:relative;cursor:col-resize;touch-action:none;background:#171717;outline:none}
+    .pane-divider::before{content:"";position:absolute;inset:0 2px;background:#303030;transition:background .12s}
+    .pane-divider::after{content:"";position:absolute;left:2px;top:calc(50% - 12px);width:2px;height:24px;border-radius:2px;background:#737373}
+    .pane-divider:hover::before,.pane-divider:focus-visible::before,.pane-divider.dragging::before{background:var(--blue)}
+    .pane-divider:focus-visible{outline:1px solid #69b1ff;outline-offset:-1px}
+    body.resizing-panes,body.resizing-panes *{cursor:col-resize!important;user-select:none!important}
+    .statusbar{min-height:25px;flex:none;display:flex;align-items:center;gap:14px;padding:4px 10px;background:#191919;border-top:1px solid var(--line);font-size:10px;color:var(--muted)}.scope-note{color:var(--faint)}.toast{position:fixed;bottom:42px;left:50%;transform:translateX(-50%);max-width:min(600px,90vw);padding:11px 16px;background:#292929;border:1px solid #454545;border-radius:5px;box-shadow:0 6px 24px #0008;font-size:12px;z-index:30;line-height:1.7}.modal-backdrop{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:#0009;z-index:40;padding:20px}.modal{width:510px;max-width:100%;max-height:90vh;overflow:auto;background:#1f1f1f;border:1px solid #424242;border-radius:6px;box-shadow:0 12px 60px #000b;padding:22px}.modal h2{font-size:15px;margin:0 0 16px}.modal p{font-size:12px;color:var(--muted);line-height:1.9;overflow-wrap:anywhere}.modal strong{color:var(--text)}.modal-select{display:block;width:100%;background:#141414;color:var(--text);border:1px solid #424242;padding:7px;margin-top:7px;border-radius:3px}.modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:22px;flex-wrap:wrap}.commit-label{display:block;font-size:12px;margin-bottom:9px}.required{color:var(--red)}#commitMessage{display:block;resize:vertical;width:100%;min-height:112px;max-height:240px;background:#141414;border:1px solid #424242;border-radius:3px;padding:10px;color:var(--text);line-height:1.7}.commit-summary{font-size:11px;color:var(--muted);margin-top:10px}
+    @media(max-width:1000px){.header-scope,.prototype-switch>span,.editor-topnote{display:none}.scope-note{display:none}}
+    @media(max-width:700px){.app{height:auto;min-height:100dvh}.workspace-header{flex-wrap:wrap;gap:8px}.workspace-header>.grow{display:none}.view-switch{margin-left:auto}.prototype-switch{width:100%;justify-content:flex-end}.prototype-switch select{max-width:none}.workspace-body{min-height:calc(100dvh - 115px);display:grid;grid-template-columns:40px minmax(0,1fr);grid-template-rows:auto auto;overflow:visible}.dock{grid-column:1;grid-row:1/-1;width:40px;min-height:46px;border-right:0;padding:5px 0;gap:3px}.dock-button{height:32px}.dock>.grow,.dock-button[data-feedback]{display:none}.review{grid-column:2;grid-row:1;width:auto;height:max(630px,calc(100dvh - 115px));min-height:630px;border-right:0}.editor{grid-column:2;grid-row:2;min-width:0;width:auto;min-height:400px;border-top:1px solid var(--line)}.repo-list{grid-template-columns:minmax(0,1fr)}.repo-row{padding:3px 4px;gap:4px}.repo-icon{display:none}.statusbar{flex-wrap:wrap;gap:6px 12px}.statusbar>.grow{display:none}.view-switch button{padding:4px 7px}.workspace-title{font-size:13px}.editor-status{flex-wrap:wrap}.modal{padding:18px}.modal-actions{gap:6px}}
+    @media(max-width:410px){.repo-list{grid-template-columns:minmax(0,1fr)}.view-switch{margin-left:0}.workspace-header{padding-right:8px}.workspace-header>.muted,.workspace-header>.breadcrumb{display:none}}
+  </style>
+</head>
+<body>
+<svg class="sprite" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><defs>
+  <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></symbol>
+  <symbol id="i-agent" viewBox="0 0 24 24"><path d="m12 3 2.8 6.2L21 12l-6.2 2.8L12 21l-2.8-6.2L3 12l6.2-2.8Z"/></symbol>
+  <symbol id="i-review" viewBox="0 0 24 24"><path d="M6 3h10l3 3v15H6zM9 8h6M9 12h6M9 16h3"/><path d="m3 8 3 3-3 3"/></symbol>
+  <symbol id="i-files" viewBox="0 0 24 24"><path d="M3 6h7l2 3h9v11H3zM3 6V4h7l2 2h7v3"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10" cy="10" r="6"/><path d="m15 15 6 6"/></symbol>
+  <symbol id="i-terminal" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3m6 1h4"/></symbol>
+  <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="m9 3-1 3-3 1-2 4 2 2v4l4 3 3-1 3 1 4-3v-4l2-2-2-4-3-1-1-3z"/></symbol>
+  <symbol id="i-repo" viewBox="0 0 24 24"><path d="M5 4h14v16H5zM5 16h14M9 4v7l2-2 2 2V4"/></symbol>
+  <symbol id="i-branch" viewBox="0 0 24 24"><circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="5" r="2"/><path d="M6 7v10m12-10c0 7-12 3-12 9"/></symbol>
+  <symbol id="i-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+  <symbol id="i-pull" viewBox="0 0 24 24"><path d="M12 3v13m-5-5 5 5 5-5M4 18v3h16v-3"/></symbol>
+  <symbol id="i-push" viewBox="0 0 24 24"><path d="M12 16V3m-5 5 5-5 5 5M4 18v3h16v-3"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 0 0-14-5L3 9m0-5v5h5m-4 4a8 8 0 0 0 14 5l3-3m0 5v-5h-5"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+  <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M6 18 18 6"/></symbol>
+  <symbol id="i-send" viewBox="0 0 24 24"><path d="M12 20V4m-6 6 6-6 6 6"/></symbol>
+  <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c5 5 5 13 0 18-5-5-5-13 0-18"/></symbol>
+  <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.5" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1.5" fill="currentColor" stroke="none"/></symbol>
+</defs></svg>
+
+<div class="app">
+  <header class="workspace-header">
+    <span class="brand" aria-hidden="true"><svg><use href="#i-grid"/></svg></span><span class="muted">工作区</span><span class="breadcrumb">/</span><span class="workspace-title">Northstar</span><span class="header-scope">跨仓库协作空间</span><span class="grow"></span>
+    <div class="view-switch" role="group" aria-label="原型布局形态"><button id="splitView" aria-pressed="true">审查 + 编辑器</button><button id="fullView" aria-pressed="false">全屏审查</button></div>
+    <label class="prototype-switch"><span>交互原型 · 仅模拟</span><select id="scenario" aria-label="切换原型演示场景"><option value="default">场景：跨仓库变更</option><option value="clean">场景：全部干净</option><option value="unknown">场景：部分查询失败</option></select></label>
+  </header>
+  <div class="workspace-body" id="workspaceBody">
+    <nav class="dock" aria-label="工作区工具">
+      <button class="dock-button" data-feedback="本页仅展示代码审查与编辑器，AI Agent 不在本次原型视图内。" aria-label="AI Agent（本原型未展开）" title="AI Agent"><svg><use href="#i-agent"/></svg></button>
+      <button id="reviewToggle" class="dock-button active" aria-label="关闭代码审查" aria-expanded="true" aria-controls="reviewPanel" title="代码审查"><svg><use href="#i-review"/></svg><span id="dockDot" class="dot dock-dot" aria-hidden="true"></span><span id="dockWarning" class="dock-warning" hidden aria-hidden="true">?</span></button>
+      <button class="dock-button" data-feedback="文件浏览不在本次原型范围内。" aria-label="文件浏览（原型未展开）" title="文件浏览"><svg><use href="#i-files"/></svg></button>
+      <button class="dock-button" data-feedback="搜索不在本次原型范围内。" aria-label="搜索（原型未展开）" title="搜索"><svg><use href="#i-search"/></svg></button>
+      <button class="dock-button" data-feedback="此原型不会执行任何终端命令。" aria-label="终端（原型未展开）" title="终端"><svg><use href="#i-terminal"/></svg></button>
+      <span class="grow"></span><button class="dock-button" data-feedback="设置不在本次原型范围内。" aria-label="设置（原型未展开）" title="设置"><svg><use href="#i-settings"/></svg></button>
+    </nav>
+    <aside class="review" id="reviewPanel" aria-label="代码审查">
+      <div class="tool-heading"><svg class="muted"><use href="#i-review"/></svg><span>代码审查</span><span class="grow"></span></div>
+      <section class="repo-section" aria-label="全部仓库">
+        <div id="repoList" class="repo-list" role="group" aria-label="选择审查仓库"></div>
+      </section>
+      <section id="changes" class="changes" aria-label="当前仓库变更列表"></section>
+    </aside>
+    <div id="paneDivider" class="pane-divider" role="separator" tabindex="0" aria-label="调整代码审查和编辑器宽度" aria-orientation="vertical" aria-controls="reviewPanel editorPanel" aria-valuemin="260" aria-valuemax="900" aria-valuenow="374" title="左右拖动调整宽度；方向键微调，双击复位"></div>
+    <main class="editor" id="editorPanel" aria-label="代码编辑器，只读差异预览">
+      <div class="editor-tabs"><div class="editor-tab"><span id="previewType" class="file-type">V</span><span id="previewFilename"></span><button id="closeEditor" class="icon-button" aria-label="关闭右侧编辑器，进入全屏审查" title="关闭编辑器"><svg><use href="#i-close"/></svg></button></div><span class="editor-topnote">代码编辑器 · 只读 Diff</span></div>
+      <div class="preview-heading"><span id="previewRepo" class="preview-repo mono"></span><span class="muted">工作区变更</span><span class="grow"></span><span id="diffStats" class="diff-stats"></span></div>
+      <div id="previewPath" class="preview-path mono"></div><div id="diffLines" class="diff-lines"></div>
+      <div class="editor-status"><span>只读差异预览</span><span>UTF-8</span><span class="grow"></span><span>点击左侧文件查看变更</span></div>
+    </main>
+  </div>
+  <footer class="statusbar"><span class="grow"></span><span id="layoutHint" class="scope-note">左侧审查 · 右侧代码编辑器</span><span>不执行 Git · 无网络请求</span></footer>
+</div>
+<div id="repoActionsMenu" class="repo-menu" role="menu" tabindex="-1" aria-label="仓库 Git 操作" hidden>
+  <button role="menuitem" data-repo-action="checkout"><svg aria-hidden="true"><use href="#i-branch"/></svg>切换分支</button>
+  <button role="menuitem" data-repo-action="pull"><svg aria-hidden="true"><use href="#i-pull"/></svg>拉取</button>
+  <button role="menuitem" data-repo-action="push"><svg aria-hidden="true"><use href="#i-push"/></svg>推送</button>
+</div>
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+<div id="modalBackdrop" class="modal-backdrop" hidden>
+  <section class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle" aria-describedby="modalDescription">
+    <h2 id="modalTitle"></h2><div id="modalDescription"></div>
+    <label id="branchLabel" hidden style="font-size:11px;color:var(--muted)">目标分支<select id="branchSelect" class="modal-select"><option value="feature/workspace-review">feature/workspace-review</option><option value="main">main</option><option value="develop">develop</option></select></label>
+    <div id="commitFields" hidden><label for="commitMessage" class="commit-label"><span class="required">*</span> 提交信息</label><textarea id="commitMessage" aria-label="模拟提交信息" placeholder="输入提交信息…" rows="4"></textarea><div id="commitSummary" class="commit-summary"></div></div>
+    <div class="modal-actions"><button id="cancelModal" class="small-button">取消</button><button id="confirmModal" class="small-button">确认模拟操作</button><button id="commitAndPush" class="small-button primary" hidden>模拟提交并推送</button></div>
+  </section>
+</div>
+<script>
+
+  'use strict';
+  // 单文件本地原型：只改变内存中的虚构数据，不访问文件、网络或 Git。
+  const $ = (id) => document.getElementById(id);
+  const escapeHTML = (value) => String(value).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const seed = [
+    { id:'web-app', branch:'feature/workspace-review', unknown:false, files:[
+      {id:'layout',path:'src/views/WorkspaceLayout.vue',type:'V',staged:false,added:12,removed:4,diff:[['hunk','@@ -28,7 +28,10 @@'],['context','<WorkspaceHeader :workspace="workspace" />'],['remove','<RepoSelector v-model="currentRepo" />'],['remove','<GitActions :target="currentTarget" />'],['add','<CodeReviewTool'],['add','  :repos="workspace.repos"'],['add','  v-model:selected-repo="reviewRepo"'],['add','/>'],['context','<AgentPanel :workspace-id="workspace.id" />']]},
+      {id:'repos',path:'src/components/RepositoryList.vue',type:'V',staged:false,added:36,removed:0,diff:[['hunk','@@ -0,0 +1,36 @@'],['add','<button v-for="repo in repositories"'],['add','  :key="repo.id"'],['add','  :class="{ selected: repo.id === selectedId }"'],['add','  @click="$emit(\'select\', repo.id)">'],['add','  <span>{{ repo.name }}</span>'],['add','  <span v-if="repo.hasChanges" class="dot" />'],['add','</button>']]},
+      {id:'runtime',path:'src/tools/code-review/runtime.ts',type:'TS',staged:true,added:18,removed:6,diff:[['hunk','@@ -14,6 +14,9 @@'],['remove','const target = getCurrentTarget();'],['remove','setDot(await hasChanges(target));'],['add','const statuses = await getWorkspaceChanges();'],['add','const hasChanges = statuses.some(repo => repo.dirty);'],['add','setDot(hasChanges);'],['context','scheduleNextRefresh();']]}
+    ]},
+    { id:'api-service', branch:'main', unknown:false, files:[] },
+    { id:'shared-kit', branch:'feature/review-contract', unknown:false, files:[
+      {id:'schema',path:'src/contracts/workspace.ts',type:'TS',staged:false,added:9,removed:1,diff:[['hunk','@@ -31,3 +31,8 @@'],['context','export interface RepositorySummary {'],['context','  id: string;'],['remove','  dirty: boolean;'],['add','  state: "dirty" | "clean" | "unknown";'],['add','  staged: number;'],['add','  unstaged: number;'],['context','}']]},
+      {id:'index',path:'src/index.ts',type:'TS',staged:false,added:1,removed:0,diff:[['hunk','@@ -8,2 +8,3 @@'],['context','export * from "./contracts/git";'],['add','export * from "./contracts/workspace";']]}
+    ]},
+    { id:'docs-site', branch:'main', unknown:false, files:[] },
+    { id:'mobile-app', branch:'feature/mobile-review', unknown:false, files:[
+      {id:'mobile-review',path:'src/screens/ReviewScreen.tsx',type:'TS',staged:false,added:4,removed:1,diff:[['hunk','@@ -12,3 +12,6 @@'],['context','export function ReviewScreen() {'],['remove','  return <Changes />;'],['add','  return <ReviewLayout>'],['add','    <RepositoryList />'],['add','    <Changes />'],['add','  </ReviewLayout>;'],['context','}']]}
+    ]},
+    { id:'agent-worker', branch:'feature/parallel-runs', unknown:false, files:[
+      {id:'worker-status',path:'src/workspace-status.ts',type:'TS',staged:true,added:3,removed:1,diff:[['hunk','@@ -8,3 +8,5 @@'],['context','export async function workspaceStatus(repos) {'],['remove','  return readStatus(repos[0]);'],['add','  const statuses = await Promise.all('],['add','    repos.map(repo => readStatus(repo))'],['add','  );'],['context','  return statuses;'],['context','}']]}
+    ]},
+    { id:'cli-tools', branch:'release/v1.8', unknown:false, files:[] },
+    { id:'infra-config', branch:'chore/local-runner', unknown:false, files:[] }
+  ];
+  let repos = [], selectedId = 'web-app', selectedFileId = 'layout', panelOpen = true, layoutMode = 'split';
+  let pendingOperation = null, returnFocus = null, toastTimer = null;
+  const REVIEW_BREAKPOINT = 640, MIN_REVIEW_WIDTH = 260, MIN_EDITOR_WIDTH = 280, DIVIDER_WIDTH = 6;
+  let reviewWidth = 374, paneDrag = null;
+  let menuRepoId = null;
+  const drafts = new Map();
+  const currentRepo = () => repos.find((repo) => repo.id === selectedId);
+  const dirtyRepos = () => repos.filter((repo) => repo.files.length > 0);
+  const unknownRepos = () => repos.filter((repo) => repo.unknown);
+  const statusText = (repo) => repo.unknown ? (repo.files.length ? '状态未知，有上次变更' : '状态未知') : repo.files.length ? `${repo.files.length} 个变更` : '干净';
+  function notify(text) {
+    clearTimeout(toastTimer); $('toast').textContent = text; $('toast').hidden = false;
+    toastTimer = setTimeout(() => { $('toast').hidden = true; }, 4200);
+  }
+  function selectRepo(id) {
+    if (!repos.some((repo) => repo.id === id)) return;
+    const keepListFocus = $('repoList').contains(document.activeElement);
+    selectedId = id; selectedFileId = currentRepo().files[0]?.id || null; render();
+    if (keepListFocus) $('repoList').querySelector(`[data-repo="${selectedId}"]`)?.focus();
+  }
+  function renderRepositories() {
+    closeRepoMenu(false);
+    const dirty = dirtyRepos().length, unknown = unknownRepos().length;
+    $('repoList').innerHTML = repos.map((repo) => `<div class="repo-row${repo.id === selectedId ? ' selected' : ''}"><button class="repo-select" data-repo="${repo.id}" aria-pressed="${repo.id === selectedId}" aria-label="${repo.id}，分支 ${escapeHTML(repo.branch)}，${statusText(repo)}${repo.id === selectedId ? '，当前选中' : ''}"><svg class="repo-icon" aria-hidden="true"><use href="#i-repo"/></svg><span class="repo-copy"><span class="repo-name">${repo.id}${repo.files.length ? '<span class="dot" aria-hidden="true"></span>' : ''}${repo.unknown ? '<span class="unknown-mark" title="仓库状态未知" aria-hidden="true">?</span>' : ''}</span><span class="repo-branch mono" title="${escapeHTML(repo.branch)}">${escapeHTML(repo.branch)}</span></span></button><button class="icon-button repo-more" data-repo-menu="${repo.id}" aria-label="${repo.id} 的更多操作" aria-haspopup="menu" aria-expanded="false" aria-controls="repoActionsMenu" title="${repo.id} 的更多操作"><svg aria-hidden="true"><use href="#i-more"/></svg></button></div>`).join('');
+    $('dockDot').hidden = dirty === 0; $('dockWarning').hidden = unknown === 0;
+    const summary = `${dirty} 个仓库有变更${unknown ? `，${unknown} 个仓库状态未知` : ''}`;
+    $('reviewToggle').setAttribute('aria-label', `${panelOpen ? '关闭' : '打开'}代码审查；${summary}`);
+    $('reviewToggle').title = `代码审查 · ${summary}（不是未读提醒）`;
+  }
+  function fileRow(file) {
+    const basename = file.path.split('/').pop();
+    return `<div class="file-row${file.id === selectedFileId ? ' selected' : ''}"><button class="file-open" data-file="${file.id}" title="${escapeHTML(file.path)}" aria-label="在编辑器查看 ${escapeHTML(file.path)} 的变更" aria-pressed="${file.id === selectedFileId}"><span class="file-type">${file.type}</span><span class="file-name">${basename}</span><span class="grow"></span><span class="file-change">M</span></button><button class="icon-button" data-stage="${file.id}" title="${file.staged ? '取消暂存' : '暂存'} ${basename}（模拟）" aria-label="${file.staged ? '取消暂存' : '暂存'} ${escapeHTML(file.path)}（模拟）">${file.staged ? '−' : '+'}</button></div>`;
+  }
+  function renderChanges() {
+    const repo = currentRepo(), staged = repo.files.filter((file) => file.staged), unstaged = repo.files.filter((file) => !file.staged);
+    if (repo.unknown) {
+      $('changes').innerHTML = `<div class="empty-state unknown-state"><div class="empty-symbol">?</div><strong>暂时无法确认仓库状态</strong><div>查询失败不代表没有变更。<br>已保留 ${repo.files.length ? `${repo.files.length} 个上次已知变更` : '上次已知状态'}，暂停当前 Git 操作。</div><button class="link" data-retry="true">模拟重试查询</button></div>`;
+    } else if (!repo.files.length) {
+      $('changes').innerHTML = `<div class="empty-state"><div class="empty-symbol"><svg><use href="#i-check"/></svg></div><strong>当前仓库没有未提交变更</strong></div>`;
+    } else {
+      $('changes').innerHTML = `<section class="change-group" aria-label="未暂存变更"><div class="file-group-heading">未暂存 <span class="count">${unstaged.length}</span><span class="grow"></span><button class="icon-button" data-stage-all="true" aria-label="暂存当前仓库全部未暂存文件（模拟）" title="全部暂存（模拟）" ${!unstaged.length ? 'disabled' : ''}>+</button></div><div class="file-list">${unstaged.map(fileRow).join('')}${!unstaged.length ? '<div class="group-empty">没有未暂存变更</div>' : ''}</div></section><section class="change-group" aria-label="已暂存变更"><div class="file-group-heading">已暂存 <span class="count">${staged.length}</span><span class="grow"></span><button id="commitButton" data-commit="true" class="small-button" ${!staged.length ? 'disabled' : ''} title="为 ${repo.id} 输入提交信息">提交…</button><button class="icon-button" data-unstage-all="true" aria-label="取消当前仓库全部暂存（模拟）" title="全部取消暂存（模拟）" ${!staged.length ? 'disabled' : ''}>−</button></div><div class="file-list">${staged.map(fileRow).join('')}${!staged.length ? '<div class="group-empty">先暂存需要提交的文件</div>' : ''}</div></section>`;
+    }
+    renderPreview();
+  }
+  function renderPreview() {
+    const repo = currentRepo(), file = repo.files.find((item) => item.id === selectedFileId);
+    $('previewRepo').textContent = repo.id;
+    $('previewType').textContent = file?.type || '·';
+    if (!file || repo.unknown) {
+      $('previewFilename').textContent = '变更预览'; $('previewPath').textContent = repo.id;
+      $('diffStats').textContent = ''; $('diffLines').innerHTML = `<div class="diff-empty">${repo.unknown ? '仓库状态未知，请先重试查询。' : '当前仓库没有变更；选择带红点的仓库查看文件差异。'}</div>`; return;
+    }
+    $('previewFilename').textContent = file.path.split('/').pop(); $('previewPath').textContent = `${repo.id} / ${file.path}  ·  ${file.staged ? '已暂存' : '未暂存'}`;
+    $('diffStats').innerHTML = `<span>+${file.added}</span><span class="deleted">−${file.removed}</span>`;
+    $('diffLines').innerHTML = file.diff.map(([kind, text], index) => `<div class="diff-line ${kind}"><span class="line-number">${kind === 'hunk' ? '' : index + 27}</span><span class="line-sign">${kind === 'add' ? '+' : kind === 'remove' ? '−' : ''}</span><span class="diff-code">${escapeHTML(text)}</span></div>`).join('');
+  }
+  function render() { renderRepositories(); renderChanges(); }
+  function availablePaneWidth() {
+    const bodyWidth = $('workspaceBody').getBoundingClientRect().width || window.innerWidth;
+    const dockWidth = document.querySelector('.dock').getBoundingClientRect().width || 40;
+    return Math.max(0, bodyWidth - dockWidth);
+  }
+  function splitBounds() {
+    return { min:MIN_REVIEW_WIDTH, max:Math.max(MIN_REVIEW_WIDTH, availablePaneWidth() - DIVIDER_WIDTH - MIN_EDITOR_WIDTH) };
+  }
+  function updateReviewMode(measuredWidth) {
+    if (!panelOpen) return;
+    const width = measuredWidth ?? ($('reviewPanel').getBoundingClientRect().width ||
+      (layoutMode === 'full' || window.innerWidth <= 700 ? availablePaneWidth() : reviewWidth));
+    $('reviewPanel').classList.toggle('review-wide', width >= REVIEW_BREAKPOINT);
+  }
+  function setReviewWidth(value) {
+    const bounds = splitBounds();
+    reviewWidth = Math.min(bounds.max, Math.max(bounds.min, value));
+    $('reviewPanel').style.setProperty('--review-width', `${reviewWidth}px`);
+    $('paneDivider').setAttribute('aria-valuemin', String(bounds.min));
+    $('paneDivider').setAttribute('aria-valuemax', String(Math.round(bounds.max)));
+    $('paneDivider').setAttribute('aria-valuenow', String(Math.round(reviewWidth)));
+    $('paneDivider').setAttribute('aria-valuetext', `代码审查宽度 ${Math.round(reviewWidth)} 像素`);
+    updateReviewMode();
+  }
+  function endPaneDrag() {
+    if (!paneDrag) return;
+    const pointerId = paneDrag.pointerId; paneDrag = null;
+    $('paneDivider').classList.remove('dragging'); document.body.classList.remove('resizing-panes');
+    if ($('paneDivider').hasPointerCapture?.(pointerId)) $('paneDivider').releasePointerCapture(pointerId);
+  }
+  function syncPaneLayout() {
+    const canResize = panelOpen && layoutMode === 'split' && window.innerWidth > 700;
+    $('paneDivider').hidden = !canResize;
+    $('paneDivider').setAttribute('aria-disabled', String(!canResize));
+    if (canResize) setReviewWidth(reviewWidth);
+    else { endPaneDrag(); updateReviewMode(); }
+  }
+  $('paneDivider').addEventListener('pointerdown', (event) => {
+    if (event.button !== 0 || $('paneDivider').hidden) return;
+    event.preventDefault();
+    paneDrag = { pointerId:event.pointerId, startX:event.clientX, startWidth:reviewWidth };
+    $('paneDivider').setPointerCapture?.(event.pointerId);
+    $('paneDivider').classList.add('dragging'); document.body.classList.add('resizing-panes'); $('paneDivider').focus();
+  });
+  document.addEventListener('pointermove', (event) => {
+    if (paneDrag && event.pointerId === paneDrag.pointerId) setReviewWidth(paneDrag.startWidth + event.clientX - paneDrag.startX);
+  });
+  for (const name of ['pointerup','pointercancel']) document.addEventListener(name, (event) => {
+    if (paneDrag && event.pointerId === paneDrag.pointerId) endPaneDrag();
+  });
+  $('paneDivider').addEventListener('lostpointercapture', endPaneDrag);
+  window.addEventListener('blur', endPaneDrag);
+  $('paneDivider').addEventListener('dblclick', () => { if (!$('paneDivider').hidden) setReviewWidth(374); });
+  $('paneDivider').addEventListener('keydown', (event) => {
+    if ($('paneDivider').hidden) return;
+    const step = event.shiftKey ? 64 : 16;
+    const values = { ArrowLeft:reviewWidth - step, ArrowRight:reviewWidth + step, Home:splitBounds().min, End:splitBounds().max };
+    if (Object.hasOwn(values, event.key)) { event.preventDefault(); setReviewWidth(values[event.key]); }
+  });
+  // 观察实际面板尺寸，拖动、开关编辑器、窗口缩放均使用同一 640px 规则。
+  if (typeof ResizeObserver !== 'undefined') {
+    const reviewResizeObserver = new ResizeObserver((entries) => {
+      for (const entry of entries) if (entry.target === $('reviewPanel')) {
+        const size = entry.borderBoxSize;
+        updateReviewMode((Array.isArray(size) ? size[0]?.inlineSize : size?.inlineSize) ?? entry.contentRect.width);
+      }
+    });
+    reviewResizeObserver.observe($('reviewPanel'));
+  }
+  window.addEventListener('resize', () => { endPaneDrag(); syncPaneLayout(); });
+  function setLayoutMode(mode) {
+    closeRepoMenu(false);
+    layoutMode = mode;
+    $('workspaceBody').classList.toggle('full-review', mode === 'full');
+    $('editorPanel').hidden = mode === 'full';
+    $('splitView').setAttribute('aria-pressed', String(mode === 'split'));
+    $('fullView').setAttribute('aria-pressed', String(mode === 'full'));
+    $('layoutHint').textContent = mode === 'full' ? '全屏代码审查 · 点击文件打开右侧编辑器' : '左侧审查 · 右侧代码编辑器';
+    if (!panelOpen) setPanelOpen(true);
+    syncPaneLayout();
+  }
+  function setPanelOpen(value) {
+    closeRepoMenu(false);
+    panelOpen = value; $('reviewPanel').hidden = !value; $('reviewToggle').classList.toggle('active', value);
+    $('reviewToggle').setAttribute('aria-expanded', String(value)); renderRepositories();
+    if (value) $('layoutHint').textContent = layoutMode === 'full' ? '全屏代码审查 · 点击文件打开右侧编辑器' : '左侧审查 · 右侧代码编辑器';
+    if (!value) {
+      // 全屏审查关闭时保留编辑器，避免工作区出现空白。
+      if (layoutMode === 'full') { layoutMode = 'split'; $('workspaceBody').classList.remove('full-review'); $('editorPanel').hidden = false; $('splitView').setAttribute('aria-pressed','true'); $('fullView').setAttribute('aria-pressed','false'); }
+      $('layoutHint').textContent = '代码编辑器 · 可从左侧重新打开代码审查';
+      $('reviewToggle').focus();
+    }
+    syncPaneLayout();
+  }
+  function resetScenario(value) {
+    if (!$('modalBackdrop').hidden) closeModal();
+    repos = JSON.parse(JSON.stringify(seed)); selectedId = 'web-app'; selectedFileId = 'layout'; drafts.clear();
+    if (value === 'clean') { for (const repo of repos) repo.files = []; selectedFileId = null; }
+    if (value === 'unknown') { repos[2].unknown = true; repos[3].unknown = true; }
+    render();
+  }
+  function updateCommitValidation() {
+    if (pendingOperation?.kind !== 'commit') return;
+    const valid = Boolean($('commitMessage').value.trim());
+    $('confirmModal').disabled = !valid; $('commitAndPush').disabled = !valid;
+    drafts.set(pendingOperation.repoId, $('commitMessage').value);
+  }
+  function openOperation(kind, repoId = selectedId, trigger = document.activeElement) {
+    const repo = repos.find((item) => item.id === repoId); if (!repo || repo.unknown) return;
+    const stagedIds = repo.files.filter((file) => file.staged).map((file) => file.id);
+    if (kind === 'commit' && !stagedIds.length) return;
+    pendingOperation = { kind, repoId:repo.id, branch:repo.branch, stagedIds };
+    returnFocus = trigger;
+    const labels = { checkout:'切换分支', pull:'拉取', push:'推送', commit:'提交变更' };
+    $('modalTitle').textContent = kind === 'commit' ? '提交变更' : `模拟${labels[kind]}`;
+    $('modalDescription').innerHTML = `<p>目标仓库：<strong class="mono">${repo.id}</strong><br>当前分支：<strong class="mono">${escapeHTML(repo.branch)}</strong></p>${kind === 'commit' ? '' : `<p>${kind === 'checkout' ? '此演示仅修改分支名称，保留现有变更，不会执行真实分支切换。' : '此演示仅展示操作反馈，不访问远端，也不改变本地文件。'}</p><p>不调用 Git 或 API，操作目标已固定。</p>`}`;
+    $('branchLabel').hidden = kind !== 'checkout'; $('branchSelect').value = repo.branch === 'main' ? 'develop' : 'main';
+    $('commitFields').hidden = kind !== 'commit'; $('commitAndPush').hidden = kind !== 'commit';
+    $('confirmModal').textContent = kind === 'commit' ? '模拟提交' : `确认模拟${labels[kind]}`;
+    $('confirmModal').classList.toggle('primary', kind !== 'commit'); $('confirmModal').disabled = false;
+    $('modalBackdrop').hidden = false; document.querySelector('.app').inert = true;
+    if (kind === 'commit') {
+      $('commitMessage').value = drafts.get(repo.id) || '';
+      $('commitSummary').textContent = `仅提交 ${repo.id} 的 ${stagedIds.length} 个已暂存文件；其他仓库不受影响。所有操作为本地模拟。`;
+      updateCommitValidation(); $('commitMessage').focus();
+    } else $('cancelModal').focus();
+  }
+  function closeModal() {
+    $('modalBackdrop').hidden = true; document.querySelector('.app').inert = false; pendingOperation = null;
+    if (returnFocus?.isConnected) returnFocus.focus();
+  }
+  function confirmOperation(andPush = false) {
+    if (!pendingOperation) return;
+    const operation = pendingOperation, repo = repos.find((item) => item.id === operation.repoId);
+    if (!repo || repo.unknown) { closeModal(); return; }
+    let message;
+    if (operation.kind === 'commit') {
+      if (!$('commitMessage').value.trim()) { $('commitMessage').focus(); return; }
+      const ids = new Set(operation.stagedIds); repo.files = repo.files.filter((file) => !ids.has(file.id)); drafts.delete(repo.id);
+      if (selectedId === repo.id && !repo.files.some((file) => file.id === selectedFileId)) selectedFileId = repo.files[0]?.id || null;
+      message = `已模拟提交${andPush ? '并推送' : ''} ${repo.id} 的 ${ids.size} 个已暂存文件；其他仓库保持不变，未执行 Git。`;
+    } else if (operation.kind === 'checkout') { repo.branch = $('branchSelect').value; message = `已模拟将 ${repo.id} 切换到 ${repo.branch}；未执行 Git，现有演示变更保留。`; }
+    else message = `已模拟${operation.kind === 'pull' ? '拉取' : '推送'} ${repo.id} / ${operation.branch}；未访问远端。`;
+    const wasCommit = operation.kind === 'commit'; closeModal(); render();
+    if (wasCommit) ($('commitButton') || $('repoList').querySelector(`[data-repo="${selectedId}"]`))?.focus();
+    else $('repoList').querySelector(`[data-repo-menu="${operation.repoId}"]`)?.focus();
+    notify(message);
+  }
+  function closeRepoMenu(restoreFocus = true) {
+    const previousId = menuRepoId; menuRepoId = null; $('repoActionsMenu').hidden = true;
+    const trigger = previousId && $('repoList').querySelector(`[data-repo-menu="${previousId}"]`);
+    if (trigger) { trigger.setAttribute('aria-expanded','false'); if (restoreFocus) trigger.focus(); }
+  }
+  function openRepoMenu(repoId, last = false) {
+    closeRepoMenu(false);
+    const repo = repos.find((item) => item.id === repoId), trigger = $('repoList').querySelector(`[data-repo-menu="${repoId}"]`);
+    if (!repo || !trigger) return;
+    menuRepoId = repoId; trigger.setAttribute('aria-expanded','true');
+    const menu = $('repoActionsMenu'); menu.setAttribute('aria-label', `${repoId} 的 Git 操作`);
+    for (const button of menu.querySelectorAll('button')) { button.disabled = repo.unknown; button.title = repo.unknown ? '仓库状态未知，请先重试查询' : `${repoId} · ${repo.branch}（仅模拟）`; }
+    menu.hidden = false;
+    const rect = trigger.getBoundingClientRect(), height = menu.offsetHeight || 116;
+    menu.style.left = `${Math.max(8, Math.min(window.innerWidth - 192, rect.right - 184))}px`;
+    menu.style.top = `${rect.bottom + height + 4 <= window.innerHeight - 8 ? rect.bottom + 4 : Math.max(8, rect.top - height - 4)}px`;
+    const enabled = [...menu.querySelectorAll('button:not(:disabled)')];
+    (enabled[last ? enabled.length - 1 : 0] || menu).focus();
+  }
+  $('repoList').addEventListener('click', (event) => {
+    const more = event.target.closest('[data-repo-menu]');
+    if (more) { if (menuRepoId === more.dataset.repoMenu) closeRepoMenu(); else openRepoMenu(more.dataset.repoMenu); return; }
+    const button = event.target.closest('[data-repo]'); if (button) selectRepo(button.dataset.repo);
+  });
+  $('repoList').addEventListener('keydown', (event) => {
+    const more = event.target.closest('[data-repo-menu]');
+    if (more && ['ArrowDown','ArrowUp'].includes(event.key)) { event.preventDefault(); openRepoMenu(more.dataset.repoMenu, event.key === 'ArrowUp'); }
+  });
+  $('repoActionsMenu').addEventListener('click', (event) => {
+    const item = event.target.closest('[data-repo-action]');
+    if (!item || item.disabled || !menuRepoId) return;
+    const targetId = menuRepoId, trigger = $('repoList').querySelector(`[data-repo-menu="${targetId}"]`);
+    closeRepoMenu(false); openOperation(item.dataset.repoAction, targetId, trigger);
+  });
+  $('repoActionsMenu').addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeRepoMenu(); return; }
+    if (event.key === 'Tab') { closeRepoMenu(); return; }
+    const items = [...$('repoActionsMenu').querySelectorAll('button:not(:disabled)')];
+    if (!items.length) return;
+    const index = items.indexOf(document.activeElement);
+    const next = { ArrowDown:(index + 1) % items.length, ArrowUp:(index - 1 + items.length) % items.length, Home:0, End:items.length - 1 };
+    if (Object.hasOwn(next, event.key)) { event.preventDefault(); items[next[event.key]].focus(); }
+  });
+  document.addEventListener('pointerdown', (event) => {
+    if (menuRepoId && !$('repoActionsMenu').contains(event.target) && !event.target.closest('[data-repo-menu]')) closeRepoMenu(false);
+  });
+  document.addEventListener('scroll', () => closeRepoMenu(false), true);
+  window.addEventListener('resize', () => closeRepoMenu(false));
+
+  $('changes').addEventListener('click', (event) => {
+    const stage = event.target.closest('[data-stage]'), fileButton = event.target.closest('[data-file]');
+    if (stage) {
+      const file = currentRepo().files.find((item) => item.id === stage.dataset.stage); if (!file || currentRepo().unknown) return;
+      file.staged = !file.staged; const id = file.id; render();
+      $('changes').querySelector(`[data-stage="${id}"]`)?.focus(); notify(`已模拟${file.staged ? '暂存' : '取消暂存'} ${file.path}。`);
+    } else if (fileButton) {
+      selectedFileId = fileButton.dataset.file;
+      if (layoutMode === 'full') { setLayoutMode('split'); notify('已打开右侧代码编辑器；可随时切回全屏审查。'); }
+      renderChanges(); $('changes').querySelector(`[data-file="${selectedFileId}"]`)?.focus();
+    }
+    else if (event.target.closest('[data-stage-all]')) { currentRepo().files.forEach((file) => { file.staged = true; }); render(); $('commitButton')?.focus(); notify(`已模拟暂存 ${selectedId} 的全部变更。`); }
+    else if (event.target.closest('[data-unstage-all]')) { currentRepo().files.forEach((file) => { file.staged = false; }); render(); $('changes').querySelector('[data-stage-all]')?.focus(); notify(`已模拟取消 ${selectedId} 的全部暂存。`); }
+    else if (event.target.closest('[data-commit]')) openOperation('commit');
+    else if (event.target.closest('[data-retry]')) { currentRepo().unknown = false; render(); notify(`已模拟恢复 ${selectedId} 状态查询，显示演示数据。`); }
+  });
+  $('splitView').addEventListener('click', () => setLayoutMode('split')); $('fullView').addEventListener('click', () => setLayoutMode('full'));
+  $('closeEditor').addEventListener('click', () => { setLayoutMode('full'); $('fullView').focus(); });
+  $('reviewToggle').addEventListener('click', () => setPanelOpen(!panelOpen));
+  $('scenario').addEventListener('change', (event) => { resetScenario(event.target.value); notify('已重置为所选演示场景；没有修改任何真实仓库。'); });
+  $('commitMessage').addEventListener('input', updateCommitValidation);
+  $('cancelModal').addEventListener('click', closeModal); $('confirmModal').addEventListener('click', () => confirmOperation());
+  $('commitAndPush').addEventListener('click', () => confirmOperation(true));
+  // 与现有提交交互一致：点击遮罩不关闭，避免误丢提交输入。
+  document.addEventListener('keydown', (event) => {
+    if ($('modalBackdrop').hidden) return;
+    if (event.key === 'Escape') { event.preventDefault(); closeModal(); }
+    if (event.key === 'Tab') {
+      const nodes = [...$('modalBackdrop').querySelectorAll('button, select, textarea')].filter((node) => !node.disabled && !node.closest('[hidden]'));
+      if (event.shiftKey && document.activeElement === nodes[0]) { event.preventDefault(); nodes[nodes.length-1].focus(); }
+      else if (!event.shiftKey && document.activeElement === nodes[nodes.length-1]) { event.preventDefault(); nodes[0].focus(); }
+    }
+  });
+  document.querySelectorAll('[data-feedback]').forEach((button) => button.addEventListener('click', () => notify(button.dataset.feedback)));
+  resetScenario('default');
+  syncPaneLayout();
+</script>
+</body>
+</html>

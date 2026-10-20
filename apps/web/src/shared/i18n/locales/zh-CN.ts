@@ -550,7 +550,16 @@ export default {
     placeholder: {
       title: "代码审查（占位）",
       desc: "在这里查看当前仓库的变更、暂存与差异。",
-      selectRepo: "请先选择一个仓库"
+      selectRepo: "请先选择一个仓库",
+      noRepos: "当前工作区没有注册仓库"
+    },
+    repositories: {
+      resize: "调整仓库栏宽度",
+      title: "仓库",
+      select: "选择审查仓库",
+      switchBranch: "切换仓库 {repo} 的分支（当前：{branch}）",
+      actions: "仓库 {repo} 的操作",
+      hasChanges: "有未提交变更"
     },
     unstaged: "未暂存",
     staged: "已暂存",
@@ -573,9 +582,13 @@ export default {
       pathCopied: "路径已复制"
     },
     status: {
-      noChanges: "无变更"
+      noChanges: "当前仓库没有未提交变更",
+      noUnstagedChanges: "没有未暂存变更",
+      noStagedChanges: "没有已暂存变更"
     },
     file: {
+      directory: "目录（不支持文本预览）",
+      submodule: "子模块（不支持文本预览）",
       oldPath: "原：{oldPath}"
     },
     discard: {
@@ -615,7 +628,9 @@ export default {
       modalTitle: "提交",
       messageLabel: "提交信息",
       messagePlaceholder: "请输入提交信息",
-      summary: "将提交：{count} 个文件",
+      target: "目标仓库：{repo}",
+      summary: "将提交：{count} 个已暂存文件",
+      scope: "仅提交该仓库的已暂存变更",
       committed: "已提交 {sha}"
     },
     preview: {

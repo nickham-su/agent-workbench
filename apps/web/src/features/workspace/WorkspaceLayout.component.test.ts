@@ -86,7 +86,7 @@ beforeEach(() => {
   window.localStorage.removeItem(key);
   storageEvent();
   apiClient.defaults.adapter = async (config) => ({
-    data: { id: config.url?.split("/").at(-1), title: "Fixture", dirName: "fixture", repos: [], createdAt: 1, updatedAt: 1, terminalCredentialId: null },
+    data: config.url === "/git/workspace-status" ? { repos: [] } : { id: config.url?.split("/").at(-1), title: "Fixture", dirName: "fixture", repos: [], createdAt: 1, updatedAt: 1, terminalCredentialId: null },
     status: 200, statusText: "OK", headers: {}, config
   });
 });
@@ -108,7 +108,7 @@ test("without new global settings old workspace layouts are ignored and no confi
   const old = { version: 3, toolArea: { files: "leftBottom" }, toolOrderByArea: { leftTop: ["agent"], leftBottom: ["files"] } };
   store(oldKey, old);
   const wrapper = mountLayout("old"); await settle();
-  assert.deepEqual(order(wrapper), { leftTop: defaults.leftTop.filter((id) => id !== "codeReview"), leftBottom: ["terminal"] });
+  assert.deepEqual(order(wrapper), { leftTop: defaults.leftTop, leftBottom: ["terminal"] });
   assert.equal(props(wrapper).toolTitle("environmentVariables"), "环境变量");
   assert.equal(props(wrapper).toolIcon("environmentVariables"), EnvironmentVariablesIcon);
   assert.equal(props(wrapper).isKeepAlive("environmentVariables"), false);
@@ -143,7 +143,7 @@ test("user reordering and area moves are shared by all workspaces and survive sw
   const persisted = JSON.parse(window.localStorage.getItem(key)!);
   assert.equal(persisted.version, 1);
   assert.deepEqual(persisted.toolOrderByArea, JSON.parse(JSON.stringify(globalToolLayout.value)));
-  assert.ok(globalToolLayout.value.leftTop.includes("codeReview"), "hidden tool preference is retained");
+  assert.ok(globalToolLayout.value.leftTop.includes("codeReview"), "code review preference is retained");
   await a.setProps({ workspaceId: "c" }); storedKeys.add(layoutKey("c")); await settle();
   assert.deepEqual(order(a), order(b));
   const remounted = mountLayout("d"); await settle();
@@ -197,7 +197,7 @@ test("storage events synchronize order/areas, repair invalid data and never echo
   mockStorageWrites((key, value) => { writes.push(key); originalSetItem.call(window.localStorage, key, value); });
   storageEvent(); await waitForSave();
   assert.deepEqual(order(a), order(b));
-  assert.deepEqual(order(a), { leftTop: ["agent", "search", "scheduledTasks", "environmentVariables"], leftBottom: ["files", "terminal"] });
+  assert.deepEqual(order(a), { leftTop: ["agent", "search", "codeReview", "scheduledTasks", "environmentVariables"], leftBottom: ["files", "terminal"] });
   assert.deepEqual([...globalToolLayout.value.rightTop], ["editor"]);
   assert.equal(props(a).activeToolIdByArea.leftBottom, "files");
   assert.equal(writes.includes(key), false);
@@ -215,7 +215,7 @@ test("malformed/removed/cleared global storage falls back to defaults without pe
   for (const invalid of ["{broken", "null", JSON.stringify({ version: 2 }), JSON.stringify({ version: 1, toolOrderByArea: "wrong" })]) {
     originalSetItem.call(window.localStorage, key, invalid);
     storageEvent(); await tick();
-    assert.deepEqual(order(wrapper).leftTop, defaults.leftTop.filter((id) => id !== "codeReview"));
+    assert.deepEqual(order(wrapper).leftTop, defaults.leftTop);
     assert.equal(window.localStorage.getItem(key), invalid);
   }
   props(wrapper).moveTool("agent", "leftBottom"); await tick();

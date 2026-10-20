@@ -23,6 +23,8 @@ import {
   GitStageRequestSchema,
   GitStatusRequestSchema,
   GitStatusResponseSchema,
+  WorkspaceGitStatusRequestSchema,
+  WorkspaceGitStatusResponseSchema,
   GitUnstageRequestSchema
 } from "@agent-workbench/shared";
 import {
@@ -33,6 +35,7 @@ import {
   gitBranches,
   gitCheckout,
   gitStatus,
+  gitWorkspaceStatus,
   listChanges,
   pullWorkspace,
   pushWorkspace,
@@ -42,6 +45,18 @@ import {
 } from "./git.service.js";
 
 export async function registerGitRoutes(app: FastifyInstance, ctx: AppContext) {
+  app.post(
+    "/api/git/workspace-status",
+    {
+      schema: {
+        tags: ["git"],
+        body: WorkspaceGitStatusRequestSchema,
+        response: { 200: WorkspaceGitStatusResponseSchema, 400: ErrorResponseSchema, 404: ErrorResponseSchema, 500: ErrorResponseSchema }
+      }
+    },
+    async (req) => gitWorkspaceStatus(ctx, req.body)
+  );
+
   app.post(
     "/api/git/changes",
     {

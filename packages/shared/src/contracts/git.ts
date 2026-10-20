@@ -20,6 +20,7 @@ export const ChangeItemSchema = Type.Object(
   {
     path: Type.String(),
     status: Type.String(),
+    kind: Type.Optional(Type.Union([Type.Literal("directory"), Type.Literal("submodule")])),
     oldPath: Type.Optional(Type.String()),
     worktreeMtimeMs: Type.Optional(Type.Number()),
     worktreeSize: Type.Optional(Type.Number()),
@@ -293,3 +294,22 @@ export const GitStatusResponseSchema = Type.Object(
   }
 );
 export type GitStatusResponse = Static<typeof GitStatusResponseSchema>;
+
+export const WorkspaceGitStatusRequestSchema = Type.Object({
+  workspaceId: Type.String({ minLength: 1 })
+});
+export type WorkspaceGitStatusRequest = Static<typeof WorkspaceGitStatusRequestSchema>;
+
+export const WorkspaceGitStatusResponseSchema = Type.Object({
+  repos: Type.Array(Type.Object({
+    repoId: Type.String(),
+    dirName: Type.String(),
+    head: Type.Object({
+      branch: Type.Union([Type.String(), Type.Null()]),
+      detached: Type.Boolean(),
+      sha: Type.String()
+    }),
+    hasChanges: Type.Boolean()
+  }))
+});
+export type WorkspaceGitStatusResponse = Static<typeof WorkspaceGitStatusResponseSchema>;

@@ -73,6 +73,8 @@ import type {
   GitStageRequest,
   GitStatusRequest,
   GitStatusResponse,
+  WorkspaceGitStatusRequest,
+  WorkspaceGitStatusResponse,
   GitTarget,
   GitUnstageRequest,
   NetworkSettings,
@@ -716,6 +718,15 @@ export async function gitBranches(body: GitBranchesRequest) {
 export async function getGitStatus(body: GitStatusRequest) {
   try {
     const res = await client.post<GitStatusResponse>("/git/status", body);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
+export async function getWorkspaceGitStatus(body: WorkspaceGitStatusRequest) {
+  try {
+    const res = await client.post<WorkspaceGitStatusResponse>("/git/workspace-status", body);
     return res.data;
   } catch (err) {
     throw toApiError(err);

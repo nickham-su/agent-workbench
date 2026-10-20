@@ -36,7 +36,7 @@
 
 <script setup lang="ts">
 import type { GitIdentityInput, GitIdentityScope, GitIdentityStatus, GitTarget } from "@agent-workbench/shared";
-import { computed, nextTick, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { getWorkspaceGitIdentity } from "@/shared/api";
 
@@ -62,9 +62,8 @@ const openModel = computed({
 
 const allowSession = computed(() => props.allowSession !== false);
 const submitting = ref(false);
-const confirmLoading = computed(() => Boolean(props.loading) || submitting.value);
-
 const statusLoading = ref(false);
+const confirmLoading = computed(() => Boolean(props.loading) || submitting.value || statusLoading.value);
 const status = ref<GitIdentityStatus | null>(null);
 
 type SimpleInputRef = { focus?: () => void; select?: () => void };
@@ -74,49 +73,69 @@ const name = ref("");
 const email = ref("");
 const scope = ref<GitIdentityScope>(props.defaultScope ?? "repo");
 
-async function refreshStatus() {
-  if (!props.target) {
-    status.value = null;
-    return;
-  }
+let dialogSeq = 0;
+let statusRequestSeq = 0;
+let disposed = false;
+const targetKey = (target: GitTarget | null) => target ? `${target.workspaceId}/${target.dirName}` : "";
+
+async function refreshStatus(dialog = dialogSeq) {
+  const request = ++statusRequestSeq;
+  const target = props.target ? { ...props.target } : null;
+  const isCurrent = () => !disposed && props.open && dialog === dialogSeq && request === statusRequestSeq && targetKey(target) === targetKey(props.target);
+  if (!target || !props.open) return;
   statusLoading.value = true;
   try {
-    status.value = await getWorkspaceGitIdentity({ target: props.target });
-    // 预填：优先 repo，其次 global
-    const pick = (status.value.repo.name && status.value.repo.email ? status.value.repo : status.value.global) as any;
-    if (pick?.name && pick?.email) {
+    const next = await getWorkspaceGitIdentity({ target });
+    if (!isCurrent()) return;
+    status.value = next;
+    // 预填：优先 repo，其次 global，不让旧弹窗或旧目标的响应回写。
+    const pick = next.repo.name && next.repo.email ? next.repo : next.global;
+    if (pick.name && pick.email) {
       name.value = pick.name;
       email.value = pick.email;
     }
   } catch {
-    status.value = null;
+    if (isCurrent()) status.value = null;
   } finally {
-    statusLoading.value = false;
+    if (isCurrent()) statusLoading.value = false;
   }
 }
 
 watch(
-  () => props.open,
-  async (v) => {
-    if (!v) return;
+  [() => props.open, () => targetKey(props.target)],
+  async () => {
+    const dialog = ++dialogSeq;
+    statusRequestSeq += 1;
     submitting.value = false;
+    statusLoading.value = false;
+    status.value = null;
+    name.value = "";
+    email.value = "";
     scope.value = props.defaultScope ?? "repo";
-    await refreshStatus();
+    if (!props.open) return;
+    await refreshStatus(dialog);
     await nextTick();
-    nameInputRef.value?.focus?.();
-  }
+    if (!disposed && props.open && dialog === dialogSeq) nameInputRef.value?.focus?.();
+  },
+  { immediate: true, flush: "sync" }
 );
+
+onBeforeUnmount(() => {
+  disposed = true;
+  dialogSeq += 1;
+  statusRequestSeq += 1;
+});
 
 const canSubmit = computed(() => Boolean(name.value.trim() && email.value.trim()));
 
-async function onOk() {
-  if (!canSubmit.value) return;
-  if (confirmLoading.value) return;
+function onOk() {
+  if (!props.open || !canSubmit.value || confirmLoading.value) return;
+  const dialog = dialogSeq;
   submitting.value = true;
-  try {
-    emit("submit", { scope: scope.value, name: name.value.trim(), email: email.value.trim() });
-  } finally {
-    submitting.value = false;
-  }
+  // 保存由父层处理；submit 同步发出，不在旧保存完成后再读取新弹窗的内容。
+  emit("submit", { scope: scope.value, name: name.value.trim(), email: email.value.trim() });
+  void nextTick(() => {
+    if (!disposed && dialog === dialogSeq) submitting.value = false;
+  });
 }
 </script>

@@ -7,6 +7,9 @@ const webRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const require = createRequire(import.meta.url);
 export const componentTests = [
   "src/features/workspace/WorkspaceLayout.component.test.ts",
+  "src/features/workspace/tools/code-review/CodeReviewState.component.test.ts",
+  "src/features/workspace/tools/code-review/CodeReviewToolView.component.test.ts",
+  "src/shared/components/GitIdentityModal.component.test.ts",
   "src/features/dashboard/Dashboard.component.test.ts",
   "src/features/settings/components/AgentProvidersSettingsPanel.component.test.ts",
   "src/features/settings/components/AgentProfilesSettingsPanel.component.test.ts",

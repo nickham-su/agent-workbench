@@ -552,7 +552,16 @@ export default {
     placeholder: {
       title: "Code review (placeholder)",
       desc: "Review changes, staging, and diffs for the current repo here.",
-      selectRepo: "Select a repo to continue."
+      selectRepo: "Select a repo to continue.",
+      noRepos: "This workspace has no registered repositories"
+    },
+    repositories: {
+      resize: "Resize repository column",
+      title: "Repositories",
+      select: "Select a repository to review",
+      switchBranch: "Switch branch for repository {repo} (current: {branch})",
+      actions: "Actions for repository {repo}",
+      hasChanges: "Uncommitted changes"
     },
     unstaged: "Unstaged",
     staged: "Staged",
@@ -575,9 +584,13 @@ export default {
       pathCopied: "Path copied"
     },
     status: {
-      noChanges: "No changes"
+      noChanges: "The current repository has no uncommitted changes",
+      noUnstagedChanges: "No unstaged changes",
+      noStagedChanges: "No staged changes"
     },
     file: {
+      directory: "Directory (text preview unavailable)",
+      submodule: "Submodule (text preview unavailable)",
       oldPath: "From: {oldPath}"
     },
     discard: {
@@ -617,7 +630,9 @@ export default {
       modalTitle: "Commit",
       messageLabel: "Commit message",
       messagePlaceholder: "Enter commit message",
-      summary: "Will commit {count} file(s)",
+      target: "Target repository: {repo}",
+      summary: "Will commit {count} staged file(s)",
+      scope: "Only staged changes in this repository will be committed",
       committed: "Committed {sha}"
     },
     preview: {
