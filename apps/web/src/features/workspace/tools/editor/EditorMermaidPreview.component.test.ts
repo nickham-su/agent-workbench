@@ -8,13 +8,14 @@ import zhCN from "@/shared/i18n/locales/zh-CN";
 import { sanitizeAgentMarkdown } from "../agent/assistantMarkdownSanitizer";
 import { renderEditorMarkdown } from "./editorMarkdown";
 import { MERMAID_MAX_NODES, MERMAID_MAX_EDGES, loadMermaid, renderMermaidPreview, sanitizeMermaidSvg } from "./editorMermaid";
-import EditorMermaidPreview from "./EditorMermaidPreview.vue";
+import EditorMermaidPreview, { type MermaidPreviewExposed } from "./EditorMermaidPreview.vue";
+import type { MermaidViewportState } from "./mermaidViewport";
 
 const originalRender = mermaid.render;
 const wrappers: Array<ReturnType<typeof mount>> = [];
 const calls: Array<{ id: string; text: string }> = [];
 let response: ((id: string, text: string) => Promise<{ svg: string; diagramType: string }>) | undefined;
-const sample = (id: string, text = "graph") => `<svg id="${id}" xmlns="http://www.w3.org/2000/svg"><defs><marker id="arrow"><path d="M0 0L1 1"/></marker></defs><text>${text}</text><path marker-end="url(#arrow)"/><style>#${id}{fill:red;}#${id} > .edge{marker-end:url(#arrow)}@keyframes dash{to{stroke-dashoffset:0}}</style></svg>`;
+const sample = (id: string, text = "graph") => `<svg id="${id}" viewBox="-10 -20 640 480" width="100%" style="max-width:640px" xmlns="http://www.w3.org/2000/svg"><defs><marker id="arrow"><path d="M0 0L1 1"/></marker></defs><text>${text}</text><path marker-end="url(#arrow)"/><style>#${id}{fill:red;}#${id} > .edge{marker-end:url(#arrow)}@keyframes dash{to{stroke-dashoffset:0}}</style></svg>`;
 async function flushUpdates() { for (let i = 0; i < 5; i++) await nextTick(); }
 async function waitFor(condition: () => boolean, message: string, timeout = 5_000) {
   const deadline = Date.now() + timeout;
@@ -26,12 +27,12 @@ async function waitFor(condition: () => boolean, message: string, timeout = 5_00
   await flushUpdates();
 }
 const svgText = (wrapper: ReturnType<typeof mount>) => wrapper.find("svg text").exists() ? wrapper.get("svg text").text() : undefined;
-function setup(text = "flowchart LR\nA-->B", scrollTop = 0) {
+function setup(text = "flowchart LR\nA-->B", scrollTop = 0, viewport?: MermaidViewportState | null) {
   mermaid.render = async (id, source) => {
     calls.push({ id, text: source });
     return response ? response(id, source) : { svg: sample(id, source.includes("new") ? "new" : "old"), diagramType: "flowchart-v2" };
   };
-  const wrapper = mount(EditorMermaidPreview, { attachTo: document.body, props: { text, scrollTop }, global: { plugins: [createI18n({ legacy: false, locale: "zh-CN", messages: { "zh-CN": zhCN } })] } });
+  const wrapper = mount(EditorMermaidPreview, { attachTo: document.body, props: { text, contentRevision: 0, viewport: viewport === null ? undefined : viewport ?? { scale: 1, left: 0, top: scrollTop, contentRevision: 0 } }, global: { plugins: [createI18n({ legacy: false, locale: "zh-CN", messages: { "zh-CN": zhCN } })] } });
   wrappers.push(wrapper); return wrapper;
 }
 afterEach(() => { for (const wrapper of wrappers.splice(0)) wrapper.unmount(); mermaid.render = originalRender; calls.length = 0; response = undefined; });
@@ -366,4 +367,125 @@ test("组件与直接入口向真实解析器及布局传递相同的正规化�
     assert.deepEqual(calls.map((call) => call.text), parsed);
     assert.equal(wrapper.props("text"), source.replace(/\n/g, "\r\n"));
   } finally { mermaid.mermaidAPI = originalApi; }
+});
+
+function viewportGeometry(wrapper: ReturnType<typeof mount>, width = 400, height = 300) {
+  const el = wrapper.element as HTMLElement;
+  Object.defineProperties(el, {
+    clientWidth: { configurable: true, value: width },
+    clientHeight: { configurable: true, value: height }
+  });
+  return el;
+}
+const controls = (wrapper: ReturnType<typeof mount>) => wrapper.vm as unknown as MermaidPreviewExposed;
+const lastViewport = (wrapper: ReturnType<typeof mount>) => wrapper.emitted("viewport-change")?.at(-1)?.[0] as MermaidViewportState;
+
+test("缩放修改实际SVG占位和尺寸，不重新布局，适应窗口不会裁剪非零viewBox", async () => {
+  const wrapper = setup();
+  const el = viewportGeometry(wrapper);
+  await waitFor(() => controls(wrapper).ready, "视口准备就绪");
+  assert.equal(calls.length, 1);
+  controls(wrapper).zoomIn(); await flushUpdates();
+  assert.equal(lastViewport(wrapper).scale, 1.2);
+  assert.equal((wrapper.get("svg").element as SVGElement).style.width, "768px");
+  assert.equal((wrapper.get("svg").element as SVGElement).style.maxWidth, "none");
+  assert.equal((wrapper.get(".editor-mermaid-canvas").element as HTMLElement).style.width, "768px");
+  assert.equal(wrapper.get("svg").attributes("viewBox"), "-10 -20 640 480");
+  controls(wrapper).zoomOut(); await flushUpdates();
+  assert.equal(lastViewport(wrapper).scale, 1);
+  controls(wrapper).fitToViewport(); await flushUpdates();
+  assert.equal(lastViewport(wrapper).scale, 304 / 640);
+  assert.equal(el.scrollLeft, 0); assert.equal(el.scrollTop, 0);
+  assert.equal(calls.length, 1);
+});
+test("缺少viewBox时为绝对尺寸SVG建立坐标系，内容随显示尺寸缩放", async () => {
+  response = async (id) => ({ svg: `<svg id="${id}" width="320" height="160" xmlns="http://www.w3.org/2000/svg"><text>old</text></svg>`, diagramType: "flowchart-v2" });
+  const wrapper = setup(); viewportGeometry(wrapper);
+  await waitFor(() => controls(wrapper).ready, "无viewBox的SVG准备就绪");
+  assert.equal(wrapper.get("svg").attributes("viewBox"), "0 0 320 160");
+  controls(wrapper).zoomIn();
+  assert.equal((wrapper.get("svg").element as SVGElement).style.width, "384px");
+  assert.equal((wrapper.get("svg").element as SVGElement).style.height, "192px");
+  assert.equal(wrapper.get("svg").attributes("viewBox"), "0 0 320 160");
+  assert.equal(calls.length, 1);
+});
+
+test("普通滚轮不被拦截，Ctrl/Cmd滚轮以鼠标为锚点缩放并限制最大比例", async () => {
+  const wrapper = setup(undefined, 100, { scale: 1, left: 200, top: 100, contentRevision: 0 });
+  const el = viewportGeometry(wrapper, 800, 600);
+  await waitFor(() => controls(wrapper).ready, "可缩放视口");
+  const plain = new window.WheelEvent("wheel", { deltaY: -100, bubbles: true, cancelable: true });
+  el.dispatchEvent(plain); assert.equal(plain.defaultPrevented, false);
+  assert.equal(lastViewport(wrapper).scale, 1);
+  for (const modifier of ["ctrlKey", "metaKey"]) {
+    const before = lastViewport(wrapper);
+    const event = new window.WheelEvent("wheel", { [modifier]: true, deltaY: -100, clientX: 120, clientY: 80, bubbles: true, cancelable: true });
+    // happy-dom WheelEvent currently extends UIEvent, not MouseEvent.
+    Object.defineProperties(event, { [modifier]: { value: true }, clientX: { value: 120 }, clientY: { value: 80 } });
+    el.dispatchEvent(event); await flushUpdates();
+    assert.equal(event.defaultPrevented, true);
+    const after = lastViewport(wrapper);
+    assert.ok(after.scale > before.scale);
+    assert.ok(Math.abs((before.left + 120 - 16) / before.scale - (after.left + 120 - 16) / after.scale) < 0.001);
+    assert.ok(Math.abs((before.top + 80 - 16) / before.scale - (after.top + 80 - 16) / after.scale) < 0.001);
+  }
+  for (let i = 0; i < 40; i++) controls(wrapper).zoomIn();
+  assert.equal(lastViewport(wrapper).scale, 8); assert.equal(controls(wrapper).canZoomIn, false);
+  assert.equal(calls.length, 1);
+});
+test("中键/空格左键拖动平移；普通左键和触摸保持默认行为，失焦取消拖动", async () => {
+  const wrapper = setup(undefined, 200, { scale: 2, left: 300, top: 200, contentRevision: 0 });
+  const el = viewportGeometry(wrapper);
+  await waitFor(() => controls(wrapper).ready, "可拖动视口");
+  const pointer = (type: string, init: PointerEventInit = {}) => {
+    const event = new window.PointerEvent(type, { pointerId: 1, clientX: 100, clientY: 100, bubbles: true, cancelable: true, ...init });
+    el.dispatchEvent(event); return event;
+  };
+  assert.equal(pointer("pointerdown", { button: 0 }).defaultPrevented, false);
+  pointer("pointermove", { clientX: 50, clientY: 40 }); assert.equal(el.scrollLeft, 300);
+  assert.equal(pointer("pointerdown", { button: 1 }).defaultPrevented, true);
+  pointer("pointermove", { clientX: 50, clientY: 40 });
+  assert.equal(el.scrollLeft, 350); assert.equal(el.scrollTop, 260);
+  pointer("pointerup");
+  const space = new window.KeyboardEvent("keydown", { code: "Space", bubbles: true, cancelable: true });
+  el.dispatchEvent(space); assert.equal(space.defaultPrevented, true);
+  assert.equal(pointer("pointerdown", { button: 0 }).defaultPrevented, true);
+  pointer("pointermove", { clientX: 80, clientY: 90 });
+  assert.equal(el.scrollLeft, 370); assert.equal(el.scrollTop, 270);
+  window.dispatchEvent(new window.Event("blur"));
+  pointer("pointermove", { clientX: 0, clientY: 0 }); assert.equal(el.scrollLeft, 370);
+  assert.equal(wrapper.classes().includes("is-panning"), false);
+  assert.equal(pointer("pointerdown", { button: 0, pointerType: "touch" }).defaultPrevented, false);
+  assert.equal(calls.length, 1);
+});
+test("视口状态在重新挂载时恢复，新修订和新图源回到适应窗口", async () => {
+  const state = { scale: 2, left: 250, top: 150, contentRevision: 0 };
+  const wrapper = setup(undefined, 0, state); viewportGeometry(wrapper);
+  await waitFor(() => controls(wrapper).ready, "保存状态恢复");
+  assert.deepEqual(lastViewport(wrapper), state);
+  await wrapper.setProps({ text: "flowchart LR\nnew-->B", contentRevision: 1 });
+  assert.equal(controls(wrapper).ready, false);
+  await waitFor(() => controls(wrapper).ready, "新修订适应窗口");
+  assert.deepEqual(lastViewport(wrapper), { scale: 304 / 640, left: 0, top: 0, contentRevision: 1 });
+  assert.equal(calls.length, 2);
+  const stale = setup(undefined, 0, { ...state, contentRevision: -1 }); viewportGeometry(stale);
+  await waitFor(() => controls(stale).ready, "过期状态忽略");
+  assert.equal(lastViewport(stale).scale, 304 / 640);
+});
+test("渲染未完成或出错时导航无效，不拦截页面缩放，卸载上报原修订最终位置", async () => {
+  const wrapper = setup(); const el = viewportGeometry(wrapper);
+  controls(wrapper).zoomIn();
+  const wheel = new window.WheelEvent("wheel", { ctrlKey: true, deltaY: -10, cancelable: true });
+  el.dispatchEvent(wheel); assert.equal(wheel.defaultPrevented, false);
+  await waitFor(() => controls(wrapper).ready, "导航就绪");
+  el.scrollLeft = 123; el.scrollTop = 45;
+  wrapper.unmount();
+  assert.deepEqual(lastViewport(wrapper), { scale: 1, left: 123, top: 45, contentRevision: 0 });
+  const count = wrapper.emitted("viewport-change")?.length;
+  el.dispatchEvent(new window.Event("scroll"));
+  assert.equal(wrapper.emitted("viewport-change")?.length, count);
+  const invalid = setup("flowchart LR\nA-->");
+  await waitFor(() => invalid.text().includes("渲染失败"), "语法错误");
+  assert.equal(controls(invalid).ready, false);
+  controls(invalid).fitToViewport(); assert.equal(invalid.emitted("viewport-change"), undefined);
 });

@@ -1,6 +1,7 @@
 import type * as monaco from "monaco-editor/esm/vs/editor/editor.api.js";
 import type { FileVersion } from "@agent-workbench/shared";
 import type { EditorImageFailure } from "./editorImages";
+import type { MermaidViewportState } from "./mermaidViewport";
 
 export type EditorOpenAtHighlight =
   | { kind: "none" }
@@ -46,6 +47,7 @@ export type FileEditorTab = {
   /** Display state only; independent of the read-only open mode. */
   presentationMode?: "source" | "preview";
   previewScrollTop?: number;
+  mermaidViewport?: MermaidViewportState;
   savedContent: string;
   dirty: boolean;
   saving: boolean;

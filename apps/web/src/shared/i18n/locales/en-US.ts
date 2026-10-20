@@ -1487,6 +1487,10 @@ export default {
       crossFileHeadingUnsupported: "Cross-file heading navigation is not supported. Open a file link without a heading."
     },
     mermaid: {
+      zoomIn: "Zoom in",
+      zoomOut: "Zoom out",
+      fit: "Fit to window",
+      navigation: "Diagram preview: Ctrl/Cmd + wheel to zoom, Space + left drag or middle drag to pan",
       loading: "Loading diagram…",
       empty: "The diagram is empty. Switch to source to edit it.",
       tooLarge: "The diagram exceeds preview size or complexity limits.",

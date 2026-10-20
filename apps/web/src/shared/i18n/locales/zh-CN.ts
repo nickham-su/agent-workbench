@@ -1485,6 +1485,10 @@ export default {
       crossFileHeadingUnsupported: "暂不支持跳转到其他文件的章节，请通过不带章节的文件链接打开"
     },
     mermaid: {
+      zoomIn: "放大",
+      zoomOut: "缩小",
+      fit: "适应窗口",
+      navigation: "图表预览：Ctrl/Cmd + 滚轮缩放，空格加左键或中键拖动",
       loading: "正在渲染图表…",
       empty: "图表内容为空，可切换到源码编辑",
       tooLarge: "图表超过预览大小或复杂度限制",

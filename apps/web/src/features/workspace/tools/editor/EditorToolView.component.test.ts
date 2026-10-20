@@ -62,6 +62,19 @@ const DiffViewerStub = defineComponent({
   },
   template: '<pre data-diff>{{ original }}→{{ modified }}</pre>'
 });
+const mermaidNavigationCalls: string[] = [];
+const MermaidViewerStub = defineComponent({
+  name: "EditorMermaidPreview",
+  props: ["text", "viewport", "contentRevision"],
+  emits: ["viewport-change"],
+  data: () => ({ ready: true, canZoomIn: true, canZoomOut: true }),
+  methods: {
+    zoomIn() { mermaidNavigationCalls.push(`in:${this.text}`); },
+    zoomOut() { mermaidNavigationCalls.push(`out:${this.text}`); },
+    fitToViewport() { mermaidNavigationCalls.push(`fit:${this.text}`); }
+  },
+  template: '<pre data-editor-mermaid-preview>{{ text }}</pre>'
+});
 let editorActionsAvailable = true;
 let modelsCreated = 0;
 let refresh: (() => unknown) | undefined;
@@ -132,7 +145,7 @@ function setup(workspaceId = `editor-test-${++id}`, previewEnabled = true) {
         callFrom(from: string, to: string, call: any) { toolCalls.push({ from, to, call }); },
         minimizeTool(toolId: string) { minimized.push(toolId); }, registerToolCommands(_toolId: string, commands: any) { refresh = commands.refresh; registeredEditorCommands = commands; return () => {}; },
       } },
-      stubs: { EditorTabs: { name: "EditorTabs", props: ["tabs", "requestCloseTab", "requestCloseOtherTabs", "requestCloseAllTabs"], template: '<div data-editor-tabs></div>' }, MonacoCodeViewer: { props: ["value"], template: '<pre data-memory-preview>{{ value }}</pre>' }, MonacoDiffViewer: DiffViewerStub, EditorMermaidPreview: { props: ["text", "scrollTop"], emits: ["scroll-position"], template: '<pre data-editor-mermaid-preview>{{ text }}</pre>' } },
+      stubs: { EditorTabs: { name: "EditorTabs", props: ["tabs", "requestCloseTab", "requestCloseOtherTabs", "requestCloseAllTabs"], template: '<div data-editor-tabs></div>' }, MonacoCodeViewer: { props: ["value"], template: '<pre data-memory-preview>{{ value }}</pre>' }, MonacoDiffViewer: DiffViewerStub, EditorMermaidPreview: MermaidViewerStub },
     },
   });
   wrappers.push(wrapper);
@@ -1226,7 +1239,7 @@ for (const path of ["diagram.mmd", "diagram.MMD", "diagram.mermaid", "diagram.ME
     requestHandler = (type) => type === "read-text" ? { path, previewable: true, content: "flowchart LR\nA-->B", version: { size: 19, mtimeMs: 1 } } : undefined;
     store.enqueueOpenFile({ path }); await settle();
     assert.equal(wrapper.get("[data-editor-source]").isVisible(), false);
-    assert.equal(wrapper.get("[data-editor-floating-actions]").findAll("button").length, 1);
+    assert.equal(wrapper.get("[data-editor-floating-actions]").findAll("button").length, 4);
     const button = wrapper.get("button[data-editor-preview-toggle]");
     assert.equal(button.attributes("aria-label"), "源码 / 预览");
     assert.ok(button.find('[aria-label="swap"]').exists());
@@ -1278,3 +1291,44 @@ for (const failure of ["failed", "conflict"] as const) {
     assert.equal(wrapper.get("button[data-editor-preview-toggle]").attributes("disabled"), undefined);
   });
 }
+
+test("Mermaid 导航按钮只在图表预览显示，操作当前视图且不改源码切换文案", async () => {
+  mermaidNavigationCalls.length = 0;
+  const { wrapper, store } = setup();
+  store.enqueueOpenFile({ path: "diagram.mmd" }); await settle();
+  for (const [selector, label] of [["zoom-in", "放大"], ["zoom-out", "缩小"], ["fit", "适应窗口"]]) {
+    const button = wrapper.get(`button[data-editor-mermaid-${selector}]`);
+    assert.equal(button.attributes("aria-label"), label);
+    assert.equal(button.attributes("disabled"), undefined);
+    const event = new window.MouseEvent("mousedown", { bubbles: true, cancelable: true });
+    button.element.dispatchEvent(event); assert.equal(event.defaultPrevented, true);
+    await button.trigger("click");
+  }
+  assert.deepEqual(mermaidNavigationCalls.map((call) => call.split(":")[0]), ["in", "out", "fit"]);
+  await wrapper.get("button[data-editor-preview-toggle]").trigger("click"); await settle();
+  assert.equal(wrapper.find("[data-editor-mermaid-zoom-in]").exists(), false);
+  assert.equal(wrapper.get("button[data-editor-preview-toggle]").attributes("aria-label"), "源码 / 预览");
+  await open(store, "README.md");
+  assert.equal(wrapper.find("[data-editor-mermaid-fit]").exists(), false);
+  await open(store, "page.html");
+  assert.equal(wrapper.find("[data-editor-mermaid-fit]").exists(), false);
+});
+test("Mermaid 视口按文件保存；离开时的最终事件只更新原Tab，关闭后或修订过期不回写", async () => {
+  const { wrapper, store, workspaceId } = setup();
+  store.enqueueOpenFile({ path: "a.mmd" }); await settle();
+  const first = tab(workspaceId);
+  const firstListener = wrapper.getComponent(MermaidViewerStub).vm.$.vnode.props?.["onViewportChange"] as (state: any) => void;
+  const state = { scale: 2, left: 140, top: 80, contentRevision: first.contentRevision ?? 0 };
+  firstListener(state); await settle(); assert.deepEqual(first.mermaidViewport, state);
+  store.enqueueOpenFile({ path: "b.mmd" }); await settle();
+  const second = tab(workspaceId);
+  firstListener({ ...state, left: 160 }); await settle();
+  assert.equal(first.mermaidViewport?.left, 160); assert.equal(second.mermaidViewport, undefined);
+  store.enqueueOpenFile({ path: "a.mmd" }); await settle();
+  assert.equal(wrapper.getComponent(MermaidViewerStub).props("viewport")?.left, 160);
+  const currentListener = wrapper.getComponent(MermaidViewerStub).vm.$.vnode.props?.["onViewportChange"] as (state: any) => void;
+  first.model!.setValue("new source"); await settle();
+  currentListener({ ...state, left: 999 }); assert.equal(first.mermaidViewport?.left, 160);
+  store.closeTab(first.key); await settle();
+  firstListener({ ...state, left: 999 }); assert.equal(first.mermaidViewport?.left, 160);
+});

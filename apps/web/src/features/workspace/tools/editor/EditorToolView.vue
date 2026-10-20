@@ -44,11 +44,13 @@
         @open-file="openMarkdownFile"
       />
       <EditorMermaidPreview
+        ref="mermaidPreviewRef"
         v-if="documentTab && showDocumentPreview && documentPresentation === 'mermaid'"
         :key="`${props.workspaceId}:${documentTab.path}`"
         :text="documentText"
-        :scroll-top="documentTab.previewScrollTop ?? 0"
-        @scroll-position="documentTab.previewScrollTop = $event"
+        :viewport="documentTab.mermaidViewport"
+        :content-revision="documentTab.contentRevision ?? 0"
+        @viewport-change="onMermaidViewportChange"
       />
       <div class="absolute right-2 top-2 z-10 flex items-center gap-2 max-w-[calc(100%-1rem)]">
         <span v-if="activeTab?.kind === 'file' && activeTab.saving" class="text-[11px] text-[color:var(--text-tertiary)]">
@@ -58,7 +60,7 @@
           {{ activeTab.error }}
         </span>
       </div>
-      <div v-if="htmlPreviewTab || documentTab || activeTab?.kind === 'diff'" data-editor-floating-actions class="absolute right-8 top-20 z-10 flex flex-col gap-1">
+      <div v-if="htmlPreviewTab || documentTab || activeTab?.kind === 'diff'" data-editor-floating-actions class="absolute right-8 top-20 z-10 flex flex-col gap-1" :class="{ 'editor-mermaid-actions': showDocumentPreview && documentPresentation === 'mermaid' }">
         <Tooltip
           v-if="htmlPreviewTab"
           placement="left"
@@ -77,16 +79,38 @@
             </button>
           </span>
         </Tooltip>
-        <Tooltip v-else-if="documentTab" placement="left" :title="t('editor.preview.toggle')">
-          <button
-            type="button"
-            data-editor-preview-toggle
-            :aria-label="t('editor.preview.toggle')"
-            :aria-pressed="showDocumentPreview"
-            :class="floatingActionClass"
-            @click="toggleDocumentPreview"
-          ><SwapOutlined /></button>
-        </Tooltip>
+        <template v-else-if="documentTab">
+          <Tooltip placement="left" :title="t('editor.preview.toggle')">
+            <button
+              type="button"
+              data-editor-preview-toggle
+              :aria-label="t('editor.preview.toggle')"
+              :aria-pressed="showDocumentPreview"
+              :class="floatingActionClass"
+              @click="toggleDocumentPreview"
+            ><SwapOutlined /></button>
+          </Tooltip>
+          <template v-if="showDocumentPreview && documentPresentation === 'mermaid'">
+            <Tooltip placement="left" :title="t('editor.mermaid.zoomIn')">
+              <span class="inline-flex w-7 h-7 shrink-0">
+                <button type="button" data-editor-mermaid-zoom-in :aria-label="t('editor.mermaid.zoomIn')"
+                  :disabled="!mermaidPreviewRef?.canZoomIn" :class="floatingActionClass" @mousedown.prevent @click="mermaidPreviewRef?.zoomIn()"><ZoomInOutlined /></button>
+              </span>
+            </Tooltip>
+            <Tooltip placement="left" :title="t('editor.mermaid.zoomOut')">
+              <span class="inline-flex w-7 h-7 shrink-0">
+                <button type="button" data-editor-mermaid-zoom-out :aria-label="t('editor.mermaid.zoomOut')"
+                  :disabled="!mermaidPreviewRef?.canZoomOut" :class="floatingActionClass" @mousedown.prevent @click="mermaidPreviewRef?.zoomOut()"><ZoomOutOutlined /></button>
+              </span>
+            </Tooltip>
+            <Tooltip placement="left" :title="t('editor.mermaid.fit')">
+              <span class="inline-flex w-7 h-7 shrink-0">
+                <button type="button" data-editor-mermaid-fit :aria-label="t('editor.mermaid.fit')"
+                  :disabled="!mermaidPreviewRef?.ready" :class="floatingActionClass" @mousedown.prevent @click="mermaidPreviewRef?.fitToViewport()"><ExpandOutlined /></button>
+              </span>
+            </Tooltip>
+          </template>
+        </template>
         <template v-else-if="activeTab?.kind === 'diff'">
           <Tooltip placement="left" :title="t('workspace.actions.previousChange')">
             <button
@@ -142,7 +166,7 @@ export default {
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { Modal, Tooltip, message } from "ant-design-vue";
-import { DownOutlined, GlobalOutlined, SwapOutlined, UpOutlined } from "@ant-design/icons-vue";
+import { DownOutlined, ExpandOutlined, GlobalOutlined, SwapOutlined, UpOutlined, ZoomInOutlined, ZoomOutOutlined } from "@ant-design/icons-vue";
 import { useI18n } from "vue-i18n";
 import * as monaco from "monaco-editor/esm/vs/editor/editor.api.js";
 import "monaco-editor/esm/vs/editor/contrib/find/browser/findController.js";
@@ -163,7 +187,8 @@ import { openWorkspacePreview, type PreviewDocument } from "../file-explorer/pre
 import type { EditorOpenAt, EditorOpenFileRequest, FileEditorTab, QueuedEditorOpenFileRequest } from "./types";
 import EditorTabs from "./EditorTabs.vue";
 import EditorMarkdownPreview from "./EditorMarkdownPreview.vue";
-import EditorMermaidPreview from "./EditorMermaidPreview.vue";
+import EditorMermaidPreview, { type MermaidPreviewExposed } from "./EditorMermaidPreview.vue";
+import type { MermaidViewportState } from "./mermaidViewport";
 import type { MonacoDiffViewerExposed } from "@/shared/components/MonacoDiffViewer.vue";
 import MonacoCodeViewer from "@/shared/components/MonacoCodeViewer.vue";
 import MonacoDiffViewer from "@/shared/components/MonacoDiffViewer.vue";
@@ -190,6 +215,17 @@ const documentText = computed(() => {
   const tab = documentTab.value;
   void tab?.contentRevision;
   return tab?.model?.getValue() ?? "";
+});
+// Capture the original session: an outgoing view can emit its final position
+// after the active Tab has already changed. Never attribute that to the new Tab.
+const onMermaidViewportChange = computed(() => {
+  const tab = documentTab.value;
+  const model = tab?.model;
+  const revision = tab?.contentRevision ?? 0;
+  return (state: MermaidViewportState) => {
+    if (tab && tab.model === model && (tab.contentRevision ?? 0) === revision &&
+        state.contentRevision === revision && store.value.tabs.includes(tab)) tab.mermaidViewport = state;
+  };
 });
 function openMarkdownFile(path: string) {
   host.call("editor", { type: "editor.openFile", payload: { path, mode: "preview" } });
@@ -230,6 +266,7 @@ const tabItems = computed(() => store.value.tabs.map((tab) => ({
 
 const editorEl = ref<HTMLDivElement | null>(null);
 const diffViewerRef = ref<MonacoDiffViewerExposed | null>(null);
+const mermaidPreviewRef = ref<MermaidPreviewExposed | null>(null);
 let editor: monaco.editor.IStandaloneCodeEditor | null = null;
 // Track the last applied source visibility: hidden layout must not overwrite its saved view state.
 let sourceViewVisible = false;
@@ -991,6 +1028,14 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+.editor-mermaid-actions {
+  top: min(5rem, max(0.5rem, calc(100% - 8.5rem)));
+  max-height: calc(100% - 1rem);
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+.editor-mermaid-actions > :deep(*) { flex-shrink: 0; }
+
 :deep(.editor-search-hit) {
   background: rgba(255, 214, 102, 0.45);
 }
