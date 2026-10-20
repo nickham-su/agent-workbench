@@ -32,7 +32,24 @@
       >
         {{ notPreviewableLabel(activeTab) }}
       </div>
-      <div ref="editorEl" class="absolute inset-0" v-show="activeTab?.kind === 'file' && !activeTab.image && activeTab.previewable !== false"></div>
+      <div ref="editorEl" data-editor-source class="absolute inset-0" v-show="activeTab?.kind === 'file' && !activeTab.image && activeTab.previewable !== false && !showDocumentPreview"></div>
+      <EditorMarkdownPreview
+        v-if="documentTab && showDocumentPreview && documentPresentation === 'markdown'"
+        :key="`${props.workspaceId}:${documentTab.path}`"
+        :workspace-id="props.workspaceId"
+        :path="documentTab.path"
+        :text="documentText"
+        :scroll-top="documentTab.previewScrollTop ?? 0"
+        @scroll-position="documentTab.previewScrollTop = $event"
+        @open-file="openMarkdownFile"
+      />
+      <EditorMermaidPreview
+        v-if="documentTab && showDocumentPreview && documentPresentation === 'mermaid'"
+        :key="`${props.workspaceId}:${documentTab.path}`"
+        :text="documentText"
+        :scroll-top="documentTab.previewScrollTop ?? 0"
+        @scroll-position="documentTab.previewScrollTop = $event"
+      />
       <div class="absolute right-2 top-2 z-10 flex items-center gap-2 max-w-[calc(100%-1rem)]">
         <span v-if="activeTab?.kind === 'file' && activeTab.saving" class="text-[11px] text-[color:var(--text-tertiary)]">
           {{ t("files.status.saving") }}
@@ -41,7 +58,7 @@
           {{ activeTab.error }}
         </span>
       </div>
-      <div v-if="htmlPreviewTab || activeTab?.kind === 'diff'" data-editor-floating-actions class="absolute right-8 top-20 z-10 flex flex-col gap-1">
+      <div v-if="htmlPreviewTab || documentTab || activeTab?.kind === 'diff'" data-editor-floating-actions class="absolute right-8 top-20 z-10 flex flex-col gap-1">
         <Tooltip
           v-if="htmlPreviewTab"
           placement="left"
@@ -60,7 +77,17 @@
             </button>
           </span>
         </Tooltip>
-        <template v-else>
+        <Tooltip v-else-if="documentTab" placement="left" :title="t('editor.preview.toggle')">
+          <button
+            type="button"
+            data-editor-preview-toggle
+            :aria-label="t('editor.preview.toggle')"
+            :aria-pressed="showDocumentPreview"
+            :class="floatingActionClass"
+            @click="toggleDocumentPreview"
+          ><SwapOutlined /></button>
+        </Tooltip>
+        <template v-else-if="activeTab?.kind === 'diff'">
           <Tooltip placement="left" :title="t('workspace.actions.previousChange')">
             <button
               type="button"
@@ -113,14 +140,14 @@ export default {
 </script>
 
 <script setup lang="ts">
-import { computed, markRaw, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { Modal, Tooltip, message } from "ant-design-vue";
-import { DownOutlined, GlobalOutlined, UpOutlined } from "@ant-design/icons-vue";
+import { DownOutlined, GlobalOutlined, SwapOutlined, UpOutlined } from "@ant-design/icons-vue";
 import { useI18n } from "vue-i18n";
 import * as monaco from "monaco-editor/esm/vs/editor/editor.api.js";
 import "monaco-editor/esm/vs/editor/contrib/find/browser/findController.js";
 import "monaco-editor/min/vs/editor/editor.main.css";
-import { getWorkspacePreviewResourceDescriptor, type FileReadResponse } from "@agent-workbench/shared";
+import type { FileReadResponse } from "@agent-workbench/shared";
 import { ApiError, downloadWorkspacePath, readWorkspaceFileText, statWorkspaceFile, writeWorkspaceFileText } from "@/shared/api";
 import { useWorkspaceHost } from "@/features/workspace/host";
 import { ensureMonacoEnvironment } from "@/shared/monaco/monacoEnv";
@@ -130,9 +157,13 @@ import { inferLanguageFromPath, normalizeMonacoLanguage } from "@/shared/monaco/
 import { editorFontSize } from "@/shared/settings/uiFontSizes";
 import { getEditorStore, releaseEditorImage } from "./store";
 import { loadEditorImage } from "./editorImages";
+import { disposeFileModel, replaceFileModel } from "./editorModels";
+import { getEditorFilePresentation } from "./editorPresentation";
 import { openWorkspacePreview, type PreviewDocument } from "../file-explorer/preview";
 import type { EditorOpenAt, EditorOpenFileRequest, FileEditorTab, QueuedEditorOpenFileRequest } from "./types";
 import EditorTabs from "./EditorTabs.vue";
+import EditorMarkdownPreview from "./EditorMarkdownPreview.vue";
+import EditorMermaidPreview from "./EditorMermaidPreview.vue";
 import type { MonacoDiffViewerExposed } from "@/shared/components/MonacoDiffViewer.vue";
 import MonacoCodeViewer from "@/shared/components/MonacoCodeViewer.vue";
 import MonacoDiffViewer from "@/shared/components/MonacoDiffViewer.vue";
@@ -145,9 +176,47 @@ const host = useWorkspaceHost(props.toolId);
 const store = computed(() => getEditorStore(props.workspaceId));
 
 const activeTab = computed(() => store.value.activeTab.value);
+const documentTab = computed(() => {
+  const tab = activeTab.value;
+  return tab?.kind === "file" && !tab.image && tab.previewable !== false && tab.model &&
+    ["markdown", "mermaid"].includes(getEditorFilePresentation(tab.path)) ? tab : null;
+});
+const documentPresentation = computed(() => documentTab.value ? getEditorFilePresentation(documentTab.value.path) : null);
+function isDocumentPreview(tab: FileEditorTab) {
+  return !tab.image && tab.previewable !== false && ["markdown", "mermaid"].includes(getEditorFilePresentation(tab.path)) && tab.presentationMode !== "source";
+}
+const showDocumentPreview = computed(() => !!documentTab.value && isDocumentPreview(documentTab.value));
+const documentText = computed(() => {
+  const tab = documentTab.value;
+  void tab?.contentRevision;
+  return tab?.model?.getValue() ?? "";
+});
+function openMarkdownFile(path: string) {
+  host.call("editor", { type: "editor.openFile", payload: { path, mode: "preview" } });
+}
+function toggleDocumentPreview() {
+  const tab = documentTab.value;
+  if (!tab) return;
+  if (showDocumentPreview.value) {
+    tab.presentationMode = "source";
+    scheduleApplyEditor();
+    const model = tab.model;
+    requestAnimationFrame(() => {
+      if (!disposed && activeTab.value === tab && !isDocumentPreview(tab) && editor && editor.getModel() === model) editor.focus();
+    });
+  } else {
+    if (editor && editor.getModel() === tab.model) tab.viewState = editor.saveViewState();
+    tab.presentationMode = "preview";
+    sourceViewVisible = false;
+  }
+}
+function applyRequestedPresentation(tab: FileEditorTab, req?: EditorOpenFileRequest) {
+  if (typeof req?.line === "number" && Number.isFinite(req.line) && req.line > 0) tab.presentationMode = "source";
+}
+
 const htmlPreviewTab = computed(() => {
   const tab = activeTab.value;
-  return props.previewEnabled && tab?.kind === "file" && !tab.image && tab.previewable && getWorkspacePreviewResourceDescriptor(tab.path)?.kind === "html" ? tab : null;
+  return props.previewEnabled && tab?.kind === "file" && !tab.image && tab.previewable && getEditorFilePresentation(tab.path) === "html" ? tab : null;
 });
 const htmlPreviewBlocked = computed(() => !!htmlPreviewTab.value && (htmlPreviewTab.value.dirty || htmlPreviewTab.value.saving || htmlPreviewTab.value.conflictOpen));
 const tabItems = computed(() => store.value.tabs.map((tab) => ({
@@ -162,6 +231,8 @@ const tabItems = computed(() => store.value.tabs.map((tab) => ({
 const editorEl = ref<HTMLDivElement | null>(null);
 const diffViewerRef = ref<MonacoDiffViewerExposed | null>(null);
 let editor: monaco.editor.IStandaloneCodeEditor | null = null;
+// Track the last applied source visibility: hidden layout must not overwrite its saved view state.
+let sourceViewVisible = false;
 let editorBlurDisposable: monaco.IDisposable | null = null;
 let editorSaveCommandId: string | null = null;
 let editorApplyScheduled = false;
@@ -212,17 +283,6 @@ async function ensureAndApplyLanguage(model: monaco.editor.ITextModel, languageI
   }
 }
 
-function attachModelListener(tab: FileEditorTab) {
-  if (!tab.model) return;
-  tab.disposable?.dispose();
-  tab.disposable = markRaw(
-    tab.model.onDidChangeContent(() => {
-      const current = tab.model?.getValue() ?? "";
-      tab.dirty = current !== tab.savedContent;
-    })
-  );
-}
-
 function createTabFromRead(path: string, res: FileReadResponse, req?: EditorOpenFileRequest) {
   const language = res.language || inferLanguageFromPath(path);
   const tab = reactive<FileEditorTab>({
@@ -243,13 +303,11 @@ function createTabFromRead(path: string, res: FileReadResponse, req?: EditorOpen
     openAt: req ? toOpenAt(req) : undefined,
     readOnly: req?.mode === "preview"
   });
+  applyRequestedPresentation(tab, req);
   if (res.previewable) {
     ensureMonacoEnvironment();
-    const uri = monaco.Uri.parse(`inmemory://editor/${encodeURIComponent(path)}`);
-    const model = monaco.editor.createModel(res.content ?? "", "plaintext", uri);
-    tab.model = markRaw(model);
+    const model = replaceFileModel(tab, res.content ?? "");
     void ensureAndApplyLanguage(model, language);
-    attachModelListener(tab);
   }
   return tab;
 }
@@ -293,13 +351,14 @@ async function openFile(entry: QueuedEditorOpenFileRequest) {
     const stillActive = entry.seq === latestOpenFileSeq && entry.epoch === store.value.activationEpoch.value;
     if (!stillActive) return;
     existing.openAt = existing.image ? undefined : toOpenAt(req);
+    applyRequestedPresentation(existing, req);
     if (req.mode === "edit" && !existing.image) existing.readOnly = false;
     store.value.setActiveTabKey(existing.key);
     scheduleApplyEditor();
     return;
   }
 
-  if (getWorkspacePreviewResourceDescriptor(path)?.kind === "image") {
+  if (getEditorFilePresentation(path) === "image") {
     if (entry.seq !== latestOpenFileSeq || entry.epoch !== store.value.activationEpoch.value) return;
     store.value.upsertTab({
       key: `file:${path}`, kind: "file", title: req.title || baseName(path), path,
@@ -324,6 +383,7 @@ async function openFile(entry: QueuedEditorOpenFileRequest) {
     if (!shouldActivate && existingAfter) return;
     if (existingAfter) {
       existingAfter.openAt = existingAfter.image ? undefined : toOpenAt(req);
+      applyRequestedPresentation(existingAfter, req);
       if (req.mode === "edit" && !existingAfter.image) existingAfter.readOnly = false;
       requestStore.setActiveTabKey(existingAfter.key);
       scheduleApplyEditor();
@@ -399,7 +459,7 @@ function revealOpenAt(openAt?: EditorOpenAt) {
 function applyOpenAtWhenReady(tabKey: string, model: monaco.editor.ITextModel, openAt?: EditorOpenAt, retries = 3) {
   if (!editor) return;
   const current = activeTab.value;
-  if (!current || current.kind !== "file" || current.key !== tabKey || current.model !== model) return;
+  if (!current || current.kind !== "file" || current.key !== tabKey || current.model !== model || isDocumentPreview(current) || current.openAt !== openAt) return;
 
   editor.layout();
   const layout = editor.getLayoutInfo();
@@ -412,7 +472,7 @@ function applyOpenAtWhenReady(tabKey: string, model: monaco.editor.ITextModel, o
   editor.focus();
   requestAnimationFrame(() => {
     const latest = activeTab.value;
-    if (!editor || !latest || latest.kind !== "file" || latest.key !== tabKey || latest.model !== model) return;
+    if (!editor || !latest || latest.kind !== "file" || latest.key !== tabKey || latest.model !== model || isDocumentPreview(latest) || latest.openAt !== openAt) return;
     applyOpenAtHighlight(openAt);
     revealOpenAt(openAt);
     latest.openAt = undefined;
@@ -442,12 +502,9 @@ async function reloadTab(path: string) {
   const isCurrent = () => !disposed && workspaceVersion === workspaceRequestVersion && store.value === requestStore &&
     fileRequestSeqByPath.get(path) === requestId && tab.loadVersion === loadVersion && tab.path === path && requestStore.tabs.includes(tab);
 
-  if (getWorkspacePreviewResourceDescriptor(path)?.kind === "image") {
+  if (getEditorFilePresentation(path) === "image") {
     releaseEditorImage(tab);
-    tab.disposable?.dispose();
-    tab.disposable = undefined;
-    tab.model?.dispose();
-    tab.model = undefined;
+    disposeFileModel(tab);
     tab.image = { status: "loading" };
     tab.readOnly = true;
     tab.openAt = undefined;
@@ -495,10 +552,7 @@ async function reloadTab(path: string) {
     if (res.previewable) {
       const current = tab.model?.getValue() ?? "";
       if (!tab.model) {
-        const uri = monaco.Uri.parse(`inmemory://editor/${encodeURIComponent(path)}`);
-        const model = monaco.editor.createModel(res.content ?? "", "plaintext", uri);
-        tab.model = markRaw(model);
-        attachModelListener(tab);
+        replaceFileModel(tab, res.content ?? "");
       } else if (current !== (res.content ?? "")) {
         tab.model.setValue(res.content ?? "");
       }
@@ -506,10 +560,7 @@ async function reloadTab(path: string) {
       tab.savedContent = res.content ?? "";
       tab.dirty = false;
     } else {
-      tab.disposable?.dispose();
-      tab.disposable = undefined;
-      tab.model?.dispose();
-      tab.model = undefined;
+      disposeFileModel(tab);
       tab.savedContent = "";
       tab.dirty = false;
     }
@@ -622,7 +673,7 @@ function isEditorFocused(evt: KeyboardEvent) {
 
 function handleEditorKeydown(evt: KeyboardEvent) {
   const tab = activeTab.value;
-  if (!editor || tab?.kind !== "file" || tab.image || !tab.model || editor.getModel() !== tab.model) return;
+  if (!editor || tab?.kind !== "file" || tab.image || !tab.model || isDocumentPreview(tab) || editor.getModel() !== tab.model) return;
   if (!isFindShortcut(evt)) return;
   if (!isEditorFocused(evt)) return;
   const action = editor.getAction(evt.key.toLowerCase() === "h" ? "editor.action.startFindReplaceAction" : "actions.find");
@@ -681,7 +732,7 @@ function scheduleApplyEditor() {
 
     const previousModel = editor.getModel();
     const previousTab = activeFileTabFromModel(previousModel);
-    if (previousTab) {
+    if (previousTab && sourceViewVisible) {
       const latestModel = editor.getModel();
       if (latestModel && previousTab.model === previousModel && latestModel === previousModel) {
         previousTab.viewState = editor.saveViewState();
@@ -689,9 +740,14 @@ function scheduleApplyEditor() {
     }
 
     const model = shouldHaveEditor ? tab?.model ?? null : null;
+    sourceViewVisible = !!model && tab?.kind === "file" && !isDocumentPreview(tab);
     editor.setModel(model);
     editor.updateOptions({ readOnly: tab?.kind === "file" ? tab.readOnly : true });
     if (tab?.kind === "file" && model) {
+      if (isDocumentPreview(tab)) {
+        clearHighlightDecorations();
+        return;
+      }
       const openAt = tab.openAt;
       const tabKey = tab.key;
       const hasOpenAtLine = typeof openAt?.line === "number" && Number.isFinite(openAt.line) && openAt.line > 0;
@@ -702,7 +758,7 @@ function scheduleApplyEditor() {
 
       requestAnimationFrame(() => {
         const latest = activeTab.value;
-        if (!editor || !latest || latest.kind !== "file" || latest.key !== tabKey || latest.model !== model) return;
+        if (!editor || !latest || latest.kind !== "file" || latest.key !== tabKey || latest.model !== model || isDocumentPreview(latest)) return;
         clearHighlightDecorations();
         if (latest.viewState) {
           try {

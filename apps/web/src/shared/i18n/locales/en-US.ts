@@ -1474,6 +1474,27 @@ export default {
     reason: { coverage_gap: "Coverage gap", range_not_reconciled: "Range not reconciled", collector_degraded: "Collector degraded", signal_loss: "Signal loss", dirty_hour: "Hour is being refreshed", open_fact: "Open fact", configuration_changed: "Configuration changed", domain_disabled: "Domain disabled", domain_unavailable: "Domain unavailable", no_safe_data: "No safe data", invalid_metric_state: "Invalid metric state" }
   },
   editor: {
+    preview: {
+      toggle: "Source / Preview",
+      renderFailed: "Unable to render the document. Switch to source to inspect it.",
+      imageFailed: "Image failed to load, exceeded resource limits, or is unsupported",
+      remoteImageBlocked: "Remote images are not loaded automatically",
+      imageBlocked: "Unsupported image path",
+      imageLimit: "Preview image count limit exceeded",
+      headingMissing: "Heading not found",
+      linkBlocked: "Unsupported link address",
+      linkFailed: "File is missing, inaccessible, or could not be opened",
+      crossFileHeadingUnsupported: "Cross-file heading navigation is not supported. Open a file link without a heading."
+    },
+    mermaid: {
+      loading: "Loading diagram…",
+      empty: "The diagram is empty. Switch to source to edit it.",
+      tooLarge: "The diagram exceeds preview size or complexity limits.",
+      unsafe: "Diagram configuration, HTML, math labels, external resources, or unsupported custom styles are disabled.",
+      unsupported: "Safe preview is not yet supported for this diagram type. Switch to source to view it.",
+      loadFailed: "Unable to load the diagram renderer. Switch to source and retry.",
+      renderFailed: "Unable to render the diagram. Check the source syntax or complexity."
+    },
     image: {
       loading: "Loading image…",
       tooLarge: "Image exceeds 20 MiB and cannot be previewed",

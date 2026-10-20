@@ -1472,6 +1472,27 @@ export default {
     reason: { coverage_gap: "覆盖缺口", range_not_reconciled: "范围尚未对账", collector_degraded: "采集器降级", signal_loss: "信号丢失", dirty_hour: "小时数据刷新中", open_fact: "事实尚未关闭", configuration_changed: "配置已变化", domain_disabled: "域已禁用", domain_unavailable: "域不可用", no_safe_data: "没有安全数据", invalid_metric_state: "无效指标状态" }
   },
   editor: {
+    preview: {
+      toggle: "源码 / 预览",
+      renderFailed: "文档渲染失败，可切换到源码查看",
+      imageFailed: "图片加载失败、超出资源限制或格式不受支持",
+      remoteImageBlocked: "远程图片未自动加载",
+      imageBlocked: "图片路径不受支持",
+      imageLimit: "图片数量超过预览限制",
+      headingMissing: "未找到对应章节",
+      linkBlocked: "链接地址不受支持",
+      linkFailed: "文件不存在、不可访问或无法打开",
+      crossFileHeadingUnsupported: "暂不支持跳转到其他文件的章节，请通过不带章节的文件链接打开"
+    },
+    mermaid: {
+      loading: "正在渲染图表…",
+      empty: "图表内容为空，可切换到源码编辑",
+      tooLarge: "图表超过预览大小或复杂度限制",
+      unsafe: "不支持图内配置、HTML、数学标签、外部资源或此类自定义样式",
+      unsupported: "暂不支持此图表类型的安全预览，可切换到源码查看",
+      loadFailed: "图表渲染器加载失败，可切换到源码后重试",
+      renderFailed: "图表渲染失败，请检查源码语法或图表复杂度"
+    },
     image: {
       loading: "正在加载图片…",
       tooLarge: "图片超过 20 MiB，暂不支持预览",

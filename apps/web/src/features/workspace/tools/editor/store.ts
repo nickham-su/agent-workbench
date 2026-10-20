@@ -1,6 +1,6 @@
-import { computed, markRaw, reactive, ref, type ComputedRef, type Ref } from "vue";
-import * as monaco from "monaco-editor/esm/vs/editor/editor.api.js";
-import { getWorkspacePreviewResourceDescriptor } from "@agent-workbench/shared";
+import { computed, reactive, ref, type ComputedRef, type Ref } from "vue";
+import { disposeFileModel, replaceFileModel } from "./editorModels";
+import { getEditorFilePresentation } from "./editorPresentation";
 import { inferLanguageFromPath } from "@/shared/monaco/languageUtils";
 import type { DiffEditorTab, EditorOpenFileRequest, EditorTab, PreviewEditorTab, QueuedEditorOpenFileRequest } from "./types";
 
@@ -39,10 +39,7 @@ function disposeTab(tab: EditorTab) {
   if (tab.kind !== "file") return;
   tab.loadVersion = (tab.loadVersion ?? 0) + 1;
   releaseEditorImage(tab);
-  tab.disposable?.dispose();
-  tab.disposable = undefined;
-  tab.model?.dispose();
-  tab.model = undefined;
+  disposeFileModel(tab);
 }
 
 function updateFileTabPath(tab: Extract<EditorTab, { kind: "file" }>, nextPath: string) {
@@ -50,7 +47,7 @@ function updateFileTabPath(tab: Extract<EditorTab, { kind: "file" }>, nextPath: 
   // Conflict dialogs belong to the old path/version. Release that state now;
   // stale callbacks remain invalid and cannot clear a later conflict.
   tab.conflictOpen = false;
-  const becomesImage = getWorkspacePreviewResourceDescriptor(nextPath)?.kind === "image";
+  const becomesImage = getEditorFilePresentation(nextPath) === "image";
   if (tab.image || (becomesImage && !tab.dirty && !tab.saving)) {
     releaseEditorImage(tab);
     tab.needsReload = true;
@@ -63,16 +60,7 @@ function updateFileTabPath(tab: Extract<EditorTab, { kind: "file" }>, nextPath: 
   tab.language = inferLanguageFromPath(nextPath);
   if (!tab.model) return;
   const value = tab.model.getValue();
-  tab.disposable?.dispose();
-  tab.disposable = undefined;
-  tab.model.dispose();
-  tab.model = markRaw(monaco.editor.createModel(value, tab.language || "plaintext", monaco.Uri.parse(`inmemory://editor/${encodeURIComponent(nextPath)}`)));
-  tab.disposable = markRaw(
-    tab.model.onDidChangeContent(() => {
-      const current = tab.model?.getValue() ?? "";
-      tab.dirty = current !== tab.savedContent;
-    })
-  );
+  replaceFileModel(tab, value, tab.language || "plaintext");
 }
 
 function updateReadonlyTabPath(tab: PreviewEditorTab | DiffEditorTab, previousPath: string, nextPath: string): [string, string] {

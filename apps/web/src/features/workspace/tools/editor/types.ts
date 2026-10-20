@@ -41,6 +41,11 @@ export type FileEditorTab = {
   reason?: "too_large" | "binary" | "decode_failed" | "unsafe_path" | "missing";
   version?: FileVersion;
   model?: monaco.editor.ITextModel;
+  /** Monotonic invalidation signal for model edits, replacement and disposal; absent means zero. */
+  contentRevision?: number;
+  /** Display state only; independent of the read-only open mode. */
+  presentationMode?: "source" | "preview";
+  previewScrollTop?: number;
   savedContent: string;
   dirty: boolean;
   saving: boolean;

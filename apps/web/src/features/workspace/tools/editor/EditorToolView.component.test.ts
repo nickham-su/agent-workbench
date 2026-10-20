@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test, { afterEach } from "node:test";
-import { defineComponent, markRaw, nextTick } from "vue";
+import { computed, defineComponent, markRaw, nextTick } from "vue";
 import { AxiosError } from "axios";
 import { createI18n } from "vue-i18n";
 import { mount } from "@vue/test-utils";
@@ -14,6 +14,7 @@ import { apiClient } from "@/shared/api/api";
 import { workspaceHostKey } from "../../host";
 import { getEditorStore } from "./store";
 import { EDITOR_IMAGE_MAX_BYTES } from "./editorImages";
+import { disposeFileModel, replaceFileModel } from "./editorModels";
 import type { FileEditorTab } from "./types";
 
 Object.defineProperty(globalThis, "UIEvent", { value: window.UIEvent, configurable: true });
@@ -40,6 +41,12 @@ const requests: Array<{ type: string; path: string; workspaceId: string; data: a
 const forms: Array<{ target: string; action: string; path: string }> = [];
 const editorOptions: any[] = [];
 const editorActionRuns: string[] = [];
+const restoredViewStates: unknown[] = [];
+const editorFocusModels: string[] = [];
+const positionedModels: Array<{ uri: string; position: unknown }> = [];
+const toolCalls: Array<{ from: string; to: string; call: any }> = [];
+const sourceViewState = { cursorState: [], viewState: { scrollTop: 42, scrollLeft: 12 }, contributionsState: {} };
+let editorCurrentViewState = sourceViewState;
 const diffNavigationCalls: Array<{ direction: "previous" | "next"; original: string; modified: string }> = [];
 let registeredEditorCommands: Record<string, unknown> | undefined;
 const DiffViewerStub = defineComponent({
@@ -88,14 +95,14 @@ function setup(workspaceId = `editor-test-${++id}`, previewEnabled = true) {
     return {
       getModel: () => model, setModel: (next: monaco.editor.ITextModel | null) => { model = next; },
       updateOptions: (next: any) => editorOptions.push(next), layout() {}, dispose() {},
-      deltaDecorations: () => [], saveViewState: () => null, restoreViewState() {},
+      deltaDecorations: () => [], saveViewState: () => editorCurrentViewState, restoreViewState: (state: unknown) => { restoredViewStates.push(state); },
       onDidBlurEditorText: (callback: () => unknown) => { blur = callback; return { dispose() {} }; },
       addCommand: (_key: number, callback: () => unknown) => { save = callback; return "save"; },
       getDomNode: () => element, hasTextFocus: () => false,
       getAction: (actionId: string) => editorActionsAvailable && EditorExtensionsRegistry.getEditorActions().some((action) => action.id === actionId)
         ? { run: () => { editorActionRuns.push(actionId); } }
         : null,
-      setPosition() {}, setSelection() {}, focus() {}, setScrollTop() {},
+      setPosition(position: unknown) { positionedModels.push({ uri: model?.uri.toString() ?? "", position }); }, setSelection() {}, focus() { editorFocusModels.push(model?.uri.toString() ?? ""); }, setScrollTop() {},
       getLayoutInfo: () => ({ height: 400, contentWidth: 600 }),
       getScrollHeight: () => 400, getTopForLineNumber: () => 0,
       getOption: () => 20,
@@ -122,9 +129,10 @@ function setup(workspaceId = `editor-test-${++id}`, previewEnabled = true) {
     global: {
       plugins: [createI18n({ legacy: false, locale: "zh-CN", messages: { "zh-CN": zhCN } })],
       provide: { [workspaceHostKey as symbol]: {
+        callFrom(from: string, to: string, call: any) { toolCalls.push({ from, to, call }); },
         minimizeTool(toolId: string) { minimized.push(toolId); }, registerToolCommands(_toolId: string, commands: any) { refresh = commands.refresh; registeredEditorCommands = commands; return () => {}; },
       } },
-      stubs: { EditorTabs: { name: "EditorTabs", props: ["tabs", "requestCloseTab", "requestCloseOtherTabs", "requestCloseAllTabs"], template: '<div data-editor-tabs></div>' }, MonacoCodeViewer: { props: ["value"], template: '<pre data-memory-preview>{{ value }}</pre>' }, MonacoDiffViewer: DiffViewerStub },
+      stubs: { EditorTabs: { name: "EditorTabs", props: ["tabs", "requestCloseTab", "requestCloseOtherTabs", "requestCloseAllTabs"], template: '<div data-editor-tabs></div>' }, MonacoCodeViewer: { props: ["value"], template: '<pre data-memory-preview>{{ value }}</pre>' }, MonacoDiffViewer: DiffViewerStub, EditorMermaidPreview: { props: ["text", "scrollTop"], emits: ["scroll-position"], template: '<pre data-editor-mermaid-preview>{{ text }}</pre>' } },
     },
   });
   wrappers.push(wrapper);
@@ -148,10 +156,11 @@ afterEach(async () => {
   (Modal as { confirm: typeof Modal.confirm }).confirm = originalConfirm;
   confirmations.length = 0;
   createdUrls.length = revokedUrls.length = requests.length = forms.length = editorOptions.length = 0;
-  editorActionRuns.length = 0;
+  editorActionRuns.length = restoredViewStates.length = editorFocusModels.length = positionedModels.length = toolCalls.length = 0;
   diffNavigationCalls.length = 0;
   registeredEditorCommands = undefined;
   editorActionsAvailable = true;
+  editorCurrentViewState = sourceViewState;
   modelsCreated = 0;
   refresh = blur = save = undefined;
   requestHandler = undefined;
@@ -165,6 +174,150 @@ function dispatchFindShortcut(target: Element, options: KeyboardEventInit = {}) 
   target.dispatchEvent(event);
   return event;
 }
+
+test("raw model 连续修改时 revision 可响应，dirty 始终为 true 也能读取最新内容", async () => {
+  const { store, workspaceId } = setup();
+  await open(store, "revision.md");
+  const current = tab(workspaceId);
+  const model = current.model!;
+  const savedContent = current.savedContent;
+  const content = computed(() => {
+    void current.contentRevision;
+    return current.model?.getValue() ?? "";
+  });
+  const initialRevision = current.contentRevision!;
+  assert.equal(content.value, savedContent);
+  assert.equal(current.dirty, false);
+  model.setValue("first unsaved value");
+  assert.equal(current.contentRevision, initialRevision + 1);
+  assert.equal(current.dirty, true);
+  assert.equal(content.value, "first unsaved value");
+  model.setValue("second unsaved value");
+  assert.equal(current.contentRevision, initialRevision + 2);
+  assert.equal(current.dirty, true);
+  assert.equal(content.value, "second unsaved value");
+  model.setValue(savedContent);
+  assert.equal(current.dirty, false);
+  assert.equal(content.value, savedContent);
+  assert.equal(current.savedContent, savedContent);
+});
+
+test("替换及释放 model 共用生命周期，revision 单调且重复释放无副作用", async () => {
+  const { store, workspaceId } = setup();
+  await open(store, "replace.txt");
+  const current = tab(workspaceId);
+  const previous = current.model!;
+  const revision = current.contentRevision!;
+  const next = replaceFileModel(current, "replacement");
+  assert.equal(previous.isDisposed(), true);
+  assert.equal(current.model, next);
+  assert.equal(current.contentRevision, revision + 1);
+  assert.equal(current.dirty, true);
+  next.setValue("replacement edited");
+  assert.equal(current.contentRevision, revision + 2);
+  disposeFileModel(current);
+  assert.equal(next.isDisposed(), true);
+  assert.equal(current.model, undefined);
+  assert.equal(current.disposable, undefined);
+  assert.equal(current.contentRevision, revision + 3);
+  disposeFileModel(current);
+  assert.equal(current.contentRevision, revision + 3);
+});
+
+test("重命名重建 model 后保留脏文本、保存基线及内容修订订阅", async () => {
+  const { store, workspaceId } = setup();
+  await open(store, "before.md");
+  const current = tab(workspaceId);
+  const savedContent = current.savedContent;
+  const version = current.version;
+  const previous = current.model!;
+  previous.setValue("unsaved markdown");
+  const revision = current.contentRevision!;
+  store.renamePath("before.md", "after.mmd");
+  assert.equal(tab(workspaceId), current);
+  assert.equal(current.path, "after.mmd");
+  assert.equal(previous.isDisposed(), true);
+  assert.notEqual(current.model, previous);
+  assert.equal(current.model?.getValue(), "unsaved markdown");
+  assert.equal(current.savedContent, savedContent);
+  assert.equal(current.version, version);
+  assert.equal(current.dirty, true);
+  assert.equal(current.contentRevision, revision + 1);
+  current.model?.setValue("edited after rename");
+  assert.equal(current.contentRevision, revision + 2);
+  assert.equal(current.dirty, true);
+  current.model?.setValue(savedContent);
+  assert.equal(current.dirty, false);
+});
+
+test("文本 View 卸载与重挂不销毁文件会话，close/reset 才释放 model", async () => {
+  const { wrapper, store, workspaceId } = setup();
+  await open(store, "retained.txt");
+  const current = tab(workspaceId);
+  const model = current.model!;
+  model.setValue("unsaved across remount");
+  const revision = current.contentRevision!;
+  wrapper.unmount();
+  assert.equal(model.isDisposed(), false);
+  assert.equal(current.model, model);
+  const remounted = setup(workspaceId);
+  await settle();
+  assert.equal(tab(workspaceId).model, model);
+  assert.equal(current.contentRevision, revision);
+  assert.equal(current.dirty, true);
+  remounted.store.closePath("retained.txt");
+  assert.equal(model.isDisposed(), true);
+  assert.equal(current.model, undefined);
+  assert.equal(current.disposable, undefined);
+  assert.equal(current.contentRevision, revision + 1);
+  await open(remounted.store, "reset.txt");
+  const resetTab = tab(workspaceId);
+  const resetModel = resetTab.model!;
+  remounted.store.reset();
+  assert.equal(resetModel.isDisposed(), true);
+  assert.equal(resetTab.model, undefined);
+  assert.equal(resetTab.disposable, undefined);
+});
+
+test("刷新保留 model 并递增内容修订，保存基线同步到读取结果", async () => {
+  const { store, workspaceId } = setup();
+  await open(store, "refresh.txt");
+  const current = tab(workspaceId);
+  const model = current.model!;
+  const revision = current.contentRevision!;
+  requestHandler = (type) => type === "read-text" ? {
+    path: "refresh.txt", previewable: true, content: "refreshed text", language: "plaintext",
+    version: { size: 14, mtimeMs: 2 }
+  } : undefined;
+  await refresh?.();
+  await settle();
+  assert.equal(current.model, model);
+  assert.equal(model.getValue(), "refreshed text");
+  assert.equal(current.savedContent, "refreshed text");
+  assert.equal(current.contentRevision, revision + 1);
+  assert.equal(current.dirty, false);
+});
+
+test("切换 active Tab 尚未挂载新 model 时失焦保存仍属于原文档", async () => {
+  const { store, workspaceId } = setup();
+  await open(store, "previous.txt");
+  const previous = tab(workspaceId);
+  await open(store, "next.txt");
+  const next = tab(workspaceId);
+  store.setActiveTabKey(previous.key);
+  await settle();
+  previous.model?.setValue("previous unsaved");
+  next.model?.setValue("next unsaved");
+  store.setActiveTabKey(next.key);
+  blur?.();
+  await settle();
+  const writes = requests.filter((request) => request.type === "write-text");
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0]?.path, "previous.txt");
+  assert.equal(writes[0]?.data.content, "previous unsaved");
+  assert.equal(previous.dirty, false);
+  assert.equal(next.dirty, true);
+});
 
 test("编辑器显式加载真实 Monaco 查找动作及控制器，不依赖其他工具注册", () => {
   const actionIds = EditorExtensionsRegistry.getEditorActions().map((action) => action.id);
@@ -839,3 +992,289 @@ test("关闭最后一个文件审查Diff标签后自动最小化右侧编辑器"
   assert.equal(store.tabs.length, 0);
   assert.deepEqual(minimized.slice(before), ["editor"]);
 });
+
+for (const path of ["docs/README.md", "docs/README.MD"]) {
+  test(`Markdown ${path} 默认预览且共享悬浮区单个 SwapOutlined 按钮、固定 Tooltip`, async () => {
+    const { wrapper, store } = setup();
+    requestHandler = (type) => type === "read-text" ? { path, previewable: true, content: "# Heading\n\nbody", version: { size: 15, mtimeMs: 1 } } : undefined;
+    store.enqueueOpenFile({ path });
+    await settle();
+    assert.equal(wrapper.get("h1").text(), "Heading");
+    assert.equal(wrapper.get("[data-editor-source]").isVisible(), false);
+    assert.equal(wrapper.get("[data-editor-floating-actions]").findAll("button").length, 1);
+    const button = wrapper.get("button[data-editor-preview-toggle]");
+    assert.equal(button.attributes("aria-label"), "源码 / 预览");
+    assert.equal(button.attributes("aria-pressed"), "true");
+    assert.equal(button.find('[aria-label="swap"]').exists(), true);
+    const tooltip = wrapper.findAllComponents(Tooltip).find((item) => item.props("title") === "源码 / 预览");
+    assert.ok(tooltip);
+    await button.trigger("click");
+    await settle();
+    assert.equal(wrapper.get("[data-editor-source]").isVisible(), true);
+    assert.equal(wrapper.get("button[data-editor-preview-toggle]").attributes("aria-pressed"), "false");
+    assert.equal(wrapper.find("[data-editor-markdown-preview]").exists(), false);
+    assert.equal(wrapper.find("button[data-editor-html-preview]").exists(), false);
+    assert.equal(wrapper.find("button[data-editor-diff-next]").exists(), false);
+  });
+}
+
+test("Markdown 连续编辑与 model 重建都预览最新未保存内容，不依赖 dirty 翻转", async () => {
+  const { wrapper, store, workspaceId } = setup();
+  store.enqueueOpenFile({ path: "docs/a.md" });
+  await settle();
+  const current = tab(workspaceId);
+  current.model!.setValue("# first unsaved");
+  await settle();
+  assert.equal(wrapper.get("h1").text(), "first unsaved");
+  assert.equal(current.dirty, true);
+  current.model!.setValue("# second unsaved");
+  await settle();
+  assert.equal(wrapper.get("h1").text(), "second unsaved");
+  assert.equal(current.dirty, true);
+  const previousModel = current.model;
+  store.renamePath("docs/a.md", "docs/b.MD");
+  await settle();
+  assert.notEqual(current.model, previousModel);
+  assert.equal(wrapper.get("h1").text(), "second unsaved");
+  current.model!.setValue("# renamed edit");
+  await settle();
+  assert.equal(wrapper.get("h1").text(), "renamed edit");
+  assert.equal(requests.filter((request) => request.type === "write-text").length, 0);
+});
+
+test("源码切换保留同一 model、撤销历史、视图状态与预览滚动", async () => {
+  const { wrapper, store, workspaceId } = setup();
+  requestHandler = (type) => type === "read-text" ? { path: "a.md", previewable: true, content: "# initial", version: { size: 9, mtimeMs: 1 } } : undefined;
+  store.enqueueOpenFile({ path: "a.md" });
+  await settle();
+  const preview = wrapper.get("[data-editor-markdown-preview]");
+  preview.element.scrollTop = 99;
+  await preview.trigger("scroll");
+  await wrapper.get("button[data-editor-preview-toggle]").trigger("click");
+  await settle();
+  const current = tab(workspaceId);
+  const model = current.model!;
+  model.pushStackElement();
+  model.pushEditOperations([], [{ range: model.getFullModelRange(), text: "# changed" }], () => null);
+  model.pushStackElement();
+  await wrapper.get("button[data-editor-preview-toggle]").trigger("click");
+  await settle();
+  assert.equal(current.model, model);
+  assert.equal(wrapper.get("h1").text(), "changed");
+  assert.equal(wrapper.get("[data-editor-markdown-preview]").element.scrollTop, 99);
+  await wrapper.get("button[data-editor-preview-toggle]").trigger("click");
+  await settle();
+  assert.deepEqual(restoredViewStates.at(-1), sourceViewState);
+  assert.ok(model.canUndo());
+  model.undo();
+  assert.equal(model.getValue(), "# initial");
+  assert.equal(current.dirty, false);
+});
+
+test("每个文档 Tab 独立模式，关闭重开默认预览；Mermaid 共用切换入口", async () => {
+  const { wrapper, store, workspaceId } = setup();
+  store.enqueueOpenFile({ path: "a.md" });
+  await settle();
+  await wrapper.get("button[data-editor-preview-toggle]").trigger("click");
+  await settle();
+  assert.equal(tab(workspaceId).presentationMode, "source");
+  store.enqueueOpenFile({ path: "b.md" });
+  await settle();
+  assert.equal(wrapper.find("[data-editor-markdown-preview]").exists(), true);
+  store.setActiveTabKey("file:a.md");
+  await settle();
+  assert.equal(wrapper.find("[data-editor-markdown-preview]").exists(), false);
+  store.closePath("a.md");
+  store.enqueueOpenFile({ path: "a.md" });
+  await settle();
+  assert.equal(wrapper.find("[data-editor-markdown-preview]").exists(), true);
+  store.enqueueOpenFile({ path: "diagram.mmd" });
+  await settle();
+  assert.equal(wrapper.find("button[data-editor-preview-toggle]").exists(), true);
+  assert.equal(wrapper.find("[data-editor-mermaid-preview]").exists(), true);
+});
+
+test("Markdown 带行号打开优先源码并定位，现有预览 Tab 同样处理", async () => {
+  const { wrapper, store, workspaceId } = setup();
+  store.enqueueOpenFile({ path: "a.md" });
+  await settle();
+  assert.equal(wrapper.find("[data-editor-markdown-preview]").exists(), true);
+  store.enqueueOpenFile({ path: "a.md", line: 1, column: 3 });
+  await settle();
+  assert.equal(wrapper.find("[data-editor-markdown-preview]").exists(), false);
+  assert.equal(tab(workspaceId).presentationMode, "source");
+  assert.deepEqual(positionedModels.at(-1)?.position, { lineNumber: 1, column: 3 });
+  store.enqueueOpenFile({ path: "b.md", line: 1 });
+  await settle();
+  assert.equal(wrapper.get("[data-editor-source]").isVisible(), true);
+  assert.equal(tab(workspaceId).presentationMode, "source");
+});
+
+test("Markdown 只读文件可切换但源码仍只读，文件链接通过 workspace host 打开", async () => {
+  const { wrapper, store, workspaceId } = setup();
+  requestHandler = (type) => type === "read-text" ? { path: "docs/a.md", previewable: true, content: "[file](../src/a.ts)", version: { size: 20, mtimeMs: 1 } } : undefined;
+  store.enqueueOpenFile({ path: "docs/a.md", mode: "preview" });
+  await settle();
+  assert.equal(tab(workspaceId).readOnly, true);
+  await wrapper.get("article a").trigger("click");
+  await settle();
+  assert.deepEqual(toolCalls, [{ from: "editor", to: "editor", call: { type: "editor.openFile", payload: { path: "src/a.ts", mode: "preview" } } }]);
+  await wrapper.get("button[data-editor-preview-toggle]").trigger("click");
+  await settle();
+  assert.equal(editorOptions.at(-1)?.readOnly, true);
+  const current = tab(workspaceId);
+  current.model!.setValue("# readonly edit simulation");
+  blur?.();
+  await settle();
+  assert.equal(requests.filter((request) => request.type === "write-text").length, 0);
+  assert.equal(current.readOnly, true);
+});
+
+for (const failure of ["failed", "conflict"] as const) {
+  test(`Markdown 保存 ${failure} 仍能切回当前内容预览，不要求保存成功`, async () => {
+    const { wrapper, store, workspaceId } = setup();
+    store.enqueueOpenFile({ path: "a.md", line: 1 });
+    await settle();
+    const current = tab(workspaceId);
+    current.model!.setValue("# unsaved preview");
+    requestHandler = (type) => {
+      if (type === "write-text") {
+        if (failure === "failed") throw new Error("offline");
+        throw new AxiosError("Conflict", undefined, undefined, undefined, {
+          data: { message: "File changed" }, status: 409, statusText: "Conflict", headers: {}, config: {} as any
+        });
+      }
+    };
+    blur?.();
+    await settle();
+    assert.equal(current.dirty, true);
+    if (failure === "conflict") assert.equal(current.conflictOpen, true);
+    await wrapper.get("button[data-editor-preview-toggle]").trigger("click");
+    await settle();
+    assert.equal(wrapper.get("h1").text(), "unsaved preview");
+    assert.equal(wrapper.get("button[data-editor-preview-toggle]").attributes("disabled"), undefined);
+  });
+}
+
+test("预览状态不响应隐藏 Monaco 的查找快捷键，切普通文本不遗留悬浮入口", async () => {
+  const { wrapper, store } = setup();
+  store.enqueueOpenFile({ path: "a.md" });
+  await settle();
+  const button = wrapper.get("button[data-editor-preview-toggle]").element as HTMLButtonElement;
+  button.focus();
+  const event = dispatchFindShortcut(button);
+  assert.equal(event.defaultPrevented, false);
+  assert.equal(editorActionRuns.length, 0);
+  store.enqueueOpenFile({ path: "a.txt" });
+  await settle();
+  assert.equal(wrapper.find("button[data-editor-preview-toggle]").exists(), false);
+  assert.equal(wrapper.find("[data-editor-markdown-preview]").exists(), false);
+});
+
+test("重复打开当前源码 Tab 保留最新视图状态，而预览恢复不采集隐藏布局", async () => {
+  const { wrapper, store, workspaceId } = setup();
+  store.enqueueOpenFile({ path: "a.md", line: 1 });
+  await settle();
+  editorCurrentViewState = { ...sourceViewState, viewState: { scrollTop: 120, scrollLeft: 8 } };
+  store.enqueueOpenFile({ path: "a.md" });
+  await settle();
+  assert.deepEqual(restoredViewStates.at(-1), editorCurrentViewState);
+  await wrapper.get("button[data-editor-preview-toggle]").trigger("click");
+  await settle();
+  const savedState = tab(workspaceId).viewState;
+  editorCurrentViewState = { ...sourceViewState, viewState: { scrollTop: 0, scrollLeft: 0 } };
+  await wrapper.get("button[data-editor-preview-toggle]").trigger("click");
+  await settle();
+  assert.deepEqual(restoredViewStates.at(-1), savedState);
+  assert.deepEqual((savedState as any).viewState, { scrollTop: 120, scrollLeft: 8 });
+});
+
+test("切回预览或切 Tab 后，迟到的源码定位/焦点回调不得抢占当前视图", async () => {
+  const originalFrame = globalThis.requestAnimationFrame;
+  const frames: FrameRequestCallback[] = [];
+  globalThis.requestAnimationFrame = (callback) => { frames.push(callback); return frames.length; };
+  try {
+    const { wrapper, store } = setup();
+    store.enqueueOpenFile({ path: "a.md", line: 1 });
+    await settle();
+    assert.ok(frames.length > 0);
+    await wrapper.get("button[data-editor-preview-toggle]").trigger("click");
+    await settle();
+    for (const callback of frames.splice(0)) callback(0);
+    await settle();
+    assert.equal(wrapper.get("button[data-editor-preview-toggle]").attributes("aria-pressed"), "true");
+    assert.equal(editorFocusModels.length, 0);
+    assert.equal(positionedModels.length, 0);
+    await wrapper.get("button[data-editor-preview-toggle]").trigger("click");
+    await settle();
+    store.upsertTab({ kind: "preview", key: "memory", title: "Memory", text: "snapshot", readOnly: true });
+    await settle();
+    for (const callback of frames.splice(0)) callback(0);
+    await settle();
+    assert.equal(editorFocusModels.length, 0);
+    assert.equal(positionedModels.length, 0);
+    assert.equal(wrapper.get("[data-memory-preview]").text(), "snapshot");
+  } finally {
+    globalThis.requestAnimationFrame = originalFrame;
+  }
+});
+
+
+for (const path of ["diagram.mmd", "diagram.MMD", "diagram.mermaid", "diagram.MERMAID"]) {
+  test(`Mermaid ${path} 默认预览、共用单 SwapOutlined 固定 Tooltip，源码切换保留内容及撤销`, async () => {
+    const { wrapper, store, workspaceId } = setup();
+    requestHandler = (type) => type === "read-text" ? { path, previewable: true, content: "flowchart LR\nA-->B", version: { size: 19, mtimeMs: 1 } } : undefined;
+    store.enqueueOpenFile({ path }); await settle();
+    assert.equal(wrapper.get("[data-editor-source]").isVisible(), false);
+    assert.equal(wrapper.get("[data-editor-floating-actions]").findAll("button").length, 1);
+    const button = wrapper.get("button[data-editor-preview-toggle]");
+    assert.equal(button.attributes("aria-label"), "源码 / 预览");
+    assert.ok(button.find('[aria-label="swap"]').exists());
+    assert.ok(wrapper.findAllComponents(Tooltip).some((item) => item.props("title") === "源码 / 预览"));
+    const current = tab(workspaceId); const model = current.model!;
+    await button.trigger("click"); await settle();
+    assert.equal(wrapper.get("[data-editor-source]").isVisible(), true);
+    model.pushStackElement(); model.pushEditOperations([], [{ range: model.getFullModelRange(), text: "flowchart LR\nnew-->B" }], () => null); model.pushStackElement();
+    await button.trigger("click"); await settle();
+    assert.equal(current.model, model);
+    assert.ok(wrapper.get("[data-editor-mermaid-preview]").text().includes("new"));
+    model.undo(); await settle();
+    assert.ok(wrapper.get("[data-editor-mermaid-preview]").text().includes("A-->B"));
+    store.renamePath(path, `renamed.${path.split(".").pop()}`); await settle();
+    const renamed = tab(workspaceId); renamed.model!.setValue("flowchart LR\nrenamed-->B"); await settle();
+    assert.ok(wrapper.get("[data-editor-mermaid-preview]").text().includes("renamed"));
+  });
+}
+
+test("Mermaid 带行号打开源码、只读不写盘，切工作区清除旧文档预览", async () => {
+  const { wrapper, store, workspaceId } = setup();
+  store.enqueueOpenFile({ path: "diagram.mmd", mode: "preview", line: 1 }); await settle();
+  const current = tab(workspaceId);
+  assert.equal(current.presentationMode, "source"); assert.equal(current.readOnly, true);
+  assert.deepEqual(positionedModels.at(-1)?.position, { lineNumber: 1, column: 1 });
+  current.model!.setValue("flowchart LR\nA-->B"); blur?.(); await settle();
+  assert.equal(requests.filter((request) => request.type === "write-text").length, 0);
+  await wrapper.get("button[data-editor-preview-toggle]").trigger("click"); await settle();
+  assert.equal(wrapper.find("[data-editor-mermaid-preview]").exists(), true);
+  const nextWorkspace = `${workspaceId}-next`; workspaceIds.add(nextWorkspace);
+  await wrapper.setProps({ workspaceId: nextWorkspace }); await settle();
+  assert.equal(wrapper.find("[data-editor-mermaid-preview]").exists(), false);
+  assert.equal(wrapper.find("button[data-editor-preview-toggle]").exists(), false);
+});
+for (const failure of ["failed", "conflict"] as const) {
+  test(`Mermaid 保存 ${failure} 仍预览当前内容且不要求先保存`, async () => {
+    const { wrapper, store, workspaceId } = setup();
+    store.enqueueOpenFile({ path: "diagram.mermaid", line: 1 }); await settle();
+    const current = tab(workspaceId); current.model!.setValue("flowchart LR\nunsaved-->B");
+    requestHandler = (type) => {
+      if (type !== "write-text") return;
+      if (failure === "failed") throw new Error("offline");
+      throw new AxiosError("Conflict", undefined, undefined, undefined, { data: { message: "File changed" }, status: 409, statusText: "Conflict", headers: {}, config: {} as any });
+    };
+    blur?.(); await settle();
+    assert.equal(current.dirty, true); if (failure === "conflict") assert.equal(current.conflictOpen, true);
+    await wrapper.get("button[data-editor-preview-toggle]").trigger("click"); await settle();
+    assert.ok(wrapper.get("[data-editor-mermaid-preview]").text().includes("unsaved"));
+    assert.equal(wrapper.get("button[data-editor-preview-toggle]").attributes("disabled"), undefined);
+  });
+}
