@@ -1,10 +1,24 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mount } from "@vue/test-utils";
+import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import postcss from "postcss";
+import tailwindcss from "tailwindcss";
+import { mount, type DOMWrapper } from "@vue/test-utils";
 import type { ScheduledTask } from "@agent-workbench/shared";
 import { apiClient } from "@/shared/api";
 import { workspaceHostKey } from "@/features/workspace/host";
 import ScheduledTasksToolView from "./ScheduledTasksToolView.vue";
+
+// 使用真实 Tailwind 配置校验标题栏样式；不将模拟 DOM 当作浏览器像素测试。
+const source = readFileSync(new URL("ScheduledTasksToolView.vue", import.meta.url), "utf8");
+const tailwindConfig = createRequire(import.meta.url)("../../../../../tailwind.config.cjs");
+const utilities = await postcss([tailwindcss({
+  ...tailwindConfig, content: [{ raw: source, extension: "vue" }]
+})]).process(readFileSync(new URL("../../../../shared/styles/tailwind.css", import.meta.url), "utf8"), { from: undefined });
+const styles = document.createElement("style");
+styles.textContent = utilities.css + (source.match(/<style scoped>([\s\S]*?)<\/style>/)?.[1] ?? "");
+document.head.appendChild(styles);
 
 const stubs={
   "a-button":{emits:["click"],template:"<button :disabled='disabled' @click=\"$emit('click')\"><slot /></button>",props:["disabled"]},
@@ -54,6 +68,7 @@ test("refresh retains second-page selection and Workspace switch ignores old det
       sessionId:null,sessionAvailable:false,runId:null,createdAt:2,startedAt:null,finishedAt:2
     }],nextCursor:null});
     if(url.endsWith("/scheduled-tasks")) {
+      assert.equal(config.params?.status,"all","移除状态选择器后，分页和刷新始终查询全部状态");
       if(workspaceId==="workspace-b")return ok({items:[task(workspaceId,"New")],nextCursor:null});
       if(config.params?.cursor)return ok({items:[task(workspaceId,"Second")],nextCursor:null});
       return ok({items:[task(workspaceId,"First")],nextCursor:"page-2"});
@@ -63,26 +78,88 @@ test("refresh retains second-page selection and Workspace switch ignores old det
     if(url.endsWith("/New"))return ok({task:task(workspaceId,"New")});
     return ok({task:task(workspaceId,"First")});
   }) as typeof adapter;
-  const wrapper=mount(ScheduledTasksToolView,{props:{workspaceId:"workspace-a",toolId:"scheduledTasks"},global:{stubs,provide:{[workspaceHostKey as symbol]:fakeHost()}}});
+  const wrapper=mount(ScheduledTasksToolView,{attachTo:document.body,props:{workspaceId:"workspace-a",toolId:"scheduledTasks"},global:{stubs,provide:{[workspaceHostKey as symbol]:fakeHost()}}});
   try {
     await tick();await tick();
     assert.equal(wrapper.classes().includes("bg-[var(--panel-bg)]"),true);
+    const heading=wrapper.get(".scheduled-tasks-heading");
+    const body=wrapper.get(".scheduled-tasks-body");
+    assert.equal(heading.text(),"定时任务");
+    assert.equal(wrapper.element.firstElementChild,heading.element);
+    assert.equal(heading.element.nextElementSibling,body.element);
+    assert.equal(wrapper.get("aside").element.parentElement,body.element);
+    assert.equal(wrapper.get("main").element.parentElement,body.element,"标题横跨列表和详情，而不是只属于侧栏");
+    const root=wrapper.element as HTMLElement;
+    root.style.setProperty("--panel-bg-elevated","rgb(32, 32, 32)");
+    root.style.setProperty("--text-color","rgb(230, 230, 230)");
+    root.style.setProperty("--border-color-secondary","rgb(64, 64, 64)");
+    const headingStyle=getComputedStyle(heading.element);
+    const rem=parseFloat(getComputedStyle(document.documentElement).fontSize)||16;
+    const pixels=(value:string)=>parseFloat(value)*(value.endsWith("rem")?rem:1);
+    assert.equal(headingStyle.height,"37px");
+    assert.equal(headingStyle.boxSizing,"border-box");
+    assert.equal(headingStyle.flexShrink,"0");
+    assert.equal(pixels(headingStyle.fontSize),12);
+    assert.equal(headingStyle.fontWeight,"600");
+    assert.equal(pixels(headingStyle.paddingLeft),12);
+    assert.equal(headingStyle.color,"rgb(230, 230, 230)");
+    assert.equal(headingStyle.backgroundColor,"rgb(32, 32, 32)");
+    assert.equal(headingStyle.borderBottomWidth,"1px");
+    assert.equal(headingStyle.borderBottomColor,"rgb(64, 64, 64)");
+    assert.equal(getComputedStyle(body.element).minHeight,"0px");
+    assert.equal(getComputedStyle(wrapper.get("aside").element).minHeight,"0px");
+    assert.equal(heading.find("button").exists(),false,"创建按钮移至搜索行");
+    assert.equal(wrapper.find('[aria-label="任务状态"]').exists(),false);
     assert.equal(wrapper.findAll(".scheduled-task-card")[0]!.classes().includes("is-selected"),true);
     assert.match(wrapper.get("main h2").text(),/First private/);
     assert.doesNotMatch(wrapper.text(),/选择任务查看详情/);
     const createButton=wrapper.findAll("button").find((button)=>button.text()==="创建任务")!;
     assert.equal(createButton.classes().includes("!w-[108px]"),true);
-    assert.equal(wrapper.get('[aria-label="任务状态"]').classes().includes("!w-[108px]"),true);
+    const toolbar=wrapper.get(".scheduled-tasks-toolbar");
+    assert.equal(createButton.element.parentElement,toolbar.element);
+    assert.equal(wrapper.get('input[aria-label="搜索任务名称"]').element.parentElement,toolbar.element);
+    assert.equal(getComputedStyle(toolbar.element).display,"flex");
+    assert.notEqual(getComputedStyle(toolbar.element).flexWrap,"wrap","窄栏中搜索框收缩、按钮保持同一行");
+    assert.equal(getComputedStyle(createButton.element).flexShrink,"0");
     await wrapper.findAll("button").find((button)=>button.text()==="加载更多")!.trigger("click");
     await tick();await tick();
     const firstCard=wrapper.findAll("button").find((button)=>button.text().includes("First private"))!;
     assert.equal(firstCard.classes().includes("scheduled-task-card"),true);
     assert.equal(firstCard.classes().includes("is-selected"),true);
+    const selectedBackground="bg-[color-mix(in_srgb,var(--info-color)_20%,var(--panel-bg))]";
+    const selectedBorder="border-l-[var(--info-color)]";
+    const hoverBackground="hover:bg-[var(--hover-bg)]";
+    const repositorySource=readFileSync(new URL("../code-review/CodeReviewToolView.vue",import.meta.url),"utf8");
+    assert.ok(repositorySource.includes(selectedBackground),"仓库列表为选中背景的对齐依据");
+    assert.ok(repositorySource.includes(selectedBorder));
+    assert.ok(repositorySource.includes(hoverBackground));
+    root.style.setProperty("--info-color","rgb(22, 119, 255)");
+    const assertSelectedStyle=(card:DOMWrapper<Element>)=>{
+      assert.ok(card.classes().includes(selectedBackground));
+      assert.ok(card.classes().includes(selectedBorder));
+      assert.ok(!card.classes().includes(hoverBackground),"悬停时保留选中背景");
+      const style=getComputedStyle(card.element);
+      assert.equal(style.borderLeftWidth,"2px");
+      assert.equal(style.borderLeftColor,"rgb(22, 119, 255)");
+      assert.equal(style.borderRadius,"0px");
+      assert.equal(style.boxSizing,"border-box");
+      for(const side of ["Top","Right","Bottom"] as const)assert.equal(parseFloat(style[`border${side}Width`])||0,0,"去掉卡片四周边框");
+      assert.equal(parseFloat(style.marginBottom)||0,0,"移除行间卡片间距");
+    };
+    const listStyle=getComputedStyle(wrapper.get('[aria-label="任务列表"]').element);
+    assert.equal(listStyle.padding,"0px","选中背景铺满列表宽度，不保留卡片外侧留白");
+    assertSelectedStyle(firstCard);
     await wrapper.findAll("button").find((button)=>button.text().includes("Second private"))!.trigger("click");
     await tick();await tick();
     assert.equal(wrapper.get(".scheduled-task-tabs").classes().includes("mt-4"),false);
     assert.equal(wrapper.findAll("button").find((button)=>button.text().includes("Second private"))!.classes().includes("is-selected"),true);
     assert.equal(firstCard.classes().includes("is-selected"),false);
+    assertSelectedStyle(wrapper.findAll(".scheduled-task-card").find((card)=>card.text().includes("Second private"))!);
+    assert.ok(!firstCard.classes().includes(selectedBackground));
+    assert.ok(firstCard.classes().includes(hoverBackground));
+    assert.ok(firstCard.classes().includes("bg-transparent"));
+    assert.ok(firstCard.classes().includes("border-l-transparent"));
+    assert.equal(getComputedStyle(firstCard.element).borderLeftWidth,"2px","切换选中时保持边框占位，文字不跳动");
     assert.match(wrapper.text(),/Second private/);
     assert.match(wrapper.get('[aria-label="最近执行"]').text(),/已跳过/);
     assert.deepEqual(wrapper.findAll(".detail-panel-heading").map((heading)=>heading.text()),
@@ -161,11 +238,13 @@ test("clock timer failure during mount does not freeze task loading, search or c
   }) as typeof adapter;
   let wrapper:ReturnType<typeof mount> | undefined;
   try {
-    wrapper=mount(ScheduledTasksToolView,{props:{workspaceId:"workspace-a",toolId:"scheduledTasks"},global:{stubs,provide:{[workspaceHostKey as symbol]:fakeHost()}}});
+    wrapper=mount(ScheduledTasksToolView,{attachTo:document.body,props:{workspaceId:"workspace-a",toolId:"scheduledTasks"},global:{stubs,provide:{[workspaceHostKey as symbol]:fakeHost()}}});
+    (wrapper.element as HTMLElement).style.setProperty("--text-tertiary","rgb(128, 128, 128)");
     await tick();await tick();
     assert.equal(agentCalls,1);
     assert.equal(listCalls,1);
     assert.match(wrapper.text(),/First private/);
+    assert.equal(wrapper.find(".scheduled-tasks-empty").exists(),false,"有任务时不显示空态");
     await wrapper.find('input[aria-label="搜索任务名称"]').setValue("First");
     await wrapper.findAll("button").find((button)=>button.text()==="创建任务")!.trigger("click");
     assert.equal(wrapper.get('[data-testid="drawer"]').attributes("data-open"),"true");
@@ -174,6 +253,16 @@ test("clock timer failure during mount does not freeze task loading, search or c
     await wrapper.setProps({workspaceId:"workspace-empty"});
     await tick();await tick();
     assert.equal(wrapper.findAll(".scheduled-task-card").length,0);
+    const empty=wrapper.get('[aria-label="任务列表"] .scheduled-tasks-empty');
+    assert.equal(empty.text(),"暂无任务");
+    assert.equal(empty.element.children.length,0,"空态只保留文字，不渲染插图");
+    const emptyStyle=getComputedStyle(empty.element);
+    assert.equal(emptyStyle.height,"100%","空态占满列表可用高度");
+    assert.equal(emptyStyle.display,"flex");
+    assert.equal(emptyStyle.alignItems,"center");
+    assert.equal(emptyStyle.justifyContent,"center");
+    assert.equal(emptyStyle.fontSize,"12px");
+    assert.equal(emptyStyle.color,"rgb(128, 128, 128)","与代码审查空态使用同一淡色变量");
     assert.equal(wrapper.find("main h2").exists(),false);
     assert.doesNotMatch(wrapper.text(),/选择任务查看详情/);
   }finally{

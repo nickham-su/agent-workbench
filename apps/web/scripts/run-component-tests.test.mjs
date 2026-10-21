@@ -89,14 +89,15 @@ test("bootstrap file URL safely handles spaces and preserves inherited Node opti
   assert.equal(env.NODE_OPTIONS, "--trace-warnings");
 });
 
-test("default component list contains twenty-five unique files including document previews, multi-repository review and Git identity regressions", () => {
-  assert.equal(componentTests.length, 25);
-  assert.equal(new Set(componentTests).size, 25);
+test("default component list contains twenty-six unique files including search, document previews, multi-repository review and Git identity regressions", () => {
+  assert.equal(componentTests.length, 26);
+  assert.equal(new Set(componentTests).size, 26);
   assert.ok(componentTests.includes("src/features/workspace/WorkspaceLayout.component.test.ts"));
   assert.ok(componentTests.includes("src/features/workspace/tools/code-review/CodeReviewState.component.test.ts"));
   assert.ok(componentTests.includes("src/features/workspace/tools/code-review/CodeReviewToolView.component.test.ts"));
   assert.ok(componentTests.includes("src/shared/components/GitIdentityModal.component.test.ts"));
   assert.ok(componentTests.includes("src/features/workspace/tools/file-explorer/FileExplorerToolView.component.test.ts"));
+  assert.ok(componentTests.includes("src/features/workspace/tools/search/SearchToolView.component.test.ts"));
   assert.ok(componentTests.includes("src/features/settings/components/AgentProfilesSettingsPanel.component.test.ts"));
   assert.ok(componentTests.includes("src/features/workspace/tools/terminal/TerminalView.component.test.ts"));
   assert.ok(componentTests.includes("src/features/workspace/tools/agent/agentMarkdownFileLinks.component.test.ts"));

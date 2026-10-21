@@ -53,8 +53,8 @@
           </div>
           <a-dropdown v-for="f in unstagedFiles" :key="`u:${f.path}`" :trigger="['contextmenu']" class="block">
             <div
-                class="group w-full text-left pl-3 pr-1 py-1.5 hover:bg-[var(--hover-bg)] cursor-pointer"
-                :class="isSelected('unstaged', f.path) ? 'bg-[var(--fill-secondary)] border-l-2 border-l-[var(--info-color)]' : 'border-l-2 border-l-transparent'"
+                class="group w-full text-left pl-3 pr-1 py-1.5 cursor-pointer"
+                :class="isSelected('unstaged', f.path) ? 'bg-[color-mix(in_srgb,var(--info-color)_20%,var(--panel-bg))] border-l-2 border-l-[var(--info-color)]' : 'hover:bg-[var(--hover-bg)] border-l-2 border-l-transparent'"
                 @click="selectFile('unstaged', f.path, f.oldPath)"
                 @contextmenu.prevent="selectFile('unstaged', f.path, f.oldPath, false)"
             >
@@ -146,8 +146,8 @@
           </div>
           <a-dropdown v-for="f in stagedFiles" :key="`s:${f.path}`" :trigger="['contextmenu']" class="block">
             <div
-                class="group w-full text-left pl-3 pr-1 py-1.5 hover:bg-[var(--hover-bg)] cursor-pointer"
-                :class="isSelected('staged', f.path) ? 'bg-[var(--fill-secondary)] border-l-2 border-l-[var(--info-color)]' : 'border-l-2 border-l-transparent'"
+                class="group w-full text-left pl-3 pr-1 py-1.5 cursor-pointer"
+                :class="isSelected('staged', f.path) ? 'bg-[color-mix(in_srgb,var(--info-color)_20%,var(--panel-bg))] border-l-2 border-l-[var(--info-color)]' : 'hover:bg-[var(--hover-bg)] border-l-2 border-l-transparent'"
                 @click="selectFile('staged', f.path, f.oldPath)"
                 @contextmenu.prevent="selectFile('staged', f.path, f.oldPath, false)"
             >

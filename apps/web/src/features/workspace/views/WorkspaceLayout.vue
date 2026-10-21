@@ -1,8 +1,11 @@
 <template>
-  <a-layout class="min-h-screen !bg-[var(--app-bg)]">
-    <WorkspaceHeader :workspace="workspace" :header-action-groups="headerActionGroups" />
+  <a-layout class="h-screen !bg-[var(--app-bg)]">
+    <WorkspaceHeader v-if="headerActionGroups.length > 0" :workspace="workspace" :header-action-groups="headerActionGroups" />
 
-    <a-layout-content class="p-0 h-[calc(100vh-64px)] border-t border-[var(--border-color-secondary)]">
+    <a-layout-content
+      class="p-0 flex-1 min-h-0"
+      :class="{ 'border-t border-[var(--border-color-secondary)]': headerActionGroups.length > 0 }"
+    >
       <WorkspaceDock
         :left-top-toolbar-tool-ids="leftTopToolbarToolIds"
         :left-bottom-toolbar-tool-ids="leftBottomToolbarToolIds"

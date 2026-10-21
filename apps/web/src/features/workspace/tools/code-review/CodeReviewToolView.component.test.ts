@@ -7,7 +7,7 @@ import tailwindcss from "tailwindcss";
 import { defineComponent, h, KeepAlive, nextTick, ref } from "vue";
 import { mount, shallowMount, type VueWrapper } from "@vue/test-utils";
 import { createI18n } from "vue-i18n";
-import { Dropdown, Menu, message } from "ant-design-vue";
+import { Button, Dropdown, Menu, message } from "ant-design-vue";
 import type { ChangeItem, GitTarget, WorkspaceDetail, WorkspaceGitStatusResponse } from "@agent-workbench/shared";
 import { apiClient } from "@/shared/api";
 import zhCN from "@/shared/i18n/locales/zh-CN";
@@ -66,7 +66,7 @@ const stubs = {
   "a-layout": { template: "<div><slot /></div>" }, "a-layout-content": { template: "<div><slot /></div>" },
   "a-select": true, "a-menu": true, "a-menu-item": true, "a-menu-divider": true, "a-divider": true, WorkspaceDock: true
 };
-function mountTool(overrides: Record<string, unknown> = {}, renderPanel = false) {
+function mountTool(overrides: Record<string, unknown> = {}, renderPanel = false, renderButtons = false) {
   const calls: Array<{ action: string; target: GitTarget }> = [];
   const selected: string[] = [];
   const wrapper = mount(Tool, {
@@ -77,7 +77,7 @@ function mountTool(overrides: Record<string, unknown> = {}, renderPanel = false)
       pull: async (target) => { calls.push({ action: "pull", target }); },
       push: async (target) => { calls.push({ action: "push", target }); }, ...overrides },
     global: { plugins: [i18n()], components: { ADropdown: Dropdown, AMenu: Menu, AMenuItem: Menu.Item },
-      stubs: renderPanel ? { ...stubs, GitIdentityModal: true, CodeReviewPanel: false } : { CodeReviewPanel: true }, provide: { [workspaceHostKey as symbol]: host } }
+      stubs: renderPanel ? { ...stubs, "a-button": renderButtons ? Button : stubs["a-button"], GitIdentityModal: true, CodeReviewPanel: false } : { CodeReviewPanel: true }, provide: { [workspaceHostKey as symbol]: host } }
   });
   wrappers.push(wrapper);
   return { wrapper, calls, selected };
@@ -99,13 +99,34 @@ function dragTo(wrapper: VueWrapper, width: number) {
   pointer(wrapper.get(".review-repo-divider").element, "pointerdown", { clientX: displayedRepoWidth(wrapper) });
   pointer(window, "pointermove", { clientX: width });
 }
-function repositoryStyle(wrapper: VueWrapper) {
-  const element = wrapper.get(".review-repositories").element;
+function reviewStyle(wrapper: VueWrapper, selector: string) {
+  const element = wrapper.get(selector).element;
   // happy-dom caches ancestor selectors on grandchildren after a root class
   // change. Invalidate that cache, without changing any production style rule.
   element.classList.add("css-contract-probe");
   element.classList.remove("css-contract-probe");
   return getComputedStyle(element);
+}
+function repositoryStyle(wrapper: VueWrapper) {
+  return reviewStyle(wrapper, ".review-repositories");
+}
+function assertWideHeadingLayout(wrapper: VueWrapper, width: number) {
+  const body = wrapper.get(".review-body");
+  assert.equal(wrapper.findAll(".review-tool-heading").length, 1);
+  assert.equal(wrapper.get(".review-tool-heading").element.parentElement, body.element);
+  assert.equal(getComputedStyle(wrapper.element).gridTemplateRows, "minmax(0, 1fr)", "no full-width heading track");
+  assert.equal(getComputedStyle(body.element).gridTemplateRows, "37px minmax(0, 1fr)");
+  assert.equal(getComputedStyle(body.element).gridTemplateColumns, `${width}px minmax(0, 1fr)`);
+  const heading = reviewStyle(wrapper, ".review-tool-heading");
+  const list = repositoryStyle(wrapper);
+  const changes = reviewStyle(wrapper, ".review-changes-region");
+  assert.equal(heading.gridColumn, "1"); assert.equal(heading.gridRow, "1");
+  assert.equal(list.gridColumn, "1"); assert.equal(list.gridRow, "2");
+  assert.equal(changes.gridColumn, "2"); assert.equal(changes.gridRow, "1 / 3", "changes start at the top and span both rows");
+  const divider = wrapper.get(".review-repo-divider");
+  assert.equal(divider.element.parentElement, body.element);
+  assert.equal(getComputedStyle(divider.element).top, "0px");
+  assert.equal(getComputedStyle(divider.element).bottom, "0px", "divider covers the heading as well as the list");
 }
 function mountPanel(overrides: Record<string, unknown> = {}, locale = "zh-CN") {
   const wrapper = shallowMount(Panel, {
@@ -285,7 +306,15 @@ test("仓库行复用文件行的整行矩形、间距、hover及选中蓝线样
   const fileRow = panel.get(".review-file-list .group");
   state(panel).selectFile("unstaged", "src/work.ts", undefined, false); await nextTick();
   const fileStyle = getComputedStyle(fileRow.element);
-  const sharedClasses = ["w-full", "text-left", "pl-3", "pr-1", "py-1.5", "hover:bg-[var(--hover-bg)]", "border-l-2", "bg-[var(--fill-secondary)]", "border-l-[var(--info-color)]"];
+  const selectedBackground = "bg-[color-mix(in_srgb,var(--info-color)_20%,var(--panel-bg))]";
+  const hoverBackground = "hover:bg-[var(--hover-bg)]";
+  const sharedClasses = ["w-full", "text-left", "pl-3", "pr-1", "py-1.5", "border-l-2", selectedBackground, "border-l-[var(--info-color)]"];
+  const backgrounds: string[] = [];
+  utilities.root.walkDecls("background-color", (declaration) => { backgrounds.push(declaration.value); });
+  assert.ok(backgrounds.includes("color-mix(in srgb,var(--info-color) 20%,var(--panel-bg))"), "Tailwind generates the stronger, theme-aware selection background");
+  assert.ok(!fileRow.classes().includes(hoverBackground), "hover cannot wash out the selected file background");
+  const stagedRow = panel.findAll(".review-file-list .group")[1]!;
+  assert.ok(stagedRow.classes().includes(hoverBackground));
   for (const width of [479, 480, 639]) {
     resize(wrapper, width); await nextTick();
     const row = wrapper.get(".review-repository.selected");
@@ -297,6 +326,7 @@ test("仓库行复用文件行的整行矩形、间距、hover及选中蓝线样
     for (const property of ["width", "paddingTop", "paddingBottom", "paddingLeft", "paddingRight", "borderLeftWidth", "borderLeftColor", "backgroundColor"] as const) {
       assert.equal(rowStyle[property], fileStyle[property], `${width}px: ${property}`);
     }
+    assert.ok(!row.classes().includes(hoverBackground), "hover cannot wash out the selected repository background");
     assert.equal(rowStyle.borderLeftWidth, "2px");
     assert.equal(rowStyle.gap, "8px");
     assert.equal(rowStyle.boxSizing, "border-box");
@@ -316,8 +346,14 @@ test("仓库行复用文件行的整行矩形、间距、hover及选中蓝线样
     assert.equal(getComputedStyle(wrapper.get(".review-repo-more").element).height, "24px");
     const unselected = wrapper.get('[data-repo="repo-2"]');
     assert.ok(unselected.classes().includes("border-l-transparent"));
-    assert.ok(!unselected.classes().includes("bg-[var(--fill-secondary)]"));
+    assert.ok(!unselected.classes().includes(selectedBackground));
+    assert.ok(unselected.classes().includes(hoverBackground));
   }
+  state(panel).selectFile("staged", "src/staged.ts", undefined, false); await nextTick();
+  assert.ok(stagedRow.classes().includes(selectedBackground), "staged files use the same stronger background");
+  assert.ok(!stagedRow.classes().includes(hoverBackground));
+  assert.ok(!fileRow.classes().includes(selectedBackground), "the previous file loses its selection background");
+  assert.ok(fileRow.classes().includes(hoverBackground));
 });
 
 test("长目录、超长文件名和重命名在两组内均可收缩省略，标题及操作保留自身宽度", async () => {
@@ -444,7 +480,7 @@ test("窄布局少量仓库按内容自然收缩，上限基于整个标题下�
     const bodyStyle = getComputedStyle(wrapper.get(".review-body").element);
     const listStyle = repositoryStyle(wrapper);
     assert.equal(rootStyle.height, "100%");
-    assert.equal(rootStyle.gridTemplateRows, "43px minmax(0, 1fr)");
+    assert.equal(rootStyle.gridTemplateRows, "37px minmax(0, 1fr)");
     assert.equal(bodyStyle.height, "100%", "definite full remaining track for percentage cap");
     assert.equal(bodyStyle.display, "flex"); assert.equal(bodyStyle.flexDirection, "column");
     assert.equal(bodyStyle.gridTemplateRows, "", "no fixed 1:2 grid areas");
@@ -472,7 +508,7 @@ test("多仓库窄布局封顶三分之一且内滚动，切到宽布局解除�
   resize(wrapper, 480); await nextTick(); assert.equal(wrapper.classes().includes("review-wide"), true);
   assert.equal(getComputedStyle(wrapper.get(".review-body").element).display, "grid");
   assert.equal(getComputedStyle(wrapper.get(".review-body").element).height, "100%");
-  assert.equal(getComputedStyle(wrapper.get(".review-body").element).gridTemplateRows, "minmax(0, 1fr)");
+  assert.equal(getComputedStyle(wrapper.get(".review-body").element).gridTemplateRows, "37px minmax(0, 1fr)");
   assert.equal(getComputedStyle(wrapper.get(".review-body").element).gridTemplateColumns, "264px minmax(0, 1fr)");
   assert.equal(repositoryStyle(wrapper).maxHeight, "none");
   resize(wrapper, 639); await nextTick(); assert.equal(wrapper.classes().includes("review-wide"), true);
@@ -488,6 +524,101 @@ test("多仓库窄布局封顶三分之一且内滚动，切到宽布局解除�
   }
   assert.equal(panel.findAll(".review-change-heading")[0]!.text().includes("未暂存"), true);
   assert.equal(panel.findAll(".review-change-heading")[1]!.text().includes("已暂存"), true);
+});
+
+test("仓库、未暂存和已暂存标题统一字号、字重、颜色和左距，并保持等高同背景", async () => {
+  const { wrapper } = mountTool({}, true, true);
+  const root = wrapper.element as HTMLElement;
+  root.style.color = "var(--text-color)";
+  root.style.setProperty("--border-color-secondary", "rgb(64, 64, 64)");
+  await settle();
+  const panel = wrapper.findComponent(Panel);
+  const unstaged = panel.get(".review-change-heading");
+  const control = unstaged.getComponent(Button);
+  assert.equal(control.props("size"), "small");
+  const headingStyle = getComputedStyle(unstaged.element);
+  const buttonStyle = getComputedStyle(control.element);
+  assert.equal(buttonStyle.height, "24px", "use the real Ant small action control, not its DOM stub");
+  assert.equal(buttonStyle.boxSizing, "border-box", "control height includes its own border and padding");
+  const rem = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+  const pixels = (value: string) => parseFloat(value) * (value.endsWith("rem") ? rem : 1);
+  const changeHeadingHeight = pixels(buttonStyle.height) + pixels(headingStyle.paddingTop)
+    + pixels(headingStyle.paddingBottom) + pixels(headingStyle.borderBottomWidth);
+  assert.equal(changeHeadingHeight, 37);
+  const expectedRows = `${changeHeadingHeight}px minmax(0, 1fr)`;
+  for (const width of [479, 480, 900, 479]) {
+    resize(wrapper, width); await nextTick();
+    const repositoryHeading = reviewStyle(wrapper, ".review-tool-heading");
+    assert.equal(repositoryHeading.boxSizing, "border-box");
+    assert.equal(repositoryHeading.borderBottomWidth, headingStyle.borderBottomWidth);
+    assert.equal(pixels(repositoryHeading.fontSize), 12);
+    assert.equal(repositoryHeading.fontWeight, "600");
+    assert.equal(pixels(repositoryHeading.paddingLeft), 12);
+    for (const heading of panel.findAll(".review-change-heading")) {
+      const titleStyle = getComputedStyle(heading.get(".font-semibold").element);
+      assert.equal(pixels(titleStyle.fontSize), 12);
+      assert.equal(titleStyle.fontWeight, repositoryHeading.fontWeight);
+      assert.equal(pixels(getComputedStyle(heading.element).paddingLeft), 12);
+    }
+    const grid = width >= 480 ? wrapper.get(".review-body").element : wrapper.element;
+    assert.equal(getComputedStyle(grid).gridTemplateRows, expectedRows, `${width}px: reserve the full matching heading height`);
+    if (width < 480) assert.equal(repositoryStyle(wrapper).maxHeight, "calc(100% / 3)");
+    for (const background of ["rgb(32, 32, 32)", "rgb(240, 240, 240)"]) {
+      root.style.setProperty("--panel-bg", "rgb(0, 0, 0)");
+      root.style.setProperty("--panel-bg-elevated", background);
+      const foreground = background === "rgb(32, 32, 32)" ? "rgb(230, 230, 230)" : "rgb(30, 30, 30)";
+      root.style.setProperty("--text-color", foreground);
+      const repositoryBackground = reviewStyle(wrapper, ".review-tool-heading").backgroundColor;
+      assert.equal(repositoryBackground, background, "repository heading follows the elevated theme variable");
+      assert.equal(repositoryBackground, reviewStyle(panel, ".review-change-heading").backgroundColor);
+      assert.equal(reviewStyle(wrapper, ".review-tool-heading").color, foreground);
+      for (const heading of panel.findAll(".review-change-heading")) {
+        assert.equal(getComputedStyle(heading.get(".font-semibold").element).color, foreground);
+      }
+    }
+  }
+});
+
+test("宽布局仓库标题仅在左列，变更区从顶部跨满两行且宽窄切换始终只有一个标题", async () => {
+  const { wrapper } = mountTool(); await settle();
+  for (const width of [479, 480, 479, 900, 479]) {
+    resize(wrapper, width); await nextTick();
+    assert.equal(wrapper.findAll(".review-tool-heading").length, 1);
+    assert.equal(wrapper.get(".review-tool-heading").text(), zhCN.codeReview.repositories.title);
+    if (width >= 480) assertWideHeadingLayout(wrapper, 264);
+    else {
+      assert.equal(wrapper.get(".review-tool-heading").element.parentElement, wrapper.element);
+      assert.equal(getComputedStyle(wrapper.element).gridTemplateRows, "37px minmax(0, 1fr)");
+      assert.equal(reviewStyle(wrapper, ".review-body").display, "flex");
+      assert.equal(repositoryStyle(wrapper).maxHeight, "calc(100% / 3)");
+      assert.equal(reviewStyle(wrapper, ".review-changes-region").gridRow, "");
+    }
+  }
+});
+
+test("拖动和键盘调整后标题与列表共享同一列，切回宽布局保留同步宽度", async () => {
+  const { wrapper } = mountTool(); await settle(); resize(wrapper, 900); await nextTick();
+  assertWideHeadingLayout(wrapper, 264);
+  dragTo(wrapper, 350); await nextTick(); assertWideHeadingLayout(wrapper, 350);
+  pointer(window, "pointerup"); await nextTick();
+  await wrapper.get(".review-repo-divider").trigger("keydown", { key: "ArrowRight" });
+  assertWideHeadingLayout(wrapper, 360);
+  assert.equal(localStorage.getItem(repoWidthKey()), "360");
+  resize(wrapper, 479); await nextTick(); resize(wrapper, 900); await nextTick();
+  assertWideHeadingLayout(wrapper, 360);
+});
+
+test("宽布局未选择仓库时空态从右列顶部开始，移除仓库后保留标题和无仓库空态", async () => {
+  const { wrapper } = mountTool({ target: null }); await settle(); resize(wrapper, 900); await nextTick();
+  assertWideHeadingLayout(wrapper, 264);
+  assert.equal(wrapper.get(".review-changes-region .review-empty").text(), zhCN.codeReview.placeholder.selectRepo);
+  await wrapper.setProps({ repos: [] });
+  assert.equal(wrapper.findAll(".review-tool-heading").length, 1);
+  assert.equal(wrapper.get(".review-tool-heading").element.parentElement, wrapper.element);
+  assert.equal(getComputedStyle(wrapper.element).gridTemplateRows, "37px minmax(0, 1fr)");
+  assert.equal(wrapper.get(".review-empty").text(), zhCN.codeReview.placeholder.noRepos);
+  assert.equal(wrapper.find(".review-body").exists(), false);
+  assert.equal(wrapper.find(".review-repo-divider").exists(), false);
 });
 
 test("内部宽布局分隔线默认264px，透明6px命中区不占列，窄布局隐藏", async () => {
@@ -529,7 +660,9 @@ test("480px已为宽布局，默认264px且拖动保持仓库与变更区双侧�
 
 test("主指针仅调整内部列，两侧至少200px，阻止外层启动且松开只保存一次", async () => {
   const { wrapper } = mountTool(); await settle(); resize(wrapper, 900); await nextTick();
-  const write = mock.method(window.Storage.prototype, "setItem");
+  // happy-dom binds storage methods to the instance on first access, so a
+  // prototype spy would depend on whether an earlier test already saved a width.
+  const write = mock.method(localStorage, "setItem");
   document.body.style.userSelect = "text"; document.body.style.cursor = "crosshair";
   let outsideStarts = 0;
   wrapper.element.addEventListener("pointerdown", () => outsideStarts++);
@@ -606,7 +739,7 @@ test("非法宽度和读取异常回退默认值，缓存写入异常不影响�
 
 test("自动限制和宽窄切换仅影响显示，不写回或丢失原宽度偏好", async () => {
   localStorage.setItem(repoWidthKey(), "1200");
-  const write = mock.method(window.Storage.prototype, "setItem");
+  const write = mock.method(localStorage, "setItem");
   const { wrapper } = mountTool(); await settle(); resize(wrapper, 480); await nextTick();
   assert.equal(displayedRepoWidth(wrapper), 280);
   resize(wrapper, 1000); await nextTick(); assert.equal(displayedRepoWidth(wrapper), 800);
@@ -717,20 +850,19 @@ test("目录和子模块有非文本图标说明，不能以普通编辑文件�
   for (const file of files.unstaged!) assert.equal(vm.isOpenFileDisabled(file), true);
 });
 
-test("页头仅保留Workspace及非Git操作，选中仓库不影响标题和其他工具范围", async () => {
+test("无工具操作时隐藏页头，选中仓库不影响标题和其他工具范围", async () => {
   const layout = shallowMount(Layout, { props: { workspaceId: wsId, previewEnabled: false }, global: { plugins: [i18n()], stubs } });
   wrappers.push(layout); await settle();
   const dock = () => layout.findComponent({ name: "WorkspaceDock" }).props() as any;
-  const headerProps = () => layout.findComponent(Header).props() as any;
-  assert.deepEqual(Object.keys(headerProps()).sort(), ["headerActionGroups", "workspace"]);
-  assert.equal(headerProps().headerActionGroups.some((group: any) => group.key === "always:codeReview"), false);
+  assert.equal(layout.findComponent(Header).exists(), false);
   assert.equal(document.title, `Review workspace - ${zhCN.app.title}`);
   const beforeAgent = dock().toolViewProps("agent"), beforeFiles = dock().toolViewProps("files"), beforeTerminal = dock().toolViewProps("terminal");
   dock().toolViewProps("codeReview").selectRepo("repo-8"); await settle();
   assert.equal(document.title, `Review workspace - ${zhCN.app.title}`);
   assert.deepEqual(dock().toolViewProps("agent"), beforeAgent); assert.deepEqual(dock().toolViewProps("files"), beforeFiles); assert.deepEqual(dock().toolViewProps("terminal"), beforeTerminal);
+  assert.equal(layout.findComponent(Header).exists(), false);
   const actions: string[] = [];
-  const header = shallowMount(Header, { props: { workspace: headerProps().workspace, headerActionGroups: [{ key: "editor", actions: [{ id: "next", label: "下一处变更", onClick: () => actions.push("next") }] }] }, global: { plugins: [i18n()], stubs: { "a-layout-header": { template: "<header><slot /></header>" }, ...stubs } } });
+  const header = shallowMount(Header, { props: { workspace: state(layout).workspace, headerActionGroups: [{ key: "editor", actions: [{ id: "next", label: "下一处变更", onClick: () => actions.push("next") }] }] }, global: { plugins: [i18n()], stubs: { "a-layout-header": { template: "<header><slot /></header>" }, ...stubs } } });
   wrappers.push(header);
   assert.equal(header.find("a-select-stub").exists(), false); assert.equal(header.text().includes("切换分支"), false); assert.equal(header.text().includes("拉取"), false); assert.equal(header.text().includes("推送"), false);
   await header.get("button").trigger("click"); assert.deepEqual(actions, ["next"]);

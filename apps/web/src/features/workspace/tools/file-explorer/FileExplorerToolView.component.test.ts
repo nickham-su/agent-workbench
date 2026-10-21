@@ -107,9 +107,10 @@ function setup() {
     return { config, data, status: 200, statusText: "OK", headers: {} };
   };
 }
-async function mountView(workspaceId = "one") {
+async function mountView(workspaceId = "one", attachTo?: HTMLElement) {
   const i18n = createI18n({ legacy: false, locale: "zh-CN", messages: { "zh-CN": zhCN, "en-US": enUS } });
   const wrapper = mount(FileExplorerToolView, {
+    attachTo,
     props: { workspaceId, toolId: "files", previewEnabled: false, workspaceRepos: [] },
     global: {
       plugins: [i18n], stubs,
@@ -143,6 +144,20 @@ afterEach(() => {
   Object.assign(message, originalMessages);
   selectedDropdown.value = 0;
   refreshCommand = undefined;
+});
+
+test("文件标题使用统一的12px字号、600字重和12px左内边距", async () => {
+  setup();
+  const { wrapper } = await mountView("one", document.body);
+  const title = wrapper.get(".font-semibold");
+  assert.equal(title.text(), zhCN.files.title);
+  assert.ok(title.classes().includes("text-xs"));
+  const heading = title.element.parentElement!;
+  assert.ok(heading.classList.contains("pl-3"));
+  assert.ok(!heading.classList.contains("px-2"));
+  const foreground = "rgb(230, 230, 230)";
+  (wrapper.element as HTMLElement).style.color = foreground;
+  assert.equal(getComputedStyle(title.element).color, foreground, "标题继承主文字色");
 });
 
 test("extract API wrapper uses shared request shape, encodes workspace IDs and preserves ApiError status/code", async () => {

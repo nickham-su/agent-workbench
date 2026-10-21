@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test, { afterEach } from "node:test";
+import { readFileSync } from "node:fs";
 import { defineComponent, h, KeepAlive, nextTick, ref } from "vue";
 import { mount, type VueWrapper } from "@vue/test-utils";
 import { AxiosError, type InternalAxiosRequestConfig } from "axios";
@@ -13,6 +14,12 @@ import {
 } from "@/shared/api";
 import EnvironmentVariablesToolView from "./EnvironmentVariablesToolView.vue";
 import EnvironmentVariablesIcon from "../../icons/EnvironmentVariablesIcon.vue";
+
+// vite-node 不注入组件样式，加载真实 scoped 规则以检查标题栏的 CSS 契约。
+const source = readFileSync(new URL("EnvironmentVariablesToolView.vue", import.meta.url), "utf8");
+const styles = document.createElement("style");
+styles.textContent = source.match(/<style scoped>([\s\S]*?)<\/style>/)?.[1] ?? "";
+document.head.appendChild(styles);
 
 // Native controls keep real form/input semantics; only Ant overlay/visual plumbing is stubbed.
 const Button = {
@@ -60,6 +67,97 @@ afterEach(() => {
   apiClient.defaults.adapter = originalAdapter;
 });
 
+test("环境变量标题统一样式且横跨主区和说明区，新增变量移到筛选行", async () => {
+  for (const locale of ["zh-CN", "en-US"]) {
+    const wrapper = setup(() => [], "workspace-a", locale);
+    await settle();
+    const heading = wrapper.get(".environment-tool-heading");
+    const body = wrapper.get(".environment-body");
+    assert.equal(heading.text(), locale === "zh-CN" ? zhCN.workspace.tools.environmentVariables : enUS.workspace.tools.environmentVariables);
+    assert.equal(wrapper.element.firstElementChild, heading.element);
+    assert.equal(heading.element.nextElementSibling, body.element);
+    assert.equal(wrapper.get("main").element.parentElement, body.element);
+    assert.equal(wrapper.get("aside").element.parentElement, body.element);
+    assert.equal(wrapper.find("h1").exists(), false);
+    assert.equal(wrapper.find(".environment-description").exists(), false);
+    const root = wrapper.element as HTMLElement;
+    root.style.setProperty("--panel-bg-elevated", "rgb(32, 32, 32)");
+    root.style.setProperty("--text-color", "rgb(230, 230, 230)");
+    root.style.setProperty("--border-color-secondary", "rgb(64, 64, 64)");
+    const style = getComputedStyle(heading.element);
+    assert.equal(style.height, "37px");
+    assert.equal(style.boxSizing, "border-box");
+    assert.equal(style.flexShrink, "0");
+    assert.equal(style.fontSize, "12px");
+    assert.equal(style.fontWeight, "600");
+    assert.equal(style.paddingLeft, "12px");
+    assert.equal(style.color, "rgb(230, 230, 230)");
+    assert.equal(style.backgroundColor, "rgb(32, 32, 32)");
+    assert.equal(style.borderBottomWidth, "1px");
+    assert.equal(style.borderBottomColor, "rgb(64, 64, 64)");
+    assert.equal(parseFloat(getComputedStyle(body.element).minHeight), 0);
+    const add = wrapper.get('[data-testid="add-variable"]');
+    assert.equal(add.element.parentElement, wrapper.get(".environment-filters").element);
+    assert.equal(add.element.previousElementSibling, wrapper.get(".environment-count").element);
+    assert.equal(wrapper.find('[data-testid="refresh"]').exists(), false, "正常工具栏不再显示刷新按钮");
+    await add.trigger("click"); await tick();
+    assert.ok(wrapper.find('[data-testid="drawer"]').exists());
+    await wrapper.get('[data-testid="cancel-editor"]').trigger("click"); await tick();
+    assert.equal(document.activeElement, add.element, "移动入口后仍恢复焦点到新增按钮");
+  }
+});
+
+test("主区域和说明区统一12px留白，筛选与表格使用紧凑间距", async () => {
+  const wrapper = setup(() => [row()]);
+  await settle();
+  for (const selector of [".environment-main", ".environment-side"]) {
+    const style = getComputedStyle(wrapper.get(selector).element);
+    for (const edge of ["Top", "Right", "Bottom", "Left"] as const) {
+      assert.equal(style[`padding${edge}`], "12px", `${selector}: padding${edge}`);
+    }
+  }
+  const filters = getComputedStyle(wrapper.get(".environment-filters").element);
+  assert.equal(filters.gap, "8px");
+  assert.equal(filters.marginBottom, "8px");
+  assert.equal(filters.flexWrap, "wrap", "保留窄区域工具栏换行");
+  for (const cell of wrapper.findAll("th, tbody td")) {
+    const style = getComputedStyle(cell.element);
+    assert.equal(style.paddingTop, "8px");
+    assert.equal(style.paddingBottom, "8px");
+    assert.equal(style.paddingLeft, "12px");
+    assert.equal(style.paddingRight, "12px");
+  }
+  assert.equal(getComputedStyle(wrapper.get(".environment-side h2").element).marginBottom, "8px");
+  const effect = getComputedStyle(wrapper.get(".environment-effect").element);
+  assert.equal(effect.gap, "8px");
+  assert.equal(effect.marginBottom, "12px");
+  const divider = getComputedStyle(wrapper.get(".environment-side hr").element);
+  assert.equal(divider.marginTop, "12px");
+  assert.equal(divider.marginBottom, "12px");
+  const empty = setup(() => [], "workspace-empty");
+  await settle();
+  const emptyStyle = getComputedStyle(empty.get(".environment-empty").element);
+  assert.equal(emptyStyle.paddingTop, "20px");
+  assert.equal(emptyStyle.paddingLeft, "12px");
+});
+
+test("读取失败时仅在错误区域提供恢复入口，恢复后不显示刷新按钮", async () => {
+  let gets = 0;
+  const wrapper = setup((config) => {
+    assert.equal(config.method, "get");
+    if (++gets === 1) throw new AxiosError("fixture-network-error", "ERR_NETWORK", config);
+    return [];
+  });
+  await settle();
+  assert.equal(wrapper.get('[data-testid="add-variable"]').attributes("disabled"), "");
+  assert.ok(wrapper.get(".environment-error-actions").find('[data-testid="refresh"]').exists());
+  assert.equal(wrapper.get(".environment-filters").find('[data-testid="refresh"]').exists(), false);
+  await wrapper.get('[data-testid="refresh"]').trigger("click"); await settle();
+  assert.equal(gets, 2);
+  assert.equal(wrapper.find('[data-testid="refresh"]').exists(), false);
+  assert.equal(wrapper.get('[data-testid="add-variable"]').attributes("disabled"), undefined);
+});
+
 test("real list rendering is plaintext, preserves empty/multiline values and supports search/status/counts", async () => {
   const items = [row({ value: "<img src=x onerror=bad()>\n $PATH $(never) " }), row({ id: "empty", name: "EMPTY", value: "", remark: "another", enabled: false, createdAt: 2 })];
   const wrapper = setup((config) => { assert.equal(config.method, "get"); assert.equal(config.url, base); return items; });
@@ -69,7 +167,7 @@ test("real list rendering is plaintext, preserves empty/multiline values and sup
   assert.equal(wrapper.get("pre").element.textContent, items[0]!.value);
   assert.match(wrapper.text(), /空字符串|显示 2\/2 条 · 1 条已启用/);
   assert.doesNotMatch(wrapper.text(), /虚构示例|仅在内存|草稿|隐藏值|显示值/);
-  assert.ok(wrapper.get(".environment-heading").find('[data-testid="add-variable"]').exists());
+  assert.ok(wrapper.get(".environment-filters").find('[data-testid="add-variable"]').exists());
   await wrapper.get('[data-testid="search"]').setValue("another");
   assert.equal(wrapper.findAll("tbody tr").length, 1);
   await wrapper.get('[data-testid="status-filter"]').setValue("enabled");

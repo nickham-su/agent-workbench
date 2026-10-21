@@ -1,151 +1,158 @@
 <template>
-  <div class="flex h-full min-h-0 bg-[var(--panel-bg)] text-sm text-[var(--text-primary)]">
-    <aside class="flex w-[min(40%,370px)] min-w-[200px] flex-col border-r border-[var(--border-color-secondary)]">
-      <div class="flex items-center justify-between gap-2 border-b border-[var(--border-color-secondary)] px-3 py-3">
-        <h2 class="m-0 text-base font-semibold">定时任务</h2>
-        <a-button class="!w-[108px] flex-none" :disabled="writesDisabled" @click="openCreate"><template #icon><PlusOutlined /></template>创建任务</a-button>
-      </div>
-      <div class="flex gap-2 border-b border-[var(--border-color-secondary)] px-3 py-3">
-        <a-input :value="search" class="min-w-0 flex-1" placeholder="搜索任务" aria-label="搜索任务名称" @update:value="updateSearch">
-          <template #prefix><SearchOutlined /></template>
-        </a-input>
-        <a-select v-model:value="status" class="!w-[108px] flex-none" :options="[{value:'all',label:'全部状态'},{value:'enabled',label:'已启用'},{value:'paused',label:'已暂停'}]" aria-label="任务状态" @change="resetList" />
-      </div>
-      <div class="min-h-0 flex-1 overflow-auto px-2 py-2" aria-label="任务列表">
-        <a-spin v-if="listLoading" class="block py-3" />
-        <button v-for="item in tasks" :key="item.id" type="button" class="scheduled-task-card mb-1 w-full rounded border border-transparent p-3 text-left" :class="{ 'is-selected': selectedId === item.id }" @click="selectTask(item)">
-          <div class="flex min-w-0 items-center gap-2">
-            <span class="h-1.5 w-1.5 flex-none rounded-full" :class="item.enabled ? 'bg-green-500' : 'bg-gray-400'" />
-            <span class="min-w-0 flex-1 truncate font-semibold" :title="item.name">{{ item.name }}</span>
-            <a-tooltip v-if="item.latestScheduledExecution?.status === 'skipped'" :title="skipReason(item.latestScheduledExecution)"><span tabindex="0" role="img" aria-label="最近一次计划执行已跳过" class="text-amber-500">⚠</span></a-tooltip>
-            <a-tag class="!m-0 flex-none" :color="item.enabled ? 'green' : 'default'">{{ item.enabled ? '已启用' : '已暂停' }}</a-tag>
-          </div>
-          <div class="mt-2 flex min-w-0 items-center justify-between gap-2 pl-3 text-xs text-[var(--text-tertiary)]">
-            <span class="min-w-0 truncate"><ClockCircleOutlined class="mr-1" />{{ summarize(item.schedule, currentOffset) }}</span>
-            <span v-if="isRunning(item)" class="flex-none text-blue-500">● 已运行 {{ elapsed(item.activeExecution!.startedAt ?? item.activeExecution!.createdAt) }} 分钟</span>
-            <span v-else-if="item.nextRunAt" class="flex-none">下次：{{ shortTime(item.nextRunAt) }}</span>
-            <span v-else class="flex-none">无后续计划</span>
-          </div>
-        </button>
-        <a-empty v-if="!listLoading && !tasks.length" description="暂无任务" />
-        <a-button v-if="nextCursor" block :loading="listLoading" @click="loadList(true)">加载更多</a-button>
-      </div>
-      <section class="space-y-1 border-t border-[var(--border-color-secondary)] bg-[var(--panel-bg)] px-3 py-2 text-xs leading-4" aria-label="时间同步状态">
-        <div class="flex items-center justify-between gap-2">
-          <span class="inline-flex items-center gap-1">
-            <span aria-hidden="true" class="clock-health-dot" :class="clock.health === 'normal' ? 'text-green-500' : clock.health === 'warning' ? 'text-amber-500' : 'text-gray-400'">●</span>
-            <span class="clock-health-label" :class="clock.health === 'normal' ? 'text-[var(--text-color)]' : clock.health === 'warning' ? 'text-amber-500' : 'text-gray-400'">{{ clockLabel }}</span>
-          </span>
-          <span class="text-[var(--text-tertiary)]">{{ clockDeviation }}</span>
+  <div class="flex h-full min-h-0 flex-col bg-[var(--panel-bg)] text-sm text-[var(--text-primary)]">
+    <div class="scheduled-tasks-heading flex h-[37px] shrink-0 items-center box-border px-3 border-b border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)] text-xs font-semibold text-[color:var(--text-color)]">定时任务</div>
+    <div class="scheduled-tasks-body flex min-h-0 min-w-0 flex-1">
+      <aside class="flex min-h-0 w-[min(40%,370px)] min-w-[200px] flex-col border-r border-[var(--border-color-secondary)]">
+        <div class="scheduled-tasks-toolbar flex items-center gap-2 border-b border-[var(--border-color-secondary)] px-3 py-3">
+          <a-input :value="search" class="min-w-0 flex-1" placeholder="搜索任务" aria-label="搜索任务名称" @update:value="updateSearch">
+            <template #prefix><SearchOutlined /></template>
+          </a-input>
+          <a-button class="!w-[108px] flex-none" :disabled="writesDisabled" @click="openCreate"><template #icon><PlusOutlined /></template>创建任务</a-button>
         </div>
-        <div v-if="clock.health !== 'normal'" class="flex justify-between gap-2 text-[var(--text-tertiary)]"><span>服务端时间</span><span>{{ clock.serverNow === null ? '—' : localTime(clock.serverNow) }}</span></div>
-        <div v-if="clock.health !== 'normal'" class="flex justify-between gap-2 text-[var(--text-tertiary)]"><span>设备时间</span><span>{{ localTime(clock.deviceNow) }}</span></div>
-      </section>
-    </aside>
-    <main class="min-w-0 flex-1 overflow-auto p-4 sm:p-5">
-      <template v-if="selected">
-        <header class="flex flex-wrap items-start justify-between gap-3">
-          <div class="min-w-0">
-            <div class="flex flex-wrap items-center gap-2">
-              <h2 class="m-0 break-words text-xl font-semibold">{{ selected.name }}</h2>
-              <a-tag class="!m-0" :color="selected.enabled ? 'green' : 'default'">{{ selected.enabled ? '已启用' : '已暂停' }}</a-tag>
-              <a-tag class="!m-0">{{ isRunning(selected) ? '运行中' : '空闲' }}</a-tag>
+        <div class="min-h-0 flex-1 overflow-auto p-0" aria-label="任务列表">
+          <a-spin v-if="listLoading" class="block py-3" />
+          <button
+            v-for="item in tasks" :key="item.id" type="button"
+            class="scheduled-task-card block w-full box-border rounded-none border-l-2 p-3 text-left"
+            :class="[
+              { 'is-selected': selectedId === item.id },
+              selectedId === item.id ? 'bg-[color-mix(in_srgb,var(--info-color)_20%,var(--panel-bg))] border-l-[var(--info-color)]' : 'bg-transparent hover:bg-[var(--hover-bg)] border-l-transparent'
+            ]"
+            @click="selectTask(item)"
+          >
+            <div class="flex min-w-0 items-center gap-2">
+              <span class="h-1.5 w-1.5 flex-none rounded-full" :class="item.enabled ? 'bg-green-500' : 'bg-gray-400'" />
+              <span class="min-w-0 flex-1 truncate font-semibold" :title="item.name">{{ item.name }}</span>
+              <a-tooltip v-if="item.latestScheduledExecution?.status === 'skipped'" :title="skipReason(item.latestScheduledExecution)"><span tabindex="0" role="img" aria-label="最近一次计划执行已跳过" class="text-amber-500">⚠</span></a-tooltip>
+              <a-tag class="!m-0 flex-none" :color="item.enabled ? 'green' : 'default'">{{ item.enabled ? '已启用' : '已暂停' }}</a-tag>
             </div>
-            <p class="mb-0 mt-1 text-xs text-[var(--text-tertiary)]">创建于 {{ createdTime(selected.createdAt) }} · 最近更新 {{ updatedTime(selected.updatedAt) }}</p>
+            <div class="mt-2 flex min-w-0 items-center justify-between gap-2 pl-3 text-xs text-[var(--text-tertiary)]">
+              <span class="min-w-0 truncate"><ClockCircleOutlined class="mr-1" />{{ summarize(item.schedule, currentOffset) }}</span>
+              <span v-if="isRunning(item)" class="flex-none text-blue-500">● 已运行 {{ elapsed(item.activeExecution!.startedAt ?? item.activeExecution!.createdAt) }} 分钟</span>
+              <span v-else-if="item.nextRunAt" class="flex-none">下次：{{ shortTime(item.nextRunAt) }}</span>
+              <span v-else class="flex-none">无后续计划</span>
+            </div>
+          </button>
+          <div v-if="!listLoading && !tasks.length" class="scheduled-tasks-empty">暂无任务</div>
+          <a-button v-if="nextCursor" block :loading="listLoading" @click="loadList(true)">加载更多</a-button>
+        </div>
+        <section class="space-y-1 border-t border-[var(--border-color-secondary)] bg-[var(--panel-bg)] px-3 py-2 text-xs leading-4" aria-label="时间同步状态">
+          <div class="flex items-center justify-between gap-2">
+            <span class="inline-flex items-center gap-1">
+              <span aria-hidden="true" class="clock-health-dot" :class="clock.health === 'normal' ? 'text-green-500' : clock.health === 'warning' ? 'text-amber-500' : 'text-gray-400'">●</span>
+              <span class="clock-health-label" :class="clock.health === 'normal' ? 'text-[var(--text-color)]' : clock.health === 'warning' ? 'text-amber-500' : 'text-gray-400'">{{ clockLabel }}</span>
+            </span>
+            <span class="text-[var(--text-tertiary)]">{{ clockDeviation }}</span>
           </div>
-          <div class="flex flex-wrap gap-2">
-            <a-button :loading="busy" :disabled="writesDisabled" @click="toggleEnabled"><template #icon><PauseOutlined v-if="selected.enabled" /><PlayCircleOutlined v-else /></template>{{ selected.enabled ? '暂停' : '启用' }}</a-button>
-            <a-button :loading="busy" :disabled="writesDisabled" @click="runNow"><template #icon><PlayCircleOutlined /></template>立即运行</a-button>
-            <a-button :disabled="writesDisabled" @click="openEdit"><template #icon><EditOutlined /></template>编辑</a-button>
-            <a-button class="scheduled-delete-button" :disabled="writesDisabled || isRunning(selected)" @click="confirmDelete"><template #icon><DeleteOutlined /></template>删除</a-button>
-          </div>
-        </header>
-        <a-alert v-if="selected.latestScheduledExecution?.status === 'skipped'" class="mt-3" type="warning" show-icon :message="'最近一次计划执行已跳过：' + skipReason(selected.latestScheduledExecution)" />
-        <a-alert v-if="notice" class="mt-3" :type="noticeType" :message="notice" show-icon closable @close="notice = ''" />
-        <a-tabs v-model:activeKey="tab" class="scheduled-task-tabs">
-          <a-tab-pane key="overview" tab="概览">
-            <div class="max-w-[1080px] space-y-4 pt-1">
-              <section class="detail-panel" aria-labelledby="task-runtime-heading">
-                <h3 id="task-runtime-heading" class="detail-panel-heading">调度与运行</h3>
-                <div class="grid gap-x-6 gap-y-5 p-4 md:grid-cols-2">
-                  <div><div class="detail-label">执行计划</div><div class="mt-2">{{ summarize(selected.schedule, currentOffset) }} <span class="text-xs text-[var(--text-tertiary)]">（本地时间）</span></div></div>
-                  <div><div class="detail-label">下次运行</div><div class="mt-2"><span v-if="selected.nextRunAt !== null" class="text-blue-500">{{ shortTime(selected.nextRunAt) }}</span><span v-else>无后续计划</span><span v-if="selected.nextRunAt !== null" class="ml-2 text-xs text-[var(--text-tertiary)]">{{ runCountdown(selected.nextRunAt) }}</span></div></div>
-                  <div aria-label="最近执行"><div class="detail-label">最近执行</div>
-                    <div class="mt-2"><span :class="executionColor(selected.latestExecution)">{{ selected.latestExecution ? statusLabel(selected.latestExecution.status) : '尚无执行' }}</span><span v-if="selected.latestExecution" class="text-xs text-[var(--text-tertiary)]"> · {{ shortTime(selected.latestExecution.createdAt) }}</span>
-                      <a-button v-if="selected.latestExecution?.sessionAvailable && selected.latestExecution.sessionId" type="link" size="small" @click="openSession(selected.latestExecution.sessionId)">查看 Session ↗</a-button>
-                      <span v-else-if="selected.latestExecution?.sessionId" class="ml-2 text-xs text-[var(--text-tertiary)]">Session 不可用</span>
-                    </div>
-                  </div>
-                  <div><div class="detail-label">Agent</div><div class="mt-2">{{ agents.find((agent) => agent.id === selected!.agentId)?.name ?? selected.agentId }}</div></div>
-                </div>
-              </section>
-              <section class="detail-panel" aria-labelledby="task-context-detail-heading">
-                <h3 id="task-context-detail-heading" class="detail-panel-heading"><span>执行上下文</span><a-tag class="!m-0" :color="selected.triggerMode === 'fork_message' ? 'blue' : 'default'">{{ selected.triggerMode === 'fork_message' ? '基于历史消息' : '新建 Session' }}</a-tag></h3>
-                <div class="p-4">
-                  <div v-if="selected.source" class="space-y-2 rounded border border-[var(--border-color-secondary)] p-3">
-                    <div class="font-medium"><MessageOutlined class="mr-2" />来源会话：{{ selected.source.title }}</div>
-                    <blockquote class="m-0 border-l-2 border-[var(--border-color)] pl-3 whitespace-pre-wrap break-words text-[var(--text-tertiary)]">{{ selected.source.messageSummary }}</blockquote>
-                    <div class="text-xs text-[var(--text-tertiary)]">锚点消息 · {{ createdTime(selected.source.messageCreatedAt) }}
-                      <a-button type="link" size="small" @click="openSession(selected.source!.sessionId)">查看上下文 ↗</a-button>
-                    </div>
-                  </div>
-                  <p v-else class="m-0 text-[var(--text-tertiary)]">每次执行时创建独立的空白 Session。</p>
-                </div>
-              </section>
-              <section class="detail-panel" aria-labelledby="task-prompt-heading">
-                <h3 id="task-prompt-heading" class="detail-panel-heading">每次执行追加的 Prompt</h3>
-                <div class="p-4"><div class="whitespace-pre-wrap break-words rounded border border-[var(--border-color-secondary)] p-3">{{ selected.prompt }}</div></div>
-              </section>
-            </div>
-          </a-tab-pane>
-          <a-tab-pane key="history" tab="执行历史">
-            <div class="pt-1">
-              <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
-                <div class="flex flex-wrap gap-2">
-                  <a-select v-model:value="resultFilter" class="w-32" :options="[{value:'all',label:'全部结果'},{value:'completed',label:'已完成'},{value:'failed',label:'已失败'},{value:'skipped',label:'已跳过'}]" aria-label="执行结果" @change="resetHistory" />
-                  <a-select v-model:value="triggerFilter" class="w-32" :options="[{value:'all',label:'全部触发'},{value:'scheduled',label:'自动'},{value:'manual',label:'手动'}]" aria-label="触发方式" @change="resetHistory" />
-                </div>
-                <a-button @click="resetHistory"><template #icon><ReloadOutlined /></template>刷新</a-button>
+          <div v-if="clock.health !== 'normal'" class="flex justify-between gap-2 text-[var(--text-tertiary)]"><span>服务端时间</span><span>{{ clock.serverNow === null ? '—' : localTime(clock.serverNow) }}</span></div>
+          <div v-if="clock.health !== 'normal'" class="flex justify-between gap-2 text-[var(--text-tertiary)]"><span>设备时间</span><span>{{ localTime(clock.deviceNow) }}</span></div>
+        </section>
+      </aside>
+      <main class="min-w-0 flex-1 overflow-auto p-4 sm:p-5">
+        <template v-if="selected">
+          <header class="flex flex-wrap items-start justify-between gap-3">
+            <div class="min-w-0">
+              <div class="flex flex-wrap items-center gap-2">
+                <h2 class="m-0 break-words text-xl font-semibold">{{ selected.name }}</h2>
+                <a-tag class="!m-0" :color="selected.enabled ? 'green' : 'default'">{{ selected.enabled ? '已启用' : '已暂停' }}</a-tag>
+                <a-tag class="!m-0">{{ isRunning(selected) ? '运行中' : '空闲' }}</a-tag>
               </div>
-              <a-spin v-if="historyLoading" />
-              <div v-if="history.length" class="overflow-x-auto">
-                <table class="w-full min-w-[880px] border border-[var(--border-color-secondary)] text-left" aria-label="执行历史列表">
-                  <thead class="bg-[var(--panel-bg-elevated)] text-[var(--text-tertiary)]">
-                    <tr>
-                      <th scope="col" class="px-3 py-2 font-normal">计划时间</th>
-                      <th scope="col" class="px-3 py-2 font-normal">触发方式</th>
-                      <th scope="col" class="px-3 py-2 font-normal">状态</th>
-                      <th scope="col" class="px-3 py-2 font-normal">开始时间</th>
-                      <th scope="col" class="px-3 py-2 font-normal">耗时</th>
-                      <th scope="col" class="px-3 py-2 font-normal">关联会话</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr v-for="execution in history" :key="execution.id" class="border-t border-[var(--border-color-secondary)]" :class="execution.status === 'skipped' ? 'bg-[var(--fill-secondary)]' : ''">
-                      <td class="whitespace-nowrap px-3 py-3">{{ historyTime(execution.scheduledFor ?? execution.createdAt) }}</td>
-                      <td class="px-3 py-3">{{ execution.triggerType === 'manual' ? '手动' : '自动' }}</td>
-                      <td class="whitespace-nowrap px-3 py-3">
-                        <a-tooltip v-if="execution.status === 'skipped'" :title="skipReason(execution)"><span tabindex="0" class="text-amber-500"><PauseOutlined class="mr-1" />{{ statusLabel(execution.status) }}</span></a-tooltip>
-                        <span v-else :class="executionColor(execution)"><CheckOutlined v-if="execution.status === 'completed'" class="mr-1" /><CloseOutlined v-else-if="execution.status === 'failed' || execution.status === 'failed_to_start'" class="mr-1" />{{ statusLabel(execution.status) }}</span>
-                      </td>
-                      <td class="whitespace-nowrap px-3 py-3">{{ execution.startedAt === null ? '—' : historyStartTime(execution.startedAt) }}</td>
-                      <td class="whitespace-nowrap px-3 py-3">{{ executionDuration(execution) }}</td>
-                      <td class="whitespace-nowrap px-3 py-3">
-                        <a-button v-if="execution.sessionAvailable && execution.sessionId" type="link" size="small" class="!h-auto !p-0" @click="openSession(execution.sessionId)">查看 Session ↗</a-button>
-                        <span v-else-if="execution.sessionId" class="text-xs text-[var(--text-tertiary)]">Session 不可用</span>
-                        <span v-else>—</span>
-                      </td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-              <a-empty v-if="!historyLoading && !history.length" description="暂无执行历史" />
-              <a-button v-if="historyCursor" block :loading="historyLoading" @click="loadHistory(true)">加载更多</a-button>
+              <p class="mb-0 mt-1 text-xs text-[var(--text-tertiary)]">创建于 {{ createdTime(selected.createdAt) }} · 最近更新 {{ updatedTime(selected.updatedAt) }}</p>
             </div>
-          </a-tab-pane>
-        </a-tabs>
-      </template>
-    </main>
+            <div class="flex flex-wrap gap-2">
+              <a-button :loading="busy" :disabled="writesDisabled" @click="toggleEnabled"><template #icon><PauseOutlined v-if="selected.enabled" /><PlayCircleOutlined v-else /></template>{{ selected.enabled ? '暂停' : '启用' }}</a-button>
+              <a-button :loading="busy" :disabled="writesDisabled" @click="runNow"><template #icon><PlayCircleOutlined /></template>立即运行</a-button>
+              <a-button :disabled="writesDisabled" @click="openEdit"><template #icon><EditOutlined /></template>编辑</a-button>
+              <a-button class="scheduled-delete-button" :disabled="writesDisabled || isRunning(selected)" @click="confirmDelete"><template #icon><DeleteOutlined /></template>删除</a-button>
+            </div>
+          </header>
+          <a-alert v-if="selected.latestScheduledExecution?.status === 'skipped'" class="mt-3" type="warning" show-icon :message="'最近一次计划执行已跳过：' + skipReason(selected.latestScheduledExecution)" />
+          <a-alert v-if="notice" class="mt-3" :type="noticeType" :message="notice" show-icon closable @close="notice = ''" />
+          <a-tabs v-model:activeKey="tab" class="scheduled-task-tabs">
+            <a-tab-pane key="overview" tab="概览">
+              <div class="max-w-[1080px] space-y-4 pt-1">
+                <section class="detail-panel" aria-labelledby="task-runtime-heading">
+                  <h3 id="task-runtime-heading" class="detail-panel-heading">调度与运行</h3>
+                  <div class="grid gap-x-6 gap-y-5 p-4 md:grid-cols-2">
+                    <div><div class="detail-label">执行计划</div><div class="mt-2">{{ summarize(selected.schedule, currentOffset) }} <span class="text-xs text-[var(--text-tertiary)]">（本地时间）</span></div></div>
+                    <div><div class="detail-label">下次运行</div><div class="mt-2"><span v-if="selected.nextRunAt !== null" class="text-blue-500">{{ shortTime(selected.nextRunAt) }}</span><span v-else>无后续计划</span><span v-if="selected.nextRunAt !== null" class="ml-2 text-xs text-[var(--text-tertiary)]">{{ runCountdown(selected.nextRunAt) }}</span></div></div>
+                    <div aria-label="最近执行"><div class="detail-label">最近执行</div>
+                      <div class="mt-2"><span :class="executionColor(selected.latestExecution)">{{ selected.latestExecution ? statusLabel(selected.latestExecution.status) : '尚无执行' }}</span><span v-if="selected.latestExecution" class="text-xs text-[var(--text-tertiary)]"> · {{ shortTime(selected.latestExecution.createdAt) }}</span>
+                        <a-button v-if="selected.latestExecution?.sessionAvailable && selected.latestExecution.sessionId" type="link" size="small" @click="openSession(selected.latestExecution.sessionId)">查看 Session ↗</a-button>
+                        <span v-else-if="selected.latestExecution?.sessionId" class="ml-2 text-xs text-[var(--text-tertiary)]">Session 不可用</span>
+                      </div>
+                    </div>
+                    <div><div class="detail-label">Agent</div><div class="mt-2">{{ agents.find((agent) => agent.id === selected!.agentId)?.name ?? selected.agentId }}</div></div>
+                  </div>
+                </section>
+                <section class="detail-panel" aria-labelledby="task-context-detail-heading">
+                  <h3 id="task-context-detail-heading" class="detail-panel-heading"><span>执行上下文</span><a-tag class="!m-0" :color="selected.triggerMode === 'fork_message' ? 'blue' : 'default'">{{ selected.triggerMode === 'fork_message' ? '基于历史消息' : '新建 Session' }}</a-tag></h3>
+                  <div class="p-4">
+                    <div v-if="selected.source" class="space-y-2 rounded border border-[var(--border-color-secondary)] p-3">
+                      <div class="font-medium"><MessageOutlined class="mr-2" />来源会话：{{ selected.source.title }}</div>
+                      <blockquote class="m-0 border-l-2 border-[var(--border-color)] pl-3 whitespace-pre-wrap break-words text-[var(--text-tertiary)]">{{ selected.source.messageSummary }}</blockquote>
+                      <div class="text-xs text-[var(--text-tertiary)]">锚点消息 · {{ createdTime(selected.source.messageCreatedAt) }}
+                        <a-button type="link" size="small" @click="openSession(selected.source!.sessionId)">查看上下文 ↗</a-button>
+                      </div>
+                    </div>
+                    <p v-else class="m-0 text-[var(--text-tertiary)]">每次执行时创建独立的空白 Session。</p>
+                  </div>
+                </section>
+                <section class="detail-panel" aria-labelledby="task-prompt-heading">
+                  <h3 id="task-prompt-heading" class="detail-panel-heading">每次执行追加的 Prompt</h3>
+                  <div class="p-4"><div class="whitespace-pre-wrap break-words rounded border border-[var(--border-color-secondary)] p-3">{{ selected.prompt }}</div></div>
+                </section>
+              </div>
+            </a-tab-pane>
+            <a-tab-pane key="history" tab="执行历史">
+              <div class="pt-1">
+                <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
+                  <div class="flex flex-wrap gap-2">
+                    <a-select v-model:value="resultFilter" class="w-32" :options="[{value:'all',label:'全部结果'},{value:'completed',label:'已完成'},{value:'failed',label:'已失败'},{value:'skipped',label:'已跳过'}]" aria-label="执行结果" @change="resetHistory" />
+                    <a-select v-model:value="triggerFilter" class="w-32" :options="[{value:'all',label:'全部触发'},{value:'scheduled',label:'自动'},{value:'manual',label:'手动'}]" aria-label="触发方式" @change="resetHistory" />
+                  </div>
+                  <a-button @click="resetHistory"><template #icon><ReloadOutlined /></template>刷新</a-button>
+                </div>
+                <a-spin v-if="historyLoading" />
+                <div v-if="history.length" class="overflow-x-auto">
+                  <table class="w-full min-w-[880px] border border-[var(--border-color-secondary)] text-left" aria-label="执行历史列表">
+                    <thead class="bg-[var(--panel-bg-elevated)] text-[var(--text-tertiary)]">
+                      <tr>
+                        <th scope="col" class="px-3 py-2 font-normal">计划时间</th>
+                        <th scope="col" class="px-3 py-2 font-normal">触发方式</th>
+                        <th scope="col" class="px-3 py-2 font-normal">状态</th>
+                        <th scope="col" class="px-3 py-2 font-normal">开始时间</th>
+                        <th scope="col" class="px-3 py-2 font-normal">耗时</th>
+                        <th scope="col" class="px-3 py-2 font-normal">关联会话</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="execution in history" :key="execution.id" class="border-t border-[var(--border-color-secondary)]" :class="execution.status === 'skipped' ? 'bg-[var(--fill-secondary)]' : ''">
+                        <td class="whitespace-nowrap px-3 py-3">{{ historyTime(execution.scheduledFor ?? execution.createdAt) }}</td>
+                        <td class="px-3 py-3">{{ execution.triggerType === 'manual' ? '手动' : '自动' }}</td>
+                        <td class="whitespace-nowrap px-3 py-3">
+                          <a-tooltip v-if="execution.status === 'skipped'" :title="skipReason(execution)"><span tabindex="0" class="text-amber-500"><PauseOutlined class="mr-1" />{{ statusLabel(execution.status) }}</span></a-tooltip>
+                          <span v-else :class="executionColor(execution)"><CheckOutlined v-if="execution.status === 'completed'" class="mr-1" /><CloseOutlined v-else-if="execution.status === 'failed' || execution.status === 'failed_to_start'" class="mr-1" />{{ statusLabel(execution.status) }}</span>
+                        </td>
+                        <td class="whitespace-nowrap px-3 py-3">{{ execution.startedAt === null ? '—' : historyStartTime(execution.startedAt) }}</td>
+                        <td class="whitespace-nowrap px-3 py-3">{{ executionDuration(execution) }}</td>
+                        <td class="whitespace-nowrap px-3 py-3">
+                          <a-button v-if="execution.sessionAvailable && execution.sessionId" type="link" size="small" class="!h-auto !p-0" @click="openSession(execution.sessionId)">查看 Session ↗</a-button>
+                          <span v-else-if="execution.sessionId" class="text-xs text-[var(--text-tertiary)]">Session 不可用</span>
+                          <span v-else>—</span>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <a-empty v-if="!historyLoading && !history.length" description="暂无执行历史" />
+                <a-button v-if="historyCursor" block :loading="historyLoading" @click="loadHistory(true)">加载更多</a-button>
+              </div>
+            </a-tab-pane>
+          </a-tabs>
+        </template>
+      </main>
+    </div>
     <ScheduledTaskDrawer :open="drawerOpen" :task="editing" :workspace-id="workspaceId" :agents="agents" :ready-agent-ids="readyAgentIds" :now="clock.deviceNow" :writes-disabled="writesDisabled" @close="closeDrawer" @saved="onSaved" @error-action="onDrawerErrorAction" />
   </div>
 </template>
@@ -167,7 +174,7 @@ const props = defineProps<{workspaceId:string; toolId:string}>();
 const host = useWorkspaceHost(props.toolId);
 const api = computed(() => scheduledApi(props.workspaceId));
 const tasks = ref<ScheduledTask[]>([]), selected = ref<ScheduledTask | null>(null), selectedId = ref("");
-const search = ref(""), status = ref<"all" | "enabled" | "paused">("all"), nextCursor = ref<string | null>(null), listLoading = ref(false);
+const search = ref(""), nextCursor = ref<string | null>(null), listLoading = ref(false);
 const history = ref<ScheduledExecution[]>([]), historyCursor = ref<string | null>(null), historyLoading = ref(false);
 const resultFilter = ref<"all" | "completed" | "failed" | "skipped">("all"), triggerFilter = ref<"all" | "scheduled" | "manual">("all");
 const tab = ref("overview"), editing = ref<ScheduledTask | null>(null), drawerOpen = ref(false), busy = ref(false);
@@ -251,7 +258,7 @@ async function loadAgents() {
 }
 async function loadList(more = false) {
   listLoading.value = true; const token = ++listToken, scope=scopeEpoch, workspaceId=props.workspaceId, taskApi=api.value;
-  try {const page = await taskApi.list({status:status.value, q:normalizeTaskSearch(search.value),...(more && nextCursor.value ? {cursor:nextCursor.value} : {})});
+  try {const page = await taskApi.list({status:"all", q:normalizeTaskSearch(search.value),...(more && nextCursor.value ? {cursor:nextCursor.value} : {})});
     if (token !== listToken || scope !== scopeEpoch || workspaceId !== props.workspaceId) return;
     tasks.value = more ? [...tasks.value,...page.items] : page.items; nextCursor.value = page.nextCursor;
     if (selectedId.value) { const updated = tasks.value.find((item)=>item.id === selectedId.value); if (updated) selected.value = updated; else if (!more) {selected.value=null;selectedId.value="";} }
@@ -267,7 +274,7 @@ async function refreshList() {
   const count=tasks.value.length, rows:ScheduledTask[]=[];
   let cursor:string|null=null;
   try {
-    do {const page=await taskApi.list({status:status.value,q:normalizeTaskSearch(search.value),...(cursor?{cursor}:{})});
+    do {const page=await taskApi.list({status:"all",q:normalizeTaskSearch(search.value),...(cursor?{cursor}:{})});
       if(scope!==scopeEpoch || token!==listToken || workspaceId!==props.workspaceId)return;
       rows.push(...page.items);cursor=page.nextCursor;
     } while(cursor && rows.length<count);
@@ -326,22 +333,14 @@ onActivated(()=>{active=true;if(!document.hidden)clockPoller.setVisible(true);})
 onDeactivated(()=>{active=false;clockPoller.setVisible(false);});
 onBeforeUnmount(()=>{clockPoller.dispose();document.removeEventListener("visibilitychange",visibilityChanged);if(searchTimer)clearTimeout(searchTimer);if(refreshTimer)clearInterval(refreshTimer);});
 watch(()=>props.workspaceId,()=>{scopeEpoch++;listToken++;historyToken++;if(searchTimer)clearTimeout(searchTimer);
-  closeDrawer();discardSelection();tasks.value=[];agents.value=[];readyAgentIds.value=[];search.value="";status.value="all";resultFilter.value="all";triggerFilter.value="all";
+  closeDrawer();discardSelection();tasks.value=[];agents.value=[];readyAgentIds.value=[];search.value="";resultFilter.value="all";triggerFilter.value="all";
   nextCursor.value=null;historyCursor.value=null;busy.value=false;listLoading.value=false;historyLoading.value=false;writesDisabled.value=false;notice.value="";
   clockPoller.setVisible(false);clockPoller.setVisible(active && !document.hidden);
   void loadList();void loadAgents();});
 </script>
 <style scoped>
-.scheduled-task-card { background: var(--panel-bg); color: inherit; cursor: pointer; transition: background-color .15s ease; }
-.scheduled-task-card:hover {
-  background: var(--fill-secondary);
-  background: color-mix(in srgb, var(--panel-bg) 85%, var(--text-color) 15%);
-}
-.scheduled-task-card.is-selected { background: var(--fill-secondary); border-color: var(--border-color); }
-.scheduled-task-card.is-selected:hover {
-  background: var(--panel-bg-elevated);
-  background: color-mix(in srgb, var(--fill-secondary) 80%, var(--text-color) 20%);
-}
+.scheduled-tasks-empty { height: 100%; display: flex; align-items: center; justify-content: center; padding: 16px; box-sizing: border-box; color: var(--text-tertiary); font-size: 12px; }
+.scheduled-task-card { color: inherit; cursor: pointer; transition: background-color .15s ease; }
 .detail-panel { border: 1px solid var(--border-color-secondary); border-radius: 4px; background: var(--panel-bg); }
 .detail-panel-heading { display: flex; min-height: 2.75rem; align-items: center; justify-content: space-between; gap: .75rem; margin: 0; border-bottom: 1px solid var(--border-color-secondary); padding: .625rem 1rem; font-size: .9rem; font-weight: 600; }
 .detail-label { font-size: .8rem; color: var(--text-tertiary); }

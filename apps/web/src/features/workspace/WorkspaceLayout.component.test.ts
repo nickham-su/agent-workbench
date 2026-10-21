@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test, { afterEach, beforeEach } from "node:test";
-import { nextTick } from "vue";
+import { nextTick, ref } from "vue";
+import type { HeaderAction } from "./types";
 import { shallowMount, type VueWrapper } from "@vue/test-utils";
 import { createI18n } from "vue-i18n";
 import { apiClient } from "@/shared/api";
@@ -112,10 +113,40 @@ test("编辑器导航不再注册全局页头按钮或订阅 Diff 标签状态",
   await settle();
   assert.equal(props(wrapper).visibleToolIdByArea.rightTop, "editor");
   assert.deepEqual(props(wrapper).toolViewListeners("editor"), {});
-  assert.deepEqual(
-    wrapper.findComponent({ name: "WorkspaceHeader" }).props("headerActionGroups"),
-    []
-  );
+  assert.equal(wrapper.findComponent({ name: "WorkspaceHeader" }).exists(), false);
+});
+
+test("无全局页头控件时释放页头空间，有控件时自动恢复", async () => {
+  const wrapper = mountLayout("header-visibility");
+  await settle();
+  const header = () => wrapper.findComponent({ name: "WorkspaceHeader" });
+  const content = () => dock(wrapper).element.parentElement!;
+  assert.equal(header().exists(), false);
+  assert.equal(content().classList.contains("border-t"), false);
+  assert.equal(content().classList.contains("flex-1"), true);
+  assert.equal(wrapper.find(".h-screen").exists(), true);
+
+  const actions = ref<HeaderAction[]>([{ id: "test", label: "测试操作", onClick: () => {} }]);
+  const state = (wrapper.vm as any).$.setupState;
+  // Inject a tool registration: no production tool currently supplies header actions.
+  state.tools.find((tool: any) => tool.toolId === "files").headerActions = () => actions.value;
+  props(wrapper).onToolIconClick("search");
+  await nextTick();
+  assert.equal(header().exists(), false);
+  props(wrapper).onToolIconClick("files");
+  await nextTick();
+  assert.equal(header().exists(), true);
+  assert.equal(header().props("headerActionGroups")[0].actions[0].id, "test");
+  assert.equal(content().classList.contains("border-t"), true);
+
+  actions.value = [];
+  await nextTick();
+  assert.equal(header().exists(), false);
+  assert.equal(content().classList.contains("border-t"), false);
+
+  actions.value.push({ id: "restored", onClick: () => {} });
+  await nextTick();
+  assert.equal(header().exists(), true);
 });
 
 test("without new global settings old workspace layouts are ignored and no configuration is created", async () => {

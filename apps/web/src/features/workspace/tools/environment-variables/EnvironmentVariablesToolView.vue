@@ -1,73 +1,74 @@
 <template>
   <div class="workspace-environment">
-    <main class="environment-main">
-      <div class="environment-heading">
-        <h1>{{ t("workspace.environmentVariables.title") }}</h1>
-        <a-button type="primary" data-testid="add-variable" :disabled="writesDisabled" @click="openEditor(null, $event)">
-          <template #icon><PlusOutlined /></template>{{ t("workspace.environmentVariables.add") }}
-        </a-button>
-      </div>
-      <p class="environment-description">{{ t("workspace.environmentVariables.description") }}</p>
-      <div class="environment-filters">
-        <a-input v-model:value="search" type="search" :placeholder="t('workspace.environmentVariables.search')" :aria-label="t('workspace.environmentVariables.search')" data-testid="search">
-          <template #prefix><SearchOutlined /></template>
-        </a-input>
-        <a-select v-model:value="statusFilter" :options="statusOptions" :aria-label="t('workspace.environmentVariables.filter')" data-testid="status-filter" />
-        <span class="environment-count" aria-live="polite">{{ t("workspace.environmentVariables.count", { shown: filteredRows.length, total: rows.length, enabled: enabledCount }) }}</span>
-        <a-button data-testid="refresh" :disabled="loading || writeBusy" @click="refresh">{{ t("common.refresh") }}</a-button>
-      </div>
-      <p v-if="notice" class="environment-notice" role="status" data-testid="notice">{{ notice }}</p>
-      <div v-if="uncertain" class="environment-error" role="alert" data-testid="unconfirmed">{{ t("workspace.environmentVariables.unconfirmed") }}</div>
-      <div v-if="listError" class="environment-error" role="alert" data-testid="list-error">{{ listError }}</div>
-      <div class="environment-table-panel" :aria-busy="loading">
-        <table :aria-label="t('workspace.environmentVariables.list')">
-          <colgroup><col class="enabled-column" /><col class="name-column" /><col /><col class="remark-column" /><col class="actions-column" /></colgroup>
-          <thead><tr>
-            <th scope="col">{{ t("workspace.environmentVariables.enabled") }}</th>
-            <th scope="col">{{ t("workspace.environmentVariables.name") }}</th>
-            <th scope="col">{{ t("workspace.environmentVariables.value") }}</th>
-            <th scope="col">{{ t("workspace.environmentVariables.remark") }}</th>
-            <th scope="col">{{ t("workspace.environmentVariables.actions") }}</th>
-          </tr></thead>
-          <tbody>
-            <tr v-for="row in filteredRows" :key="row.id" :class="{ 'is-disabled': !row.enabled }" :data-variable-id="row.id">
-              <td><a-switch :checked="row.enabled" size="small" :disabled="writesDisabled || editorOpen" :aria-label="t('workspace.environmentVariables.toggle', { name: row.name })" @change="toggle(row)" /></td>
-              <td class="environment-name">{{ row.name }}</td>
-              <td><span v-if="row.value === ''" class="environment-empty-value">{{ t("workspace.environmentVariables.emptyString") }}</span><pre v-else class="environment-value">{{ row.value }}</pre></td>
-              <td class="environment-remark">{{ row.remark || '—' }}</td>
-              <td><div class="environment-row-actions">
-                <a-button type="text" size="small" :disabled="writesDisabled" :aria-label="t('workspace.environmentVariables.editVariable', { name: row.name })" data-action="edit" @click="openEditor(row, $event)"><EditOutlined /></a-button>
-                <a-button type="text" size="small" danger :disabled="writesDisabled || editorOpen" :aria-label="t('workspace.environmentVariables.deleteVariable', { name: row.name })" data-action="delete" @click="askDelete(row, $event)"><DeleteOutlined /></a-button>
-              </div></td>
-            </tr>
-          </tbody>
-        </table>
-        <div v-if="loading" class="environment-empty" role="status">{{ t("common.loading") }}</div>
-        <div v-else-if="!listError && !filteredRows.length" class="environment-empty" data-testid="empty">
-          <p>{{ t(rows.length ? "workspace.environmentVariables.noMatches" : "workspace.environmentVariables.empty") }}</p>
-          <a-button v-if="rows.length" @click="clearFilters">{{ t("workspace.environmentVariables.clearFilters") }}</a-button>
-          <a-button v-else :disabled="writesDisabled" @click="openEditor(null, $event)">{{ t("workspace.environmentVariables.add") }}</a-button>
+    <div class="environment-tool-heading">{{ t("workspace.tools.environmentVariables") }}</div>
+    <div class="environment-body">
+      <main class="environment-main">
+        <div class="environment-filters">
+          <a-input v-model:value="search" type="search" :placeholder="t('workspace.environmentVariables.search')" :aria-label="t('workspace.environmentVariables.search')" data-testid="search">
+            <template #prefix><SearchOutlined /></template>
+          </a-input>
+          <a-select v-model:value="statusFilter" :options="statusOptions" :aria-label="t('workspace.environmentVariables.filter')" data-testid="status-filter" />
+          <span class="environment-count" aria-live="polite">{{ t("workspace.environmentVariables.count", { shown: filteredRows.length, total: rows.length, enabled: enabledCount }) }}</span>
+          <a-button type="primary" data-testid="add-variable" :disabled="writesDisabled" @click="openEditor(null, $event)">
+            <template #icon><PlusOutlined /></template>{{ t("workspace.environmentVariables.add") }}
+          </a-button>
         </div>
-      </div>
-    </main>
-    <aside class="environment-side" :aria-label="t('workspace.environmentVariables.rulesLabel')">
-      <h2>{{ t("workspace.environmentVariables.scope") }}</h2>
-      <div class="environment-effect"><CodeOutlined /><div><h3>bash {{ t("workspace.environmentVariables.tool") }}</h3><p>{{ t("workspace.environmentVariables.bashScope") }}</p></div></div>
-      <div class="environment-effect"><CodeOutlined /><div><h3>{{ t("workspace.tools.terminal") }}</h3><p>{{ t("workspace.environmentVariables.terminalScope") }}</p></div></div>
-      <hr />
-      <h2>{{ t("workspace.environmentVariables.rules") }}</h2>
-      <ul>
-        <li>{{ t("workspace.environmentVariables.sharedRule") }}</li>
-        <li>{{ t("workspace.environmentVariables.priorityRule") }}</li>
-        <li>{{ t("workspace.environmentVariables.emptyRule") }}</li>
-        <li>{{ t("workspace.environmentVariables.inheritRule") }}</li>
-        <li>{{ t("workspace.environmentVariables.literalRule") }}</li>
-        <li>{{ t("workspace.environmentVariables.reservedRule") }}</li>
-      </ul>
-      <hr />
-      <h2><SafetyOutlined /> {{ t("workspace.environmentVariables.security") }}</h2>
-      <p class="environment-security">{{ t("workspace.environmentVariables.securityNote") }}</p>
-    </aside>
+        <p v-if="notice" class="environment-notice" role="status" data-testid="notice">{{ notice }}</p>
+        <div v-if="uncertain" class="environment-error" role="alert" data-testid="unconfirmed">{{ t("workspace.environmentVariables.unconfirmed") }}</div>
+        <div v-if="listError" class="environment-error" role="alert" data-testid="list-error">{{ listError }}</div>
+        <div v-if="listError || uncertain" class="environment-error-actions">
+          <a-button data-testid="refresh" :disabled="loading || writeBusy" @click="refresh">{{ t("common.refresh") }}</a-button>
+        </div>
+        <div class="environment-table-panel" :aria-busy="loading">
+          <table :aria-label="t('workspace.environmentVariables.list')">
+            <colgroup><col class="enabled-column" /><col class="name-column" /><col /><col class="remark-column" /><col class="actions-column" /></colgroup>
+            <thead><tr>
+              <th scope="col">{{ t("workspace.environmentVariables.enabled") }}</th>
+              <th scope="col">{{ t("workspace.environmentVariables.name") }}</th>
+              <th scope="col">{{ t("workspace.environmentVariables.value") }}</th>
+              <th scope="col">{{ t("workspace.environmentVariables.remark") }}</th>
+              <th scope="col">{{ t("workspace.environmentVariables.actions") }}</th>
+            </tr></thead>
+            <tbody>
+              <tr v-for="row in filteredRows" :key="row.id" :class="{ 'is-disabled': !row.enabled }" :data-variable-id="row.id">
+                <td><a-switch :checked="row.enabled" size="small" :disabled="writesDisabled || editorOpen" :aria-label="t('workspace.environmentVariables.toggle', { name: row.name })" @change="toggle(row)" /></td>
+                <td class="environment-name">{{ row.name }}</td>
+                <td><span v-if="row.value === ''" class="environment-empty-value">{{ t("workspace.environmentVariables.emptyString") }}</span><pre v-else class="environment-value">{{ row.value }}</pre></td>
+                <td class="environment-remark">{{ row.remark || '—' }}</td>
+                <td><div class="environment-row-actions">
+                  <a-button type="text" size="small" :disabled="writesDisabled" :aria-label="t('workspace.environmentVariables.editVariable', { name: row.name })" data-action="edit" @click="openEditor(row, $event)"><EditOutlined /></a-button>
+                  <a-button type="text" size="small" danger :disabled="writesDisabled || editorOpen" :aria-label="t('workspace.environmentVariables.deleteVariable', { name: row.name })" data-action="delete" @click="askDelete(row, $event)"><DeleteOutlined /></a-button>
+                </div></td>
+              </tr>
+            </tbody>
+          </table>
+          <div v-if="loading" class="environment-empty" role="status">{{ t("common.loading") }}</div>
+          <div v-else-if="!listError && !filteredRows.length" class="environment-empty" data-testid="empty">
+            <p>{{ t(rows.length ? "workspace.environmentVariables.noMatches" : "workspace.environmentVariables.empty") }}</p>
+            <a-button v-if="rows.length" @click="clearFilters">{{ t("workspace.environmentVariables.clearFilters") }}</a-button>
+            <a-button v-else :disabled="writesDisabled" @click="openEditor(null, $event)">{{ t("workspace.environmentVariables.add") }}</a-button>
+          </div>
+        </div>
+      </main>
+      <aside class="environment-side" :aria-label="t('workspace.environmentVariables.rulesLabel')">
+        <h2>{{ t("workspace.environmentVariables.scope") }}</h2>
+        <div class="environment-effect"><CodeOutlined /><div><h3>bash {{ t("workspace.environmentVariables.tool") }}</h3><p>{{ t("workspace.environmentVariables.bashScope") }}</p></div></div>
+        <div class="environment-effect"><CodeOutlined /><div><h3>{{ t("workspace.tools.terminal") }}</h3><p>{{ t("workspace.environmentVariables.terminalScope") }}</p></div></div>
+        <hr />
+        <h2>{{ t("workspace.environmentVariables.rules") }}</h2>
+        <ul>
+          <li>{{ t("workspace.environmentVariables.sharedRule") }}</li>
+          <li>{{ t("workspace.environmentVariables.priorityRule") }}</li>
+          <li>{{ t("workspace.environmentVariables.emptyRule") }}</li>
+          <li>{{ t("workspace.environmentVariables.inheritRule") }}</li>
+          <li>{{ t("workspace.environmentVariables.literalRule") }}</li>
+          <li>{{ t("workspace.environmentVariables.reservedRule") }}</li>
+        </ul>
+        <hr />
+        <h2><SafetyOutlined /> {{ t("workspace.environmentVariables.security") }}</h2>
+        <p class="environment-security">{{ t("workspace.environmentVariables.securityNote") }}</p>
+      </aside>
+    </div>
     <a-drawer :open="editorOpen" :title="t(editing ? 'workspace.environmentVariables.edit' : 'workspace.environmentVariables.add')" width="min(100vw, 560px)" :closable="!writeBusy" :mask-closable="!writeBusy" :keyboard="!writeBusy" :destroy-on-close="true" @close="closeEditor">
       <form :id="formId" class="environment-form" autocomplete="off" @submit.prevent="save">
         <p class="environment-field-help">{{ t("workspace.environmentVariables.saveHelp") }}</p>
@@ -346,20 +347,19 @@ onBeforeUnmount(() => { disposed = true; release(); });
 </script>
 
 <style scoped>
-.workspace-environment { display: flex; height: 100%; min-height: 0; color: var(--text-primary); background: var(--panel-bg); font-size: 13px; }
-.environment-main { flex: 1; min-width: 0; overflow: auto; padding: 22px 24px; }
-.environment-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
-.environment-heading h1 { margin: 0; font-size: 18px; font-weight: 600; }
-.environment-description { color: var(--text-secondary); margin: 10px 0 22px; }
-.environment-filters { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; flex-wrap: wrap; }
+.workspace-environment { display: flex; flex-direction: column; height: 100%; min-height: 0; color: var(--text-primary); background: var(--panel-bg); font-size: 13px; }
+.environment-tool-heading { display: flex; flex: none; height: 37px; box-sizing: border-box; align-items: center; padding: 0 12px; border-bottom: 1px solid var(--border-color-secondary); background: var(--panel-bg-elevated); color: var(--text-color); font-size: 12px; font-weight: 600; }
+.environment-body { display: flex; flex: 1; min-width: 0; min-height: 0; }
+.environment-main { flex: 1; min-width: 0; overflow: auto; padding: 12px; }
+.environment-filters { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
 .environment-filters :deep(.ant-input-affix-wrapper) { width: 250px; max-width: 100%; }
 .environment-filters :deep(.ant-select) { width: 114px; }
 .environment-count { flex: 1; text-align: right; color: var(--text-tertiary); font-size: 12px; white-space: nowrap; }
 .environment-table-panel { border: 1px solid var(--border-color-secondary); border-radius: 4px; overflow: auto; }
 .environment-table-panel table { border-collapse: collapse; width: 100%; table-layout: fixed; min-width: 480px; }
 .enabled-column { width: 64px; } .name-column { width: 24%; } .remark-column { width: 19%; } .actions-column { width: 84px; }
-.environment-table-panel th { padding: 12px; background: var(--panel-bg-elevated); color: var(--text-secondary); text-align: left; font-weight: 500; }
-.environment-table-panel td { padding: 14px 12px; border-top: 1px solid var(--border-color-secondary); vertical-align: top; overflow-wrap: anywhere; }
+.environment-table-panel th { padding: 8px 12px; background: var(--panel-bg-elevated); color: var(--text-secondary); text-align: left; font-weight: 500; }
+.environment-table-panel td { padding: 8px 12px; border-top: 1px solid var(--border-color-secondary); vertical-align: top; overflow-wrap: anywhere; }
 .environment-name, .environment-value, .environment-value-input { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .environment-name { font-weight: 500; }
 .environment-value { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
@@ -367,18 +367,19 @@ onBeforeUnmount(() => { disposed = true; release(); });
 .environment-remark { color: var(--text-secondary); white-space: pre-wrap; }
 .environment-row-actions { display: flex; gap: 2px; }
 .is-disabled .environment-name, .is-disabled .environment-value, .is-disabled .environment-remark { color: var(--text-tertiary); }
-.environment-empty { padding: 30px 16px; text-align: center; color: var(--text-secondary); }
-.environment-side { flex: none; width: 270px; padding: 20px 18px; border-left: 1px solid var(--border-color-secondary); overflow: auto; background: var(--panel-bg-soft, var(--panel-bg)); }
-.environment-side h2 { margin: 0 0 14px; font-size: 13px; font-weight: 600; }
-.environment-effect { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 17px; }
+.environment-empty { padding: 20px 12px; text-align: center; color: var(--text-secondary); }
+.environment-side { flex: none; width: 270px; padding: 12px; border-left: 1px solid var(--border-color-secondary); overflow: auto; background: var(--panel-bg-soft, var(--panel-bg)); }
+.environment-side h2 { margin: 0 0 8px; font-size: 13px; font-weight: 600; }
+.environment-effect { display: flex; align-items: flex-start; gap: 8px; margin-bottom: 12px; }
 .environment-effect > :first-child { color: var(--primary-color); padding-top: 4px; }
 .environment-effect h3 { margin: 0 0 4px; font-size: 13px; font-weight: 400; }
 .environment-effect p, .environment-security { margin: 0; color: var(--text-tertiary); font-size: 12px; line-height: 1.7; }
-.environment-side hr { border: 0; border-top: 1px solid var(--border-color-secondary); margin: 22px 0; }
-.environment-side ul { padding-left: 16px; color: var(--text-secondary); font-size: 12px; line-height: 1.7; }
-.environment-side li { margin-bottom: 10px; }
+.environment-side hr { border: 0; border-top: 1px solid var(--border-color-secondary); margin: 12px 0; }
+.environment-side ul { margin: 0; padding-left: 16px; color: var(--text-secondary); font-size: 12px; line-height: 1.7; }
+.environment-side li { margin-bottom: 8px; }
 .environment-notice { color: var(--text-secondary); font-size: 12px; }
 .environment-error { color: var(--danger-color, #ff7875); margin: 10px 0; font-size: 12px; }
+.environment-error-actions { margin-bottom: 8px; }
 .environment-form label { display: block; margin: 20px 0 8px; }
 .environment-input { width: 100%; color: var(--text-primary); background: var(--panel-bg); border: 1px solid var(--border-color); border-radius: 4px; padding: 6px 10px; font-size: 13px; }
 .environment-input:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 1px; }
@@ -386,6 +387,5 @@ onBeforeUnmount(() => { disposed = true; release(); });
 .environment-field-help { color: var(--text-tertiary); font-size: 12px; line-height: 1.7; margin: 6px 0 16px; }
 .environment-form .environment-enabled-field { display: flex; align-items: center; gap: 10px; }
 .environment-drawer-actions { display: flex; justify-content: flex-end; gap: 8px; }
-@media (max-width: 850px) { .environment-side { padding: 18px 14px; } .environment-main { padding: 18px 16px; } }
-@media (max-width: 1023.98px) { .workspace-environment { flex-direction: column; overflow: auto; } .environment-main { flex: none; overflow: visible; } .environment-side { width: auto; overflow: visible; border-left: 0; border-top: 1px solid var(--border-color-secondary); } }
+@media (max-width: 1023.98px) { .environment-body { flex-direction: column; overflow: auto; } .environment-main { flex: none; overflow: visible; } .environment-side { width: auto; overflow: visible; border-left: 0; border-top: 1px solid var(--border-color-secondary); } }
 </style>

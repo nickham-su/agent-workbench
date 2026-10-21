@@ -24,6 +24,7 @@ export const componentTests = [
   "src/features/workspace/tools/agent/AgentToolView.component.test.ts",
   "src/features/workspace/tools/agent/useAgentSessionStatusStore.component.test.ts",
   "src/features/workspace/tools/file-explorer/FileExplorerToolView.component.test.ts",
+  "src/features/workspace/tools/search/SearchToolView.component.test.ts",
   "src/features/workspace/tools/editor/EditorToolView.component.test.ts",
   "src/features/workspace/tools/editor/EditorMarkdownPreview.component.test.ts",
   "src/features/workspace/tools/editor/EditorMermaidPreview.component.test.ts",

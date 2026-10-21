@@ -1,37 +1,39 @@
 <template>
   <div class="h-full min-h-0 flex flex-col">
+    <div class="search-tool-heading flex h-[37px] shrink-0 items-center box-border px-3 border-b border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)] text-xs font-semibold">
+      {{ t("workspace.tools.search") }}
+    </div>
     <div class="flex-1 min-h-0 flex flex-col gap-2 px-3 py-3">
       <div class="flex items-center gap-2">
         <a-input
           v-model:value="query"
           :placeholder="t('search.placeholder.query')"
           allowClear
-          @pressEnter="runSearch"
+          @pressEnter="onPressEnter"
+          @input="onInput"
         />
-        <a-button type="primary" size="small" :loading="loading" :disabled="!canSearch" @click="runSearch">
-          {{ t("search.actions.search") }}
-        </a-button>
       </div>
 
       <div class="flex items-center gap-2 text-xs text-[color:var(--text-tertiary)]">
         <a-input
           v-model:value="path"
-          size="small"
           class="min-w-0"
           :placeholder="t('search.placeholder.pathHint')"
           :aria-label="t('search.placeholder.path')"
           allowClear
+          @pressEnter="onPressEnter"
+          @input="onInput"
         />
       </div>
 
       <div class="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-[color:var(--text-tertiary)]">
-        <a-checkbox v-model:checked="caseSensitive" class="shrink-0 whitespace-nowrap">
+        <a-checkbox v-model:checked="caseSensitive" class="shrink-0 whitespace-nowrap" @change="searchAfterUpdate">
           {{ t("search.options.caseSensitive") }}
         </a-checkbox>
-        <a-checkbox v-model:checked="wholeWord" class="shrink-0 whitespace-nowrap">
+        <a-checkbox v-model:checked="wholeWord" class="shrink-0 whitespace-nowrap" @change="searchAfterUpdate">
           {{ t("search.options.wholeWord") }}
         </a-checkbox>
-        <a-checkbox v-model:checked="useRegex" class="shrink-0 whitespace-nowrap">
+        <a-checkbox v-model:checked="useRegex" class="shrink-0 whitespace-nowrap" @change="searchAfterUpdate">
           {{ t("search.options.regex") }}
         </a-checkbox>
         <span class="shrink-0 whitespace-nowrap">
@@ -110,7 +112,7 @@ export default {
 </script>
 
 <script setup lang="ts">
-import { computed, watch } from "vue";
+import { computed, nextTick, watch } from "vue";
 import { message } from "ant-design-vue";
 import { useI18n } from "vue-i18n";
 import type { FileSearchBlock, WorkspaceDetail } from "@agent-workbench/shared";
@@ -142,10 +144,6 @@ const error = store.error;
 const truncated = store.truncated;
 const timedOut = store.timedOut;
 const tookMs = store.tookMs;
-const canSearch = computed(() => {
-  if (!query.value.trim()) return false;
-  return true;
-});
 
 const summaryLabel = computed(() => {
   if (loading.value) return t("search.status.searching");
@@ -242,6 +240,24 @@ async function openBlock(block: FileSearchBlock) {
       targetDirName: ""
     }
   });
+}
+
+async function searchAfterUpdate() {
+  // 等待 v-model 和路径变更的结果清理完成，避免新请求刚发出便被作废。
+  await nextTick();
+  if (query.value.trim()) await runSearch();
+}
+
+function onPressEnter(event: KeyboardEvent) {
+  if (event.isComposing || event.keyCode === 229) return;
+  void searchAfterUpdate();
+}
+
+function onInput(event: Event) {
+  // input 发生在粘贴值写入后；Ant Input 的清空按钮则发送 click 类型的 input。
+  if ((event as InputEvent).inputType === "insertFromPaste" || event.type === "click") {
+    void searchAfterUpdate();
+  }
 }
 
 async function runSearch() {

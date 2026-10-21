@@ -1,15 +1,16 @@
 <template>
-  <div ref="containerEl" class="code-review-tool" :class="{ 'review-wide': wide }" :style="{ '--review-repo-width': `${repoWidth}px` }">
-    <div class="review-tool-heading">{{ t("codeReview.repositories.title") }}</div>
+  <div ref="containerEl" class="code-review-tool" :class="{ 'review-wide': wide && repos.length > 0 }" :style="{ '--review-repo-width': `${repoWidth}px` }">
+    <div v-if="!wide || !repos.length" class="review-tool-heading">{{ t("codeReview.repositories.title") }}</div>
     <div v-if="repos.length" class="review-body">
+      <div v-if="wide" class="review-tool-heading">{{ t("codeReview.repositories.title") }}</div>
       <section class="review-repositories" :aria-label="t('codeReview.repositories.select')" @scroll="closeMenu()">
         <div
           v-for="(repo, index) in repos"
           :key="repo.repo.id"
-          class="review-repository w-full text-left pl-3 pr-1 py-1.5 hover:bg-[var(--hover-bg)]"
+          class="review-repository w-full text-left pl-3 pr-1 py-1.5"
           :class="[
             { selected: repo.dirName === selectedRepoDirName },
-            repo.dirName === selectedRepoDirName ? 'bg-[var(--fill-secondary)] border-l-2 border-l-[var(--info-color)]' : 'border-l-2 border-l-transparent'
+            repo.dirName === selectedRepoDirName ? 'bg-[color-mix(in_srgb,var(--info-color)_20%,var(--panel-bg))] border-l-2 border-l-[var(--info-color)]' : 'hover:bg-[var(--hover-bg)] border-l-2 border-l-transparent'
           ]"
           :data-repo="repo.dirName"
         >
@@ -356,8 +357,9 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-.code-review-tool { height: 100%; min-width: 0; min-height: 0; display: grid; grid-template-rows: 43px minmax(0, 1fr); overflow: hidden; background: var(--panel-bg); }
-.review-tool-heading { display: flex; align-items: center; padding: 0 13px; border-bottom: 1px solid var(--border-color-secondary); font-size: 13px; font-weight: 600; }
+/* Match the change heading: 24px small buttons + 12px vertical padding + 1px border. */
+.code-review-tool { height: 100%; min-width: 0; min-height: 0; display: grid; grid-template-rows: 37px minmax(0, 1fr); overflow: hidden; background: var(--panel-bg); }
+.review-tool-heading { display: flex; align-items: center; box-sizing: border-box; padding: 0 12px; border-bottom: 1px solid var(--border-color-secondary); background: var(--panel-bg-elevated); font-size: 12px; font-weight: 600; }
 /* The definite heading-free grid track is the percentage cap's containing block. */
 .review-body { position: relative; height: 100%; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .review-repositories { flex: 0 1 auto; max-height: calc(100% / 3); box-sizing: border-box; min-width: 0; min-height: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; scrollbar-width: thin; padding: 0; border-bottom: 1px solid var(--border-color-secondary); }
@@ -376,8 +378,12 @@ onBeforeUnmount(() => {
 .review-repo-select:focus-visible, .review-repo-branch:focus-visible, .review-repo-more:focus-visible { outline: 2px solid var(--info-color); outline-offset: -2px; }
 .review-changes-region { flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
 .review-empty { display: flex; align-items: center; justify-content: center; min-height: 0; padding: 16px; color: var(--text-tertiary); font-size: 12px; }
-.review-wide .review-body { display: grid; grid-template-columns: var(--review-repo-width, 264px) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
-.review-wide .review-repositories { max-height: none; border-bottom: 0; border-right: 1px solid var(--border-color-secondary); }
+/* Only the repository column owns a heading in side-by-side mode. */
+.code-review-tool.review-wide { grid-template-rows: minmax(0, 1fr); }
+.review-wide .review-body { display: grid; grid-template-columns: var(--review-repo-width, 264px) minmax(0, 1fr); grid-template-rows: 37px minmax(0, 1fr); }
+.review-wide .review-tool-heading { grid-column: 1; grid-row: 1; border-right: 1px solid var(--border-color-secondary); }
+.review-wide .review-repositories { grid-column: 1; grid-row: 2; max-height: none; border-bottom: 0; border-right: 1px solid var(--border-color-secondary); }
+.review-wide .review-changes-region { grid-column: 2; grid-row: 1 / 3; }
 .review-repo-divider { position: absolute; z-index: 10; left: calc(var(--review-repo-width, 264px) - 3px); top: 0; bottom: 0; width: 6px; cursor: col-resize; touch-action: none; }
 .review-repo-divider:hover, .review-repo-divider.dragging { background: var(--info-color); opacity: .45; }
 .review-repo-divider:focus-visible { outline: 2px solid var(--info-color); outline-offset: -2px; }
