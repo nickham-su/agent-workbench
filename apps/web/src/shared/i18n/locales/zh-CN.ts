@@ -644,7 +644,7 @@ export default {
   },
   terminal: {
     config: {
-      title: "配置",
+      title: "运行配置",
       add: "新建配置",
       collapse: "收起配置",
       empty: "暂无配置",

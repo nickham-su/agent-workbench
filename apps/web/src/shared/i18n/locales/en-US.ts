@@ -646,7 +646,7 @@ export default {
   },
   terminal: {
     config: {
-      title: "Configurations",
+      title: "Run configurations",
       add: "New configuration",
       collapse: "Collapse configurations",
       empty: "No configurations",

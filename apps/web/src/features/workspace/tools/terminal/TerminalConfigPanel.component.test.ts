@@ -52,7 +52,9 @@ test("compact configuration pane aligns headings and actions without extra row c
   const { wrapper } = setup(); await settle();
   const row = wrapper.get(".config-row");
   assert.equal(row.element.children.length, 3); assert.equal(row.get(".config-name").text(), "前端开发");
-  assert.equal(wrapper.get(".config-heading-title").text(), "配置");
+  assert.equal(wrapper.get(".config-heading-title").text(), "运行");
+  assert.match(getComputedStyle(row.get(".config-run").element).color, /^(?:#fff(?:fff)?|rgb\(255,\s*255,\s*255\))$/i);
+  assert.equal(row.get(".config-run").element.parentElement, row.element);
   assert.equal(wrapper.findAll('.config-heading button').length, 2);
   const headingStyle = getComputedStyle(wrapper.get(".config-heading").element), rowStyle = getComputedStyle(row.element);
   for (const key of ["paddingLeft", "paddingRight", "gap", "height"] as const) assert.equal(rowStyle[key], headingStyle[key]);
@@ -63,8 +65,8 @@ test("compact configuration pane aligns headings and actions without extra row c
 
 test("each completed run request creates and emits a new terminal without session reuse", async () => {
   const { wrapper, counts } = setup(); await settle();
-  await wrapper.get('[aria-label="运行"]').trigger("click"); await settle();
-  await wrapper.get('[aria-label="运行"]').trigger("click"); await settle();
+  await wrapper.get('button[aria-label="运行"]').trigger("click"); await settle();
+  await wrapper.get('button[aria-label="运行"]').trigger("click"); await settle();
   assert.equal(counts().runs, 2);
   const events = wrapper.emitted("created")!;
   assert.equal(events.length, 2); assert.notDeepEqual(events[0], events[1]);

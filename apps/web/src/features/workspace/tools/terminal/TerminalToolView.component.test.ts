@@ -43,12 +43,13 @@ test("configuration pane preserves terminal mounts and activates created termina
   try {
     await settle();
     assert.equal(terminalMounts, 1);
-    assert.equal(wrapper.get('[aria-label="配置"]').text(), "");
-    await wrapper.get('[aria-label="配置"]').trigger("click"); await settle();
-    assert.equal(wrapper.find('[aria-label="配置"]').exists(), false);
     const panel = wrapper.findComponent({ name: "TestConfigs" });
+    assert.equal(wrapper.get("[data-configs]").isVisible(), true);
+    assert.equal(wrapper.find('[aria-label="运行配置"]').exists(), false);
     panel.vm.$emit("close"); await settle();
     assert.equal(wrapper.get("[data-configs]").isVisible(), false);
+    assert.equal(wrapper.get('[aria-label="运行配置"]').text(), "");
+    assert.equal(wrapper.get('[aria-label="运行配置"]').element.parentElement?.getAttribute("title"), "运行配置");
     assert.equal(terminalMounts, 1);
     // A request can complete while its pane is hidden. The new terminal must
     // still be refreshed and selected, without reconnecting the existing one.
@@ -56,7 +57,7 @@ test("configuration pane preserves terminal mounts and activates created termina
     assert.equal(wrapper.get('[data-terminal="second"]').attributes("data-active"), "true");
     assert.equal(wrapper.get('[data-terminal="first"]').attributes("data-active"), "false");
     assert.equal(terminalMounts, 2);
-    await wrapper.get('[aria-label="配置"]').trigger("click"); await settle();
+    await wrapper.get('[aria-label="运行配置"]').trigger("click"); await settle();
     assert.equal(terminalMounts, 2);
     assert.equal(wrapper.findComponent({ name: "TestConfigs" }).vm, panel.vm);
   } finally { wrapper.unmount(); apiClient.defaults.adapter = previous; }
@@ -111,7 +112,7 @@ function responseFixture(t: TestContext, realConfigs = false) {
   t.after(() => { unmount(); apiClient.defaults.adapter = previous; });
   async function created(record: TerminalRecord) {
     if (!wrapper.findComponent({ name: "TestConfigs" }).exists()) {
-      await wrapper.get('[aria-label="配置"]').trigger("click");
+      await wrapper.get('[aria-label="运行配置"]').trigger("click");
     }
     wrapper.findComponent({ name: "TestConfigs" }).vm.$emit("created", record);
     await settle();
@@ -119,11 +120,22 @@ function responseFixture(t: TestContext, realConfigs = false) {
   return { wrapper, lists, creates, created, unmount, minimized: () => minimized, runs: () => runs };
 }
 
+test("the run pane opens by default on entering each Workspace", async (t) => {
+  const f = responseFixture(t); await settle();
+  const panel = f.wrapper.findComponent({ name: "TestConfigs" });
+  assert.equal(panel.isVisible(), true);
+  assert.equal(panel.props("active"), true);
+  panel.vm.$emit("close"); await settle();
+  assert.equal(panel.isVisible(), false);
+  await f.wrapper.setProps({ workspaceId: "B" }); await settle();
+  assert.equal(f.wrapper.findComponent({ name: "TestConfigs" }).isVisible(), true);
+  assert.equal(f.wrapper.findComponent({ name: "TestConfigs" }).props("active"), true);
+});
+
 test("a configuration-run refresh from A cannot overwrite B or activate A after switching Workspace", async (t) => {
   const f = responseFixture(t, true); await settle();
   f.lists[0]!.resolve([terminal("A", "a-first")]); await settle();
-  await f.wrapper.get('[aria-label="配置"]').trigger("click"); await settle();
-  await f.wrapper.get('[aria-label="运行"]').trigger("click"); await settle();
+  await f.wrapper.get('button[aria-label="运行"]').trigger("click"); await settle();
   assert.equal(f.runs(), 1);
   assert.equal(f.lists[1]!.workspaceId, "A");
   await f.wrapper.setProps({ workspaceId: "B" }); await settle();

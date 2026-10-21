@@ -17,7 +17,7 @@
       </a-tooltip>
       <span class="flex-1" />
       <a-tooltip v-if="showConfigButton" :title="t('terminal.config.title')">
-        <a-button type="text" size="small" class="terminal-config-entry" :aria-label="t('terminal.config.title')" @click="emit('openConfig')"><SettingOutlined /></a-button>
+        <a-button type="text" size="small" class="terminal-config-entry" :aria-label="t('terminal.config.title')" @click="emit('openConfig')"><CaretRightOutlined /></a-button>
       </a-tooltip>
     </div>
 
@@ -31,7 +31,7 @@
       >
         <template #rightExtra>
           <a-tooltip v-if="showConfigButton" :title="t('terminal.config.title')">
-            <a-button type="text" size="small" class="terminal-config-entry" :aria-label="t('terminal.config.title')" @click="emit('openConfig')"><SettingOutlined /></a-button>
+            <a-button type="text" size="small" class="terminal-config-entry" :aria-label="t('terminal.config.title')" @click="emit('openConfig')"><CaretRightOutlined /></a-button>
           </a-tooltip>
           <a-tooltip :title="collapseLabel" placement="topRight">
             <a-button
@@ -85,7 +85,7 @@
 
 <script setup lang="ts">
 import {Modal, message} from "ant-design-vue";
-import {CloseOutlined, PlusOutlined, CodeOutlined, MinusOutlined, SettingOutlined} from "@ant-design/icons-vue";
+import {CloseOutlined, PlusOutlined, CodeOutlined, MinusOutlined, CaretRightOutlined} from "@ant-design/icons-vue";
 import {computed, nextTick, ref, watch} from "vue";
 import { useI18n } from "vue-i18n";
 import type {TerminalRecord} from "@agent-workbench/shared";

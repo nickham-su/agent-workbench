@@ -38,8 +38,8 @@ const host = useWorkspaceHost(props.toolId);
 
 const terminals = ref<TerminalRecord[]>([]);
 const terminalTabs = ref<InstanceType<typeof TerminalTabs>>();
-const configOpen = ref(false);
-const configOpened = ref(false);
+const configOpen = ref(true);
+const configOpened = ref(true);
 function openConfig() { configOpened.value = true; configOpen.value = true; }
 function onConfigTerminalCreated(terminal: TerminalRecord) {
   if (disposed || terminal.workspaceId !== props.workspaceId) return;
@@ -116,8 +116,8 @@ watch(
   () => {
     workspaceEpoch++;
     refreshGeneration++;
-    configOpen.value = false;
-    configOpened.value = false;
+    configOpen.value = true;
+    configOpened.value = true;
     terminals.value = [];
     void refreshAndEnsureTerminal();
   },

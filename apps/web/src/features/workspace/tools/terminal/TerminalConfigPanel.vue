@@ -1,7 +1,7 @@
 <template>
-  <aside class="terminal-config-panel" :aria-label="t('terminal.config.title')">
+  <aside class="terminal-config-panel" :aria-label="t('terminal.config.run')">
     <header class="config-heading">
-      <span class="config-heading-title">{{ t('terminal.config.title') }}</span>
+      <span class="config-heading-title">{{ t('terminal.config.run') }}</span>
       <span class="spacer" />
       <a-tooltip :title="t('terminal.config.add')"><a-button type="text" class="config-icon" :disabled="loading" :aria-label="t('terminal.config.add')" @click="openEditor()"><PlusOutlined /></a-button></a-tooltip>
       <a-tooltip :title="t('terminal.config.collapse')"><a-button type="text" class="config-icon" :aria-label="t('terminal.config.collapse')" @click="emit('close')"><CloseOutlined /></a-button></a-tooltip>
@@ -12,7 +12,7 @@
       <div v-else-if="configs.length === 0" class="config-empty">{{ t('terminal.config.empty') }}</div>
       <div v-for="config in configs" v-else :key="config.id" class="config-row">
         <span class="config-name" :title="config.name">{{ config.name }}</span>
-        <a-tooltip :title="t('terminal.config.run')"><a-button type="text" class="config-icon config-run" :loading="runningIds.has(config.id)" :disabled="runningIds.has(config.id)" :aria-label="t('terminal.config.run')" @click="run(config)"><CaretRightOutlined v-if="!runningIds.has(config.id)" /></a-button></a-tooltip>
+        <a-button type="text" class="config-icon config-run" :loading="runningIds.has(config.id)" :disabled="runningIds.has(config.id)" :aria-label="t('terminal.config.run')" @click="run(config)"><CaretRightOutlined v-if="!runningIds.has(config.id)" /></a-button>
         <a-dropdown :trigger="['click']">
           <a-button type="text" class="config-icon" :aria-label="t('terminal.config.more')"><MoreOutlined /></a-button>
           <template #overlay><a-menu @click="handleMenu(String($event.key), config)"><a-menu-item key="edit">{{ t('terminal.config.edit') }}</a-menu-item><a-menu-item key="delete" danger>{{ t('terminal.config.delete') }}</a-menu-item></a-menu></template>
@@ -143,7 +143,7 @@ function handleMenu(key: string, config: TerminalConfigRecord) {
 .config-row { border-radius: 0; }
 .config-row:hover { background: var(--panel-bg-elevated); }
 .config-icon { width: 28px; height: 28px; flex: 0 0 28px; padding: 0; }
-.config-run { color: var(--primary-color, #1677ff); }
+.config-run { color: #fff; }
 .config-empty, .config-loading { display: block; padding: 24px 12px; text-align: center; color: var(--text-tertiary); }
 .config-command { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .config-editor-footer { display: flex; justify-content: flex-end; gap: 8px; }
