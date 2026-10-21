@@ -1,3 +1,4 @@
+import { buildTerminalStartupBootstrap, TERMINAL_STARTUP_BOOTSTRAP_NAME } from "./terminal-startup-bootstrap.js";
 import fs from "node:fs/promises";
 import { constants, existsSync, type Stats } from "node:fs";
 import path from "node:path";
@@ -34,7 +35,7 @@ import {
 export type PreparedTerminalEnvironmentLaunch = { attempt: TerminalEnvironmentLaunchAttempt; command: string[] };
 export type TerminalEnvironmentLaunchTestHooks = {
   /** Crash windows before the newly created object's identity is durable. Never receives payload contents. */
-  afterCreate?: (kind: "directory" | "payload" | "status") => Promise<void> | void;
+  afterCreate?: (kind: "directory" | "payload" | "status" | "bootstrap") => Promise<void> | void;
   /** Crash after rename but before unlink/rmdir, exercising restart recovery from durable identity. */
   afterRetire?: (params: { kind: "file" | "directory"; parentFdPath: string; privateName: string }) => Promise<void> | void;
 };
@@ -43,7 +44,8 @@ export function terminalEnvironmentLaunchLocator(dataDir: string, attempt: Termi
   return {
     version: 1, attemptId: attempt.id, dataDir: path.resolve(dataDir), directoryName: attempt.directoryName,
     ownerUid: attempt.ownerUid, dataRoot: attempt.dataRoot, launchRoot: attempt.launchRoot,
-    attemptDirectory: attempt.attemptDirectory, payload: attempt.payload, status: attempt.status
+    attemptDirectory: attempt.attemptDirectory, payload: attempt.payload, status: attempt.status,
+    ...(attempt.bootstrap ? { bootstrap: attempt.bootstrap } : {})
   };
 }
 /** Resolves only alongside this trusted API module; never via Workspace PATH/cwd or arbitrary execArgv. */
@@ -70,12 +72,14 @@ async function checkDirectory(directory: SecureDirectory, data: SecureDirectory,
 export async function prepareTerminalEnvironmentLaunch(params: {
   db: Db; dataDir: string; terminalId: string; shell: string;
   workspaceEnv: Readonly<Record<string, string>>; systemEnv: Record<string, string>;
-  baseEnv?: NodeJS.ProcessEnv; hooks?: TerminalEnvironmentLaunchTestHooks;
+  baseEnv?: NodeJS.ProcessEnv; hooks?: TerminalEnvironmentLaunchTestHooks; startupCommand?: string;
 }): Promise<PreparedTerminalEnvironmentLaunch> {
   const id = newId("te");
   const directoryName = terminalEnvironmentDirectoryName(params.terminalId, id);
   const payload = createTerminalEnvironmentPayload({ attemptId: id, shell: params.shell,
     baseEnv: params.baseEnv ?? process.env, systemEnv: params.systemEnv, workspaceEnv: params.workspaceEnv });
+  const bootstrap = params.startupCommand === undefined ? undefined : buildTerminalStartupBootstrap(params.startupCommand, id);
+  if (bootstrap !== undefined && params.shell !== "bash") terminalEnvironmentProtocolError();
   const ownerUid = process.getuid?.();
   if (ownerUid === undefined) throw new TerminalEnvironmentLaunchError("TERMINAL_ENV_PREPARE_FAILED");
   let data: SecureDirectory | undefined, root: SecureDirectory | undefined, directory: SecureDirectory | undefined;
@@ -105,9 +109,9 @@ export async function prepareTerminalEnvironmentLaunch(params: {
     directory = await openExistingSecureChildDirectory(root, directoryName);
     await checkDirectory(directory, data, null, ownerUid);
     attempt = updateTerminalEnvironmentLaunchAttempt(params.db, id, { attemptDirectory: terminalEnvironmentIdentity(await directory.handle.stat()) });
-    for (const kind of ["payload", "status"] as const) {
-      const name = kind === "payload" ? TERMINAL_ENV_PAYLOAD_NAME : TERMINAL_ENV_STATUS_NAME;
-      attempt = updateTerminalEnvironmentLaunchAttempt(params.db, id, { [kind === "payload" ? "payloadArmed" : "statusArmed"]: true });
+    for (const kind of (bootstrap === undefined ? ["payload", "status"] as const : ["payload", "status", "bootstrap"] as const)) {
+      const name = kind === "payload" ? TERMINAL_ENV_PAYLOAD_NAME : kind === "status" ? TERMINAL_ENV_STATUS_NAME : TERMINAL_STARTUP_BOOTSTRAP_NAME;
+      attempt = updateTerminalEnvironmentLaunchAttempt(params.db, id, { [`${kind}Armed`]: true });
       await checkDirectory(data, data, attempt.dataRoot, ownerUid, false);
       await checkDirectory(root, data, attempt.launchRoot, ownerUid);
       await checkDirectory(directory, data, attempt.attemptDirectory, ownerUid);
@@ -123,8 +127,8 @@ export async function prepareTerminalEnvironmentLaunch(params: {
         // Persist identity BEFORE writing plaintext, so the secret-write stage has durable authority.
         attempt = updateTerminalEnvironmentLaunchAttempt(params.db, id, { [kind]: identity });
         await assertTerminalEnvironmentFileCurrent({ directory, name, handle, identity, ownerUid });
-        const body = kind === "payload" ? payload : { version: 1, attemptId: id, state: "pending" };
-        await handle.writeFile(JSON.stringify(body), "utf8");
+        const body = kind === "payload" ? JSON.stringify(payload) : kind === "bootstrap" ? bootstrap! : JSON.stringify({ version: 1, attemptId: id, state: "pending" });
+        await handle.writeFile(body, "utf8");
         await handle.sync();
         await assertTerminalEnvironmentFileCurrent({ directory, name, handle, identity, ownerUid });
         await checkDirectory(data, data, attempt.dataRoot, ownerUid, false);
@@ -227,7 +231,7 @@ export async function cleanupTerminalEnvironmentLaunch(params: {
     data = await openSecureRootDirectory(params.dataDir);
     await checkDirectory(data, data, attempt.dataRoot, attempt.ownerUid, false);
     if (!attempt.launchRoot) {
-      if (attempt.directoryArmed || attempt.payloadArmed || attempt.statusArmed) terminalEnvironmentProtocolError();
+      if (attempt.directoryArmed || attempt.payloadArmed || attempt.statusArmed || attempt.bootstrapArmed) terminalEnvironmentProtocolError();
       return "clean"; // Shared-root establishment window has not armed any secret child.
     }
     root = await openExistingSecureChildDirectory(data, TERMINAL_ENV_LAUNCH_ROOT);
@@ -238,25 +242,25 @@ export async function cleanupTerminalEnvironmentLaunch(params: {
     if (!candidate) return "clean";
     directory = await openExistingSecureChildDirectory(root, candidate.name);
     await checkDirectory(directory, data, attempt.attemptDirectory, attempt.ownerUid);
-    for (const kind of ["payload", "status"] as const) {
-      const name = kind === "payload" ? TERMINAL_ENV_PAYLOAD_NAME : TERMINAL_ENV_STATUS_NAME;
+    for (const kind of ["payload", "status", "bootstrap"] as const) {
+      const name = kind === "payload" ? TERMINAL_ENV_PAYLOAD_NAME : kind === "status" ? TERMINAL_ENV_STATUS_NAME : TERMINAL_STARTUP_BOOTSTRAP_NAME;
       await checkDirectory(data, data, attempt.dataRoot, attempt.ownerUid, false);
       await checkDirectory(root, data, attempt.launchRoot, attempt.ownerUid);
       await checkDirectory(directory, data, attempt.attemptDirectory, attempt.ownerUid);
-      const file = await locateEntry({ parent: directory, name, scope: scopes[kind], expected: attempt[kind], uid: attempt.ownerUid, kind: "file" });
+      const file = await locateEntry({ parent: directory, name, scope: scopes[kind], expected: attempt[kind] ?? null, uid: attempt.ownerUid, kind: "file" });
       if (!file) continue;
       const retired = file.retired ? { privateName: file.name, stat: file.stat, kind: "file" as const }
         : await retireSecureEntry({ parent: directory, name, expected: terminalEnvironmentInode(attempt[kind]!), kind: "file", privateSlotScope: scopes[kind] });
       if (!retired) terminalEnvironmentProtocolError();
-      assertTerminalEnvironmentStat(retired.stat, attempt[kind], "file", attempt.ownerUid);
+      assertTerminalEnvironmentStat(retired.stat, attempt[kind] ?? null, "file", attempt.ownerUid);
       if (!file.retired) await params.hooks?.afterRetire?.({ kind: "file", parentFdPath: directory.fdPath, privateName: retired.privateName });
       await checkDirectory(data, data, attempt.dataRoot, attempt.ownerUid, false);
       await checkDirectory(root, data, attempt.launchRoot, attempt.ownerUid);
       await checkDirectory(directory, data, attempt.attemptDirectory, attempt.ownerUid);
       const current = await fs.lstat(path.join(directory.fdPath, retired.privateName));
-      assertTerminalEnvironmentStat(current, attempt[kind], "file", attempt.ownerUid);
+      assertTerminalEnvironmentStat(current, attempt[kind] ?? null, "file", attempt.ownerUid);
       if (!await removeRetiredSecureFile(directory, retired)) terminalEnvironmentProtocolError();
-      if (await locateEntry({ parent: directory, name, scope: scopes[kind], expected: attempt[kind], uid: attempt.ownerUid, kind: "file" })) terminalEnvironmentProtocolError();
+      if (await locateEntry({ parent: directory, name, scope: scopes[kind], expected: attempt[kind] ?? null, uid: attempt.ownerUid, kind: "file" })) terminalEnvironmentProtocolError();
     }
     if ((await fs.readdir(directory.fdPath)).length !== 0) terminalEnvironmentProtocolError();
     await checkDirectory(data, data, attempt.dataRoot, attempt.ownerUid, false);

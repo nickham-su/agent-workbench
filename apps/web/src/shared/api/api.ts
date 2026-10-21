@@ -1,3 +1,4 @@
+import type { TerminalConfigInput, TerminalConfigRecord, UpdateTerminalConfigRequest } from "@agent-workbench/shared";
 import axios from "axios";
 import { Value } from "@sinclair/typebox/value";
 import {
@@ -1397,4 +1398,26 @@ export async function revertAgentSession(sessionId: string, body: AgentRevertSes
   } catch (err) {
     throw toApiError(err);
   }
+}
+
+
+export async function listTerminalConfigs(workspaceId: string) {
+  try { return (await client.get<TerminalConfigRecord[]>(`/workspaces/${workspaceId}/terminal-configs`)).data; }
+  catch (err) { throw toApiError(err); }
+}
+export async function createTerminalConfig(workspaceId: string, body: TerminalConfigInput) {
+  try { return (await client.post<TerminalConfigRecord>(`/workspaces/${workspaceId}/terminal-configs`, body)).data; }
+  catch (err) { throw toApiError(err); }
+}
+export async function updateTerminalConfig(workspaceId: string, configId: string, body: UpdateTerminalConfigRequest) {
+  try { return (await client.patch<TerminalConfigRecord>(`/workspaces/${workspaceId}/terminal-configs/${configId}`, body)).data; }
+  catch (err) { throw toApiError(err); }
+}
+export async function deleteTerminalConfig(workspaceId: string, configId: string) {
+  try { await client.delete(`/workspaces/${workspaceId}/terminal-configs/${configId}`); }
+  catch (err) { throw toApiError(err); }
+}
+export async function runTerminalConfig(workspaceId: string, configId: string) {
+  try { return (await client.post<TerminalRecord>(`/workspaces/${workspaceId}/terminal-configs/${configId}/run`)).data; }
+  catch (err) { throw toApiError(err); }
 }

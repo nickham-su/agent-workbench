@@ -1,3 +1,4 @@
+import { resolveTerminalConfigCwd } from "./terminal-config.service.js";
 import type { FastifyBaseLogger } from "fastify";
 import type { TerminalRecord } from "@agent-workbench/shared";
 import type { AppContext } from "../../app/context.js";
@@ -397,6 +398,7 @@ export async function createTerminal(
   params: {
     workspaceId: string;
     shell?: string;
+    startup?: { cwd: string; command: string };
     runtimeOperations?: TerminalRuntimeOperations;
     writeAuthArtifactForTest?: typeof writeTerminalGitAuthArtifact;
     buildNetworkEnvForTest?: typeof buildTerminalNetworkEnvPairs;
@@ -409,6 +411,7 @@ export async function createTerminal(
   return workspaceLifecycleCoordinator.withMutation(workspaceId, async () => {
     const ws = getWorkspace(ctx.db, workspaceId);
     if (!ws) throw new HttpError(404, "Workspace not found");
+    const startupCwd = params.startup ? await resolveTerminalConfigCwd(ws.path, params.startup.cwd) : undefined;
     // Capture both layers once, before the first asynchronous preparation; fallback reuses them.
     const workspaceEnv = getWorkspaceEnvironmentService(ctx).readEnvironment(workspaceId);
     let baseEnv: Record<string, string>;
@@ -420,7 +423,7 @@ export async function createTerminal(
     const term: TerminalRecord = {
       id: terminalId, workspaceId: ws.id, sessionName, status: "creating", createdAt: ts, updatedAt: ts,
     };
-    const specifiedShell = params.shell?.trim();
+    const specifiedShell = params.startup ? "bash" : params.shell?.trim();
     const runtimeOperations = params.runtimeOperations ?? defaultTerminalRuntimeOperations;
     let intentPersisted = false;
     let authArtifactWriteStarted = false;
@@ -443,11 +446,12 @@ export async function createTerminal(
         if (separator <= 0) throw new TerminalEnvironmentLaunchError("TERMINAL_ENV_PREPARE_FAILED");
         systemEnv[pair.slice(0, separator)] = pair.slice(separator + 1);
       }
-      const cwd = await resolveTerminalCwd(ctx, ws);
-      for (let index = 0; index < 2; index++) {
+      const cwd = startupCwd ?? await resolveTerminalCwd(ctx, ws);
+      for (let index = 0; index < (params.startup ? 1 : 2); index++) {
         const shell = index === 0 ? specifiedShell || "bash" : "sh";
         const launch = await (runtimeOperations.prepareEnvironmentLaunch ?? prepareTerminalEnvironmentLaunch)({
           db: ctx.db, dataDir: ctx.dataDir, terminalId, shell, workspaceEnv, systemEnv, baseEnv,
+          startupCommand: params.startup?.command,
         });
         const attempt = markTerminalEnvironmentLaunchStarting(ctx.db, launch.attempt.id);
         // Arm before the side effect: a response loss may still have created a live launcher.

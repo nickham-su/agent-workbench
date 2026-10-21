@@ -274,6 +274,15 @@ function createBaseSchema(db: Db) {
       updated_at integer not null
     );
 
+    create table if not exists workspace_terminal_configs (
+      id text primary key,
+      workspace_id text not null references workspaces(id) on delete cascade,
+      name text not null, cwd text not null, command text not null,
+      created_at integer not null, updated_at integer not null
+    );
+    create index if not exists idx_workspace_terminal_configs_list
+      on workspace_terminal_configs(workspace_id, created_at, id);
+
     create table if not exists workspace_environment_variables (
       id text primary key,
       workspace_id text not null references workspaces(id) on delete cascade,
@@ -398,6 +407,14 @@ function ensureTerminalEnvironmentLaunchAttemptSchema(db: Db) {
         throw new Error("Unsupported terminal environment launch attempt schema. Refusing unsafe repair.");
       }
     } else db.exec(ddl);
+    // A separate child locator preserves the existing strict attempt-table layout.
+    // Its durable arm/identity authorizes bootstrap cleanup across process crashes.
+    db.exec(`create table if not exists terminal_env_launch_bootstraps (
+      attempt_id text primary key references terminal_env_launch_attempts(id) on delete cascade,
+      armed integer not null check (armed in (0, 1)),
+      dev text, ino text,
+      check ((dev is null and ino is null) or (dev is not null and ino is not null and armed = 1))
+    )`);
     db.exec(`create index if not exists idx_terminal_env_launch_attempts_terminal
       on terminal_env_launch_attempts(terminal_id, created_at, id)`);
   })();

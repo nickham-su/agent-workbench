@@ -1,13 +1,21 @@
 <template>
-  <TerminalTabs
-    :workspaceId="workspaceId"
-    :terminals="terminals"
-    @created="refreshTerminals"
-    @deleted="onDeleted"
-    @terminal-exited="onTerminalExited"
-    @terminal-invalidated="onTerminalInvalidated"
-    @minimize="minimizeSelf"
-  />
+  <div class="h-full min-h-0 flex">
+    <div class="flex-1 min-w-0 min-h-0">
+      <TerminalTabs
+        ref="terminalTabs"
+        :workspaceId="workspaceId"
+        :terminals="terminals"
+        :show-config-button="!configOpen"
+        @open-config="openConfig"
+        @created="refreshTerminals"
+        @deleted="onDeleted"
+        @terminal-exited="onTerminalExited"
+        @terminal-invalidated="onTerminalInvalidated"
+        @minimize="minimizeSelf"
+      />
+    </div>
+    <TerminalConfigPanel v-if="configOpened" v-show="configOpen" :key="workspaceId" :workspace-id="workspaceId" :active="configOpen" @close="configOpen = false" @created="onConfigTerminalCreated" />
+  </div>
 </template>
 
 <script lang="ts">
@@ -17,44 +25,72 @@ export default {
 </script>
 
 <script setup lang="ts">
-import { onMounted, ref, watch } from "vue";
+import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { message } from "ant-design-vue";
 import type { TerminalRecord } from "@agent-workbench/shared";
 import { createTerminal, listTerminals } from "@/shared/api";
 import TerminalTabs from "./TerminalTabs.vue";
+import TerminalConfigPanel from "./TerminalConfigPanel.vue";
 import { useWorkspaceHost } from "@/features/workspace/host";
 
 const props = defineProps<{ workspaceId: string; toolId: string }>();
 const host = useWorkspaceHost(props.toolId);
 
 const terminals = ref<TerminalRecord[]>([]);
-const autoCreating = ref(false);
+const terminalTabs = ref<InstanceType<typeof TerminalTabs>>();
+const configOpen = ref(false);
+const configOpened = ref(false);
+function openConfig() { configOpened.value = true; configOpen.value = true; }
+function onConfigTerminalCreated(terminal: TerminalRecord) {
+  if (disposed || terminal.workspaceId !== props.workspaceId) return;
+  terminalTabs.value?.activateCreatedTerminal(terminal.id);
+}
+type RefreshRequest = { workspaceId: string; workspaceEpoch: number; generation: number };
+let workspaceEpoch = 0, refreshGeneration = 0, disposed = false;
+let autoCreatingEpoch: number | null = null;
+function isWorkspaceCurrent(request: RefreshRequest) {
+  return !disposed && request.workspaceId === props.workspaceId && request.workspaceEpoch === workspaceEpoch;
+}
+function isRefreshCurrent(request: RefreshRequest) {
+  return isWorkspaceCurrent(request) && request.generation === refreshGeneration;
+}
+onBeforeUnmount(() => { disposed = true; refreshGeneration++; });
 
-async function refreshTerminals(): Promise<boolean> {
-  if (!props.workspaceId) return false;
+async function refreshTerminals(): Promise<RefreshRequest | null> {
+  if (disposed || !props.workspaceId) return null;
+  const request = { workspaceId: props.workspaceId, workspaceEpoch, generation: ++refreshGeneration };
   try {
-    terminals.value = await listTerminals(props.workspaceId);
-    return true;
+    const result = await listTerminals(request.workspaceId);
+    if (!isRefreshCurrent(request)) return null;
+    terminals.value = result;
+    return request;
   } catch (err) {
-    message.error(err instanceof Error ? err.message : String(err));
-    return false;
+    if (isRefreshCurrent(request)) message.error(err instanceof Error ? err.message : String(err));
+    return null;
   }
 }
 
-async function ensureTerminalOnActivate() {
-  if (!props.workspaceId) return;
-  if (autoCreating.value) return;
+async function ensureTerminalOnActivate(request: RefreshRequest) {
+  if (!isRefreshCurrent(request)) return;
+  if (autoCreatingEpoch === request.workspaceEpoch) return;
   if (terminals.value.length > 0) return;
 
-  autoCreating.value = true;
+  autoCreatingEpoch = request.workspaceEpoch;
   try {
-    await createTerminal(props.workspaceId, {});
+    await createTerminal(request.workspaceId, {});
   } catch (err) {
-    message.error(err instanceof Error ? err.message : String(err));
+    if (isWorkspaceCurrent(request)) message.error(err instanceof Error ? err.message : String(err));
   } finally {
-    autoCreating.value = false;
+    if (autoCreatingEpoch === request.workspaceEpoch) autoCreatingEpoch = null;
   }
-  await refreshTerminals();
+  // A current Workspace's completed create needs a fresh list even if another
+  // refresh started meanwhile. An old Workspace must never refresh its successor.
+  if (isWorkspaceCurrent(request)) await refreshTerminals();
+}
+
+async function refreshAndEnsureTerminal() {
+  const request = await refreshTerminals();
+  if (request && isRefreshCurrent(request)) await ensureTerminalOnActivate(request);
 }
 
 function minimizeSelf() {
@@ -62,32 +98,33 @@ function minimizeSelf() {
 }
 
 async function onTerminalExited() {
-  await refreshTerminals();
-  if (terminals.value.length === 0) minimizeSelf();
+  const request = await refreshTerminals();
+  if (request && isRefreshCurrent(request) && terminals.value.length === 0) minimizeSelf();
 }
 
 async function onTerminalInvalidated() {
-  const ok = await refreshTerminals();
-  if (ok) await ensureTerminalOnActivate();
+  await refreshAndEnsureTerminal();
 }
 
 async function onDeleted() {
-  await refreshTerminals();
-  if (terminals.value.length === 0) minimizeSelf();
+  const request = await refreshTerminals();
+  if (request && isRefreshCurrent(request) && terminals.value.length === 0) minimizeSelf();
 }
 
 watch(
   () => props.workspaceId,
-  async () => {
+  () => {
+    workspaceEpoch++;
+    refreshGeneration++;
+    configOpen.value = false;
+    configOpened.value = false;
     terminals.value = [];
-    const ok = await refreshTerminals();
-    if (ok) await ensureTerminalOnActivate();
-  }
+    void refreshAndEnsureTerminal();
+  },
+  { flush: "sync" }
 );
 
 onMounted(() => {
-  void refreshTerminals().then((ok) => {
-    if (ok) return ensureTerminalOnActivate();
-  });
+  void refreshAndEnsureTerminal();
 });
 </script>

@@ -643,6 +643,27 @@ export default {
     }
   },
   terminal: {
+    config: {
+      title: "配置",
+      add: "新建配置",
+      collapse: "收起配置",
+      empty: "暂无配置",
+      run: "运行",
+      more: "更多",
+      edit: "编辑配置",
+      delete: "删除",
+      confirmDelete: "确认删除配置？",
+      name: "名称",
+      nameRequired: "请输入名称",
+      cwd: "工作目录",
+      cwdHint: "选择已有仓库，或输入相对路径；留空使用 Workspace 根目录。",
+      root: "Workspace 根目录",
+      command: "启动命令",
+      commandRequired: "请输入启动命令",
+      cancel: "取消",
+      save: "保存配置",
+      saved: "配置已保存"
+    },
     panel: {
       collapse: "折叠终端面板"
     },

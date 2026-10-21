@@ -1,3 +1,4 @@
+import { TERMINAL_STARTUP_BOOTSTRAP_NAME } from "./terminal-startup-bootstrap.js";
 import fs, { type FileHandle } from "node:fs/promises";
 import { constants } from "node:fs";
 import path from "node:path";
@@ -41,7 +42,7 @@ export async function assertTerminalEnvironmentDirectoriesCurrent(dirs: Terminal
   }
 }
 export async function openTerminalEnvironmentFile(params: {
-  directory: SecureDirectory; name: typeof TERMINAL_ENV_PAYLOAD_NAME | typeof TERMINAL_ENV_STATUS_NAME;
+  directory: SecureDirectory; name: typeof TERMINAL_ENV_PAYLOAD_NAME | typeof TERMINAL_ENV_STATUS_NAME | typeof TERMINAL_STARTUP_BOOTSTRAP_NAME;
   identity: TerminalEnvironmentIdentity; ownerUid: number; writable?: boolean;
 }): Promise<FileHandle> {
   let handle: FileHandle | undefined;

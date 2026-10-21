@@ -1,3 +1,4 @@
+import { registerTerminalConfigRoutes } from "./terminal-config.routes.js";
 import type { FastifyInstance } from "fastify";
 import type { AppContext } from "../../app/context.js";
 import { ErrorResponseSchema } from "@agent-workbench/shared";
@@ -7,6 +8,7 @@ import { createTerminal, deleteTerminal, getTerminalById, reconcileWorkspaceActi
 import { listActiveTerminalsByWorkspace } from "./terminal.store.js";
 
 export async function registerTerminalsRoutes(app: FastifyInstance, ctx: AppContext) {
+  await registerTerminalConfigRoutes(app, ctx);
   app.get(
     "/api/workspaces/:workspaceId/terminals",
     {

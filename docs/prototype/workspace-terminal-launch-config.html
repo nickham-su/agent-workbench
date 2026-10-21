@@ -1,0 +1,656 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>终端配置 · Agent Workbench 原型</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #141414; --raised: #1f1f1f; --border: #303030; --border-strong: #424242;
+      --text: rgba(255,255,255,.88); --muted: rgba(255,255,255,.55); --faint: rgba(255,255,255,.36);
+      --blue: #1677ff; --blue-text: #69b1ff; --danger: #ff7875; --terminal: #0b0f14;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      font-size: 13px;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #000; color: var(--text); }
+    button, input, textarea { font: inherit; color: inherit; }
+    button { cursor: pointer; }
+    button:disabled { cursor: default; opacity: .5; }
+    button, input, textarea { border-radius: 3px; }
+    button:focus-visible, input:focus-visible, textarea:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
+    button { height: 28px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 0 10px; border: 1px solid var(--border-strong); background: var(--raised); white-space: nowrap; }
+    button:hover { color: white; border-color: #626262; background: #272727; }
+    .primary { border-color: var(--blue); background: var(--blue); color: #fff; }
+    .primary:hover { background: #4096ff; border-color: #4096ff; }
+    .subtle { background: transparent; border-color: transparent; color: var(--muted); }
+    .subtle:hover { border-color: transparent; }
+    .icon-button { width: 28px; flex: 0 0 28px; padding: 0; }
+    .danger { color: var(--danger); }
+    .danger-solid { background: #a61d24; border-color: #a61d24; color: #fff; }
+    .danger-solid:hover { background: #cf1322; border-color: #cf1322; }
+    svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; flex-shrink: 0; }
+    .sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    [hidden] { display: none !important; }
+    .app { min-width: 760px; min-height: 620px; height: 100dvh; display: flex; flex-direction: column; }
+    .workspace-header { height: 48px; flex: none; display: flex; align-items: center; gap: 12px; padding: 0 16px 0 12px; background: var(--raised); border-bottom: 1px solid var(--border); }
+    .logo { display: flex; align-items: center; color: var(--blue-text); }
+    .logo svg { width: 21px; height: 21px; }
+    .crumb { color: var(--muted); }
+    .workspace-name { font-size: 14px; font-weight: 600; }
+    .divider { width: 1px; height: 18px; background: var(--border-strong); margin: 0 3px; }
+    .branch { display: flex; align-items: center; gap: 5px; color: var(--muted); font-size: 12px; }
+    .spacer { flex: 1; }
+    .prototype-label { font-size: 11px; letter-spacing: .7px; color: var(--muted); border: 1px solid var(--border-strong); border-radius: 3px; padding: 3px 6px; }
+    .workspace-body { display: flex; flex: 1; min-height: 0; }
+    .dock { width: 40px; flex: 0 0 40px; background: #171717; border-right: 1px solid var(--border); display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 8px 0; }
+    .dock-item { width: 39px; height: 38px; display: flex; align-items: center; justify-content: center; color: var(--faint); border-left: 2px solid transparent; }
+    .dock-item svg { width: 19px; height: 19px; }
+    .dock-item.active { color: var(--blue-text); background: #112033; border-left-color: var(--blue); }
+    .tool { flex: 1; min-width: 0; display: flex; }
+    .terminal-toolbar { height: 40px; display: flex; align-items: center; gap: 6px; padding-right: 12px; flex: none; border-bottom: 1px solid var(--border); background: var(--raised); }
+    .terminal-tabs { display: flex; align-self: stretch; min-width: 0; overflow-x: auto; scrollbar-width: thin; }
+    .tab { display: flex; align-items: center; flex: none; gap: 5px; border-right: 1px solid #2a2a2a; border-bottom: 2px solid transparent; padding: 0 6px 0 12px; color: var(--muted); }
+    .tab.active { background: var(--bg); color: var(--text); border-bottom-color: var(--blue); }
+    .tab-select { height: 36px; max-width: 170px; border: 0; padding: 0 4px 0 0; background: transparent; color: inherit; }
+    .tab-select span { overflow: hidden; text-overflow: ellipsis; }
+    .tab-select svg { width: 14px; height: 14px; }
+    .tab-close { width: 22px; height: 22px; flex-basis: 22px; }
+    .tab-close svg { width: 12px; height: 12px; }
+    .config-toggle { color: var(--blue-text); border-color: #15395d; background: #111e2c; }
+    .config-toggle[aria-expanded="false"] { color: var(--text); border-color: var(--border-strong); background: var(--raised); }
+    .terminal-pane { min-width: 0; flex: 1; display: flex; flex-direction: column; background: var(--terminal); }
+    .terminal-context { min-height: 42px; padding: 8px 20px; display: flex; align-items: center; gap: 9px; border-bottom: 1px solid #1a222c; color: #8a97a6; font-size: 12px; }
+    .terminal-context > .mono { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .session-badge { flex: none; font-size: 11px; color: #8aa1bb; border: 1px solid #253448; padding: 2px 6px; border-radius: 3px; }
+    .terminal-scroll { flex: 1; overflow: auto; padding: 24px 24px 18px; }
+    .terminal-lines { font: 13px/1.95 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #c7cfd9; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .line { min-height: 1.95em; }
+    .line.dim { color: #66778b; }
+    .line.blue { color: #7bb7fa; }
+    .line.green { color: #a4d98b; }
+    .line.heading { color: #dfc0fc; font-weight: 600; }
+    .line.command { color: #e5edf5; }
+    .prompt { color: #7dcca5; }
+    .terminal-cursor { display: inline-block; width: 8px; height: 15px; background: #b9c8d6; vertical-align: -3px; margin-left: 5px; }
+    .terminal-empty { padding: 40px 24px; color: var(--muted); }
+    .terminal-empty p { line-height: 1.8; }
+    .config-panel { width: 340px; flex: 0 0 340px; background: var(--bg); border-left: 1px solid var(--border); display: flex; flex-direction: column; }
+    .panel-heading { height: 40px; flex: 0 0 40px; display: flex; align-items: center; gap: 8px; padding: 0 12px 0 16px; border-bottom: 1px solid var(--border); background: var(--raised); }
+    .panel-heading h1 { font-size: 13px; font-weight: 500; margin: 0; }
+    .config-list { flex: 1; min-height: 0; overflow-y: auto; padding: 0 0 12px; }
+    .config-row { display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 12px 0 16px; border-radius: 0; }
+    .config-row:hover { background: #202020; }
+    .config-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+    .config-action { width: 28px; height: 28px; flex: 0 0 28px; padding: 0; }
+    .config-action svg { width: 14px; height: 14px; }
+    .run-action { color: var(--blue-text); }
+    .config-menu { position: fixed; z-index: 15; width: 132px; padding: 4px; background: #252525; border: 1px solid var(--border-strong); border-radius: 4px; box-shadow: 0 6px 20px #0008; }
+    .config-menu button { width: 100%; justify-content: flex-start; height: 30px; border: 0; background: transparent; }
+    .config-menu button:hover { background: #353535; }
+    .empty-list { text-align: center; color: var(--muted); padding: 30px 12px; line-height: 1.9; }
+    .statusbar { flex: none; min-height: 29px; display: flex; align-items: center; gap: 8px; padding: 5px 14px; background: #161616; border-top: 1px solid var(--border); color: var(--muted); font-size: 11px; }
+    .statusbar svg { width: 13px; height: 13px; color: #8494a9; }
+    .reset-button { height: 20px; padding: 0 4px; font-size: 11px; color: #98b9df; }
+    .overlay { position: fixed; inset: 0; z-index: 20; background: rgba(0,0,0,.57); display: flex; justify-content: flex-end; }
+    .drawer { width: 500px; max-width: 100vw; height: 100%; display: flex; flex-direction: column; background: #181818; box-shadow: -12px 0 40px #0006; border-left: 1px solid var(--border-strong); }
+    .drawer-header { min-height: 62px; display: flex; align-items: center; gap: 8px; padding: 0 24px; border-bottom: 1px solid var(--border); }
+    .drawer-header h2 { font-size: 15px; margin: 0; }
+    .drawer-body { flex: 1; overflow-y: auto; padding: 25px 24px; }
+    .field { margin-bottom: 24px; }
+    .field label { display: block; margin-bottom: 9px; font-weight: 500; }
+    .required { color: var(--danger); margin-right: 4px; }
+    input, textarea { width: 100%; border: 1px solid var(--border-strong); background: #101010; padding: 8px 10px; }
+    input { height: 34px; }
+    textarea { min-height: 140px; resize: vertical; line-height: 1.7; }
+    input:focus, textarea:focus { border-color: var(--blue); }
+    .input-prefix { display: flex; align-items: center; background: #222; border: 1px solid var(--border-strong); border-radius: 3px; }
+    .input-prefix span { padding: 0 10px; color: #8b99a7; }
+    .input-prefix input { border: 0; border-left: 1px solid var(--border-strong); border-radius: 0 2px 2px 0; }
+    .directory-combo { position: relative; }
+    .input-prefix input { min-width: 0; flex: 1; }
+    .input-prefix:focus-within { border-color: var(--blue); }
+    .input-prefix .combo-toggle { height: 32px; width: 32px; flex: 0 0 32px; padding: 0; border: 0; background: #101010; color: var(--muted); }
+    .combo-list { position: absolute; z-index: 3; top: calc(100% + 5px); left: 0; right: 0; max-height: 215px; overflow-y: auto; background: #222; border: 1px solid var(--border-strong); border-radius: 3px; padding: 5px; box-shadow: 0 7px 20px #0008; }
+    .combo-option { padding: 8px 9px; border-radius: 2px; cursor: pointer; }
+    .combo-option.active, .combo-option:hover { background: #17355b; }
+    .combo-group-label { padding: 6px 9px 4px; font-size: 11px; color: var(--muted); }
+    .combo-group { border-top: 1px solid var(--border); margin-top: 4px; padding-top: 3px; }
+    .combo-empty { color: var(--muted); padding: 7px 9px; font-size: 12px; }
+    .hint { color: var(--muted); font-size: 12px; line-height: 1.8; margin: 7px 0 0; }
+    .form-error { color: var(--danger); background: #2b1718; padding: 8px 10px; margin-bottom: 15px; font-size: 12px; border: 1px solid #5c2729; border-radius: 3px; }
+    .drawer-footer { flex: none; display: flex; gap: 8px; align-items: center; justify-content: flex-end; padding: 16px 24px; border-top: 1px solid var(--border); }
+    .confirm-overlay { z-index: 30; justify-content: center; align-items: center; padding: 24px; }
+    .confirm-dialog { width: 430px; max-width: 100%; background: #202020; border: 1px solid #424242; border-radius: 5px; padding: 24px; box-shadow: 0 12px 50px #0008; }
+    .confirm-dialog h2 { margin: 0 0 12px; font-size: 16px; }
+    .confirm-dialog p { margin: 0; color: #aeb2ba; line-height: 1.9; overflow-wrap: anywhere; white-space: pre-line; }
+    .confirm-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 24px; }
+    .toast { position: fixed; z-index: 50; top: 64px; left: 50%; transform: translateX(-50%); max-width: calc(100vw - 40px); display: flex; align-items: center; gap: 9px; padding: 11px 16px; border: 1px solid #454545; border-radius: 4px; color: #e0e8f1; background: #252525; box-shadow: 0 8px 25px #0008; font-size: 12px; }
+    .toast svg { color: #94c785; }
+    @media (max-width: 1050px) { .config-panel { width: 310px; flex-basis: 310px; } .terminal-scroll { padding: 20px 16px; } .terminal-context { padding: 8px 16px; } .branch { display: none; } }
+    @media (prefers-reduced-motion: no-preference) { .drawer { animation: slide-in .18s ease-out; } @keyframes slide-in { from { transform: translateX(25px); opacity: .6; } to { transform: translateX(0); opacity: 1; } } }
+  </style>
+</head>
+<body>
+  <svg class="sprite" aria-hidden="true"><defs>
+    <symbol id="i-terminal" viewBox="0 0 24 24"><path d="m5 7 5 5-5 5m8 0h6"/></symbol>
+    <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></symbol>
+    <symbol id="i-files" viewBox="0 0 24 24"><path d="M8 3h8l4 4v13H8zM16 3v5h4M4 7v14"/></symbol>
+    <symbol id="i-branch" viewBox="0 0 24 24"><circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="5" r="2"/><path d="M6 7v10m12-10c0 6-12 3-12 9"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><path d="m9 3-.6 2.2-2 .9L4.3 5.5 2.8 8l1.5 1.8-.2 2.2L2.5 14l1.5 2.6 2.3-.4 1.8 1.3.3 2.5h3l.9-2.1 2.1-.7 2 .9 2-2.2-.9-2.2.6-2.1 2.2-1V7.7l-2.4-.4-1.2-1.8.4-2.4-2.6-1.3-1.9 1.6L12 3z"/><circle cx="11.7" cy="10.8" r="3.2"/></symbol>
+    <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1" fill="currentColor"/><circle cx="12" cy="12" r="1" fill="currentColor"/><circle cx="19" cy="12" r="1" fill="currentColor"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M6 18 18 6"/></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="m8 5 11 7-11 7z"/></symbol>
+    <symbol id="i-edit" viewBox="0 0 24 24"><path d="m15 4 5 5M4 20l5-1L21 7l-5-5L4 14z"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7m4-7v7"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 6h7l2 3h9v11H3z"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6m0-10v.1"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+    <symbol id="i-panel" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="1"/><path d="M15 4v16"/></symbol>
+    <symbol id="i-reset" viewBox="0 0 24 24"><path d="M4 10a8 8 0 1 1 1 7M4 4v6h6"/></symbol>
+  </defs></svg>
+  <div class="app">
+    <header class="workspace-header">
+      <span class="logo"><svg aria-hidden="true"><use href="#i-grid"/></svg></span>
+      <span class="crumb">Workspace</span><span class="crumb">/</span><span class="workspace-name">agent-workbench</span>
+      <span class="divider"></span><span class="branch"><svg aria-hidden="true"><use href="#i-branch"/></svg><span class="mono">feature/local-dev</span></span>
+      <span class="spacer"></span><span class="prototype-label">交互原型</span>
+    </header>
+    <div class="workspace-body">
+      <aside class="dock" aria-label="Workspace 工具上下文">
+        <span class="dock-item" title="文件（背景示意）"><svg aria-hidden="true"><use href="#i-files"/></svg></span>
+        <span class="dock-item" title="代码变更（背景示意）"><svg aria-hidden="true"><use href="#i-branch"/></svg></span>
+        <span class="dock-item active" title="终端"><svg aria-hidden="true"><use href="#i-terminal"/></svg></span>
+        <span class="spacer"></span>
+        <span class="dock-item" title="设置（背景示意）"><svg aria-hidden="true"><use href="#i-settings"/></svg></span>
+      </aside>
+      <main class="tool" aria-label="终端工具">
+        <section class="terminal-pane" aria-label="终端">
+        <div class="terminal-toolbar">
+          <div id="terminalTabs" class="terminal-tabs" aria-label="终端列表"></div>
+          <button id="addTerminal" class="icon-button subtle" title="新建普通终端" aria-label="新建普通终端"><svg aria-hidden="true"><use href="#i-plus"/></svg></button>
+          <span class="spacer"></span>
+          <button id="toggleConfigs" class="config-toggle icon-button" title="配置" aria-label="配置" aria-expanded="false" aria-controls="configPanel"><svg aria-hidden="true"><use href="#i-settings"/></svg></button>
+        </div>
+            <div id="terminalContext" class="terminal-context"><svg aria-hidden="true"><use href="#i-folder"/></svg><span id="terminalCwd" class="mono"></span><span class="spacer"></span><span id="terminalState" class="session-badge">会话存在</span></div>
+            <div id="terminalScroll" class="terminal-scroll"><div id="terminalOutput" class="terminal-lines" tabindex="0" aria-label="模拟终端输出"></div></div>
+            <div id="terminalEmpty" class="terminal-empty" hidden><svg aria-hidden="true"><use href="#i-terminal"/></svg><p>暂无打开的终端。<br>从配置运行命令，或用上方 ＋ 新建普通终端。</p><button id="emptyAddTerminal">新建普通终端</button></div>
+          </section>
+          <aside id="configPanel" class="config-panel" aria-label="配置" hidden>
+            <div class="panel-heading"><h1>配置</h1><span class="spacer"></span><button id="newConfig" class="icon-button subtle" aria-label="新建配置" title="新建配置"><svg aria-hidden="true"><use href="#i-plus"/></svg></button><button id="hideConfigs" class="icon-button subtle" aria-label="收起配置" title="收起配置"><svg aria-hidden="true"><use href="#i-panel"/></svg></button></div>
+            <div id="configList" class="config-list"></div>
+          </aside>
+      </main>
+    </div>
+    <footer class="statusbar"><span class="spacer"></span><button id="resetDemo" class="subtle reset-button"><svg aria-hidden="true"><use href="#i-reset"/></svg>重置示例</button></footer>
+  </div>
+  <div id="drawerOverlay" class="overlay" hidden>
+    <section id="configDrawer" class="drawer" role="dialog" aria-modal="true" aria-labelledby="drawerTitle" tabindex="-1">
+      <div class="drawer-header"><h2 id="drawerTitle">新建配置</h2><span class="spacer"></span><button id="closeDrawer" class="icon-button subtle" aria-label="关闭配置编辑器"><svg aria-hidden="true"><use href="#i-close"/></svg></button></div>
+      <form id="configForm" style="display:contents" novalidate>
+        <div class="drawer-body">
+          <div id="formError" class="form-error" role="alert" hidden></div>
+          <div class="field"><label for="configName"><span class="required">*</span>名称</label><input id="configName" name="name" placeholder="例如：前端开发" maxlength="60" required autocomplete="off" /></div>
+          <div class="field"><label for="configCwd">工作目录</label>
+            <div id="directoryCombo" class="directory-combo">
+              <div class="input-prefix"><span class="mono">./</span><input id="configCwd" class="mono" name="cwd" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="directoryOptions" placeholder="Workspace 根目录" autocomplete="off" aria-describedby="cwdHint" /><button id="toggleDirectories" class="combo-toggle" type="button" aria-label="选择工作目录" title="选择工作目录" aria-expanded="false" aria-controls="directoryOptions" tabindex="-1"><svg aria-hidden="true"><use href="#i-chevron"/></svg></button></div>
+              <div id="directoryOptions" class="combo-list" role="listbox" aria-label="工作目录候选" hidden></div>
+            </div>
+            <p id="cwdHint" class="hint">选择已有仓库，或输入相对路径；留空使用 Workspace 根目录。</p>
+          </div>
+          <div class="field"><label for="configCommand"><span class="required">*</span>启动命令</label><textarea id="configCommand" class="mono" name="command" placeholder="npm run dev" required spellcheck="false" aria-describedby="commandHint"></textarea><p id="commandHint" class="hint">支持多行 shell 命令；敏感值请使用环境变量。</p></div>
+        </div>
+        <div class="drawer-footer"><button id="cancelDrawer" type="button">取消</button><button class="primary" id="saveConfig" type="submit">保存配置</button></div>
+      </form>
+    </section>
+  </div>
+  <div id="confirmOverlay" class="overlay confirm-overlay" hidden>
+    <section class="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="confirmTitle" aria-describedby="confirmText" tabindex="-1">
+      <h2 id="confirmTitle"></h2><p id="confirmText"></p>
+      <div class="confirm-actions"><button id="cancelConfirm">取消</button><button id="acceptConfirm" class="danger-solid">确认</button></div>
+    </section>
+  </div>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden><svg aria-hidden="true"><use href="#i-check"/></svg><span id="toastText"></span></div>
+  <div id="configMenu" class="config-menu" role="menu" aria-label="配置操作" hidden></div>
+  <script>
+    'use strict';
+    const $ = (id) => document.getElementById(id);
+    const svgNS = 'http://www.w3.org/2000/svg';
+    const workspacePath = '~/workspace';
+    const WORKSPACE_REPOSITORIES = [{ name: 'agent-workbench', path: 'agent-workbench' }];
+    let configs = [];
+    let terminals = [];
+    let activeId = '';
+    let nextConfig = 4;
+    let nextTerminal = 3;
+    let ordinaryNumber = 1;
+    let editingId = null;
+    let pendingConfirmation = null;
+    let returnFocus = null;
+    let toastTimer;
+    let menuConfigId = null;
+    let menuTrigger = null;
+    let directoryCandidates = [];
+    let activeDirectory = -1;
+    function node(tag, className, text) {
+      const element = document.createElement(tag);
+      if (className) element.className = className;
+      if (text !== undefined) element.textContent = text;
+      return element;
+    }
+    function icon(name, className) {
+      const svg = document.createElementNS(svgNS, 'svg');
+      svg.setAttribute('aria-hidden', 'true');
+      if (className) svg.setAttribute('class', className);
+      const use = document.createElementNS(svgNS, 'use');
+      use.setAttribute('href', '#i-' + name);
+      svg.append(use);
+      return svg;
+    }
+    function button(label, className, iconName, onClick) {
+      const element = node('button', className);
+      element.type = 'button';
+      if (iconName) element.append(icon(iconName));
+      if (label) element.append(node('span', '', label));
+      element.addEventListener('click', onClick);
+      return element;
+    }
+    function actionButton(label, iconName, onClick) {
+      const element = button('', 'subtle config-action', iconName, onClick);
+      element.title = label;
+      element.setAttribute('aria-label', label);
+      return element;
+    }
+    function terminalFor(configId) { return terminals.find((terminal) => terminal.configId === configId); }
+    function toast(message) {
+      clearTimeout(toastTimer);
+      $('toastText').textContent = message;
+      $('toast').hidden = false;
+      toastTimer = setTimeout(() => { $('toast').hidden = true; }, 3200);
+    }
+    function commandLines(config) {
+      const lines = [
+        ['command', workspacePath + (config.cwd === '.' ? '' : '/' + config.cwd) + ' $ ' + config.command],
+        ['', '']
+      ];
+      if (config.id === 'config-web' && config.command.trim() === 'npm run dev') {
+        lines.push(['dim', '> @agent-workbench/web dev'], ['', '> vite'], ['', ''], ['heading', '  VITE  ·  dev server'], ['', ''], ['blue', '  ➜  Local:   http://localhost:5173/'], ['dim', '  ➜  Network: use --host to expose'], ['', ''], ['dim', '  按 Ctrl+C 停止前台命令。']);
+      } else if (config.id === 'config-api' && config.command.trim() === 'npm run dev') {
+        lines.push(['dim', '> @agent-workbench/api dev'], ['', '> tsx watch src/main.ts'], ['', ''], ['blue', '[dev] API server listening on http://localhost:3000'], ['dim', '[dev] Watching for file changes…']);
+      } else if (config.id === 'config-test' && config.command.trim() === 'npm test') {
+        lines.push(['dim', '> npm test'], ['', ''], ['green', '✓ workspace.spec.ts (6 tests)'], ['green', '✓ terminal.spec.ts (4 tests)'], ['', ''], ['', 'Test Files  2 passed (2)'], ['', '     Tests  10 passed (10)'], ['dim', '  Duration  1.24s'], ['', ''], ['dim', 'Process exited with code 0'], ['command', workspacePath + (config.cwd === '.' ? '' : '/' + config.cwd) + ' $ ']);
+      } else {
+        lines.push(['dim', '等待命令输出…']);
+      }
+      return lines;
+    }
+    function makeTerminal(config) {
+      return {
+        id: 'terminal-' + nextTerminal++, configId: config.id, title: config.name,
+        cwd: config.cwd, command: config.command, lines: commandLines(config),
+        ended: config.id === 'config-test' && config.command.trim() === 'npm test'
+      };
+    }
+    function renderTabs() {
+      $('terminalTabs').replaceChildren();
+      terminals.forEach((terminal) => {
+        const tab = node('div', 'tab' + (terminal.id === activeId ? ' active' : ''));
+        tab.dataset.terminalId = terminal.id;
+        const select = button(terminal.title, 'tab-select', 'terminal', () => {
+          activeId = terminal.id;
+          render();
+          $('terminalTabs').querySelector('[data-terminal-id="' + terminal.id + '"] .tab-select')?.focus();
+        });
+        select.title = terminal.title;
+        select.setAttribute('aria-pressed', String(terminal.id === activeId));
+        const close = button('', 'icon-button subtle tab-close', 'close', () => confirmClose(terminal.id));
+        close.setAttribute('aria-label', '关闭终端：' + terminal.title);
+        close.title = '关闭终端';
+        tab.append(select, close);
+        $('terminalTabs').append(tab);
+      });
+    }
+    function renderTerminal() {
+      const terminal = terminals.find((item) => item.id === activeId);
+      $('terminalContext').hidden = !terminal;
+      $('terminalScroll').hidden = !terminal;
+      $('terminalEmpty').hidden = Boolean(terminal);
+      $('terminalOutput').replaceChildren();
+      if (!terminal) return;
+      $('terminalCwd').textContent = workspacePath + (terminal.cwd === '.' ? '' : '/' + terminal.cwd);
+      $('terminalCwd').title = $('terminalCwd').textContent;
+      $('terminalState').textContent = terminal.ended ? '命令已结束 · shell 保留' : '会话存在';
+      terminal.lines.forEach(([style, text]) => $('terminalOutput').append(node('div', 'line ' + style, text)));
+      if (!terminal.configId || terminal.ended) {
+        const lastLine = $('terminalOutput').lastElementChild;
+        lastLine?.append(node('span', 'terminal-cursor'));
+      }
+    }
+    function closeMenu(restoreFocus = false) {
+      $('configMenu').hidden = true;
+      menuTrigger?.setAttribute('aria-expanded', 'false');
+      if (restoreFocus && menuTrigger?.isConnected) menuTrigger.focus();
+      menuConfigId = null;
+      menuTrigger = null;
+    }
+    function showMenu(configId, trigger) {
+      if (menuConfigId === configId) { closeMenu(true); return; }
+      closeMenu();
+      menuConfigId = configId;
+      menuTrigger = trigger;
+      const menu = $('configMenu');
+      menu.replaceChildren();
+      const edit = button('编辑', '', 'edit', () => openDrawer(configId));
+      const remove = button('删除', 'danger', 'trash', () => confirmDelete(configId));
+      edit.dataset.action = 'edit'; remove.dataset.action = 'delete';
+      [edit, remove].forEach((item) => item.setAttribute('role', 'menuitem'));
+      menu.append(edit, remove);
+      const rect = trigger.getBoundingClientRect();
+      menu.style.left = Math.max(8, Math.min(rect.right - 132, window.innerWidth - 140)) + 'px';
+      menu.style.top = Math.max(8, Math.min(rect.bottom + 4, window.innerHeight - 82)) + 'px';
+      menu.hidden = false;
+      trigger.setAttribute('aria-expanded', 'true');
+      edit.focus();
+    }
+    function closeDirectories() {
+      $('directoryOptions').hidden = true;
+      $('configCwd').setAttribute('aria-expanded', 'false');
+      $('toggleDirectories').setAttribute('aria-expanded', 'false');
+      $('configCwd').removeAttribute('aria-activedescendant');
+      activeDirectory = -1;
+    }
+    function highlightDirectory(index) {
+      activeDirectory = index;
+      const options = [...$('directoryOptions').querySelectorAll('[role="option"]')];
+      options.forEach((option, current) => {
+        option.classList.toggle('active', current === index);
+        option.setAttribute('aria-selected', String(current === index));
+      });
+      if (options[index]) {
+        $('configCwd').setAttribute('aria-activedescendant', options[index].id);
+        options[index].scrollIntoView?.({ block: 'nearest' });
+      } else $('configCwd').removeAttribute('aria-activedescendant');
+    }
+    function chooseDirectory(index) {
+      const candidate = directoryCandidates[index];
+      if (!candidate) return;
+      $('configCwd').value = candidate.path;
+      $('configCwd').removeAttribute('aria-invalid');
+      closeDirectories();
+      $('configCwd').focus();
+    }
+    function openDirectories(query = '') {
+      const filter = query.trim().toLowerCase();
+      const repositories = WORKSPACE_REPOSITORIES.filter((repo) => repo.name.toLowerCase().includes(filter) || repo.path.toLowerCase().includes(filter));
+      directoryCandidates = [{ name: 'Workspace 根目录', path: '' }, ...repositories];
+      const list = $('directoryOptions');
+      list.replaceChildren();
+      const shortcutGroup = node('div');
+      shortcutGroup.setAttribute('role', 'group'); shortcutGroup.setAttribute('aria-label', '快捷目录');
+      shortcutGroup.append(node('div', 'combo-group-label', '快捷目录'));
+      const repoGroup = node('div', 'combo-group');
+      repoGroup.setAttribute('role', 'group'); repoGroup.setAttribute('aria-label', '已有仓库');
+      repoGroup.append(node('div', 'combo-group-label', '已有仓库'));
+      directoryCandidates.forEach((candidate, index) => {
+        const option = node('div', 'combo-option', candidate.name);
+        option.id = 'directory-option-' + index;
+        option.title = candidate.path || '.';
+        option.setAttribute('role', 'option');
+        option.setAttribute('aria-selected', 'false');
+        option.addEventListener('mousedown', (event) => event.preventDefault());
+        option.addEventListener('click', () => chooseDirectory(index));
+        (index ? repoGroup : shortcutGroup).append(option);
+      });
+      if (!repositories.length) repoGroup.append(node('div', 'combo-empty', '无匹配仓库'));
+      list.append(shortcutGroup, repoGroup);
+      list.hidden = false;
+      $('configCwd').setAttribute('aria-expanded', 'true');
+      $('toggleDirectories').setAttribute('aria-expanded', 'true');
+      highlightDirectory(-1);
+    }
+    function directoryKeydown(event) {
+      const open = !$('directoryOptions').hidden;
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        event.preventDefault();
+        if (!open) openDirectories();
+        const count = directoryCandidates.length;
+        const index = activeDirectory < 0 ? (event.key === 'ArrowDown' ? 0 : count - 1) : (activeDirectory + (event.key === 'ArrowDown' ? 1 : -1) + count) % count;
+        highlightDirectory(index);
+      } else if (event.key === 'Enter' && open) {
+        event.preventDefault();
+        if (activeDirectory >= 0) chooseDirectory(activeDirectory);
+        else closeDirectories();
+      } else if (event.key === 'Escape' && open) {
+        event.preventDefault(); event.stopPropagation(); closeDirectories();
+      } else if (event.key === 'Tab') closeDirectories();
+    }
+    function renderConfigs() {
+      closeMenu();
+      $('configList').replaceChildren();
+      if (!configs.length) $('configList').append(node('div', 'empty-list', '暂无配置'));
+      configs.forEach((config) => {
+        const terminal = terminalFor(config.id);
+        const row = node('div', 'config-row');
+        row.dataset.configId = config.id;
+        const name = node('span', 'config-name', config.name);
+        name.title = config.name;
+        const launch = actionButton((terminal ? '打开终端：' : '运行：') + config.name, 'play', () => launchConfig(config.id));
+        launch.classList.add('run-action');
+        launch.dataset.action = 'launch';
+        const more = actionButton('更多：' + config.name, 'more', () => showMenu(config.id, more));
+        more.dataset.action = 'more';
+        more.setAttribute('aria-haspopup', 'menu');
+        more.setAttribute('aria-expanded', 'false');
+        more.setAttribute('aria-controls', 'configMenu');
+        row.append(name, launch, more);
+        $('configList').append(row);
+      });
+    }
+    function render() { renderTabs(); renderTerminal(); renderConfigs(); }
+    function focusLaunch(configId) {
+      $('configList').querySelector('[data-config-id="' + configId + '"] [data-action="launch"]')?.focus();
+    }
+    function launchConfig(configId) {
+      const config = configs.find((item) => item.id === configId);
+      if (!config) return;
+      let terminal = terminalFor(configId);
+      const existed = Boolean(terminal);
+      // 同步登记会话，再绘制；连续点击旧按钮也会复用相同会话。
+      if (!terminal) { terminal = makeTerminal(config); terminals.push(terminal); }
+      activeId = terminal.id;
+      render();
+      focusLaunch(configId);
+      toast(existed ? '已打开现有终端' : '已创建终端');
+    }
+    function addOrdinaryTerminal() {
+      ordinaryNumber++;
+      const terminal = {
+        id: 'terminal-' + nextTerminal++, title: '终端 ' + ordinaryNumber, configId: null, cwd: '.', ended: false,
+        lines: [['command', workspacePath + ' $ ']]
+      };
+      terminals.push(terminal); activeId = terminal.id; render();
+      $('terminalOutput').focus();
+      toast('已打开普通终端');
+    }
+    function togglePanel(show) {
+      closeMenu();
+      $('configPanel').hidden = !show;
+      $('toggleConfigs').hidden = show;
+      $('toggleConfigs').setAttribute('aria-expanded', String(show));
+      if (show) $('hideConfigs').focus();
+      if (!show) $('toggleConfigs').focus();
+    }
+    function openDrawer(configId = null) {
+      closeMenu(true);
+      closeDirectories();
+      editingId = configId;
+      const config = configs.find((item) => item.id === configId);
+      returnFocus = document.activeElement;
+      $('drawerTitle').textContent = config ? '编辑配置' : '新建配置';
+      $('configName').value = config?.name || '';
+      $('configCwd').value = config && config.cwd !== '.' ? config.cwd : '';
+      $('configCommand').value = config?.command || '';
+      $('formError').hidden = true;
+      ['configName', 'configCwd', 'configCommand'].forEach((id) => $(id).removeAttribute('aria-invalid'));
+      $('drawerOverlay').hidden = false;
+      $('configName').focus();
+    }
+    function closeDrawer() {
+      closeDirectories();
+      $('drawerOverlay').hidden = true;
+      if (returnFocus?.isConnected) returnFocus.focus();
+      else $('newConfig').focus();
+      editingId = null;
+    }
+    function formError(message, field) {
+      $('formError').textContent = message; $('formError').hidden = false;
+      $(field).setAttribute('aria-invalid', 'true'); $(field).focus();
+    }
+    function normalizedCwd(value) {
+      const input = value.trim().replace(/\\/g, '/');
+      if (/^(\/|[a-zA-Z]:|~)/.test(input) || /[\u0000-\u001f\u007f]/.test(input)) return null;
+      const segments = [];
+      for (const segment of input.split('/')) {
+        if (!segment || segment === '.') continue;
+        if (segment === '..') { if (!segments.length) return null; segments.pop(); }
+        else segments.push(segment);
+      }
+      return segments.join('/') || '.';
+    }
+    function saveConfig(event) {
+      event.preventDefault();
+      const name = $('configName').value.trim();
+      const command = $('configCommand').value.trim();
+      const cwd = normalizedCwd($('configCwd').value);
+      if (!name) return formError('请填写配置名称。', 'configName');
+      if (name.length > 60) return formError('配置名称不能超过 60 个字符。', 'configName');
+      if (cwd === null) return formError('请使用 Workspace 内的相对目录，不支持绝对路径或向上越界。', 'configCwd');
+      if (!command) return formError('请填写要保存的启动命令。', 'configCommand');
+      const id = editingId || 'config-' + nextConfig++;
+      const index = configs.findIndex((config) => config.id === id);
+      const config = { id, name, cwd, command };
+      const editing = index >= 0;
+      if (editing) configs[index] = config; else configs.push(config);
+      closeDrawer(); renderConfigs();
+      $('configList').querySelector('[data-config-id="' + id + '"] [data-action="more"]')?.focus();
+      toast('配置已保存');
+    }
+    function showConfirmation(title, text, acceptLabel, onAccept) {
+      returnFocus = document.activeElement;
+      pendingConfirmation = onAccept;
+      $('confirmTitle').textContent = title;
+      $('confirmText').textContent = text;
+      $('acceptConfirm').textContent = acceptLabel;
+      $('confirmOverlay').hidden = false;
+      $('cancelConfirm').focus();
+    }
+    function closeConfirmation() {
+      $('confirmOverlay').hidden = true;
+      pendingConfirmation = null;
+      if (returnFocus?.isConnected) returnFocus.focus();
+      else $('toggleConfigs').focus();
+    }
+    function confirmDelete(configId) {
+      const config = configs.find((item) => item.id === configId);
+      if (!config) return;
+      closeMenu(true);
+      showConfirmation('删除配置？', '将删除「' + config.name + '」。\n已打开的终端不会关闭。', '删除配置', () => {
+        configs = configs.filter((item) => item.id !== configId);
+        renderConfigs(); $('newConfig').focus();
+        toast('配置已删除；已打开的终端保持不变');
+      });
+    }
+    function confirmClose(terminalId) {
+      const terminal = terminals.find((item) => item.id === terminalId);
+      if (!terminal) return;
+      showConfirmation('关闭终端？', '即将关闭「' + terminal.title + '」及其会话。\n配置仍保留，可以再次运行。', '关闭终端', () => {
+        const index = terminals.findIndex((item) => item.id === terminalId);
+        terminals = terminals.filter((item) => item.id !== terminalId);
+        if (activeId === terminalId) activeId = terminals[Math.min(index, terminals.length - 1)]?.id || '';
+        render();
+        if (terminal.configId && configs.some((item) => item.id === terminal.configId) && !$('configPanel').hidden) focusLaunch(terminal.configId);
+        else $('addTerminal').focus();
+        toast('终端已关闭');
+      });
+    }
+    function resetDemo() {
+      configs = [
+        { id: 'config-web', name: '前端开发', cwd: 'agent-workbench/apps/web', command: 'npm run dev' },
+        { id: 'config-api', name: 'API 服务', cwd: 'agent-workbench/apps/api', command: 'npm run dev' },
+        { id: 'config-test', name: '单元测试', cwd: 'agent-workbench', command: 'npm test' }
+      ];
+      nextConfig = 4; nextTerminal = 3; ordinaryNumber = 1;
+      const ordinary = { id: 'terminal-1', title: '终端 1', configId: null, cwd: '.', ended: false, lines: [['command', workspacePath + ' $ ']] };
+      const web = makeTerminal(configs[0]);
+      terminals = [ordinary, web]; activeId = web.id;
+      $('drawerOverlay').hidden = true; $('confirmOverlay').hidden = true;
+      editingId = null; pendingConfirmation = null;
+      closeDirectories(); togglePanel(false); render();
+    }
+    $('addTerminal').addEventListener('click', addOrdinaryTerminal);
+    $('emptyAddTerminal').addEventListener('click', addOrdinaryTerminal);
+    $('toggleConfigs').addEventListener('click', () => togglePanel($('configPanel').hidden));
+    $('hideConfigs').addEventListener('click', () => togglePanel(false));
+    $('newConfig').addEventListener('click', () => openDrawer());
+    $('closeDrawer').addEventListener('click', closeDrawer);
+    $('cancelDrawer').addEventListener('click', closeDrawer);
+    $('configForm').addEventListener('submit', saveConfig);
+    $('cancelConfirm').addEventListener('click', closeConfirmation);
+    $('acceptConfirm').addEventListener('click', () => {
+      const action = pendingConfirmation;
+      closeConfirmation();
+      action?.();
+    });
+    $('resetDemo').addEventListener('click', () => {
+      showConfirmation('重置示例？', '丢弃本次配置修改，恢复初始示例？', '重置示例', () => { resetDemo(); $('resetDemo').focus(); toast('已恢复示例'); });
+    });
+    $('configCwd').addEventListener('input', () => {
+      $('configCwd').removeAttribute('aria-invalid');
+      openDirectories($('configCwd').value);
+    });
+    $('configCwd').addEventListener('keydown', directoryKeydown);
+    $('toggleDirectories').addEventListener('click', () => {
+      const wasOpen = !$('directoryOptions').hidden;
+      $('configCwd').focus();
+      if (wasOpen) closeDirectories(); else openDirectories();
+    });
+    document.addEventListener('click', (event) => {
+      if (menuConfigId && !$('configMenu').contains(event.target) && !menuTrigger?.contains(event.target)) closeMenu();
+      if (!$('directoryCombo').contains(event.target)) closeDirectories();
+    });
+    document.addEventListener('focusin', (event) => {
+      if (!$('directoryCombo').contains(event.target)) closeDirectories();
+      if (menuConfigId && !$('configMenu').contains(event.target) && !menuTrigger?.contains(event.target)) closeMenu();
+    });
+    window.addEventListener('resize', () => closeMenu());
+    document.addEventListener('scroll', () => closeMenu(), true);
+    document.addEventListener('keydown', (event) => {
+      if (menuConfigId) {
+        const items = [...$('configMenu').querySelectorAll('[role="menuitem"]')];
+        const index = items.indexOf(document.activeElement);
+        if (event.key === 'Escape') { event.preventDefault(); closeMenu(true); return; }
+        if (event.key === 'Tab') closeMenu();
+        if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+          event.preventDefault();
+          items[(index + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length]?.focus();
+          return;
+        }
+      }
+      const overlay = !$('confirmOverlay').hidden ? $('confirmOverlay') : !$('drawerOverlay').hidden ? $('drawerOverlay') : null;
+      if (!overlay) return;
+      if (event.key === 'Escape') { event.preventDefault(); overlay.id === 'confirmOverlay' ? closeConfirmation() : closeDrawer(); }
+      if (event.key === 'Tab') {
+        const items = [...overlay.querySelectorAll('button, input, textarea, [tabindex="0"]')].filter((element) => !element.disabled && !element.hidden && element.getAttribute('tabindex') !== '-1');
+        const first = items[0], last = items[items.length - 1];
+        if (event.shiftKey && (document.activeElement === first || !overlay.contains(document.activeElement))) { event.preventDefault(); last?.focus(); }
+        else if (!event.shiftKey && (document.activeElement === last || !overlay.contains(document.activeElement))) { event.preventDefault(); first?.focus(); }
+      }
+    });
+    resetDemo();
+  </script>
+</body>
+</html>

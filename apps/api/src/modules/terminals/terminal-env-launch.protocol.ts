@@ -42,6 +42,7 @@ export type TerminalEnvironmentLaunchLocator = {
   version: 1; attemptId: string; dataDir: string; directoryName: string; ownerUid: number;
   dataRoot: TerminalEnvironmentIdentity; launchRoot: TerminalEnvironmentIdentity;
   attemptDirectory: TerminalEnvironmentIdentity; payload: TerminalEnvironmentIdentity; status: TerminalEnvironmentIdentity;
+  bootstrap?: TerminalEnvironmentIdentity;
 };
 
 export function isTerminalEnvironmentSafeSegment(value: unknown): value is string {
@@ -54,7 +55,7 @@ export function terminalEnvironmentDirectoryName(terminalId: string, attemptId: 
 export function terminalEnvironmentScopes(attemptId: string) {
   if (!isTerminalEnvironmentSafeSegment(attemptId)) terminalEnvironmentProtocolError();
   const token = createHash("sha256").update(attemptId, "utf8").digest("hex").slice(0, 32);
-  return { payload: `ep-${token}`, status: `es-${token}`, directory: `ed-${token}` };
+  return { payload: `ep-${token}`, status: `es-${token}`, bootstrap: `eb-${token}`, directory: `ed-${token}` };
 }
 export function terminalEnvironmentIdentity(stat: Pick<Stats, "dev" | "ino">): TerminalEnvironmentIdentity {
   if (![stat.dev, stat.ino].every((value) => Number.isSafeInteger(value) && value >= 0)) terminalEnvironmentProtocolError();
@@ -149,7 +150,8 @@ export function assertTerminalLaunchStatus(value: unknown, attemptId: string): a
     || !TERMINAL_ENV_STATUS_CODES.includes(value.code as TerminalLaunchStatusCode)) terminalEnvironmentProtocolError();
 }
 export function assertTerminalEnvironmentLaunchLocator(value: unknown): asserts value is TerminalEnvironmentLaunchLocator {
-  if (!object(value) || !exactKeys(value, ["version", "attemptId", "dataDir", "directoryName", "ownerUid", "dataRoot", "launchRoot", "attemptDirectory", "payload", "status"])
+  if (!object(value) || !exactKeys(value, ["version", "attemptId", "dataDir", "directoryName", "ownerUid", "dataRoot", "launchRoot", "attemptDirectory", "payload", "status", ...(Object.hasOwn(value, "bootstrap") ? ["bootstrap"] : [])])
+    || (Object.hasOwn(value, "bootstrap") && !isTerminalEnvironmentIdentity(value.bootstrap))
     || value.version !== 1 || !isTerminalEnvironmentSafeSegment(value.attemptId) || !validString(value.dataDir) || !value.dataDir.startsWith("/")
     || typeof value.directoryName !== "string" || !/^[A-Za-z0-9_-]{3,129}$/.test(value.directoryName)
     || typeof value.ownerUid !== "number" || !Number.isSafeInteger(value.ownerUid) || value.ownerUid < 0

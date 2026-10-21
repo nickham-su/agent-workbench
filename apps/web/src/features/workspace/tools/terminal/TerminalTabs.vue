@@ -1,7 +1,7 @@
 <template>
   <div class="h-full flex flex-col min-h-0">
     <div v-if="terminals.length === 0"
-         class="p-1"
+         class="terminal-empty-toolbar"
     >
       <a-tooltip :title="t('terminal.empty.create')">
         <a-button
@@ -15,6 +15,10 @@
           <CodeOutlined class="text-xl"/>
         </a-button>
       </a-tooltip>
+      <span class="flex-1" />
+      <a-tooltip v-if="showConfigButton" :title="t('terminal.config.title')">
+        <a-button type="text" size="small" class="terminal-config-entry" :aria-label="t('terminal.config.title')" @click="emit('openConfig')"><SettingOutlined /></a-button>
+      </a-tooltip>
     </div>
 
     <template v-else>
@@ -26,6 +30,9 @@
           class="terminal-tabs"
       >
         <template #rightExtra>
+          <a-tooltip v-if="showConfigButton" :title="t('terminal.config.title')">
+            <a-button type="text" size="small" class="terminal-config-entry" :aria-label="t('terminal.config.title')" @click="emit('openConfig')"><SettingOutlined /></a-button>
+          </a-tooltip>
           <a-tooltip :title="collapseLabel" placement="topRight">
             <a-button
                 v-if="terminals.length > 0"
@@ -78,7 +85,7 @@
 
 <script setup lang="ts">
 import {Modal, message} from "ant-design-vue";
-import {CloseOutlined, PlusOutlined, CodeOutlined, MinusOutlined} from "@ant-design/icons-vue";
+import {CloseOutlined, PlusOutlined, CodeOutlined, MinusOutlined, SettingOutlined} from "@ant-design/icons-vue";
 import {computed, nextTick, ref, watch} from "vue";
 import { useI18n } from "vue-i18n";
 import type {TerminalRecord} from "@agent-workbench/shared";
@@ -91,12 +98,14 @@ const TERMINAL_ACTIVE_TAB_STORAGE_KEY_PREFIX = "agent-workbench.workspace.termin
 const props = defineProps<{
   workspaceId: string;
   terminals: TerminalRecord[];
+  showConfigButton?: boolean;
 }>();
 
 const emit = defineEmits<{
   created: [];
   deleted: [];
   minimize: [];
+  openConfig: [];
   terminalExited: [terminalId: string];
   terminalInvalidated: [terminalId: string];
 }>();
@@ -249,12 +258,17 @@ watch(
   }
 );
 
+function activateCreatedTerminal(terminalId: string) {
+  pendingActivateKey.value = terminalId;
+  emit("created");
+}
+defineExpose({ activateCreatedTerminal });
+
 async function createOne() {
   creating.value = true;
   try {
     const created = await createTerminal(props.workspaceId, {});
-    pendingActivateKey.value = created.id;
-    emit("created");
+    activateCreatedTerminal(created.id);
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err));
   } finally {
@@ -296,6 +310,9 @@ function onTerminalInvalidated(terminalId: string) {
 </script>
 
 <style scoped>
+.terminal-empty-toolbar { display: flex; align-items: center; height: 40px; padding: 0 4px; background: var(--panel-bg-elevated); }
+.terminal-config-entry { width: 28px; height: 28px; padding: 0; }
+
 .terminal-tabs {
   flex: 1;
   min-height: 0;
@@ -319,6 +336,8 @@ function onTerminalInvalidated(terminalId: string) {
 }
 
 .terminal-tabs :deep(.ant-tabs-nav) {
+  height: 40px;
+  min-height: 40px;
   margin-bottom: 0 !important;
   background: var(--panel-bg-elevated);
 }

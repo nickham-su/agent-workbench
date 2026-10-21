@@ -62,7 +62,10 @@ test("durable identities are canonical and safe; retirement scopes are stable ex
     assert.equal(isTerminalEnvironmentIdentity(value), false);
   }
   const token = createHash("sha256").update("te-test", "utf8").digest("hex").slice(0, 32);
-  assert.deepEqual(terminalEnvironmentScopes("te-test"), { payload: `ep-${token}`, status: `es-${token}`, directory: `ed-${token}` });
+  const scopes = terminalEnvironmentScopes("te-test");
+  assert.deepEqual(scopes, { payload: `ep-${token}`, status: `es-${token}`, bootstrap: `eb-${token}`, directory: `ed-${token}` });
+  assert.equal(terminalEnvironmentScopes("te-test").bootstrap, scopes.bootstrap);
+  assert.equal(new Set(Object.values(scopes)).size, 4);
   assert.equal(terminalEnvironmentScopes("te-test").directory.length, 35);
   invalid(() => terminalEnvironmentScopes("../escape"));
 });

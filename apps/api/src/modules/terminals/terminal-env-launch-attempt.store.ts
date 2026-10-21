@@ -12,6 +12,7 @@ export type TerminalEnvironmentLaunchAttempt = {
   launchRoot: TerminalEnvironmentIdentity | null; attemptDirectory: TerminalEnvironmentIdentity | null;
   payload: TerminalEnvironmentIdentity | null; status: TerminalEnvironmentIdentity | null;
   directoryArmed: boolean; payloadArmed: boolean; statusArmed: boolean;
+  bootstrap?: TerminalEnvironmentIdentity | null; bootstrapArmed?: boolean;
   errorCode: TerminalEnvironmentErrorCode | null; createdAt: number; updatedAt: number;
 };
 const columns = `id, terminal_id as terminalId, directory_name as directoryName, phase, owner_uid as ownerUid,
@@ -33,6 +34,10 @@ function assertAttempt(attempt: TerminalEnvironmentLaunchAttempt) {
     || (attempt.directoryArmed && !attempt.launchRoot)
     || (attempt.attemptDirectory && !attempt.directoryArmed)
     || ((attempt.payloadArmed || attempt.statusArmed) && !attempt.attemptDirectory)
+    || (attempt.bootstrap != null && (!isTerminalEnvironmentIdentity(attempt.bootstrap) || !attempt.bootstrapArmed))
+    || (attempt.bootstrapArmed && !attempt.attemptDirectory)
+    || (attempt.bootstrapArmed !== undefined && typeof attempt.bootstrapArmed !== "boolean")
+    || (["prepared", "launching"].includes(attempt.phase) && attempt.bootstrapArmed && !attempt.bootstrap)
     || (attempt.payload && !attempt.payloadArmed) || (attempt.status && !attempt.statusArmed)
     || (["prepared", "launching"].includes(attempt.phase) && (!attempt.attemptDirectory || !attempt.payload || !attempt.status))) {
     terminalEnvironmentProtocolError();
@@ -74,9 +79,27 @@ function bindings(attempt: TerminalEnvironmentLaunchAttempt) {
     errorCode: attempt.errorCode, createdAt: attempt.createdAt, updatedAt: attempt.updatedAt
   };
 }
+function attachBootstrap(db: Db, attempt: TerminalEnvironmentLaunchAttempt): TerminalEnvironmentLaunchAttempt {
+  const row = db.prepare("select armed, dev, ino from terminal_env_launch_bootstraps where attempt_id = ?").get(attempt.id) as { armed: number; dev: string | null; ino: string | null } | undefined;
+  if (row) {
+    if ((row.armed !== 0 && row.armed !== 1) || ((row.dev === null) !== (row.ino === null))) terminalEnvironmentProtocolError();
+    attempt.bootstrapArmed = row.armed === 1;
+    attempt.bootstrap = row.dev === null ? null : { dev: row.dev, ino: row.ino! };
+  }
+  assertAttempt(attempt);
+  return attempt;
+}
+function persistBootstrap(db: Db, attempt: TerminalEnvironmentLaunchAttempt) {
+  if (attempt.bootstrapArmed === undefined && attempt.bootstrap === undefined) return;
+  db.prepare(`insert into terminal_env_launch_bootstraps (attempt_id, armed, dev, ino) values (?, ?, ?, ?)
+    on conflict(attempt_id) do update set armed=excluded.armed, dev=excluded.dev, ino=excluded.ino`)
+    .run(attempt.id, Number(attempt.bootstrapArmed ?? false), attempt.bootstrap?.dev ?? null, attempt.bootstrap?.ino ?? null);
+}
 function assertPersistedAttempt(db: Db, attempt: TerminalEnvironmentLaunchAttempt) {
   const persisted = getTerminalEnvironmentLaunchAttempt(db, attempt.id);
-  if (!persisted || JSON.stringify(bindings(persisted)) !== JSON.stringify(bindings(attempt))) {
+  if (!persisted || JSON.stringify(bindings(persisted)) !== JSON.stringify(bindings(attempt))
+    || JSON.stringify(persisted.bootstrap ?? null) !== JSON.stringify(attempt.bootstrap ?? null)
+    || Boolean(persisted.bootstrapArmed) !== Boolean(attempt.bootstrapArmed)) {
     terminalEnvironmentProtocolError();
   }
 }
@@ -89,15 +112,16 @@ export function insertTerminalEnvironmentLaunchAttempt(db: Db, attempt: Terminal
   ) values (@id, @terminalId, @directoryName, @phase, @ownerUid, @dataRootDev, @dataRootIno, @launchRootDev, @launchRootIno,
     @attemptDirectoryDev, @attemptDirectoryIno, @payloadDev, @payloadIno, @statusDev, @statusIno,
      @directoryArmed, @payloadArmed, @statusArmed, @errorCode, @createdAt, @updatedAt)`).run(bindings(attempt));
+  persistBootstrap(db, attempt);
   assertPersistedAttempt(db, attempt);
 }
 export function getTerminalEnvironmentLaunchAttempt(db: Db, id: string): TerminalEnvironmentLaunchAttempt | null {
   const row = db.prepare(`select ${columns} from terminal_env_launch_attempts where id = ?`).get(id);
-  return row ? decode(row as Record<string, unknown>) : null;
+  return row ? attachBootstrap(db, decode(row as Record<string, unknown>)) : null;
 }
 export function listTerminalEnvironmentLaunchAttempts(db: Db, terminalId: string): TerminalEnvironmentLaunchAttempt[] {
   const rows = db.prepare(`select ${columns} from terminal_env_launch_attempts where terminal_id = ? order by created_at, id`).all(terminalId);
-  return (rows as Record<string, unknown>[]).map(decode);
+  return (rows as Record<string, unknown>[]).map((row) => attachBootstrap(db, decode(row)));
 }
 /** Must be called under the caller's Workspace admission; there is no async window in this write. */
 export function updateTerminalEnvironmentLaunchAttempt(
@@ -112,10 +136,10 @@ export function updateTerminalEnvironmentLaunchAttempt(
   };
   if (!transitions[previous.phase].includes(next.phase)) terminalEnvironmentProtocolError();
   // Arms and durable locators are monotonic. Never replace deletion authority with a fresh stat.
-  for (const key of ["directoryArmed", "payloadArmed", "statusArmed"] as const) {
+  for (const key of ["directoryArmed", "payloadArmed", "statusArmed", "bootstrapArmed"] as const) {
     if (previous[key] && !next[key]) terminalEnvironmentProtocolError();
   }
-  for (const key of ["launchRoot", "attemptDirectory", "payload", "status"] as const) {
+  for (const key of ["launchRoot", "attemptDirectory", "payload", "status", "bootstrap"] as const) {
     if (previous[key] && (!next[key] || previous[key].dev !== next[key].dev || previous[key].ino !== next[key].ino)) terminalEnvironmentProtocolError();
   }
   db.prepare(`update terminal_env_launch_attempts set phase=@phase,
@@ -123,6 +147,7 @@ export function updateTerminalEnvironmentLaunchAttempt(
     payload_dev=@payloadDev, payload_ino=@payloadIno, status_dev=@statusDev, status_ino=@statusIno,
     directory_armed=@directoryArmed, payload_armed=@payloadArmed, status_armed=@statusArmed,
      error_code=@errorCode, updated_at=@updatedAt where id=@id`).run(bindings(next));
+  persistBootstrap(db, next);
   assertPersistedAttempt(db, next);
   return next;
 }

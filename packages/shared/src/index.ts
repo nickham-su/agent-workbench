@@ -27,3 +27,4 @@ export * from "./agent-primary-projection.js";
 export * from "./skills-protocol.js";
 export * from "./workspace-context-paths.js";
 export * from "./llm/reasoning-provider-policy.js";
+export * from "./contracts/terminal-configs.js";

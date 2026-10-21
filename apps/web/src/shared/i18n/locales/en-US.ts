@@ -645,6 +645,27 @@ export default {
     }
   },
   terminal: {
+    config: {
+      title: "Configurations",
+      add: "New configuration",
+      collapse: "Collapse configurations",
+      empty: "No configurations",
+      run: "Run",
+      more: "More",
+      edit: "Edit configuration",
+      delete: "Delete",
+      confirmDelete: "Delete configuration?",
+      name: "Name",
+      nameRequired: "Enter a name",
+      cwd: "Working directory",
+      cwdHint: "Select a repository or enter a relative path. Leave blank for the Workspace root.",
+      root: "Workspace root",
+      command: "Startup command",
+      commandRequired: "Enter a startup command",
+      cancel: "Cancel",
+      save: "Save configuration",
+      saved: "Configuration saved"
+    },
     panel: {
       collapse: "Collapse terminal panel"
     },
