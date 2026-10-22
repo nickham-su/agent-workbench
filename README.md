@@ -43,6 +43,18 @@ git clone https://github.com/nickham-su/agent-workbench.git
 docker compose up -d --build
 ```
 
+**Build cache and diagnostics**
+
+BuildKit reuses npm downloads and prebuilt binaries across builds while the same builder's cache is retained. This does not cache native compilation outputs or guarantee a faster first build. Both dependency steps print installation scripts and npm timings; the install step also records Node/npm versions.
+
+To inspect detailed build logs without starting or restarting services:
+
+```bash
+docker compose --progress plain build
+```
+
+Compare individual step timings and total build wall time separately: BuildKit can run stages concurrently, so adding the two dependency-step times does not give the total build time. Build-time dependency auditing is disabled; run `npm audit` separately during development or CI.
+
 **Agent startup recovery**
 
 Startup recovery has no mode switch. Before the API listener starts, it only cleans temporary/orphan data. After `onListen`, it uses fenced recovery enqueue: only a Run that is still the Session's current active Run is enqueued again.

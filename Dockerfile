@@ -18,7 +18,11 @@ COPY packages/shared/package.json packages/shared/package.json
 COPY packages/cli/package.json packages/cli/package.json
 COPY plugins/feishu/package.json plugins/feishu/package.json
 
-RUN npm ci
+# 下载缓存独立于依赖层，保留安装脚本以构建原生依赖
+RUN --mount=type=cache,id=awb-npm,target=/root/.npm,sharing=locked \
+    node --version \
+    && npm --version \
+    && npm ci --no-audit --no-fund --foreground-scripts --timing
 
 # 再复制源码并构建
 COPY apps ./apps
@@ -30,7 +34,8 @@ COPY prompts ./prompts
 RUN npm run build
 
 # 运行时不需要 devDependencies
-RUN npm prune --omit=dev
+RUN --mount=type=cache,id=awb-npm,target=/root/.npm,sharing=locked \
+    npm prune --omit=dev --no-audit --no-fund --foreground-scripts --timing
 
 
 FROM node:24-bookworm-slim AS runtime
