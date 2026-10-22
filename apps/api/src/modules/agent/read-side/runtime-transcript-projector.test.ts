@@ -40,10 +40,58 @@ test("RuntimeTranscriptProjector filters reasoning and projects historical image
     { role: "user", content: "old\n\n[Historical image attachment (not included in this run; Workspace path unavailable).]" },
     { role: "assistant", content: "answer" },
     { role: "user", content: [
-      { type: "text", text: "[The user sent 1 image attachment(s) without accompanying text.]" },
+      { type: "text", text: "[The user sent 1 image attachment(s) without accompanying text.]\n\n[Image attachment 1 included in this run. Workspace-relative path: .awb/agent/attachments/att_new.jpg]" },
       { type: "attachment_ref", workspaceId: "ws", attachmentId: "a-new", mediaType: "image/jpeg", filename: "new.jpg", path: ".awb/agent/attachments/att_new.jpg" }
     ] }
   ]);
+});
+
+for (const text of ["Use these images as local resources.", ""]) {
+  for (const imageCount of [1, 2, 4]) {
+    test(`RuntimeTranscriptProjector pairs ${imageCount} current image path(s) with references ${text ? "with" : "without"} user text`, () => {
+      const images = Array.from({ length: imageCount }, (_, index) => ({
+        id: `image-${index}`, messageId: "trigger", position: index + 1, type: "image" as const,
+        attachmentId: `att-${index}`, mediaType: "image/png" as const, filename: `upload-${index}.png`,
+        updatedRevision: 1, createdAt: 1, updatedAt: 1
+      }));
+      const paths = images.map((image) => `.awb/agent/attachments/${image.attachmentId}.png`);
+      const input = {
+        workspaceId: "ws", triggerMessageId: "trigger", executions: [],
+        attachmentPaths: new Map(images.map((image, index) => [image.id, paths[index]!])),
+        messages: [message({ id: "trigger", type: "user", status: "completed", parts: [
+          ...[...images].reverse(),
+          { id: "text", messageId: "trigger", position: 0, type: "text", text, updatedRevision: 1, createdAt: 1, updatedAt: 1 }
+        ] })]
+      };
+      const original = structuredClone(input);
+      const expected = [{ role: "user", content: [
+        { type: "text", text: [
+          text || `[The user sent ${imageCount} image attachment(s) without accompanying text.]`,
+          ...paths.map((path, index) => `[Image attachment ${index + 1} included in this run. Workspace-relative path: ${path}]`)
+        ].join("\n\n") },
+        ...images.map((image, index) => (
+          { type: "attachment_ref", workspaceId: "ws", attachmentId: image.attachmentId,
+            mediaType: image.mediaType, filename: image.filename, path: paths[index] }
+        ))
+      ] }];
+      assert.deepEqual(projector.project(input), expected);
+      assert.deepEqual(projector.project(input), expected, "rebuilding the context must not duplicate path hints");
+      assert.deepEqual(input, original, "projection must not mutate the stored message graph");
+    });
+  }
+}
+
+test("RuntimeTranscriptProjector still rejects current images without a trusted Workspace path", () => {
+  const input = {
+    workspaceId: "ws", triggerMessageId: "trigger", executions: [], messages: [
+      message({ id: "trigger", type: "user", status: "completed", parts: [
+        { id: "image", messageId: "trigger", position: 0, type: "image", attachmentId: "att", mediaType: "image/png", filename: "upload.png", updatedRevision: 1, createdAt: 1, updatedAt: 1 }
+      ] })
+    ]
+  };
+  for (const attachmentPaths of [undefined, new Map<string, string | null>(), new Map([["image", null]]), new Map([["image", ""]])]) {
+    assert.throws(() => projector.project({ ...input, attachmentPaths }), /current Run image has no trusted Workspace path/);
+  }
 });
 
 test("RuntimeTranscriptProjector preserves interleaved visible Text and ToolCall order while omitting Reasoning", () => {

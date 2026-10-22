@@ -110,13 +110,15 @@ export class RuntimeTranscriptProjector {
           messages.push({ role: "user", content: safeUserText(text, located) });
           continue;
         }
-        const content: Array<RuntimePromptTextPart | RuntimePromptAttachmentRefPart> = [{
+        const promptText: RuntimePromptTextPart = {
           type: "text",
           text: text || imageOnlyTriggerText(images.length)
-        }];
-        for (const image of images) {
+        };
+        const content: Array<RuntimePromptTextPart | RuntimePromptAttachmentRefPart> = [promptText];
+        for (const [index, image] of images.entries()) {
           const attachmentPath = input.attachmentPaths?.get(image.id);
           if (!attachmentPath) throw new Error("current Run image has no trusted Workspace path");
+          promptText.text += `\n\n[Image attachment ${index + 1} included in this run. Workspace-relative path: ${attachmentPath}]`;
           content.push({
             type: "attachment_ref",
             workspaceId: input.workspaceId,

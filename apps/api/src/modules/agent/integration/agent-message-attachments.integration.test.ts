@@ -295,7 +295,7 @@ test("新上传图在当前 Run 显式传可信路径，后续 Run 只留下逐�
   const { createAgentAttachmentStorage } = await import(new URL("../../../../../agent-worker/src/runtime/agentAttachmentStorage.ts", import.meta.url).href);
   const workspace = getWorkspace(fixture.db, fixture.workspaceId);
   assert.ok(workspace);
-  const modelRequests: Array<{ messages: Array<{ content: Array<{ type: string; data?: Uint8Array }> }> }> = [];
+  const modelRequests: Array<{ messages: Array<{ role: string; content: Array<{ type: string; text?: string; data?: Uint8Array }> }> }> = [];
   const run = { workspaceId: fixture.workspaceId, sessionId: session.id, runId,
     workspacePath: workspace.path, workspaceRepoDirNames: [], inputText: "请看图片" };
   const profile = {
@@ -326,12 +326,19 @@ test("新上传图在当前 Run 显式传可信路径，后续 Run 只留下逐�
       signal: new AbortController().signal, repeatedToolCallCounter: new Map() });
   };
   await requestModel(current);
+  const firstUserContent = modelRequests[0]!.messages.find((message) => message.role === "user")!.content;
+  const expectedText = ["请看图片", ...paths.map((relativePath, index) =>
+    `[Image attachment ${index + 1} included in this run. Workspace-relative path: ${relativePath}]`)].join("\n\n");
+  assert.deepEqual(firstUserContent.filter((part) => part.type === "text").map((part) => part.text), [expectedText]);
+  assert.deepEqual(firstUserContent.map((part) => part.type), ["text", "file", "file"]);
   const firstFiles = modelRequests[0]!.messages.flatMap((message) => message.content.filter((part) => part.type === "file"));
   assert.deepEqual(firstFiles.map((part) => Buffer.from(part.data!)), [PNG_BYTES, PNG_BYTES]);
   // Replace the on-disk bytes before the recovered Worker obtains a fresh API context.
   const updatedBytes = Buffer.concat([PNG_BYTES, Buffer.from("new version")]);
   await fs.writeFile(path.join(workspaceAttachmentDirectory(fixture), rows[0]!.storageKey), updatedBytes);
   await requestModel(await prompt(runId));
+  const recoveredUserContent = modelRequests[1]!.messages.find((message) => message.role === "user")!.content;
+  assert.deepEqual(recoveredUserContent.filter((part) => part.type === "text").map((part) => part.text), [expectedText]);
   const recoveredFiles = modelRequests[1]!.messages.flatMap((message) => message.content.filter((part) => part.type === "file"));
   assert.deepEqual(recoveredFiles.map((part) => Buffer.from(part.data!)), [updatedBytes, PNG_BYTES]);
   await convergeCompletedRun({ ...fixture, sessionId: session.id, runId });

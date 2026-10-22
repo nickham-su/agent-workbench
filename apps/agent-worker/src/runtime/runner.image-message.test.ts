@@ -70,6 +70,12 @@ const logger = { info() {}, warn() {}, error() {} };
 test("AgentRunner materializes only attachment_ref parts into AI SDK file parts", async () => {
   const api = createApiClient();
   const context = imageContext();
+  const pathHint = {
+    type: "text" as const,
+    text: "describe this\n\n[Image attachment 1 included in this run. Workspace-relative path: .awb/agent/attachments/att_test-image.png]"
+  };
+  context.messages[0]!.content[0] = pathHint;
+  const originalContext = structuredClone(context);
   const requests: Record<string, unknown>[] = [];
   let reads = 0;
   const runner = new AgentRunner(api.client as any, {} as any, logger, 1, {
@@ -99,14 +105,14 @@ test("AgentRunner materializes only attachment_ref parts into AI SDK file parts"
 
   assert.equal(reads, 1);
   const messages = requests[0]?.messages as Array<{ content: Array<Record<string, unknown>> }>;
-  assert.equal(messages[0]?.content[0]?.type, "text");
+  assert.deepEqual(messages[0]?.content[0], pathHint);
   assert.deepEqual(messages[0]?.content[1], {
     type: "file",
     data: new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
     mediaType: "image/png",
     filename: "image.png"
   });
-  assert.equal((context.messages[0]?.content[1] as { type: string }).type, "attachment_ref");
+  assert.deepEqual(context, originalContext, "materialization must preserve the source references and path text");
 });
 
 test("each Provider retry reopens user images and local read errors never become Provider retries", async () => {
