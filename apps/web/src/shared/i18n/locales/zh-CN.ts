@@ -644,6 +644,11 @@ export default {
   },
   terminal: {
     config: {
+      reorder: "调整顺序",
+      orderDone: "完成",
+      drag: "拖动调整顺序",
+      moveUp: "上移",
+      moveDown: "下移",
       title: "运行配置",
       add: "新建配置",
       collapse: "收起配置",

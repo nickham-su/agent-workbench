@@ -1,4 +1,4 @@
-import type { TerminalConfigInput, TerminalConfigRecord, UpdateTerminalConfigRequest } from "@agent-workbench/shared";
+import type { ReorderTerminalConfigsRequest, TerminalConfigInput, TerminalConfigRecord, UpdateTerminalConfigRequest } from "@agent-workbench/shared";
 import axios from "axios";
 import { Value } from "@sinclair/typebox/value";
 import {
@@ -1413,6 +1413,10 @@ export async function revertAgentSession(sessionId: string, body: AgentRevertSes
 
 export async function listTerminalConfigs(workspaceId: string) {
   try { return (await client.get<TerminalConfigRecord[]>(`/workspaces/${workspaceId}/terminal-configs`)).data; }
+  catch (err) { throw toApiError(err); }
+}
+export async function reorderTerminalConfigs(workspaceId: string, body: ReorderTerminalConfigsRequest) {
+  try { await client.put(`/workspaces/${workspaceId}/terminal-configs/order`, body); }
   catch (err) { throw toApiError(err); }
 }
 export async function createTerminalConfig(workspaceId: string, body: TerminalConfigInput) {

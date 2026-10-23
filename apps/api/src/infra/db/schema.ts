@@ -356,6 +356,11 @@ function createBaseSchema(db: Db) {
   ensureColumn(db, { table: "workspaces", column: "dir_name", ddl: "dir_name text" });
   ensureColumn(db, { table: "workspaces", column: "terminal_credential_id", ddl: "terminal_credential_id text" });
   ensureColumn(db, { table: "workspaces", column: "last_used_at", ddl: "last_used_at integer" });
+  ensureColumn(db, { table: "workspace_terminal_configs", column: "sort_order", ddl: "sort_order integer not null default 0" });
+  db.exec(`
+    create index if not exists idx_workspace_terminal_configs_order
+      on workspace_terminal_configs(workspace_id, sort_order, created_at, id);
+  `);
   ensureTerminalEnvironmentLaunchAttemptSchema(db);
   ensureTerminalAuthCleanupIntentSchema(db);
   createScheduledTaskSchema(db);

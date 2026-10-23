@@ -3,11 +3,12 @@ import test, { afterEach } from "node:test";
 import { readFileSync } from "node:fs";
 import { mount, flushPromises, type VueWrapper } from "@vue/test-utils";
 import { createI18n } from "vue-i18n";
-import { defineComponent, nextTick } from "vue";
+import { defineComponent, h, KeepAlive, nextTick } from "vue";
 import { Modal } from "ant-design-vue";
 import { apiClient } from "@/shared/api";
 import zhCN from "@/shared/i18n/locales/zh-CN";
 import TerminalConfigPanel from "./TerminalConfigPanel.vue";
+import type { TerminalConfigRecord } from "@agent-workbench/shared";
 
 const source = readFileSync(new URL("TerminalConfigPanel.vue", import.meta.url), "utf8");
 const style = document.createElement("style"); style.textContent = source.match(/<style scoped>([\s\S]*?)<\/style>/)?.[1] ?? ""; document.head.append(style);
@@ -29,23 +30,47 @@ const adapter = apiClient.defaults.adapter;
 const wrappers: VueWrapper[] = [];
 afterEach(() => { wrappers.splice(0).forEach((wrapper) => wrapper.unmount()); apiClient.defaults.adapter = adapter; });
 async function settle() { await nextTick(); await flushPromises(); await nextTick(); }
-function setup() {
+const OtherTool = defineComponent({ template: "<div>其他工具</div>" });
+const CachedPanelHost = defineComponent({
+  props: { show: { type: Boolean, default: true }, workspaceId: { type: String, default: "ws" }, active: { type: Boolean, default: true } },
+  setup(props) {
+    return () => h(KeepAlive, null, { default: () => props.show
+      ? h(TerminalConfigPanel, { workspaceId: props.workspaceId, active: props.active })
+      : h(OtherTool) });
+  }
+});
+function setup(options: { count?: number; listWait?: Promise<void>; keepAlive?: boolean } = {}) {
   let runs = 0, creates = 0, updates = 0, deletes = 0;
   const config = { id: "config", workspaceId: "ws", name: "前端开发", cwd: "repo/apps/web", command: "npm run dev", createdAt: 1, updatedAt: 1 };
+  let items: TerminalConfigRecord[] = Array.from({ length: options.count ?? 1 }, (_, index) => ({ ...config, id: index ? `config-${index + 1}` : "config", name: index ? `配置${index + 1}` : config.name, createdAt: index + 1 }));
+  const state = { failOrder: false, orderWait: undefined as Promise<void> | undefined, orders: [] as string[][], listWait: options.listWait, listCalls: 0 };
   apiClient.defaults.adapter = async (request) => {
     const url = String(request.url), method = request.method;
     let data: unknown;
-    if (url === "/workspaces/ws") data = { repos: [{ dirName: "repo", repo: { id: "r", url: "fixture" } }] };
+    if (/^\/workspaces\/[^/]+$/.test(url)) data = { repos: [{ dirName: "repo", repo: { id: "r", url: "fixture" } }] };
     else if (url.endsWith("/run")) { runs++; data = { id: `terminal-${runs}`, workspaceId: "ws", sessionName: `session-${runs}`, status: "active", createdAt: 1, updatedAt: 1 }; }
-    else if (method === "post") { creates++; data = { ...config, ...JSON.parse(request.data), id: "new-config", createdAt: 2 }; }
-    else if (method === "patch") { updates++; data = { ...config, ...JSON.parse(request.data) }; }
+    else if (method === "put" && url.endsWith("/order")) {
+      const { orderedIds } = JSON.parse(request.data) as { orderedIds: string[] };
+      state.orders.push(orderedIds);
+      await state.orderWait;
+      if (state.failOrder) throw new Error("排序保存失败");
+      items = orderedIds.map((id) => items.find((item) => item.id === id)!); data = null;
+    }
+    else if (method === "post") { creates++; data = { ...config, ...JSON.parse(request.data), id: "new-config", createdAt: 0 }; items.push(data as TerminalConfigRecord); }
+    else if (method === "patch") {
+      updates++; const id = url.split("/").at(-1)!;
+      data = { ...items.find((item) => item.id === id)!, ...JSON.parse(request.data) };
+      items = items.map((item) => item.id === id ? data as TerminalConfigRecord : item);
+    }
     else if (method === "delete") { deletes++; data = null; }
-    else data = [config];
+    else { state.listCalls++; const snapshot = items.map((item) => ({ ...item })); await state.listWait; data = snapshot; }
     return { data, status: 200, statusText: "OK", headers: {}, config: request };
   };
-  const wrapper = mount(TerminalConfigPanel, { attachTo: document.body, props: { workspaceId: "ws" }, global: { plugins: [createI18n({ legacy: false, locale: "zh-CN", messages: { "zh-CN": zhCN } })], stubs } });
+  const wrapper = mount(options.keepAlive ? CachedPanelHost : TerminalConfigPanel, { attachTo: document.body, props: { workspaceId: "ws" }, global: { plugins: [createI18n({ legacy: false, locale: "zh-CN", messages: { "zh-CN": zhCN } })], stubs } });
   wrappers.push(wrapper);
-  return { wrapper, counts: () => ({ runs, creates, updates, deletes }) };
+  return { wrapper, state, counts: () => ({ runs, creates, updates, deletes }),
+    setServerOrder(orderedIds: string[]) { items = orderedIds.map((id) => items.find((item) => item.id === id)!); }
+  };
 }
 
 test("compact configuration pane aligns headings and actions without extra row content", async () => {
@@ -55,7 +80,7 @@ test("compact configuration pane aligns headings and actions without extra row c
   assert.equal(wrapper.get(".config-heading-title").text(), "运行");
   assert.match(getComputedStyle(row.get(".config-run").element).color, /^(?:#fff(?:fff)?|rgb\(255,\s*255,\s*255\))$/i);
   assert.equal(row.get(".config-run").element.parentElement, row.element);
-  assert.equal(wrapper.findAll('.config-heading button').length, 2);
+  assert.equal(wrapper.findAll('.config-heading button').length, 3);
   const headingStyle = getComputedStyle(wrapper.get(".config-heading").element), rowStyle = getComputedStyle(row.element);
   for (const key of ["paddingLeft", "paddingRight", "gap", "height"] as const) assert.equal(rowStyle[key], headingStyle[key]);
   assert.equal(rowStyle.borderRadius, "0px");
@@ -97,4 +122,237 @@ test("editing and confirmed deletion only update configuration APIs, not termina
   assert.equal(counts().deletes, 0); assert.ok(confirmation);
   await confirmation.onOk?.(); await settle();
   assert.equal(counts().deletes, 1); assert.equal(counts().runs, 0); assert.equal(wrapper.findAll(".config-row").length, 0);
+});
+
+
+const rowNames = (wrapper: VueWrapper) => wrapper.findAll(".config-name").map((node) => node.text());
+const button = (wrapper: VueWrapper, label: string) => wrapper.get(`[aria-label="${label}"]`);
+function deferred() { let resolve!: () => void; const promise = new Promise<void>((done) => { resolve = done; }); return { promise, resolve }; }
+
+test("reorder is disabled while loading or with fewer than two configurations", async () => {
+  const wait = deferred();
+  const { wrapper } = setup({ count: 1, listWait: wait.promise });
+  assert.equal(button(wrapper, "调整顺序").attributes("disabled"), "");
+  wait.resolve(); await settle();
+  assert.equal(button(wrapper, "调整顺序").attributes("disabled"), "");
+  await button(wrapper, "调整顺序").trigger("click");
+  assert.equal(wrapper.find(".config-drag").exists(), false);
+  const empty = setup({ count: 0 }); await settle();
+  assert.equal(button(empty.wrapper, "调整顺序").attributes("disabled"), "");
+});
+
+test("order draft disables mutations, supports accessible moves and cancel/no-change never saves or runs", async () => {
+  const { wrapper, state, counts } = setup({ count: 3 }); await settle();
+  const initial = rowNames(wrapper);
+  await button(wrapper, "调整顺序").trigger("click");
+  assert.equal(wrapper.findAll(".config-drag").length, 3);
+  for (const label of ["新建配置", "收起配置"]) assert.equal(wrapper.find(`[aria-label="${label}"]`).exists(), false);
+  assert.deepEqual(wrapper.findAll(".config-heading button").map((node) => node.attributes("aria-label")), ["完成", "取消"]);
+  assert.equal(wrapper.find(".config-run").exists(), false);
+  assert.equal(wrapper.find('[aria-label="更多"]').exists(), false);
+  assert.equal(wrapper.findAll('[aria-label="上移"]')[0].attributes("disabled"), "");
+  assert.equal(wrapper.findAll('[aria-label="下移"]')[2].attributes("disabled"), "");
+  await wrapper.findAll('[aria-label="下移"]')[0].trigger("click");
+  assert.deepEqual(rowNames(wrapper), ["配置2", "前端开发", "配置3"]);
+  await button(wrapper, "取消").trigger("click");
+  assert.deepEqual(rowNames(wrapper), initial);
+  for (const label of ["新建配置", "收起配置"]) assert.equal(wrapper.find(`[aria-label="${label}"]`).exists(), true);
+  await button(wrapper, "调整顺序").trigger("click");
+  await wrapper.findAll('[aria-label="下移"]')[0].trigger("click");
+  await wrapper.findAll('[aria-label="上移"]')[1].trigger("click");
+  await button(wrapper, "完成").trigger("click"); await settle();
+  assert.equal(wrapper.find(".config-drag").exists(), false);
+  assert.deepEqual(state.orders, []);
+  assert.deepEqual(counts(), { runs: 0, creates: 0, updates: 0, deletes: 0 });
+});
+
+test("native drag/drop has feedback and completion saves one full ordered ID list; new configs append", async () => {
+  const { wrapper, state, counts } = setup({ count: 3 }); await settle();
+  await button(wrapper, "调整顺序").trigger("click");
+  let rows = wrapper.findAll(".config-row");
+  await rows[0].get(".config-drag").trigger("dragstart");
+  await rows[2].trigger("dragover");
+  assert.equal(rows[2].classes().includes("config-drop-after"), true);
+  await rows[2].trigger("drop");
+  assert.deepEqual(rowNames(wrapper), ["配置2", "配置3", "前端开发"]);
+  rows = wrapper.findAll(".config-row");
+  await rows[2].get(".config-drag").trigger("dragstart");
+  await rows[1].trigger("dragover");
+  assert.equal(rows[1].classes().includes("config-drop-before"), true);
+  await rows[1].trigger("drop");
+  assert.deepEqual(rowNames(wrapper), ["配置2", "前端开发", "配置3"]);
+  assert.deepEqual(state.orders, []);
+  await button(wrapper, "完成").trigger("click"); await settle();
+  assert.deepEqual(state.orders, [["config-2", "config", "config-3"]]);
+  assert.equal(wrapper.find(".config-drag").exists(), false);
+  for (const label of ["新建配置", "收起配置"]) assert.equal(wrapper.find(`[aria-label="${label}"]`).exists(), true);
+  assert.equal(counts().runs, 0);
+  await wrapper.setProps({ active: false }); await wrapper.setProps({ active: true }); await settle();
+  assert.deepEqual(rowNames(wrapper), ["配置2", "前端开发", "配置3"]);
+  await button(wrapper, "新建配置").trigger("click");
+  await wrapper.get('input[aria-label="名称"]').setValue("末尾配置");
+  await wrapper.get('textarea[aria-label="启动命令"]').setValue("true");
+  await wrapper.findAll("button").find((node) => node.text() === "保存配置")!.trigger("click"); await settle();
+  assert.deepEqual(rowNames(wrapper), ["配置2", "前端开发", "配置3", "末尾配置"]);
+  wrapper.findComponent({ name: "TestMenu" }).vm.$emit("click", { key: "edit" }); await settle();
+  await wrapper.get('input[aria-label="名称"]').setValue("修改但不移动");
+  await wrapper.findAll("button").find((node) => node.text() === "保存配置")!.trigger("click"); await settle();
+  assert.deepEqual(rowNames(wrapper), ["修改但不移动", "前端开发", "配置3", "末尾配置"]);
+});
+
+test("failed order save retains the draft and can retry; saving blocks duplicate actions", async () => {
+  const { wrapper, state, counts } = setup({ count: 2 }); await settle();
+  await button(wrapper, "调整顺序").trigger("click");
+  await wrapper.findAll('[aria-label="下移"]')[0].trigger("click");
+  state.failOrder = true;
+  await button(wrapper, "完成").trigger("click"); await settle();
+  assert.match(wrapper.get(".config-order-error").text(), /排序保存失败/);
+  assert.deepEqual(rowNames(wrapper), ["配置2", "前端开发"]);
+  assert.equal(wrapper.findAll(".config-drag").length, 2);
+  state.failOrder = false;
+  const wait = deferred(); state.orderWait = wait.promise;
+  await button(wrapper, "完成").trigger("click"); await nextTick();
+  for (const label of ["完成", "取消"]) assert.equal(button(wrapper, label).attributes("disabled"), "");
+  for (const label of ["新建配置", "收起配置"]) assert.equal(wrapper.find(`[aria-label="${label}"]`).exists(), false);
+  assert.equal(wrapper.findAll(".config-heading button").length, 2);
+  await button(wrapper, "完成").trigger("click");
+  await button(wrapper, "取消").trigger("click");
+  await wrapper.findAll('[aria-label="上移"]')[1].trigger("click");
+  assert.equal(state.orders.length, 2);
+  assert.deepEqual(rowNames(wrapper), ["配置2", "前端开发"]);
+  wait.resolve(); await settle();
+  assert.equal(wrapper.find(".config-order-error").exists(), false);
+  assert.equal(wrapper.find(".config-drag").exists(), false);
+  assert.equal(counts().runs, 0);
+});
+
+test("external hiding and Workspace switch discard drafts; normal collapse remains available", async () => {
+  const { wrapper, state } = setup({ count: 2 }); await settle();
+  const startAndMove = async () => {
+    await button(wrapper, "调整顺序").trigger("click");
+    await wrapper.findAll('[aria-label="下移"]')[0].trigger("click");
+  };
+  await startAndMove(); await wrapper.setProps({ active: false });
+  assert.equal(wrapper.find(".config-drag").exists(), false);
+  assert.deepEqual(rowNames(wrapper), ["前端开发", "配置2"]);
+  await wrapper.setProps({ active: true }); await settle();
+  assert.deepEqual(rowNames(wrapper), ["前端开发", "配置2"]);
+  await button(wrapper, "收起配置").trigger("click");
+  assert.equal(wrapper.emitted("close")?.length, 1);
+  await startAndMove(); await wrapper.setProps({ workspaceId: "ws2" }); await settle();
+  assert.equal(wrapper.find(".config-drag").exists(), false);
+  assert.deepEqual(rowNames(wrapper), ["前端开发", "配置2"]);
+  assert.deepEqual(state.orders, []);
+});
+
+test("late failed order save cannot alter another Workspace's new sorting session", async () => {
+  const { wrapper, state } = setup({ count: 2 }); await settle();
+  await button(wrapper, "调整顺序").trigger("click");
+  await wrapper.findAll('[aria-label="下移"]')[0].trigger("click");
+  const wait = deferred(); state.orderWait = wait.promise; state.failOrder = true;
+  await button(wrapper, "完成").trigger("click");
+  await wrapper.setProps({ workspaceId: "ws2" }); await settle();
+  await button(wrapper, "调整顺序").trigger("click");
+  wait.resolve(); await settle();
+  assert.equal(wrapper.find(".config-order-error").exists(), false);
+  assert.equal(wrapper.findAll(".config-drag").length, 2);
+  assert.deepEqual(rowNames(wrapper), ["前端开发", "配置2"]);
+  assert.equal(button(wrapper, "完成").attributes("disabled"), undefined);
+});
+
+
+test("late successful order save cannot overwrite a new Workspace draft or revive an unmounted panel", async () => {
+  const { wrapper, state } = setup({ count: 2 }); await settle();
+  await button(wrapper, "调整顺序").trigger("click");
+  await wrapper.findAll('[aria-label="下移"]')[0].trigger("click");
+  const wait = deferred(); state.orderWait = wait.promise;
+  await button(wrapper, "完成").trigger("click");
+  await wrapper.setProps({ workspaceId: "ws2" }); await settle();
+  await button(wrapper, "调整顺序").trigger("click");
+  wait.resolve(); await settle();
+  assert.deepEqual(rowNames(wrapper), ["前端开发", "配置2"]);
+  assert.equal(wrapper.findAll(".config-drag").length, 2);
+  assert.equal(button(wrapper, "完成").attributes("disabled"), undefined);
+  const pending = deferred(); state.orderWait = pending.promise;
+  await wrapper.findAll('[aria-label="下移"]')[0].trigger("click");
+  await button(wrapper, "完成").trigger("click");
+  wrapper.unmount(); wrappers.splice(wrappers.indexOf(wrapper), 1);
+  pending.resolve(); await settle();
+  assert.equal(state.orders.length, 2);
+});
+
+
+test("real KeepAlive deactivation discards the draft and activation reloads exactly once", async () => {
+  const { wrapper, state } = setup({ count: 2, keepAlive: true }); await settle();
+  const panelUid = wrapper.findComponent(TerminalConfigPanel).vm.$.uid;
+  assert.equal(state.listCalls, 1); // Immediate watch plus initial onActivated must not double-load.
+  await button(wrapper, "调整顺序").trigger("click");
+  await wrapper.findAll('[aria-label="下移"]')[0].trigger("click");
+  assert.deepEqual(rowNames(wrapper), ["配置2", "前端开发"]);
+  await wrapper.setProps({ show: false }); await settle();
+  assert.equal(wrapper.find(".terminal-config-panel").exists(), false);
+  assert.equal(state.listCalls, 1);
+  await wrapper.setProps({ show: true }); await settle();
+  assert.equal(wrapper.findComponent(TerminalConfigPanel).vm.$.uid, panelUid); // Reused, not unmounted/remounted.
+  assert.equal(wrapper.find(".config-drag").exists(), false);
+  assert.deepEqual(rowNames(wrapper), ["前端开发", "配置2"]);
+  assert.equal(state.listCalls, 2);
+  assert.deepEqual(state.orders, []);
+  // Prop changes while cached cannot load; restoring and changing props together loads only once.
+  await wrapper.setProps({ show: false });
+  await wrapper.setProps({ active: false, workspaceId: "ws2" }); await settle();
+  assert.equal(state.listCalls, 2);
+  await wrapper.setProps({ show: true, active: true, workspaceId: "ws3" }); await settle();
+  assert.equal(state.listCalls, 3);
+});
+
+test("KeepAlive restoration reads an order saved successfully while the panel was deactivated", async () => {
+  const { wrapper, state } = setup({ count: 2, keepAlive: true }); await settle();
+  await button(wrapper, "调整顺序").trigger("click");
+  await wrapper.findAll('[aria-label="下移"]')[0].trigger("click");
+  const wait = deferred(); state.orderWait = wait.promise;
+  await button(wrapper, "完成").trigger("click");
+  await wrapper.setProps({ show: false }); await settle();
+  wait.resolve(); await settle();
+  assert.equal(state.listCalls, 1);
+  await wrapper.setProps({ show: true }); await settle();
+  assert.deepEqual(rowNames(wrapper), ["配置2", "前端开发"]);
+  assert.equal(wrapper.find(".config-drag").exists(), false);
+  assert.equal(state.listCalls, 2);
+});
+
+for (const failOrder of [false, true]) {
+  test(`KeepAlive ignores a late ${failOrder ? "failed" : "successful"} save after restoring a new draft`, async () => {
+    const { wrapper, state } = setup({ count: 3, keepAlive: true }); await settle();
+    await button(wrapper, "调整顺序").trigger("click");
+    await wrapper.findAll('[aria-label="下移"]')[0].trigger("click");
+    const wait = deferred(); state.orderWait = wait.promise; state.failOrder = failOrder;
+    await button(wrapper, "完成").trigger("click");
+    await wrapper.setProps({ show: false }); await settle();
+    await wrapper.setProps({ show: true }); await settle();
+    assert.deepEqual(rowNames(wrapper), ["前端开发", "配置2", "配置3"]);
+    await button(wrapper, "调整顺序").trigger("click");
+    await wrapper.findAll('[aria-label="下移"]')[1].trigger("click");
+    wait.resolve(); await settle();
+    assert.deepEqual(rowNames(wrapper), ["前端开发", "配置3", "配置2"]);
+    assert.equal(wrapper.findAll(".config-drag").length, 3);
+    assert.equal(button(wrapper, "完成").attributes("disabled"), undefined);
+    assert.equal(wrapper.find(".config-order-error").exists(), false);
+    assert.equal(state.listCalls, 2);
+    assert.equal(state.orders.length, 1);
+  });
+}
+
+test("KeepAlive invalidates an old pending load so it cannot overwrite the restored list", async () => {
+  const wait = deferred();
+  const { wrapper, state, setServerOrder } = setup({ count: 2, keepAlive: true, listWait: wait.promise }); await settle();
+  assert.equal(state.listCalls, 1);
+  await wrapper.setProps({ show: false }); await settle();
+  setServerOrder(["config-2", "config"]); state.listWait = undefined;
+  await wrapper.setProps({ show: true }); await settle();
+  assert.equal(state.listCalls, 2);
+  assert.deepEqual(rowNames(wrapper), ["配置2", "前端开发"]);
+  wait.resolve(); await settle();
+  assert.deepEqual(rowNames(wrapper), ["配置2", "前端开发"]);
+  assert.equal(button(wrapper, "调整顺序").attributes("disabled"), undefined);
 });

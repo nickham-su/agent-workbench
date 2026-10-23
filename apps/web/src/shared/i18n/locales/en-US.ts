@@ -646,6 +646,11 @@ export default {
   },
   terminal: {
     config: {
+      reorder: "Reorder",
+      orderDone: "Done",
+      drag: "Drag to reorder",
+      moveUp: "Move up",
+      moveDown: "Move down",
       title: "Run configurations",
       add: "New configuration",
       collapse: "Collapse configurations",

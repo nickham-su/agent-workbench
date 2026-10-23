@@ -49,6 +49,22 @@ export async function listWorkspaceTerminalConfigs(ctx: AppContext, workspaceId:
     return store.listTerminalConfigs(ctx.db, workspaceId);
   });
 }
+export async function reorderWorkspaceTerminalConfigs(ctx: AppContext, workspaceId: string, orderedIds: string[]) {
+  return workspaceLifecycleCoordinator.withMutation(workspaceId, async () => {
+    ctx.db.transaction(() => {
+      requireTerminalConfigWorkspace(ctx, workspaceId);
+      const ids = new Set(orderedIds);
+      if (ids.size !== orderedIds.length) {
+        throw new HttpError(400, "Duplicate terminal configuration IDs", "TERMINAL_CONFIG_ORDER_INVALID");
+      }
+      const current = store.listTerminalConfigs(ctx.db, workspaceId);
+      if (current.length !== orderedIds.length || current.some((config) => !ids.has(config.id))) {
+        throw new HttpError(409, "Terminal configurations changed. Refresh the list and try again.", "TERMINAL_CONFIG_ORDER_CONFLICT");
+      }
+      store.updateTerminalConfigOrder(ctx.db, workspaceId, orderedIds);
+    }).immediate();
+  });
+}
 export async function saveWorkspaceTerminalConfig(ctx: AppContext, workspaceId: string, input: TerminalConfigInput | UpdateTerminalConfigRequest, id?: string) {
   return workspaceLifecycleCoordinator.withMutation(workspaceId, async () => {
     requireTerminalConfigWorkspace(ctx, workspaceId);

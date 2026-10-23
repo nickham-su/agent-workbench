@@ -8,7 +8,7 @@ import type { AppContext } from "../../app/context.js";
 import { HttpError } from "../../app/errors.js";
 import { initSchema } from "../../infra/db/schema.js";
 import { registerTerminalConfigRoutes } from "./terminal-config.routes.js";
-import { normalizeTerminalConfig, resolveTerminalConfigCwd, saveWorkspaceTerminalConfig, deleteWorkspaceTerminalConfig } from "./terminal-config.service.js";
+import { normalizeTerminalConfig, resolveTerminalConfigCwd, saveWorkspaceTerminalConfig, deleteWorkspaceTerminalConfig, listWorkspaceTerminalConfigs, reorderWorkspaceTerminalConfigs } from "./terminal-config.service.js";
 import { runWorkspaceTerminalConfig } from "./terminal-config-run.service.js";
 import { createTerminal, type TerminalRuntimeOperations } from "./terminal.service.js";
 import { prepareTerminalEnvironmentLaunch, cleanupTerminalEnvironmentLaunch, terminalEnvironmentLaunchLocator, markTerminalEnvironmentLaunchStarting, waitTerminalEnvironmentLaunch } from "./terminal-env-launch.js";
@@ -223,4 +223,62 @@ test("unlocated bootstrap create window stays pending without adopting or writin
   const filename = path.join(f.dataDir, TERMINAL_ENV_LAUNCH_ROOT, attempt.directoryName, TERMINAL_STARTUP_BOOTSTRAP_NAME);
   assert.equal(await fs.readFile(filename, "utf8"), "");
   assert.equal(await cleanupTerminalEnvironmentLaunch({ db: f.db, dataDir: f.dataDir, attemptId: attempt.id, consumption: "stopped" }), "pending");
+});
+
+
+test("configuration order is persisted atomically and rejects stale or foreign collections", async () => {
+  const f = await fixture(), app = Fastify();
+  app.setErrorHandler((error, _req, reply) => reply.code(error instanceof HttpError ? error.statusCode : 400).send({ message: error instanceof Error ? error.message : "error" }));
+  await registerTerminalConfigRoutes(app, f.ctx);
+  try {
+    const create = (workspaceId: string, name: string) => saveWorkspaceTerminalConfig(f.ctx, workspaceId, { name, cwd: ".", command: "true" });
+    const a = await create("ws", "A"), b = await create("ws", "B"), foreign = await create("other", "Other");
+    const order = async () => (await listWorkspaceTerminalConfigs(f.ctx, "ws")).map((item) => item.id);
+    const put = (orderedIds: string[], workspaceId = "ws") => app.inject({ method: "PUT", url: `/api/workspaces/${workspaceId}/terminal-configs/order`, payload: { orderedIds } });
+    assert.equal((await put([b.id, a.id])).statusCode, 204);
+    assert.deepEqual(await order(), [b.id, a.id]);
+    assert.equal((await put([a.id, a.id])).statusCode, 400);
+    await assert.rejects(reorderWorkspaceTerminalConfigs(f.ctx, "ws", [a.id, a.id]), (error: unknown) => error instanceof HttpError && error.statusCode === 400);
+    for (const ids of [[a.id], [a.id, foreign.id], [a.id, b.id, "missing"], ["missing", b.id]]) {
+      assert.equal((await put(ids)).statusCode, 409);
+      assert.deepEqual(await order(), [b.id, a.id]);
+    }
+    assert.equal((await put([], "missing")).statusCode, 404);
+    assert.equal((await put([foreign.id], "other")).statusCode, 204);
+    const c = await create("ws", "C");
+    assert.deepEqual(await order(), [b.id, a.id, c.id]);
+    assert.equal((await put([a.id, b.id])).statusCode, 409);
+    await saveWorkspaceTerminalConfig(f.ctx, "ws", { name: "renamed" }, b.id);
+    assert.deepEqual(await order(), [b.id, a.id, c.id]);
+    assert.equal((await put([c.id, a.id, b.id])).statusCode, 204);
+    assert.equal((await put([a.id, c.id, b.id])).statusCode, 204);
+    assert.deepEqual(await order(), [a.id, c.id, b.id]);
+    await deleteWorkspaceTerminalConfig(f.ctx, "ws", c.id);
+    assert.equal((await put([a.id, c.id, b.id])).statusCode, 409);
+    assert.deepEqual(await order(), [a.id, b.id]);
+    assert.equal((f.db.prepare("select count(*) as count from terminals").get() as { count: number }).count, 0);
+    // A failed write must roll back earlier row updates in the same batch.
+    f.db.exec(`create trigger reject_config_order before update of sort_order on workspace_terminal_configs when new.id = '${a.id}' begin select raise(abort, 'fixture rejection'); end`);
+    await assert.rejects(reorderWorkspaceTerminalConfigs(f.ctx, "ws", [b.id, a.id]));
+    assert.deepEqual(await order(), [a.id, b.id]);
+  } finally { await app.close(); }
+});
+
+test("legacy configuration table gains ordering without changing its existing order or data", async () => {
+  const f = await fixture();
+  f.db.exec(`drop table workspace_terminal_configs;
+    create table workspace_terminal_configs (
+      id text primary key, workspace_id text not null references workspaces(id) on delete cascade,
+      name text not null, cwd text not null, command text not null,
+      created_at integer not null, updated_at integer not null
+    );
+    insert into workspace_terminal_configs values ('z', 'ws', 'Z', '.', 'true', 1, 1), ('a', 'ws', 'A', '.', 'true', 1, 1), ('b', 'ws', 'B', '.', 'true', 2, 2);`);
+  initSchema(f.db);
+  initSchema(f.db);
+  const list = () => listWorkspaceTerminalConfigs(f.ctx, "ws");
+  assert.deepEqual((await list()).map((item) => item.id), ["a", "z", "b"]);
+  assert.deepEqual(f.db.prepare("select distinct sort_order from workspace_terminal_configs").all(), [{ sort_order: 0 }]);
+  const added = await saveWorkspaceTerminalConfig(f.ctx, "ws", { name: "New", cwd: ".", command: "true" });
+  assert.deepEqual((await list()).map((item) => item.id), ["a", "z", "b", added.id]);
+  assert.equal((await list())[0].command, "true");
 });

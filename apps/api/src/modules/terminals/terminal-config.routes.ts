@@ -1,9 +1,9 @@
 import type { FastifyInstance } from "fastify";
 import { Type } from "@sinclair/typebox";
-import { ErrorResponseSchema, TerminalConfigInputSchema, TerminalConfigRecordSchema, UpdateTerminalConfigRequestSchema, TerminalRecordSchema, type TerminalConfigInput, type UpdateTerminalConfigRequest } from "@agent-workbench/shared";
+import { ErrorResponseSchema, ReorderTerminalConfigsRequestSchema, TerminalConfigInputSchema, TerminalConfigRecordSchema, UpdateTerminalConfigRequestSchema, TerminalRecordSchema, type ReorderTerminalConfigsRequest, type TerminalConfigInput, type UpdateTerminalConfigRequest } from "@agent-workbench/shared";
 import type { AppContext } from "../../app/context.js";
 import { runWorkspaceTerminalConfig } from "./terminal-config-run.service.js";
-import { deleteWorkspaceTerminalConfig, listWorkspaceTerminalConfigs, saveWorkspaceTerminalConfig } from "./terminal-config.service.js";
+import { deleteWorkspaceTerminalConfig, listWorkspaceTerminalConfigs, reorderWorkspaceTerminalConfigs, saveWorkspaceTerminalConfig } from "./terminal-config.service.js";
 
 export async function registerTerminalConfigRoutes(app: FastifyInstance, ctx: AppContext) {
   const base = "/api/workspaces/:workspaceId/terminal-configs";
@@ -15,6 +15,11 @@ export async function registerTerminalConfigRoutes(app: FastifyInstance, ctx: Ap
   app.post(base, { schema: { tags: ["terminals"], body: TerminalConfigInputSchema, response: { 201: TerminalConfigRecordSchema, ...errors } } }, async (req, reply) => {
     const { workspaceId } = req.params as { workspaceId: string };
     return reply.code(201).send(await saveWorkspaceTerminalConfig(ctx, workspaceId, req.body as TerminalConfigInput));
+  });
+  app.put(`${base}/order`, { schema: { tags: ["terminals"], body: ReorderTerminalConfigsRequestSchema, response: { 204: Type.Null(), ...errors } } }, async (req, reply) => {
+    const { workspaceId } = req.params as { workspaceId: string };
+    await reorderWorkspaceTerminalConfigs(ctx, workspaceId, (req.body as ReorderTerminalConfigsRequest).orderedIds);
+    return reply.code(204).send();
   });
   app.patch(`${base}/:configId`, { schema: { tags: ["terminals"], body: UpdateTerminalConfigRequestSchema, response: { 200: TerminalConfigRecordSchema, ...errors } } }, async (req) => {
     const { workspaceId, configId } = req.params as { workspaceId: string; configId: string };
