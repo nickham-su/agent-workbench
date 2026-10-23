@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test, { afterEach } from "node:test";
-import { computed, defineComponent, markRaw, nextTick } from "vue";
+import { computed, defineComponent, h, KeepAlive, markRaw, nextTick, ref } from "vue";
 import { AxiosError } from "axios";
 import { createI18n } from "vue-i18n";
 import { mount } from "@vue/test-utils";
@@ -20,6 +20,7 @@ import type { FileEditorTab } from "./types";
 Object.defineProperty(globalThis, "UIEvent", { value: window.UIEvent, configurable: true });
 Object.defineProperty(globalThis, "CSS", { value: window.CSS, configurable: true });
 const { default: EditorToolView } = await import("./EditorToolView.vue");
+const { default: EditorMediaPreview } = await import("./EditorMediaPreview.vue");
 const EditorExtensionsRegistry = monacoRegistry as {
   getEditorActions(): Array<{ id: string }>;
   getEditorContributions(): Array<{ id: string }>;
@@ -1331,4 +1332,213 @@ test("Mermaid 视口按文件保存；离开时的最终事件只更新原Tab，
   currentListener({ ...state, left: 999 }); assert.equal(first.mermaidViewport?.left, 160);
   store.closeTab(first.key); await settle();
   firstListener({ ...state, left: 999 }); assert.equal(first.mermaidViewport?.left, 160);
+});
+
+for (const resource of Object.values(WORKSPACE_PREVIEW_RESOURCES).filter((item) => item.kind === "audio" || item.kind === "video")) {
+  test(`${resource.extension} 在标签页使用原生只读播放器，不创建模型或下载 Blob`, async () => {
+    const { wrapper, store, workspaceId } = setup();
+    const path = `repo/中文 & clip${resource.extension.toUpperCase()}`;
+    await open(store, path);
+    const current = tab(workspaceId);
+    const player = wrapper.get(resource.kind);
+    const src = new URL(player.attributes("src")!, "http://localhost");
+    assert.equal(src.pathname, `/api/workspaces/${workspaceId}/files/media`);
+    assert.equal(src.searchParams.get("path"), path);
+    assert.equal(player.attributes("controls"), "");
+    assert.equal(player.attributes("preload"), "metadata");
+    assert.equal(player.attributes("autoplay"), undefined);
+    assert.equal(current.readOnly, true);
+    assert.equal(current.model, undefined);
+    assert.equal(current.image, undefined);
+    assert.equal(current.openAt, undefined);
+    assert.equal(modelsCreated, 0);
+    assert.equal(editorOptions.length, 0);
+    assert.deepEqual(requests, []);
+    assert.deepEqual(createdUrls, []);
+    const download = new URL(wrapper.get("[data-editor-media] a").attributes("href")!, "http://localhost");
+    assert.equal(download.pathname, `/api/workspaces/${workspaceId}/files/download`);
+    assert.equal(download.searchParams.get("path"), path);
+    await open(store, path, "edit");
+    assert.equal(current.readOnly, true);
+    assert.equal(current.openAt, undefined);
+  });
+}
+
+test("切换、刷新、关闭、切换 Workspace 及卸载都会停止播放并清除媒体源", async (t) => {
+  const paused: HTMLMediaElement[] = [];
+  const unloaded: HTMLMediaElement[] = [];
+  t.mock.method(window.HTMLMediaElement.prototype, "pause", function (this: HTMLMediaElement) { paused.push(this); });
+  t.mock.method(window.HTMLMediaElement.prototype, "load", function (this: HTMLMediaElement) {
+    if (!this.getAttribute("src")) unloaded.push(this);
+  });
+  const { wrapper, store, workspaceId } = setup();
+  await open(store, "first.mp4");
+  const first = wrapper.get("video").element as HTMLMediaElement;
+  await open(store, "next.mp3");
+  assert.ok(paused.includes(first));
+  assert.ok(unloaded.includes(first));
+  const second = wrapper.get("audio").element as HTMLMediaElement;
+  await refresh?.();
+  await settle();
+  assert.ok(paused.includes(second));
+  assert.ok(unloaded.includes(second));
+  const refreshed = wrapper.get("audio").element as HTMLMediaElement;
+  assert.notEqual(refreshed, second);
+  store.closePath("next.mp3");
+  await settle();
+  assert.ok(unloaded.includes(refreshed));
+  const reopenedFirst = wrapper.get("video").element as HTMLMediaElement;
+  const nextWorkspace = `${workspaceId}-next`;
+  workspaceIds.add(nextWorkspace);
+  await wrapper.setProps({ workspaceId: nextWorkspace });
+  await settle();
+  assert.ok(unloaded.includes(reopenedFirst));
+  await open(getEditorStore(nextWorkspace), "last.mp4");
+  const last = wrapper.get("video").element as HTMLMediaElement;
+  wrapper.unmount();
+  assert.ok(unloaded.includes(last));
+  for (const element of [first, second, refreshed, reopenedFirst, last]) assert.equal(element.getAttribute("src"), null);
+});
+
+test("媒体加载或解码失败有提示且保留直接下载入口，刷新后可以重试", async () => {
+  const { wrapper, store } = setup();
+  await open(store, "broken.mp4");
+  const player = wrapper.get("video");
+  Object.defineProperty(player.element, "error", { configurable: true, value: { code: 3 } });
+  await player.trigger("error");
+  assert.match(wrapper.text(), /浏览器无法解码/);
+  assert.ok(wrapper.find("[data-editor-media] a[download]").exists());
+  await refresh?.();
+  await settle();
+  assert.equal(wrapper.find('[role="status"]').exists(), false);
+  Object.defineProperty(wrapper.get("video").element, "error", { configurable: true, value: { code: 4 } });
+  await wrapper.get("video").trigger("error");
+  assert.match(wrapper.text(), /检查文件和登录状态/);
+});
+
+test("音视频格式重命名重新加载对应展示，干净文本变为媒体会释放原模型", async () => {
+  const { wrapper, store, workspaceId } = setup();
+  await open(store, "clip.mp4");
+  const old = wrapper.get("video").element;
+  store.renamePath("clip.mp4", "clip.mp3");
+  await settle();
+  assert.ok(wrapper.find("audio").exists());
+  assert.equal(old.getAttribute("src"), null);
+  assert.equal(tab(workspaceId).media?.kind, "audio");
+  store.renamePath("clip.mp3", "clip.txt");
+  await settle();
+  assert.equal(wrapper.find("audio").exists(), false);
+  const model = tab(workspaceId).model!;
+  assert.ok(model);
+  assert.equal(tab(workspaceId).media, undefined);
+  store.renamePath("clip.txt", "clip.webm");
+  await settle();
+  assert.equal(model.isDisposed(), true);
+  assert.equal(tab(workspaceId).model, undefined);
+  assert.ok(wrapper.find("video").exists());
+});
+
+test("KeepAlive 隐藏编辑器时停止媒体请求，重新激活后恢复媒体源但不自动播放", async (t) => {
+  const visible = ref(true);
+  const paused: HTMLMediaElement[] = [];
+  const unloaded: HTMLMediaElement[] = [];
+  t.mock.method(window.HTMLMediaElement.prototype, "pause", function (this: HTMLMediaElement) { paused.push(this); });
+  t.mock.method(window.HTMLMediaElement.prototype, "load", function (this: HTMLMediaElement) {
+    if (!this.getAttribute("src")) unloaded.push(this);
+  });
+  const Root = defineComponent({
+    setup: () => () => h(KeepAlive, null, {
+      default: () => visible.value
+        ? h(EditorMediaPreview, { workspaceId: "keepalive-media", path: "clip.mp4", kind: "video", title: "clip.mp4" })
+        : h("div")
+    })
+  });
+  const wrapper = mount(Root, {
+    attachTo: document.body,
+    global: { plugins: [createI18n({ legacy: false, locale: "zh-CN", messages: { "zh-CN": zhCN } })] }
+  });
+  wrappers.push(wrapper);
+  const player = wrapper.get("video").element as HTMLMediaElement;
+  const src = player.getAttribute("src");
+  visible.value = false;
+  await settle();
+  assert.ok(paused.includes(player));
+  assert.ok(unloaded.includes(player));
+  assert.equal(player.getAttribute("src"), null);
+  visible.value = true;
+  await settle();
+  assert.equal(wrapper.get("video").element, player);
+  assert.equal(player.getAttribute("src"), src);
+  assert.equal(player.autoplay, false);
+});
+
+for (const extension of ["mp4", "mp3", "png"]) {
+  for (const mode of ["edit", "preview"] as const) {
+    test(`M1: ${mode} 文本经过 ${extension} 只读展示再返回文本，保留原编辑与保存权限`, async () => {
+      const { wrapper, store, workspaceId } = setup();
+      await open(store, "original.txt", mode);
+      const originalModel = tab(workspaceId).model!;
+      store.renamePath("original.txt", `resource.${extension}`);
+      await settle();
+      assert.equal(originalModel.isDisposed(), true);
+      assert.equal(tab(workspaceId).model, undefined);
+      assert.equal(tab(workspaceId).readOnly, true);
+      store.renamePath(`resource.${extension}`, "restored.txt");
+      await settle();
+      const current = tab(workspaceId);
+      assert.ok(current.model);
+      assert.equal(current.image, undefined);
+      assert.equal(current.media, undefined);
+      assert.equal(current.readOnly, mode === "preview");
+      assert.equal(editorOptions.at(-1)?.readOnly, mode === "preview");
+      assert.ok(wrapper.find("[data-editor-source]").isVisible());
+      current.model.setValue("edited after resource roundtrip");
+      await save?.();
+      await settle();
+      const writes = requests.filter((request) => request.type === "write-text");
+      if (mode === "edit") {
+        assert.equal(writes.length, 1);
+        assert.equal(writes[0]?.path, "restored.txt");
+        assert.equal(writes[0]?.data.content, "edited after resource roundtrip");
+        assert.equal(current.savedContent, "edited after resource roundtrip");
+        assert.equal(current.dirty, false);
+      } else {
+        assert.equal(writes.length, 0);
+        assert.equal(current.dirty, true);
+      }
+    });
+  }
+}
+
+for (const extension of ["mp4", "png"]) {
+  test(`M1: 最初以 preview 打开的 ${extension} 改为文本后仍只读且不能保存`, async () => {
+    const { store, workspaceId } = setup();
+    await open(store, `resource.${extension}`, "preview");
+    store.renamePath(`resource.${extension}`, "restored.txt");
+    await settle();
+    const current = tab(workspaceId);
+    assert.equal(current.readOnly, true);
+    assert.equal(editorOptions.at(-1)?.readOnly, true);
+    current.model!.setValue("must not be written");
+    await save?.();
+    await settle();
+    assert.equal(requests.some((request) => request.type === "write-text"), false);
+  });
+}
+
+test("M1: 媒体标签收到显式 edit 请求时只更新请求模式，返回文本才恢复可编辑", async () => {
+  const { store, workspaceId } = setup();
+  await open(store, "resource.mp4", "preview");
+  await open(store, "resource.mp4", "edit");
+  assert.equal(tab(workspaceId).readOnly, true);
+  assert.equal(tab(workspaceId).model, undefined);
+  store.renamePath("resource.mp4", "restored.txt");
+  await settle();
+  const current = tab(workspaceId);
+  assert.equal(current.readOnly, false);
+  assert.equal(editorOptions.at(-1)?.readOnly, false);
+  current.model!.setValue("explicit edit after media");
+  await save?.();
+  await settle();
+  assert.equal(requests.filter((request) => request.type === "write-text").length, 1);
 });

@@ -13,6 +13,14 @@
       <div v-if="!activeTab" class="h-full flex items-center justify-center text-xs text-[color:var(--text-tertiary)]">
         {{ t("editor.placeholder.empty") }}
       </div>
+      <EditorMediaPreview
+        v-else-if="activeTab.kind === 'file' && activeTab.media"
+        :key="`${props.workspaceId}:${activeTab.path}:${activeTab.loadVersion ?? 0}`"
+        :workspace-id="props.workspaceId"
+        :path="activeTab.path"
+        :kind="activeTab.media.kind"
+        :title="activeTab.title"
+      />
       <div v-else-if="activeTab.kind === 'file' && activeTab.image" class="h-full min-h-0 flex items-center justify-center overflow-auto p-4">
         <img
           v-if="activeTab.image.status === 'ready' && activeTab.image.url"
@@ -32,7 +40,7 @@
       >
         {{ notPreviewableLabel(activeTab) }}
       </div>
-      <div ref="editorEl" data-editor-source class="absolute inset-0" v-show="activeTab?.kind === 'file' && !activeTab.image && activeTab.previewable !== false && !showDocumentPreview"></div>
+      <div ref="editorEl" data-editor-source class="absolute inset-0" v-show="activeTab?.kind === 'file' && !activeTab.image && !activeTab.media && activeTab.previewable !== false && !showDocumentPreview"></div>
       <EditorMarkdownPreview
         v-if="documentTab && showDocumentPreview && documentPresentation === 'markdown'"
         :key="`${props.workspaceId}:${documentTab.path}`"
@@ -186,6 +194,7 @@ import { getEditorFilePresentation } from "./editorPresentation";
 import { openWorkspacePreview, type PreviewDocument } from "../file-explorer/preview";
 import type { EditorOpenAt, EditorOpenFileRequest, FileEditorTab, QueuedEditorOpenFileRequest } from "./types";
 import EditorTabs from "./EditorTabs.vue";
+import EditorMediaPreview from "./EditorMediaPreview.vue";
 import EditorMarkdownPreview from "./EditorMarkdownPreview.vue";
 import EditorMermaidPreview, { type MermaidPreviewExposed } from "./EditorMermaidPreview.vue";
 import type { MermaidViewportState } from "./mermaidViewport";
@@ -203,12 +212,12 @@ const store = computed(() => getEditorStore(props.workspaceId));
 const activeTab = computed(() => store.value.activeTab.value);
 const documentTab = computed(() => {
   const tab = activeTab.value;
-  return tab?.kind === "file" && !tab.image && tab.previewable !== false && tab.model &&
+  return tab?.kind === "file" && !tab.image && !tab.media && tab.previewable !== false && tab.model &&
     ["markdown", "mermaid"].includes(getEditorFilePresentation(tab.path)) ? tab : null;
 });
 const documentPresentation = computed(() => documentTab.value ? getEditorFilePresentation(documentTab.value.path) : null);
 function isDocumentPreview(tab: FileEditorTab) {
-  return !tab.image && tab.previewable !== false && ["markdown", "mermaid"].includes(getEditorFilePresentation(tab.path)) && tab.presentationMode !== "source";
+  return !tab.image && !tab.media && tab.previewable !== false && ["markdown", "mermaid"].includes(getEditorFilePresentation(tab.path)) && tab.presentationMode !== "source";
 }
 const showDocumentPreview = computed(() => !!documentTab.value && isDocumentPreview(documentTab.value));
 const documentText = computed(() => {
@@ -252,7 +261,7 @@ function applyRequestedPresentation(tab: FileEditorTab, req?: EditorOpenFileRequ
 
 const htmlPreviewTab = computed(() => {
   const tab = activeTab.value;
-  return props.previewEnabled && tab?.kind === "file" && !tab.image && tab.previewable && getEditorFilePresentation(tab.path) === "html" ? tab : null;
+  return props.previewEnabled && tab?.kind === "file" && !tab.image && !tab.media && tab.previewable && getEditorFilePresentation(tab.path) === "html" ? tab : null;
 });
 const htmlPreviewBlocked = computed(() => !!htmlPreviewTab.value && (htmlPreviewTab.value.dirty || htmlPreviewTab.value.saving || htmlPreviewTab.value.conflictOpen));
 const tabItems = computed(() => store.value.tabs.map((tab) => ({
@@ -338,7 +347,8 @@ function createTabFromRead(path: string, res: FileReadResponse, req?: EditorOpen
     conflictOpen: false,
     error: undefined,
     openAt: req ? toOpenAt(req) : undefined,
-    readOnly: req?.mode === "preview"
+    readOnly: req?.mode === "preview",
+    requestedReadOnly: req?.mode === "preview"
   });
   applyRequestedPresentation(tab, req);
   if (res.previewable) {
@@ -387,20 +397,25 @@ async function openFile(entry: QueuedEditorOpenFileRequest) {
   if (existing) {
     const stillActive = entry.seq === latestOpenFileSeq && entry.epoch === store.value.activationEpoch.value;
     if (!stillActive) return;
-    existing.openAt = existing.image ? undefined : toOpenAt(req);
+    existing.openAt = existing.image || existing.media ? undefined : toOpenAt(req);
     applyRequestedPresentation(existing, req);
-    if (req.mode === "edit" && !existing.image) existing.readOnly = false;
+    if (req.mode === "edit") {
+      existing.requestedReadOnly = false;
+      if (!existing.image && !existing.media) existing.readOnly = false;
+    }
     store.value.setActiveTabKey(existing.key);
     scheduleApplyEditor();
     return;
   }
 
-  if (getEditorFilePresentation(path) === "image") {
+  const presentation = getEditorFilePresentation(path);
+  if (presentation === "image" || presentation === "audio" || presentation === "video") {
     if (entry.seq !== latestOpenFileSeq || entry.epoch !== store.value.activationEpoch.value) return;
     store.value.upsertTab({
       key: `file:${path}`, kind: "file", title: req.title || baseName(path), path,
       previewable: true, savedContent: "", dirty: false, saving: false, pendingSave: false,
-      readOnly: true, image: { status: "loading" }
+      readOnly: true, requestedReadOnly: req.mode === "preview",
+      ...(presentation === "image" ? { image: { status: "loading" as const } } : { media: { kind: presentation } })
     });
     await reloadTab(path);
     return;
@@ -419,9 +434,12 @@ async function openFile(entry: QueuedEditorOpenFileRequest) {
     const existingAfter = getFileTab(path);
     if (!shouldActivate && existingAfter) return;
     if (existingAfter) {
-      existingAfter.openAt = existingAfter.image ? undefined : toOpenAt(req);
+      existingAfter.openAt = existingAfter.image || existingAfter.media ? undefined : toOpenAt(req);
       applyRequestedPresentation(existingAfter, req);
-      if (req.mode === "edit" && !existingAfter.image) existingAfter.readOnly = false;
+      if (req.mode === "edit") {
+        existingAfter.requestedReadOnly = false;
+        if (!existingAfter.image && !existingAfter.media) existingAfter.readOnly = false;
+      }
       requestStore.setActiveTabKey(existingAfter.key);
       scheduleApplyEditor();
       return;
@@ -539,7 +557,29 @@ async function reloadTab(path: string) {
   const isCurrent = () => !disposed && workspaceVersion === workspaceRequestVersion && store.value === requestStore &&
     fileRequestSeqByPath.get(path) === requestId && tab.loadVersion === loadVersion && tab.path === path && requestStore.tabs.includes(tab);
 
-  if (getEditorFilePresentation(path) === "image") {
+  const presentation = getEditorFilePresentation(path);
+  if (presentation === "image" || presentation === "audio" || presentation === "video") {
+    // Remember the caller's mode before applying a resource-only display restriction.
+    tab.requestedReadOnly ??= tab.readOnly;
+  }
+  if (presentation === "audio" || presentation === "video") {
+    releaseEditorImage(tab);
+    disposeFileModel(tab);
+    tab.image = undefined;
+    tab.media = { kind: presentation };
+    tab.previewable = true;
+    tab.reason = undefined;
+    tab.version = undefined;
+    tab.readOnly = true;
+    tab.openAt = undefined;
+    tab.savedContent = "";
+    tab.dirty = false;
+    tab.error = undefined;
+    scheduleApplyEditor();
+    return;
+  }
+  tab.media = undefined;
+  if (presentation === "image") {
     releaseEditorImage(tab);
     disposeFileModel(tab);
     tab.image = { status: "loading" };
@@ -581,6 +621,7 @@ async function reloadTab(path: string) {
     if (tab.dirty && tab.model?.getValue() !== initialText) return;
     releaseEditorImage(tab);
     tab.image = undefined;
+    tab.readOnly = tab.requestedReadOnly ?? tab.readOnly;
     tab.previewable = res.previewable;
     tab.reason = res.reason;
     tab.version = res.version;
@@ -710,7 +751,7 @@ function isEditorFocused(evt: KeyboardEvent) {
 
 function handleEditorKeydown(evt: KeyboardEvent) {
   const tab = activeTab.value;
-  if (!editor || tab?.kind !== "file" || tab.image || !tab.model || isDocumentPreview(tab) || editor.getModel() !== tab.model) return;
+  if (!editor || tab?.kind !== "file" || tab.image || tab.media || !tab.model || isDocumentPreview(tab) || editor.getModel() !== tab.model) return;
   if (!isFindShortcut(evt)) return;
   if (!isEditorFocused(evt)) return;
   const action = editor.getAction(evt.key.toLowerCase() === "h" ? "editor.action.startFindReplaceAction" : "actions.find");
@@ -762,7 +803,7 @@ function scheduleApplyEditor() {
     if (disposed) return;
     const tab = activeTab.value;
     const isFileTab = tab?.kind === "file";
-    const shouldHaveEditor = isFileTab && !tab.image && tab.previewable !== false;
+    const shouldHaveEditor = isFileTab && !tab.image && !tab.media && tab.previewable !== false;
 
     if (!editor && shouldHaveEditor) initEditor();
     if (!editor) return;

@@ -56,6 +56,8 @@ export type FileEditorTab = {
   error?: string;
   openAt?: EditorOpenAt;
   readOnly: boolean;
+  /** Caller open mode, preserved separately from image/media's forced read-only display. */
+  requestedReadOnly?: boolean;
   disposable?: monaco.IDisposable;
   viewState?: monaco.editor.ICodeEditorViewState | null;
   image?: {
@@ -63,6 +65,8 @@ export type FileEditorTab = {
     url?: string;
     reason?: EditorImageFailure;
   };
+  /** Media bytes belong to the native player, never to a Blob or Monaco model. */
+  media?: { kind: "audio" | "video" };
   /** Invalidates reads when the Tab is closed, renamed or refreshed. */
   loadVersion?: number;
   needsReload?: boolean;

@@ -53,6 +53,7 @@ import {
   writeWorkspaceFileText
 } from "./workspace-files.service.js";
 import { workspaceLifecycleCoordinator } from "../../infra/locks/workspace-lifecycle-coordinator.js";
+import { registerWorkspaceMediaRoutes } from "./workspace-media.routes.js";
 
 type MultipartFilePart = {
   type: "file";
@@ -88,6 +89,7 @@ function attachmentHeader(filename: string) {
 }
 
 export async function registerWorkspaceFilesRoutes(app: FastifyInstance, ctx: AppContext, hooks: WorkspaceFilesRouteTestHooks = {}) {
+  await registerWorkspaceMediaRoutes(app, ctx);
   app.post(
     "/api/workspaces/:workspaceId/files/extract",
     {

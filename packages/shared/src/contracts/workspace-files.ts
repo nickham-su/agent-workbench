@@ -28,6 +28,11 @@ export const WorkspaceFileStatRequestSchema = Type.Object({
 });
 export type WorkspaceFileStatRequest = Static<typeof WorkspaceFileStatRequestSchema>;
 
+export const WorkspaceFileMediaRequestSchema = Type.Object({
+  path: Type.String({ minLength: 1, maxLength: 4096 })
+}, { additionalProperties: false });
+export type WorkspaceFileMediaRequest = Static<typeof WorkspaceFileMediaRequestSchema>;
+
 export const WorkspaceFileReadRequestSchema = Type.Object({
   path: Type.String({ minLength: 1 })
 });

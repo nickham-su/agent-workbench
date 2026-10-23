@@ -1523,6 +1523,11 @@ export default {
       tooLarge: "图片超过 20 MiB，暂不支持预览",
       loadFailed: "图片加载失败或格式不受支持"
     },
+    media: {
+      loadFailed: "音视频加载失败或浏览器不支持此格式，请检查文件和登录状态，或下载后播放",
+      decodeFailed: "浏览器无法解码此音视频，请下载后使用本地播放器打开",
+      download: "下载文件"
+    },
     htmlPreview: {
       open: "在浏览器中预览",
       saveFirst: "请先完成保存并解决冲突，再打开预览"

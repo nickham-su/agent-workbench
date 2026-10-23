@@ -958,6 +958,16 @@ export async function uploadWorkspaceFiles(params: { workspaceId: string; dir: s
   }
 }
 
+/** Native media elements use same-origin session cookies and HTTP Range, not Axios/Blob. */
+export function getWorkspaceMediaUrl(params: { workspaceId: string; path: string }) {
+  return client.getUri({ url: `/workspaces/${encodeURIComponent(params.workspaceId)}/files/media`, params: { path: params.path } });
+}
+
+/** Let the browser stream downloads directly rather than retaining a large Blob in memory. */
+export function getWorkspaceDownloadUrl(params: { workspaceId: string; path: string }) {
+  return client.getUri({ url: `/workspaces/${encodeURIComponent(params.workspaceId)}/files/download`, params: { path: params.path } });
+}
+
 export async function downloadWorkspacePath(params: { workspaceId: string; path: string }) {
   const { workspaceId, path } = params;
   try {

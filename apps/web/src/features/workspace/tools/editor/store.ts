@@ -47,8 +47,9 @@ function updateFileTabPath(tab: Extract<EditorTab, { kind: "file" }>, nextPath: 
   // Conflict dialogs belong to the old path/version. Release that state now;
   // stale callbacks remain invalid and cannot clear a later conflict.
   tab.conflictOpen = false;
-  const becomesImage = getEditorFilePresentation(nextPath) === "image";
-  if (tab.image || (becomesImage && !tab.dirty && !tab.saving)) {
+  const presentation = getEditorFilePresentation(nextPath);
+  const becomesResource = presentation === "image" || presentation === "audio" || presentation === "video";
+  if (tab.image || tab.media || (becomesResource && !tab.dirty && !tab.saving)) {
     releaseEditorImage(tab);
     tab.needsReload = true;
     if (tab.image) tab.image = { status: "loading" };

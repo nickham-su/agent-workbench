@@ -22,3 +22,14 @@ test("图片展示能力完全沿用共享资源目录，不另维护扩展名�
   assert.equal(getEditorFilePresentation("image.png?raw"), "source");
   assert.equal(getEditorFilePresentation("image.png#fragment"), "source");
 });
+
+test("音视频展示能力完全沿用共享目录，扩展名不区分大小写", () => {
+  for (const resource of Object.values(WORKSPACE_PREVIEW_RESOURCES)) {
+    if (resource.kind !== "audio" && resource.kind !== "video") continue;
+    assert.equal(getEditorFilePresentation(`folder/media${resource.extension.toUpperCase()}`), resource.kind);
+  }
+  assert.equal(getEditorFilePresentation("clip.mp4?raw"), "source");
+  assert.equal(getEditorFilePresentation("clip.mp4#fragment"), "source");
+  assert.equal(getEditorFilePresentation("clip.mkv"), "source");
+  assert.equal(getEditorFilePresentation("clip.mp4.txt"), "source");
+});

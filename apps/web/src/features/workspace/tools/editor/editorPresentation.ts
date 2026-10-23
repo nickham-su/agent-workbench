@@ -1,11 +1,12 @@
 import { getWorkspacePreviewResourceDescriptor } from "@agent-workbench/shared";
 
 /** Presentation only: this is neither a text-read allowlist nor a Monaco language mapping. */
-export type EditorFilePresentation = "source" | "markdown" | "mermaid" | "image" | "html";
+export type EditorFilePresentation = "source" | "markdown" | "mermaid" | "image" | "audio" | "video" | "html";
 
 export function getEditorFilePresentation(path: string): EditorFilePresentation {
   const resource = getWorkspacePreviewResourceDescriptor(path);
   if (resource?.kind === "image") return "image";
+  if (resource?.kind === "audio" || resource?.kind === "video") return resource.kind;
   // HTML keeps its existing external-preview action, not an inline renderer.
   if (resource?.kind === "html") return "html";
   if (path.includes("?") || path.includes("#")) return "source";

@@ -1525,6 +1525,11 @@ export default {
       tooLarge: "Image exceeds 20 MiB and cannot be previewed",
       loadFailed: "Image failed to load or its format is unsupported"
     },
+    media: {
+      loadFailed: "Media failed to load or its format is unsupported. Check the file and your sign-in status, or download it to play locally.",
+      decodeFailed: "Your browser cannot decode this media. Download it to play with a local player.",
+      download: "Download file"
+    },
     htmlPreview: {
       open: "Preview in browser",
       saveFirst: "Finish saving and resolve conflicts before opening the preview"
