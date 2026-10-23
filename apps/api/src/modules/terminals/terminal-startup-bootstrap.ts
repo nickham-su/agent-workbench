@@ -18,6 +18,7 @@ export function buildTerminalStartupBootstrap(command: string, attemptId: string
     `__awb_terminal_startup_command=${quote(command)}`,
     `builtin printf '%s\\n' ${quote(attemptId)} >&4 || builtin exit 1`,
     "builtin exec 4>&- 3<&-",
+    'builtin history -s -- "$__awb_terminal_startup_command"',
     // Expansion captures the complete command before eval unsets the temporary
     // variable; no trailing cleanup command masks the startup command's status.
     'builtin eval -- "builtin unset __awb_terminal_startup_command; $__awb_terminal_startup_command"',

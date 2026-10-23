@@ -106,16 +106,20 @@ function writeHint(lines: string[]) {
 function cleanupWs() {
   if (!ws) return;
   closingByUs = true;
-  ws.close();
+  const socket = ws;
   ws = null;
+  socket.onopen = socket.onclose = socket.onerror = socket.onmessage = null;
+  socket.close();
   wsState.value = "idle";
 }
 
 function closeWsKeepState() {
   if (!ws) return;
   closingByUs = true;
-  ws.close();
+  const socket = ws;
   ws = null;
+  socket.onopen = socket.onclose = socket.onerror = socket.onmessage = null;
+  socket.close();
 }
 
 function cleanupTerm() {
@@ -230,10 +234,10 @@ function connect(force: boolean) {
     return;
   }
 
+  const socket = ws;
   let opened = false;
-  ws.onopen = () => {
-    const socket = ws;
-    if (!socket) return;
+  socket.onopen = () => {
+    if (ws !== socket) return;
     opened = true;
     wsState.value = "connected";
     lastSize = null;
@@ -245,10 +249,12 @@ function connect(force: boolean) {
     window.setTimeout(() => nudgeResizeToForceRedraw(), 60);
     focusIfActiveSoon();
   };
-  ws.onerror = () => {
+  socket.onerror = () => {
+    if (ws !== socket) return;
     if (!opened) scheduleReconnect();
   };
-  ws.onclose = (evt) => {
+  socket.onclose = (evt) => {
+    if (ws !== socket) return;
     clearFitBurst();
     if (evt.code === 4401) {
       wsState.value = "errored";
@@ -294,7 +300,8 @@ function connect(force: boolean) {
       scheduleReconnect();
     }
   };
-  ws.onmessage = (evt) => {
+  socket.onmessage = (evt) => {
+    if (ws !== socket) return;
     const msg = parseWsMessage(evt);
     if (!msg) return;
 
@@ -436,6 +443,17 @@ onMounted(() => {
     }
   );
 });
+
+// A rerun keeps the tab/xterm instance, but replaces its physical tmux session.
+watch(
+  () => props.terminal.sessionName,
+  () => {
+    if (!term) return;
+    reconnectAttempts = 0;
+    didResizeNudge = false;
+    connect(false);
+  }
+);
 
 watch(
   () => isActive.value,

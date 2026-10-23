@@ -73,12 +73,13 @@ function responseFixture(t: TestContext, realConfigs = false) {
   const previous = apiClient.defaults.adapter;
   const lists: PendingResponse<TerminalRecord[]>[] = [], creates: PendingResponse<TerminalRecord>[] = [];
   let minimized = 0, runs = 0;
+  let runWait: Promise<TerminalRecord> | undefined;
   apiClient.defaults.adapter = async (config) => {
     const url = String(config.url);
     const response = (data: unknown): AxiosResponse => ({ data, status: 200, statusText: "OK", headers: {}, config });
     if (url === "/workspaces/A/terminal-configs") return response([{ id: "config", workspaceId: "A", name: "开发服务", cwd: ".", command: "fixture", createdAt: 1, updatedAt: 1 }]);
     if (url === "/workspaces/A") return response({ repos: [] });
-    if (url === "/workspaces/A/terminal-configs/config/run") { runs++; return response(terminal("A", "a-run")); }
+    if (url === "/workspaces/A/terminal-configs/config/run") { runs++; return response(await (runWait ?? Promise.resolve(terminal("A", "a-run")))); }
     const workspaceId = String(config.url).match(/^\/workspaces\/([^/]+)\/terminals$/)?.[1];
     if (!workspaceId) throw new Error("Unexpected fixture request");
     return new Promise<AxiosResponse>((resolve, reject) => {
@@ -119,7 +120,13 @@ function responseFixture(t: TestContext, realConfigs = false) {
     wrapper.findComponent({ name: "TestConfigs" }).vm.$emit("created", record);
     await settle();
   }
-  return { wrapper, lists, creates, created, unmount, minimized: () => minimized, runs: () => runs };
+  return { wrapper, lists, creates, created, unmount,
+    holdRun() {
+      let resolve!: (term: TerminalRecord) => void, reject!: (error: Error) => void;
+      runWait = new Promise<TerminalRecord>((ok, fail) => { resolve = ok; reject = fail; });
+      return { resolve, reject };
+    },
+    minimized: () => minimized, runs: () => runs };
 }
 
 test("the run pane opens by default on entering each Workspace", async (t) => {
@@ -246,4 +253,42 @@ test("same-Workspace stale failures are ignored while the current refresh failur
   f.lists[3]!.reject(new Error("current fixture failure")); await settle();
   assert.equal(errors.length, 1); assert.equal(f.minimized(), 0);
   assert.equal(f.wrapper.get('[data-terminal="current"]').attributes("data-active"), "true");
+});
+
+test("clicking run activates its managed tab while pending and applies the new generation before refresh", async (t) => {
+  const errors = t.mock.method(message, "error", () => (() => {}) as ReturnType<typeof message.error>);
+  const f = responseFixture(t, true); await settle();
+  const managed = { ...terminal("A", "managed"), configId: "config" };
+  f.lists[0]!.resolve([terminal("A", "first"), managed]); await settle();
+  assert.equal(f.wrapper.get('[data-terminal="first"]').attributes("data-active"), "true");
+  const run = f.holdRun();
+  await f.wrapper.get('button[aria-label="运行"]').trigger("click"); await settle();
+  assert.equal(f.runs(), 1);
+  assert.equal(f.wrapper.get('[data-terminal="managed"]').attributes("data-active"), "true");
+  assert.equal(f.wrapper.get('[data-terminal="first"]').attributes("data-active"), "false");
+  assert.equal(f.wrapper.findAll('[data-terminal]').length, 2);
+  run.resolve({ ...managed, sessionName: "session-restarted", updatedAt: 2 }); await settle();
+  const view = f.wrapper.findAllComponents({ name: "TestTerminal" }).find((view) => view.props("terminal").id === managed.id)!;
+  assert.equal(view.props("terminal").sessionName, "session-restarted");
+  assert.equal(f.wrapper.findAll('[data-terminal]').length, 2);
+  f.lists[1]!.reject(new Error("fixture refresh failure")); await settle();
+  assert.equal(errors.mock.callCount(), 1);
+  assert.equal(view.props("terminal").sessionName, "session-restarted");
+  assert.equal(f.creates.length, 0);
+});
+
+test("a failed restart uses message.error and retains the selected existing tab without creating another", async (t) => {
+  const errors = t.mock.method(message, "error", () => (() => {}) as ReturnType<typeof message.error>);
+  const f = responseFixture(t, true); await settle();
+  const managed = { ...terminal("A", "managed"), configId: "config" };
+  f.lists[0]!.resolve([terminal("A", "first"), managed]); await settle();
+  const run = f.holdRun();
+  await f.wrapper.get('button[aria-label="运行"]').trigger("click"); await settle();
+  assert.equal(f.wrapper.get('[data-terminal="managed"]').attributes("data-active"), "true");
+  run.reject(Object.assign(new Error("fixture stop failure"), { isAxiosError: true, response: { status: 503, data: { code: "TERMINAL_SESSION_STOP_UNCONFIRMED", message: "fixture stop failure" } } })); await settle();
+  assert.equal(errors.mock.callCount(), 1);
+  assert.equal(errors.mock.calls[0]?.arguments[0], zhCN.terminal.config.restartStoppedUnconfirmed);
+  assert.equal(f.wrapper.get('[data-terminal="managed"]').attributes("data-active"), "true");
+  assert.equal(f.wrapper.findAll('[data-terminal]').length, 2);
+  assert.equal(f.creates.length, 0);
 });

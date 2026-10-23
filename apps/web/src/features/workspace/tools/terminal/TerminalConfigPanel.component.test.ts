@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { mount, flushPromises, type VueWrapper } from "@vue/test-utils";
 import { createI18n } from "vue-i18n";
 import { defineComponent, h, KeepAlive, nextTick } from "vue";
-import { Modal } from "ant-design-vue";
+import { Modal, message } from "ant-design-vue";
 import { apiClient } from "@/shared/api";
 import zhCN from "@/shared/i18n/locales/zh-CN";
 import TerminalConfigPanel from "./TerminalConfigPanel.vue";
@@ -48,7 +48,7 @@ function setup(options: { count?: number; listWait?: Promise<void>; keepAlive?: 
     const url = String(request.url), method = request.method;
     let data: unknown;
     if (/^\/workspaces\/[^/]+$/.test(url)) data = { repos: [{ dirName: "repo", repo: { id: "r", url: "fixture" } }] };
-    else if (url.endsWith("/run")) { runs++; data = { id: `terminal-${runs}`, workspaceId: "ws", sessionName: `session-${runs}`, status: "active", createdAt: 1, updatedAt: 1 }; }
+    else if (url.endsWith("/run")) { runs++; data = { id: "terminal-config", configId: "config", workspaceId: "ws", sessionName: `session-${runs}`, status: "active", createdAt: 1, updatedAt: 1 }; }
     else if (method === "put" && url.endsWith("/order")) {
       const { orderedIds } = JSON.parse(request.data) as { orderedIds: string[] };
       state.orders.push(orderedIds);
@@ -88,13 +88,16 @@ test("compact configuration pane aligns headings and actions without extra row c
   await wrapper.get('[aria-label="收起配置"]').trigger("click"); assert.equal(wrapper.emitted("close")?.length, 1);
 });
 
-test("each completed run request creates and emits a new terminal without session reuse", async () => {
+test("run events carry stable managed identity and each fresh physical session", async () => {
   const { wrapper, counts } = setup(); await settle();
   await wrapper.get('button[aria-label="运行"]').trigger("click"); await settle();
   await wrapper.get('button[aria-label="运行"]').trigger("click"); await settle();
   assert.equal(counts().runs, 2);
   const events = wrapper.emitted("created")!;
-  assert.equal(events.length, 2); assert.notDeepEqual(events[0], events[1]);
+  assert.equal(events.length, 2);
+  const first = events[0]![0] as { id: string; sessionName: string }, second = events[1]![0] as { id: string; sessionName: string };
+  assert.equal(first.id, second.id); assert.notEqual(first.sessionName, second.sessionName);
+  assert.deepEqual(wrapper.emitted("runStarted"), [[{ workspaceId: "ws", configId: "config" }], [{ workspaceId: "ws", configId: "config" }]]);
 });
 
 test("new configuration supports repository choices and free relative cwd; saving never runs", async () => {
@@ -355,4 +358,29 @@ test("KeepAlive invalidates an old pending load so it cannot overwrite the resto
   wait.resolve(); await settle();
   assert.deepEqual(rowNames(wrapper), ["配置2", "前端开发"]);
   assert.equal(button(wrapper, "调整顺序").attributes("disabled"), undefined);
+});
+
+test("run starts synchronously and unconfirmed-stop errors use message.error without emitting a replacement", async (t) => {
+  const f = setup(); await settle();
+  let reject!: (error: Error) => void;
+  apiClient.defaults.adapter = () => new Promise((_resolve, fail) => { reject = fail; });
+  const error = t.mock.method(message, "error", () => (() => {}) as ReturnType<typeof message.error>);
+  await f.wrapper.get('button[aria-label="运行"]').trigger("click"); await settle();
+  assert.deepEqual(f.wrapper.emitted("runStarted"), [[{ workspaceId: "ws", configId: "config" }]]);
+  assert.equal(f.wrapper.emitted("created"), undefined);
+  reject(Object.assign(new Error("fixture stop error"), { isAxiosError: true, response: { status: 503, data: { message: "fixture stop error", code: "TERMINAL_SESSION_STOP_UNCONFIRMED" } } })); await settle();
+  assert.equal(error.mock.callCount(), 1);
+  assert.equal(error.mock.calls[0]?.arguments[0], zhCN.terminal.config.restartStoppedUnconfirmed);
+  assert.equal(f.wrapper.emitted("created"), undefined);
+});
+
+test("a destroyed configuration panel cannot publish a late run generation", async () => {
+  const f = setup(); await settle();
+  let resolve!: (response: { data: unknown; status: number; statusText: string; headers: object; config: unknown }) => void;
+  let request: unknown;
+  apiClient.defaults.adapter = (config) => { request = config; return new Promise((done) => { resolve = done as typeof resolve; }); };
+  await f.wrapper.get('button[aria-label="运行"]').trigger("click"); await settle();
+  f.wrapper.unmount();
+  resolve({ data: { id: "late", workspaceId: "ws", configId: "config", sessionName: "late-session", status: "active", createdAt: 1, updatedAt: 1 }, status: 200, statusText: "OK", headers: {}, config: request });
+  await settle(); assert.equal(f.wrapper.emitted("created"), undefined);
 });

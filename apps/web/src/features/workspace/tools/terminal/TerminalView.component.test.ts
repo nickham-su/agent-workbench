@@ -220,3 +220,21 @@ test("终端保留断线重连与占用后确认抢占", async (t) => {
   assert.equal(f.sockets.length, 3);
   assert.equal(new URL(f.sockets[2]!.url).searchParams.get("force"), "1");
 });
+
+test("同一标签的会话更新会重连，旧连接迟到事件不会关闭或污染新连接", async (t) => {
+  const f = setup(t); await settle();
+  const old = f.sockets[0]!; old.open(); old.output("old-output\r\n"); await f.drain();
+  const lateMessage = old.onmessage!, lateClose = old.onclose!, lateOpen = old.onopen!, lateError = old.onerror!;
+  await f.wrapper.setProps({ terminal: { ...f.wrapper.props("terminal"), sessionName: "session-next", updatedAt: 2 } }); await settle();
+  assert.equal(f.sockets.length, 2); assert.equal(old.closed, true); assert.equal(old.onmessage, null);
+  const current = f.sockets[1]!; current.open();
+  lateOpen(); lateError(); lateMessage({ data: JSON.stringify({ type: "exit", exitCode: 0 }) });
+  lateMessage({ data: JSON.stringify({ type: "output", data: "stale-output" }) });
+  lateClose({ code: 4410, reason: "stale", wasClean: true });
+  current.output("new-output\r\n"); await f.drain();
+  assert.equal(current.closed, false); assert.equal(f.wrapper.emitted("exited"), undefined); assert.equal(f.wrapper.emitted("invalidated"), undefined);
+  f.input("echo alive\r");
+  assert.ok(current.sent.some((msg) => msg.type === "input" && msg.data === "echo alive\r"));
+  const buffer = Array.from({ length: f.terminal.buffer.active.length }, (_, i) => f.terminal.buffer.active.getLine(i)?.translateToString(true) ?? "").join("\n");
+  assert.match(buffer, /old-output/); assert.match(buffer, /new-output/); assert.doesNotMatch(buffer, /stale-output/);
+});

@@ -3,19 +3,25 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { afterEach, test } from "node:test";
 import Database from "better-sqlite3";
+import * as pty from "node-pty";
 import Fastify from "fastify";
 import type { AppContext } from "../../app/context.js";
 import { HttpError } from "../../app/errors.js";
 import { initSchema } from "../../infra/db/schema.js";
+import { registerTerminalsRoutes } from "./terminals.routes.js";
+import { workspaceLifecycleCoordinator } from "../../infra/locks/workspace-lifecycle-coordinator.js";
 import { registerTerminalConfigRoutes } from "./terminal-config.routes.js";
 import { normalizeTerminalConfig, resolveTerminalConfigCwd, saveWorkspaceTerminalConfig, deleteWorkspaceTerminalConfig, listWorkspaceTerminalConfigs, reorderWorkspaceTerminalConfigs } from "./terminal-config.service.js";
 import { runWorkspaceTerminalConfig } from "./terminal-config-run.service.js";
-import { createTerminal, type TerminalRuntimeOperations } from "./terminal.service.js";
+import { createTerminal, deleteTerminal, type TerminalRuntimeOperations } from "./terminal.service.js";
 import { prepareTerminalEnvironmentLaunch, cleanupTerminalEnvironmentLaunch, terminalEnvironmentLaunchLocator, markTerminalEnvironmentLaunchStarting, waitTerminalEnvironmentLaunch } from "./terminal-env-launch.js";
 import { getTerminalEnvironmentLaunchAttempt, listTerminalEnvironmentLaunchAttempts } from "./terminal-env-launch-attempt.store.js";
 import { closeTerminalEnvironmentDirectories, openTerminalEnvironmentDirectories, openTerminalEnvironmentFile, writeTerminalEnvironmentStatus } from "./terminal-env-launch.files.js";
 import { TERMINAL_ENV_LAUNCH_ROOT, type TerminalEnvironmentLaunchLocator } from "./terminal-env-launch.protocol.js";
 import { runTerminalEnvironmentLauncher } from "./terminal-env-launcher.js";
+import { getTerminal, getTerminalByConfig, listVisibleTerminalsByWorkspace } from "./terminal.store.js";
+import { terminalSshKeyPath } from "./terminal.gitAuth.js";
+import { armTerminalAuthCleanupIntent, listTerminalAuthCleanupIntents, updateTerminalAuthCleanupIntent } from "./terminal-auth-cleanup-intent.store.js";
 import { buildTerminalStartupBootstrap, TERMINAL_STARTUP_BOOTSTRAP_NAME } from "./terminal-startup-bootstrap.js";
 
 const fixtures: Array<{ root: string; db: Database.Database }> = [];
@@ -34,6 +40,7 @@ async function fixture() {
   return { ctx, db, root, workspace, dataDir };
 }
 function runtime(status: "spawned" | "missing" | "timeout" = "spawned") {
+  const bootstraps: string[] = [];
   const sessions = new Set<string>(), starts: Array<{ sessionName: string; cwd: string; command: string[] }> = [];
   const operations: TerminalRuntimeOperations = {
     hasSession: async ({ sessionName }) => sessions.has(sessionName) ? "exists" : "not_found",
@@ -45,7 +52,7 @@ function runtime(status: "spawned" | "missing" | "timeout" = "spawned") {
       try {
         if (locator.bootstrap) {
           const bootstrap = await openTerminalEnvironmentFile({ directory: dirs.directory, name: TERMINAL_STARTUP_BOOTSTRAP_NAME, identity: locator.bootstrap, ownerUid: locator.ownerUid });
-          try { assert.match(await bootstrap.readFile("utf8"), /builtin eval/); } finally { await bootstrap.close(); }
+          try { const script = await bootstrap.readFile("utf8"); assert.match(script, /builtin eval/); bootstraps.push(script); } finally { await bootstrap.close(); }
         }
         const handle = await openTerminalEnvironmentFile({ directory: dirs.directory, name: "status.json", identity: locator.status, ownerUid: locator.ownerUid, writable: true });
         try {
@@ -58,7 +65,7 @@ function runtime(status: "spawned" | "missing" | "timeout" = "spawned") {
     waitEnvironmentLaunch: (params) => waitTerminalEnvironmentLaunch({ ...params, timeoutMs: 80, pollMs: 5 }),
     cleanupAuthArtifacts: async () => {}
   };
-  return { operations, starts };
+  return { operations, starts, bootstraps };
 }
 
 test("configuration HTTP CRUD validates ownership and cascades with Workspace deletion", async () => {
@@ -92,19 +99,23 @@ test("relative cwd validation rejects invalid, missing, file and escaping symlin
   for (const cwd of ["missing", "file", "escape", "../"]) await assert.rejects(resolveTerminalConfigCwd(f.workspace, cwd), (error: unknown) => error instanceof HttpError && error.code === "TERMINAL_CONFIG_CWD_INVALID");
 });
 
-test("every run creates a new independent terminal; edits/deletes never mutate existing terminals", async () => {
+test("reruns keep the managed terminal identity and replace its physical session; deleting config unlinks it", async () => {
   const f = await fixture(), fake = runtime(), app = Fastify();
   const config = await saveWorkspaceTerminalConfig(f.ctx, "ws", { name: "Dev", cwd: "", command: "printf '中文\\n'\ncat <<'EOF'\nhello\nEOF" });
   const first = await runWorkspaceTerminalConfig(f.ctx, app.log, "ws", config.id, fake.operations);
   const second = await runWorkspaceTerminalConfig(f.ctx, app.log, "ws", config.id, fake.operations);
-  assert.notEqual(first.id, second.id); assert.equal(fake.starts.length, 2);
+  assert.equal(first.id, second.id); assert.notEqual(first.sessionName, second.sessionName);
+  assert.equal(first.createdAt, second.createdAt); assert.equal(second.configId, config.id); assert.equal(fake.starts.length, 2);
   assert.ok(fake.starts.every((start) => start.cwd === f.workspace && !start.command.join(" ").includes("printf")));
   assert.equal((f.db.prepare("select count(*) as n from terminal_env_launch_attempts").get() as { n: number }).n, 0);
   assert.equal((f.db.prepare("select count(*) as n from terminal_env_launch_bootstraps").get() as { n: number }).n, 0);
-  await saveWorkspaceTerminalConfig(f.ctx, "ws", { command: "false" }, config.id);
+  await saveWorkspaceTerminalConfig(f.ctx, "ws", { command: "printf latest-command-marker" }, config.id);
+  const edited = await runWorkspaceTerminalConfig({ ...f.ctx }, app.log, "ws", config.id, fake.operations);
+  assert.equal(edited.id, first.id); assert.match(fake.bootstraps.at(-1)!, /printf latest-command-marker/);
   await deleteWorkspaceTerminalConfig(f.ctx, "ws", config.id);
-  assert.equal((f.db.prepare("select count(*) as n from terminals where status = 'active'").get() as { n: number }).n, 2);
-  assert.deepEqual(Object.keys(first).sort(), ["createdAt", "id", "sessionName", "status", "updatedAt", "workspaceId"].sort());
+  assert.equal((f.db.prepare("select count(*) as n from terminals where status = 'active'").get() as { n: number }).n, 1);
+  assert.equal(getTerminal(f.db, first.id)?.configId, null);
+  assert.deepEqual(Object.keys(first).sort(), ["configId", "createdAt", "id", "sessionName", "status", "updatedAt", "workspaceId"].sort());
   await app.close();
 });
 
@@ -133,7 +144,7 @@ test("bootstrap encoding preserves original command and is acknowledged only aft
 
 test("bootstrap artifact has durable identity, private mode, and participates in safe cleanup", async () => {
   const f = await fixture();
-  f.db.prepare("insert into terminals values('term_fixture','ws','session','creating',1,1)").run();
+  f.db.prepare("insert into terminals (id,workspace_id,session_name,status,created_at,updated_at) values('term_fixture','ws','session','creating',1,1)").run();
   const prepared = await prepareTerminalEnvironmentLaunch({ db: f.db, dataDir: f.dataDir, terminalId: "term_fixture", shell: "bash", baseEnv: {}, systemEnv: {}, workspaceEnv: {}, startupCommand: "echo fixture" });
   const locator = terminalEnvironmentLaunchLocator(f.dataDir, prepared.attempt);
   assert.ok(locator.bootstrap); assert.ok(getTerminalEnvironmentLaunchAttempt(f.db, prepared.attempt.id)?.bootstrapArmed);
@@ -150,11 +161,11 @@ test("bootstrap artifact has durable identity, private mode, and participates in
 test("configuration launcher waits for the Bash consumption acknowledgement, not process spawn (fake Bash, no tmux)", { timeout: 8000 }, async () => {
   const f = await fixture();
   const bin = path.join(f.root, "bin"); await fs.mkdir(bin);
-  f.db.prepare("insert into terminals values('term_fixture','ws','session','creating',1,1)").run();
+  f.db.prepare("insert into terminals (id,workspace_id,session_name,status,created_at,updated_at) values('term_fixture','ws','session','creating',1,1)").run();
   const prepared = await prepareTerminalEnvironmentLaunch({ db: f.db, dataDir: f.dataDir, terminalId: "term_fixture", shell: "bash", baseEnv: { PATH: bin, HOME: f.root }, systemEnv: {}, workspaceEnv: {}, startupCommand: "never-execute-this-command" });
   const observed = path.join(f.root, "observed.json"), allow = path.join(f.root, "allow"), finish = path.join(f.root, "finish");
   await fs.writeFile(path.join(bin, "bash"), `#!${process.execPath}
-const fs = require('node:fs');
+import fs from 'node:fs';
 const source = fs.readFileSync(3, 'utf8');
 fs.writeFileSync(${JSON.stringify(observed)}, JSON.stringify({ regular: fs.fstatSync(3).isFile(), args: process.argv.slice(2), hasEval: source.includes('builtin eval') }));
 let acknowledged = false;
@@ -198,7 +209,7 @@ test("configuration root cwd differs from the unchanged single-repository ordina
 
 test("bootstrap replacement is rejected and never authorizes deleting another file", async () => {
   const f = await fixture();
-  f.db.prepare("insert into terminals values('term_fixture','ws','session','creating',1,1)").run();
+  f.db.prepare("insert into terminals (id,workspace_id,session_name,status,created_at,updated_at) values('term_fixture','ws','session','creating',1,1)").run();
   const prepared = await prepareTerminalEnvironmentLaunch({ db: f.db, dataDir: f.dataDir, terminalId: "term_fixture", shell: "bash", baseEnv: {}, systemEnv: {}, workspaceEnv: {}, startupCommand: "echo fixture" });
   const locator = terminalEnvironmentLaunchLocator(f.dataDir, prepared.attempt);
   const directory = path.join(f.dataDir, TERMINAL_ENV_LAUNCH_ROOT, prepared.attempt.directoryName);
@@ -216,7 +227,7 @@ test("bootstrap replacement is rejected and never authorizes deleting another fi
 
 test("unlocated bootstrap create window stays pending without adopting or writing a replacement", async () => {
   const f = await fixture();
-  f.db.prepare("insert into terminals values('term_fixture','ws','session','creating',1,1)").run();
+  f.db.prepare("insert into terminals (id,workspace_id,session_name,status,created_at,updated_at) values('term_fixture','ws','session','creating',1,1)").run();
   await assert.rejects(prepareTerminalEnvironmentLaunch({ db: f.db, dataDir: f.dataDir, terminalId: "term_fixture", shell: "bash", baseEnv: {}, systemEnv: {}, workspaceEnv: {}, startupCommand: "do-not-write-this-fixture", hooks: { afterCreate(kind) { if (kind === "bootstrap") throw new Error("fixture crash"); } } }));
   const attempt = listTerminalEnvironmentLaunchAttempts(f.db, "term_fixture")[0]!;
   assert.equal(attempt.bootstrapArmed, true); assert.equal(attempt.bootstrap, null);
@@ -281,4 +292,262 @@ test("legacy configuration table gains ordering without changing its existing or
   const added = await saveWorkspaceTerminalConfig(f.ctx, "ws", { name: "New", cwd: ".", command: "true" });
   assert.deepEqual((await list()).map((item) => item.id), ["a", "z", "b", added.id]);
   assert.equal((await list())[0].command, "true");
+});
+
+test("managed terminals remain independent and concurrent reruns use one durable ID", async () => {
+  const f = await fixture(), fake = runtime(), app = Fastify();
+  const one = await saveWorkspaceTerminalConfig(f.ctx, "ws", { name: "One", cwd: ".", command: "true" });
+  const two = await saveWorkspaceTerminalConfig(f.ctx, "ws", { name: "Two", cwd: ".", command: "true" });
+  const [first, rerun] = await Promise.all([1, 2].map(() => runWorkspaceTerminalConfig(f.ctx, app.log, "ws", one.id, fake.operations)));
+  assert.equal(first!.id, rerun!.id); assert.notEqual(first!.sessionName, rerun!.sessionName);
+  const other = await runWorkspaceTerminalConfig(f.ctx, app.log, "ws", two.id, fake.operations);
+  const plain = await createTerminal(f.ctx, app.log, { workspaceId: "ws", runtimeOperations: fake.operations });
+  assert.notEqual(other.id, first!.id); assert.notEqual(plain.id, first!.id); assert.equal(plain.configId, null);
+  assert.equal(getTerminalByConfig(f.db, "ws", one.id)?.id, first!.id);
+  assert.equal(getTerminalByConfig(f.db, "other", one.id), null);
+  await assert.rejects(runWorkspaceTerminalConfig(f.ctx, app.log, "other", one.id, fake.operations), (e: unknown) => e instanceof HttpError && e.statusCode === 404);
+  assert.equal(fake.starts.length, 4);
+  await deleteTerminal(f.ctx, app.log, first!.id, fake.operations);
+  const recreated = await runWorkspaceTerminalConfig(f.ctx, app.log, "ws", one.id, fake.operations);
+  assert.notEqual(recreated.id, first!.id);
+  await app.close();
+});
+
+test("restart preflight failure leaves the current environment untouched", async () => {
+  const f = await fixture(), fake = runtime(), app = Fastify();
+  const config = await saveWorkspaceTerminalConfig(f.ctx, "ws", { name: "Dev", cwd: ".", command: "true" });
+  const first = await runWorkspaceTerminalConfig(f.ctx, app.log, "ws", config.id, fake.operations);
+  await saveWorkspaceTerminalConfig(f.ctx, "ws", { cwd: "missing-directory" }, config.id);
+  let stops = 0;
+  await assert.rejects(runWorkspaceTerminalConfig(f.ctx, app.log, "ws", config.id, { ...fake.operations, killSession: async () => { stops++; } }));
+  assert.equal(stops, 0); assert.equal(fake.starts.length, 1); assert.deepEqual(getTerminal(f.db, first.id), first);
+  await app.close();
+});
+
+test("failed or unconfirmed stop never starts another environment or clears old recovery intent", async () => {
+  for (const mode of ["kill-failure", "still-exists", "probe-failure"] as const) {
+    const f = await fixture(), fake = runtime(), app = Fastify();
+    const config = await saveWorkspaceTerminalConfig(f.ctx, "ws", { name: "Dev", cwd: ".", command: "true" });
+    const first = await runWorkspaceTerminalConfig(f.ctx, app.log, "ws", config.id, fake.operations);
+    const stat = await fs.lstat(f.ctx.dataDir);
+    armTerminalAuthCleanupIntent(f.db, { terminalId: first.id, rootDev: stat.dev, rootIno: stat.ino, updatedAt: 1 });
+    const intent = listTerminalAuthCleanupIntents(f.db, first.id);
+    const operations = { ...fake.operations,
+      hasSession: mode === "probe-failure" ? async () => { throw new Error("fixture probe failure"); } : fake.operations.hasSession,
+      killSession: async () => { if (mode === "kill-failure") throw new Error("fixture kill failure"); },
+    };
+    await assert.rejects(runWorkspaceTerminalConfig(f.ctx, app.log, "ws", config.id, operations), (e: unknown) => e instanceof HttpError && e.code === "TERMINAL_SESSION_STOP_UNCONFIRMED");
+    assert.equal(fake.starts.length, 1); assert.deepEqual(getTerminal(f.db, first.id), first);
+    assert.deepEqual(listTerminalAuthCleanupIntents(f.db, first.id), intent);
+    assert.equal(listVisibleTerminalsByWorkspace(f.db, "ws")[0]?.id, first.id);
+    await app.close();
+  }
+});
+
+test("pending cleanup blocks restart and preserves its recovery intent and visible tab", async () => {
+  const f = await fixture(), fake = runtime(), app = Fastify();
+  const config = await saveWorkspaceTerminalConfig(f.ctx, "ws", { name: "Dev", cwd: ".", command: "true" });
+  const first = await runWorkspaceTerminalConfig(f.ctx, app.log, "ws", config.id, fake.operations);
+  const stat = await fs.lstat(f.ctx.dataDir);
+  armTerminalAuthCleanupIntent(f.db, { terminalId: first.id, rootDev: stat.dev, rootIno: stat.ino, updatedAt: 1 });
+  const intent = listTerminalAuthCleanupIntents(f.db, first.id);
+  await assert.rejects(runWorkspaceTerminalConfig(f.ctx, app.log, "ws", config.id, fake.operations), (e: unknown) => e instanceof HttpError && e.code === "TERMINAL_RESTART_CLEANUP_PENDING");
+  assert.equal(fake.starts.length, 1); assert.equal(getTerminal(f.db, first.id)?.sessionName, first.sessionName);
+  assert.deepEqual(listTerminalAuthCleanupIntents(f.db, first.id), intent);
+  assert.equal(listVisibleTerminalsByWorkspace(f.db, "ws")[0]?.id, first.id);
+  await app.close();
+});
+
+test("failed replacement launch keeps the managed tab and a retry reuses the same ID", async () => {
+  const f = await fixture(), fake = runtime(), app = Fastify();
+  const config = await saveWorkspaceTerminalConfig(f.ctx, "ws", { name: "Dev", cwd: ".", command: "true" });
+  const first = await runWorkspaceTerminalConfig(f.ctx, app.log, "ws", config.id, fake.operations);
+  await assert.rejects(runWorkspaceTerminalConfig(f.ctx, app.log, "ws", config.id, { ...fake.operations, newSession: async () => { throw new Error("fixture launch failure"); } }));
+  const failed = getTerminalByConfig(f.db, "ws", config.id)!;
+  assert.equal(failed.id, first.id); assert.equal(failed.status, "closed");
+  assert.equal(listVisibleTerminalsByWorkspace(f.db, "ws")[0]?.id, first.id);
+  const next = await runWorkspaceTerminalConfig(f.ctx, app.log, "ws", config.id, fake.operations);
+  assert.equal(next.id, first.id); assert.notEqual(next.sessionName, first.sessionName);
+  assert.equal((f.db.prepare("select count(*) as n from terminals").get() as { n: number }).n, 1);
+  f.db.prepare("update terminals set status = 'closed', config_id = null where id = ?").run(next.id);
+  assert.deepEqual(listVisibleTerminalsByWorkspace(f.db, "ws"), []);
+  await app.close();
+});
+
+test("legacy terminal schema migrates losslessly and enforces one terminal per config", async () => {
+  const f = await fixture();
+  f.db.exec(`drop table terminals; create table terminals (
+    id text primary key, workspace_id text not null, session_name text not null,
+    status text not null, created_at integer not null, updated_at integer not null
+  ); insert into terminals values ('legacy', 'ws', 'legacy-session', 'active', 1, 2);`);
+  initSchema(f.db); initSchema(f.db);
+  assert.deepEqual(getTerminal(f.db, "legacy"), { id: "legacy", workspaceId: "ws", configId: null, sessionName: "legacy-session", status: "active", createdAt: 1, updatedAt: 2 });
+  const config = await saveWorkspaceTerminalConfig(f.ctx, "ws", { name: "Dev", cwd: ".", command: "true" });
+  f.db.prepare("update terminals set config_id = ? where id = 'legacy'").run(config.id);
+  assert.throws(() => f.db.prepare("insert into terminals(id,workspace_id,config_id,session_name,status,created_at,updated_at) values('duplicate','ws',?,'second','active',1,1)").run(config.id));
+  await deleteWorkspaceTerminalConfig(f.ctx, "ws", config.id); assert.equal(getTerminal(f.db, "legacy")?.configId, null);
+});
+
+async function waitFor(check: () => boolean | Promise<boolean>, description: string) {
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    if (await check()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.fail(`Timed out: ${description}`);
+}
+
+test("real Bash recalls the raw startup command on first up-arrow after completion or Ctrl+C", async () => {
+  for (const { command, interrupt } of [
+    { command: "printf '%s\\n' 'normal-completion'", interrupt: false },
+    { command: "false", interrupt: false },
+    { command: "printf '%s\\n' 'running-marker'; sleep 30", interrupt: true },
+    { command: "cat <<'EOF'\n中文 'quoted' \"double\" $literal\nEOF", interrupt: false },
+  ]) {
+    const f = await fixture(), home = path.join(f.root, "home"); await fs.mkdir(home);
+    const capture = path.join(home, "capture"), histfile = path.join(home, ".bash_history"), inputrc = path.join(home, ".inputrc");
+    await fs.writeFile(histfile, "old-existing-command\n"); await fs.writeFile(inputrc, "");
+    await fs.writeFile(path.join(home, ".bashrc"), `PS1='AWB_READY> '\nPS2='AWB_MORE> '\nbind -x '\"\\C-x\\C-g\":printf \"%s\" \"$READLINE_LINE\" > \"$CAPTURE\"'\n`);
+    const rc = path.join(home, "startup.bash");
+    await fs.writeFile(rc, `exec 4>/dev/null 3</dev/null\n${buildTerminalStartupBootstrap(command, "te_history")}`);
+    const child = pty.spawn("/bin/bash", ["--noprofile", "--rcfile", rc, "-i"], {
+      name: "xterm", cols: 500, rows: 30, cwd: home,
+      env: { HOME: home, HISTFILE: histfile, INPUTRC: inputrc, CAPTURE: capture, PATH: "/usr/bin:/bin", TERM: "xterm" },
+    });
+    let output = ""; const data = child.onData((chunk) => { output += chunk; });
+    const exited = new Promise<void>((resolve) => { child.onExit(() => resolve()); });
+    try {
+      if (interrupt) { await waitFor(() => output.includes("running-marker"), "startup command entered"); child.write("\x03"); }
+      await waitFor(() => output.includes("AWB_READY> "), "interactive prompt");
+      child.write("\x1b[A\x18\x07");
+      await waitFor(async () => { try { return (await fs.readFile(capture, "utf8")) === command; } catch { return false; } }, "first up-arrow recalls raw command");
+      assert.equal(await fs.readFile(capture, "utf8"), command);
+      assert.equal(await fs.readFile(histfile, "utf8"), "old-existing-command\n");
+    } finally { child.kill(); await exited; data.dispose(); }
+  }
+});
+
+test("terminal listing waits for restart and retains managed closed tabs, but hides ordinary closed tabs", async () => {
+  const f = await fixture(), app = Fastify();
+  const config = await saveWorkspaceTerminalConfig(f.ctx, "ws", { name: "Dev", cwd: ".", command: "true" });
+  f.db.prepare("insert into terminals(id,workspace_id,config_id,session_name,status,created_at,updated_at) values('managed','ws',?,'new-session','creating',1,1)").run(config.id);
+  f.db.prepare("insert into terminals(id,workspace_id,session_name,status,created_at,updated_at) values('plain','ws','plain-session','closed',1,1)").run();
+  let release!: () => void, entered!: () => void;
+  const gateEntered = new Promise<void>((resolve) => { entered = resolve; });
+  const held = workspaceLifecycleCoordinator.withMutation("ws", async () => {
+    entered(); await new Promise<void>((resolve) => { release = resolve; });
+    f.db.prepare("update terminals set status = 'closed' where id = 'managed'").run();
+  });
+  await gateEntered; await registerTerminalsRoutes(app, f.ctx);
+  let returned = false;
+  const listing = app.inject({ method: "GET", url: "/api/workspaces/ws/terminals" }).then((response) => { returned = true; return response; });
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 20)); assert.equal(returned, false);
+    release(); await held;
+    const response = await listing; assert.equal(response.statusCode, 200);
+    assert.deepEqual(response.json().map((term: { id: string; status: string }) => [term.id, term.status]), [["managed", "closed"]]);
+  } finally { release(); await held; await app.close(); }
+});
+
+test("unconfirmed old environment cleanup blocks replacement without dropping launch material", async () => {
+  const f = await fixture(), fake = runtime(), app = Fastify();
+  const config = await saveWorkspaceTerminalConfig(f.ctx, "ws", { name: "Dev", cwd: ".", command: "true" });
+  const first = await runWorkspaceTerminalConfig(f.ctx, app.log, "ws", config.id, fake.operations);
+  const pending = await prepareTerminalEnvironmentLaunch({ db: f.db, dataDir: f.dataDir, terminalId: first.id, shell: "bash", baseEnv: {}, systemEnv: {}, workspaceEnv: {}, startupCommand: "true" });
+  const before = getTerminalEnvironmentLaunchAttempt(f.db, pending.attempt.id);
+  await assert.rejects(runWorkspaceTerminalConfig(f.ctx, app.log, "ws", config.id, {
+    ...fake.operations, cleanupEnvironmentLaunch: async () => "pending",
+  }), (e: unknown) => e instanceof HttpError && e.code === "TERMINAL_RESTART_CLEANUP_PENDING");
+  assert.equal(fake.starts.length, 1);
+  assert.deepEqual(getTerminalEnvironmentLaunchAttempt(f.db, pending.attempt.id), before);
+  assert.equal(getTerminal(f.db, first.id)?.sessionName, first.sessionName);
+  assert.equal(listVisibleTerminalsByWorkspace(f.db, "ws")[0]?.id, first.id);
+  await app.close();
+});
+
+async function seedRecoverableAuthArtifact(f: Awaited<ReturnType<typeof fixture>>, terminalId: string) {
+  const filename = terminalSshKeyPath(f.dataDir, terminalId);
+  await fs.writeFile(filename, "fixture-auth-material", { mode: 0o600 });
+  const root = await fs.lstat(f.dataDir), artifact = await fs.lstat(filename);
+  armTerminalAuthCleanupIntent(f.db, {
+    terminalId, artifactKind: "ssh-key", artifactName: path.basename(filename), rootDev: root.dev, rootIno: root.ino, updatedAt: 1,
+  });
+  updateTerminalAuthCleanupIntent(f.db, {
+    terminalId, artifactKind: "ssh-key", artifactName: path.basename(filename), phase: "recoverable",
+    expectedDev: artifact.dev, expectedIno: artifact.ino, diagnostic: "fixture recoverable artifact", updatedAt: 2,
+  });
+  return { filename, intents: listTerminalAuthCleanupIntents(f.db, terminalId) };
+}
+
+test("only explicit logical close detaches a managed tab with Git-only pending cleanup; restart keeps it", async () => {
+  const f = await fixture(), fake = runtime(), app = Fastify();
+  const config = await saveWorkspaceTerminalConfig(f.ctx, "ws", { name: "Dev", cwd: ".", command: "true" });
+  const first = await runWorkspaceTerminalConfig(f.ctx, app.log, "ws", config.id, fake.operations);
+  const artifact = await seedRecoverableAuthArtifact(f, first.id);
+  let cleanups = 0;
+  const operations = { ...fake.operations, cleanupAuthArtifacts: async () => { cleanups++; throw new Error("fixture auth cleanup pending"); } };
+
+  await assert.rejects(runWorkspaceTerminalConfig(f.ctx, app.log, "ws", config.id, operations),
+    (e: unknown) => e instanceof HttpError && e.code === "TERMINAL_RESTART_CLEANUP_PENDING");
+  assert.equal(cleanups, 1); assert.equal(fake.starts.length, 1);
+  assert.equal(getTerminalByConfig(f.db, "ws", config.id)?.id, first.id);
+  assert.equal(listVisibleTerminalsByWorkspace(f.db, "ws")[0]?.id, first.id);
+  assert.deepEqual(listTerminalAuthCleanupIntents(f.db, first.id), artifact.intents);
+
+  await assert.doesNotReject(deleteTerminal(f.ctx, app.log, first.id, operations));
+  assert.equal(cleanups, 2);
+  const retained = getTerminal(f.db, first.id)!;
+  assert.equal(retained.status, "errored"); assert.equal(retained.configId, null);
+  assert.equal(retained.sessionName, first.sessionName);
+  assert.equal(getTerminalByConfig(f.db, "ws", config.id), null);
+  assert.deepEqual(listVisibleTerminalsByWorkspace(f.db, "ws"), []);
+  assert.deepEqual(listTerminalAuthCleanupIntents(f.db, first.id), artifact.intents);
+  assert.equal(await fs.readFile(artifact.filename, "utf8"), "fixture-auth-material");
+
+  const next = await runWorkspaceTerminalConfig(f.ctx, app.log, "ws", config.id, fake.operations);
+  assert.notEqual(next.id, first.id); assert.equal(next.configId, config.id);
+  assert.equal(getTerminalByConfig(f.db, "ws", config.id)?.id, next.id);
+  assert.deepEqual(listVisibleTerminalsByWorkspace(f.db, "ws").map((term) => term.id), [next.id]);
+  assert.equal(getTerminal(f.db, first.id)?.status, "errored");
+  assert.deepEqual(listTerminalAuthCleanupIntents(f.db, first.id), artifact.intents);
+  assert.equal(await fs.readFile(artifact.filename, "utf8"), "fixture-auth-material");
+  await app.close();
+});
+
+test("explicit close with an unconfirmed stop never detaches its managed association", async () => {
+  for (const mode of ["kill-failure", "still-exists", "probe-failure"] as const) {
+    const f = await fixture(), fake = runtime(), app = Fastify();
+    const config = await saveWorkspaceTerminalConfig(f.ctx, "ws", { name: "Dev", cwd: ".", command: "true" });
+    const first = await runWorkspaceTerminalConfig(f.ctx, app.log, "ws", config.id, fake.operations);
+    const artifact = await seedRecoverableAuthArtifact(f, first.id);
+    const operations = { ...fake.operations,
+      hasSession: mode === "probe-failure" ? async () => { throw new Error("fixture probe failure"); } : fake.operations.hasSession,
+      killSession: async () => { if (mode === "kill-failure") throw new Error("fixture kill failure"); },
+    };
+    await assert.rejects(deleteTerminal(f.ctx, app.log, first.id, operations),
+      (e: unknown) => e instanceof HttpError && e.code === "TERMINAL_SESSION_STOP_UNCONFIRMED");
+    assert.deepEqual(getTerminal(f.db, first.id), first);
+    assert.equal(getTerminalByConfig(f.db, "ws", config.id)?.id, first.id);
+    assert.equal(listVisibleTerminalsByWorkspace(f.db, "ws")[0]?.id, first.id);
+    assert.deepEqual(listTerminalAuthCleanupIntents(f.db, first.id), artifact.intents);
+    assert.equal(await fs.readFile(artifact.filename, "utf8"), "fixture-auth-material");
+    await app.close();
+  }
+});
+
+test("explicit close with environment cleanup pending keeps its managed tab and all recovery locators", async () => {
+  const f = await fixture(), fake = runtime(), app = Fastify();
+  const config = await saveWorkspaceTerminalConfig(f.ctx, "ws", { name: "Dev", cwd: ".", command: "true" });
+  const first = await runWorkspaceTerminalConfig(f.ctx, app.log, "ws", config.id, fake.operations);
+  const artifact = await seedRecoverableAuthArtifact(f, first.id);
+  const pending = await prepareTerminalEnvironmentLaunch({ db: f.db, dataDir: f.dataDir, terminalId: first.id, shell: "bash", baseEnv: {}, systemEnv: {}, workspaceEnv: {}, startupCommand: "true" });
+  const attempt = getTerminalEnvironmentLaunchAttempt(f.db, pending.attempt.id);
+  await assert.rejects(deleteTerminal(f.ctx, app.log, first.id, { ...fake.operations, cleanupEnvironmentLaunch: async () => "pending" }),
+    (e: unknown) => e instanceof HttpError && e.code === "TERMINAL_ENV_CLEANUP_PENDING");
+  assert.equal(getTerminalByConfig(f.db, "ws", config.id)?.id, first.id);
+  assert.equal(listVisibleTerminalsByWorkspace(f.db, "ws")[0]?.id, first.id);
+  assert.deepEqual(getTerminalEnvironmentLaunchAttempt(f.db, pending.attempt.id), attempt);
+  assert.deepEqual(listTerminalAuthCleanupIntents(f.db, first.id), artifact.intents);
+  assert.equal(await fs.readFile(artifact.filename, "utf8"), "fixture-auth-material");
+  await app.close();
 });

@@ -5,7 +5,8 @@ import { ErrorResponseSchema } from "@agent-workbench/shared";
 import { CreateTerminalRequestSchema, TerminalRecordSchema } from "@agent-workbench/shared";
 import { getWorkspaceById } from "../workspaces/workspace.service.js";
 import { createTerminal, deleteTerminal, getTerminalById, reconcileWorkspaceActiveTerminals } from "./terminal.service.js";
-import { listActiveTerminalsByWorkspace } from "./terminal.store.js";
+import { workspaceLifecycleCoordinator } from "../../infra/locks/workspace-lifecycle-coordinator.js";
+import { listVisibleTerminalsByWorkspace } from "./terminal.store.js";
 
 export async function registerTerminalsRoutes(app: FastifyInstance, ctx: AppContext) {
   await registerTerminalConfigRoutes(app, ctx);
@@ -19,9 +20,11 @@ export async function registerTerminalsRoutes(app: FastifyInstance, ctx: AppCont
     },
     async (req) => {
       const params = req.params as { workspaceId: string };
-      await getWorkspaceById(ctx, params.workspaceId);
-      await reconcileWorkspaceActiveTerminals(ctx, app.log, params.workspaceId);
-      return listActiveTerminalsByWorkspace(ctx.db, params.workspaceId);
+      return workspaceLifecycleCoordinator.withAdmission(params.workspaceId, async () => {
+        await getWorkspaceById(ctx, params.workspaceId);
+        await reconcileWorkspaceActiveTerminals(ctx, app.log, params.workspaceId);
+        return listVisibleTerminalsByWorkspace(ctx.db, params.workspaceId);
+      });
     }
   );
 

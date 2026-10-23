@@ -11,7 +11,7 @@ export async function runWorkspaceTerminalConfig(
   return workspaceLifecycleCoordinator.withMutation(workspaceId, async () => {
     requireTerminalConfigWorkspace(ctx, workspaceId);
     const config = normalizeTerminalConfig(requireTerminalConfig(ctx, workspaceId, configId));
-    // A snapshot, not an association: every request creates an independent terminal.
-    return createTerminal(ctx, logger, { workspaceId, startup: { cwd: config.cwd, command: config.command }, runtimeOperations });
+    // One durable managed terminal per configuration; reruns replace its shell.
+    return createTerminal(ctx, logger, { workspaceId, configId, startup: { cwd: config.cwd, command: config.command }, runtimeOperations });
   });
 }

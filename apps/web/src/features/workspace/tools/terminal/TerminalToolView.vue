@@ -14,7 +14,7 @@
         @minimize="minimizeSelf"
       />
     </div>
-    <TerminalConfigPanel v-if="configOpened" v-show="configOpen" :key="workspaceId" :workspace-id="workspaceId" :active="configOpen" @close="configOpen = false" @created="onConfigTerminalCreated" />
+    <TerminalConfigPanel v-if="configOpened" v-show="configOpen" :key="workspaceId" :workspace-id="workspaceId" :active="configOpen" @close="configOpen = false" @created="onConfigTerminalCreated" @run-started="onConfigRunStarted" />
   </div>
 </template>
 
@@ -41,8 +41,18 @@ const terminalTabs = ref<InstanceType<typeof TerminalTabs>>();
 const configOpen = ref(true);
 const configOpened = ref(true);
 function openConfig() { configOpened.value = true; configOpen.value = true; }
+function onConfigRunStarted(request: { workspaceId: string; configId: string }) {
+  if (disposed || request.workspaceId !== props.workspaceId) return;
+  const terminal = terminals.value.find((term) => term.configId === request.configId);
+  if (terminal) terminalTabs.value?.activateTerminal(terminal.id);
+}
 function onConfigTerminalCreated(terminal: TerminalRecord) {
   if (disposed || terminal.workspaceId !== props.workspaceId) return;
+  // Apply the returned generation immediately; a failed follow-up list request
+  // must not leave this stable tab attached to its previous physical session.
+  const index = terminals.value.findIndex((term) => term.id === terminal.id);
+  terminals.value = index < 0 ? [...terminals.value, terminal]
+    : terminals.value.map((term) => term.id === terminal.id ? terminal : term);
   terminalTabs.value?.activateCreatedTerminal(terminal.id);
 }
 type RefreshRequest = { workspaceId: string; workspaceEpoch: number; generation: number };

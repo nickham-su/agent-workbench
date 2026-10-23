@@ -22,8 +22,11 @@ import { getWorkspaceEnvironmentService } from "../workspaces/workspace-environm
 import { listWorkspaces } from "../workspaces/workspace.store.js";
 import {
   insertTerminal,
+  getTerminalByConfig,
+  restartTerminalRecord,
   getTerminal,
   updateTerminalStatus,
+  clearTerminalConfigAssociation,
   deleteTerminalRecord,
   listActiveTerminalsByWorkspace,
   listTerminalsByWorkspace
@@ -399,6 +402,7 @@ export async function createTerminal(
     workspaceId: string;
     shell?: string;
     startup?: { cwd: string; command: string };
+    configId?: string;
     runtimeOperations?: TerminalRuntimeOperations;
     writeAuthArtifactForTest?: typeof writeTerminalGitAuthArtifact;
     buildNetworkEnvForTest?: typeof buildTerminalNetworkEnvPairs;
@@ -417,19 +421,37 @@ export async function createTerminal(
     let baseEnv: Record<string, string>;
     try { baseEnv = copyTerminalEnvironmentLayer(process.env, true); }
     catch (error) { throw terminalCreateError(error); }
-    const terminalId = newId("term");
-    const sessionName = `term_${terminalId}`;
+    const previous = params.configId ? getTerminalByConfig(ctx.db, workspaceId, params.configId) : null;
+    const runtimeOperations = params.runtimeOperations ?? defaultTerminalRuntimeOperations;
+    // Settle the old launch before entering the new launch's failure cleanup. Its
+    // durable auth/environment locators must survive an uncertain stop.
+    if (previous) {
+      await stopTerminalSession(ctx, previous, runtimeOperations);
+      const settlement = await settleTerminalAfterSessionStopped(ctx, logger, previous.id, runtimeOperations);
+      if (settlement !== "closed") {
+        const code = settlement === "env_cleanup_pending" || settlement === "cleanup_pending"
+          ? "TERMINAL_RESTART_CLEANUP_PENDING" : "TERMINAL_SESSION_STOP_UNCONFIRMED";
+        throw new HttpError(503, "Terminal restart failed: the previous environment could not be confirmed stopped and cleaned up. No new run was started.", code);
+      }
+    }
+    const terminalId = previous?.id ?? newId("term");
+    // The logical tab is stable; a fresh physical session also identifies the
+    // generation to connected clients without changing the WebSocket protocol.
+    const sessionName = previous ? `term_${terminalId}_${newId("run")}` : `term_${terminalId}`;
     const ts = nowMs();
     const term: TerminalRecord = {
-      id: terminalId, workspaceId: ws.id, sessionName, status: "creating", createdAt: ts, updatedAt: ts,
+      id: terminalId, workspaceId: ws.id, configId: params.configId ?? null,
+      sessionName, status: "creating", createdAt: previous?.createdAt ?? ts, updatedAt: ts,
     };
     const specifiedShell = params.startup ? "bash" : params.shell?.trim();
-    const runtimeOperations = params.runtimeOperations ?? defaultTerminalRuntimeOperations;
     let intentPersisted = false;
     let authArtifactWriteStarted = false;
     let tmuxMayExist = false;
     try {
-      ctx.db.transaction(() => { insertTerminal(ctx.db, term); })();
+      ctx.db.transaction(() => {
+        if (previous) restartTerminalRecord(ctx.db, term);
+        else insertTerminal(ctx.db, term);
+      })();
       intentPersisted = true;
       const { envPairs } = await buildTerminalGitEnv({
         ctx, terminalId, workspaceId: ws.id,
@@ -613,6 +635,9 @@ export async function deleteTerminal(
       throw new HttpError(409, "Terminal environment cleanup remains pending.", "TERMINAL_ENV_CLEANUP_PENDING");
     }
     if (settlement === "cleanup_pending") {
+      // Explicit close succeeded logically. Detach only here: failed restarts
+      // and unconfirmed stops must keep their managed identity and visible tab.
+      if (term.configId != null) clearTerminalConfigAssociation(ctx.db, term.id);
       logger.info({ terminalId: term.id }, "terminal logically deleted with Git auth cleanup pending");
       return;
     }

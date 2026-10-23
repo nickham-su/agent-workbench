@@ -275,11 +275,17 @@ watch(
   }
 );
 
+function activateTerminal(terminalId: string) {
+  if (!props.terminals.some((term) => term.id === terminalId && term.workspaceId === props.workspaceId)) return false;
+  pendingActivateKey.value = null;
+  activeKey.value = terminalId;
+  return true;
+}
 function activateCreatedTerminal(terminalId: string) {
-  pendingActivateKey.value = terminalId;
+  if (!activateTerminal(terminalId)) pendingActivateKey.value = terminalId;
   emit("created");
 }
-defineExpose({ activateCreatedTerminal });
+defineExpose({ activateCreatedTerminal, activateTerminal });
 
 async function createOne() {
   creating.value = true;

@@ -60,10 +60,10 @@ import { useI18n } from "vue-i18n";
 import { Modal, message, type FormInstance } from "ant-design-vue";
 import { ArrowDownOutlined, ArrowUpOutlined, CaretRightOutlined, CloseOutlined, DownOutlined, HolderOutlined, MoreOutlined, PlusOutlined, SortAscendingOutlined } from "@ant-design/icons-vue";
 import { TERMINAL_CONFIG_COMMAND_MAX_LENGTH, type TerminalConfigRecord, type TerminalRecord } from "@agent-workbench/shared";
-import { createTerminalConfig, deleteTerminalConfig, getWorkspace, listTerminalConfigs, reorderTerminalConfigs, runTerminalConfig, updateTerminalConfig } from "@/shared/api";
+import { ApiError, createTerminalConfig, deleteTerminalConfig, getWorkspace, listTerminalConfigs, reorderTerminalConfigs, runTerminalConfig, updateTerminalConfig } from "@/shared/api";
 
 const props = withDefaults(defineProps<{ workspaceId: string; active?: boolean }>(), { active: true });
-const emit = defineEmits<{ close: []; created: [terminal: TerminalRecord] }>();
+const emit = defineEmits<{ close: []; created: [terminal: TerminalRecord]; runStarted: [request: { workspaceId: string; configId: string }] }>();
 const { t } = useI18n();
 const configs = ref<TerminalConfigRecord[]>([]);
 const orderDraft = ref<TerminalConfigRecord[]>([]);
@@ -187,12 +187,18 @@ async function run(config: TerminalConfigRecord) {
   if (ordering.value || runningIds.has(config.id)) return;
   const workspaceId = props.workspaceId;
   runningIds.add(config.id);
+  emit("runStarted", { workspaceId, configId: config.id });
   try {
     const terminal = await runTerminalConfig(workspaceId, config.id);
-    // Even if the panel was collapsed meanwhile, let the existing terminal flow
-    // display the newly created terminal. Parent checks its Workspace identity.
-    emit("created", terminal);
-  } catch (error) { if (!disposed && workspaceId === props.workspaceId) message.error(errorText(error)); }
+    // Collapsing only hides the panel, so its result still activates the tab.
+    // A destroyed/replaced Workspace panel must not publish a stale generation.
+    if (!disposed && workspaceId === props.workspaceId) emit("created", terminal);
+  } catch (error) {
+    if (!disposed && workspaceId === props.workspaceId) {
+      const stopFailed = error instanceof ApiError && ["TERMINAL_SESSION_STOP_UNCONFIRMED", "TERMINAL_RESTART_CLEANUP_PENDING"].includes(error.code ?? "");
+      message.error(stopFailed ? t("terminal.config.restartStoppedUnconfirmed") : errorText(error));
+    }
+  }
   finally { runningIds.delete(config.id); }
 }
 function handleMenu(key: string, config: TerminalConfigRecord) {

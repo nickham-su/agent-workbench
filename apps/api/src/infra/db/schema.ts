@@ -326,6 +326,7 @@ function createBaseSchema(db: Db) {
     create table if not exists terminals (
       id text primary key,
       workspace_id text not null,
+      config_id text references workspace_terminal_configs(id) on delete set null,
       session_name text not null,
       status text not null,
       created_at integer not null,
@@ -357,7 +358,10 @@ function createBaseSchema(db: Db) {
   ensureColumn(db, { table: "workspaces", column: "terminal_credential_id", ddl: "terminal_credential_id text" });
   ensureColumn(db, { table: "workspaces", column: "last_used_at", ddl: "last_used_at integer" });
   ensureColumn(db, { table: "workspace_terminal_configs", column: "sort_order", ddl: "sort_order integer not null default 0" });
+  ensureColumn(db, { table: "terminals", column: "config_id", ddl: "config_id text references workspace_terminal_configs(id) on delete set null" });
   db.exec(`
+    create unique index if not exists idx_terminals_config
+      on terminals(config_id) where config_id is not null;
     create index if not exists idx_workspace_terminal_configs_order
       on workspace_terminal_configs(workspace_id, sort_order, created_at, id);
   `);

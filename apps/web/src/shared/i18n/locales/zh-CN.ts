@@ -654,6 +654,7 @@ export default {
       collapse: "收起配置",
       empty: "暂无配置",
       run: "运行",
+      restartStoppedUnconfirmed: "重启失败：无法确认旧运行环境已停止并完成清理，未启动新的运行。请稍后重试。",
       more: "更多",
       edit: "编辑配置",
       delete: "删除",

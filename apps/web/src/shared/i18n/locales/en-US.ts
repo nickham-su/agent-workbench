@@ -656,6 +656,7 @@ export default {
       collapse: "Collapse configurations",
       empty: "No configurations",
       run: "Run",
+      restartStoppedUnconfirmed: "Restart failed: the previous environment could not be confirmed stopped and cleaned up. No new run was started. Please try again later.",
       more: "More",
       edit: "Edit configuration",
       delete: "Delete",
