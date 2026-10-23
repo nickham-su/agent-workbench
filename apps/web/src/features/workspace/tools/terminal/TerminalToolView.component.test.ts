@@ -31,6 +31,7 @@ test("configuration pane preserves terminal mounts and activates created termina
       plugins: [createI18n({ legacy: false, locale: "zh-CN", messages: { "zh-CN": zhCN } })],
       provide: { [workspaceHostKey as symbol]: { minimizeTool() {} } },
       stubs: {
+        "a-popconfirm": { template: "<span><slot /></span>" },
         "a-tooltip": { template: "<span><slot /></span>" },
         "a-button": { emits: ["click"], template: '<button @click="$emit(\'click\')"><slot /><slot name="icon" /></button>' },
         "a-tabs": { props: ["activeKey"], template: '<div><slot name="rightExtra" /><slot /></div>' },
@@ -92,6 +93,7 @@ function responseFixture(t: TestContext, realConfigs = false) {
       plugins: [createI18n({ legacy: false, locale: "zh-CN", messages: { "zh-CN": zhCN } })],
       provide: { [workspaceHostKey as symbol]: { minimizeTool() { minimized++; } } },
       stubs: {
+        "a-popconfirm": { template: "<span><slot /></span>" },
         "a-tooltip": { template: "<span><slot /></span>" },
         "a-button": { emits: ["click"], template: '<button @click="$emit(\'click\')"><slot /><slot name="icon" /></button>' },
         "a-tabs": { props: ["activeKey"], template: '<div><slot name="rightExtra" /><slot /></div>' },

@@ -31,6 +31,7 @@ export const componentTests = [
   "src/features/workspace/tools/environment-variables/EnvironmentVariablesToolView.component.test.ts",
   "src/features/workspace/tools/scheduled-tasks/ScheduledTaskDrawer.component.test.ts",
   "src/features/workspace/tools/scheduled-tasks/ScheduledTasksToolView.component.test.ts",
+  "src/features/workspace/tools/terminal/TerminalTabs.component.test.ts",
   "src/features/workspace/tools/terminal/TerminalView.component.test.ts",
   "src/features/workspace/tools/terminal/TerminalConfigPanel.component.test.ts",
   "src/features/workspace/tools/terminal/TerminalToolView.component.test.ts",
