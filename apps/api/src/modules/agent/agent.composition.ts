@@ -475,10 +475,7 @@ function buildSubtaskToolDescription(
   return `${header.join("\n")}\n\nAvailable agents:\n${lines.join("\n")}`;
 }
 
-function toolDescription(
-  toolName: AgentContextToolName,
-  options?: { subtaskDescription?: string },
-) {
+function toolDescription(toolName: AgentContextToolName) {
   if (toolName === "git") {
     return [
       "Run native Git in an explicitly selected registered Workspace repository. The system prepares the initial directory and project Git credentials; args are passed unchanged without a shell.",
@@ -668,9 +665,7 @@ function toolDescription(
     ].join("\n");
   }
   if (toolName === "subtask")
-    return (
-      options?.subtaskDescription || "Execute a task in a subtask session."
-    );
+    return "Execute a task in a subtask session.";
   if (toolName === "write") {
     return [
       "Write and fully overwrite a workspace-relative file.",
@@ -1722,21 +1717,11 @@ function createReadQueryWritebackAssembly(assembly: {
       }),
     getMaxSubtaskDepth: () =>
       assembly.environment.getAgentRuntimeSettings().maxSubtaskDepth,
-    listSubtaskAgents: () =>
-      assembly.environment
-        .listAvailableAgentsForSurface("subtask")
-        .map((item) => ({
-          id: item.id,
-          name: item.name,
-          summary: item.summary,
-        })),
     buildSystem: (input) => buildSystemPrompt(input),
     buildOutputFormatInstruction: (input) =>
       buildOutputFormatInstruction(input),
     buildSkillsInstruction: (input) => buildSkillsInstructionSection(input),
-    buildSubtaskDescription: (agents) => buildSubtaskToolDescription(agents),
-    describeTool: (name, options) =>
-      toolDescription(name as AgentContextToolName, options),
+    describeTool: (name) => toolDescription(name as AgentContextToolName),
     getToolInputSchema: (name) => toolArgsSchema(name as AgentContextToolName),
   });
   const promptContextProjector = new PromptContextProjector<any>(
@@ -1746,6 +1731,13 @@ function createReadQueryWritebackAssembly(assembly: {
         assembly.resolveExecutionProfileForReadSide(input),
       assembleStatic: (input) => promptStaticAssembler.assemble(input),
       buildRuntimeInstruction: (input) => buildRuntimeInstruction(input),
+      resolveSubtaskDescription: (workspaceId) =>
+        buildSubtaskToolDescription(
+          assembly.environment.listAvailableAgentsForSurface("subtask", {
+            workspaceEnablement:
+              assembly.environment.getWorkspaceEnabledAgentIds(workspaceId),
+          }),
+        ),
       readWorkspaceRepoNames: (workspaceId) =>
         listAgentWorkspaceRepoNames(assembly.environment.db, workspaceId, (count) => {
           assembly.logger.warn(

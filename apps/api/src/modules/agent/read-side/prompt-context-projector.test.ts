@@ -35,6 +35,7 @@ test("PromptContextProjector composes cached static data with dynamic locale, me
       };
     },
     readWorkspaceRepoNames: () => [],
+    resolveSubtaskDescription: () => assert.fail("hidden subtask must not resolve a description"),
     buildRuntimeInstruction: ({ uiLocale }) => `runtime:${uiLocale}`,
     appendRuntimeConstraints: (system, runtime) => `${system}|${runtime}`,
   });
@@ -109,6 +110,7 @@ test("PromptContextProjector passes every pending Assistant ID so transcript pro
       return { systemStatic: "static", tools: [], externalSkills: [] };
     },
     readWorkspaceRepoNames: () => [],
+    resolveSubtaskDescription: () => assert.fail("hidden subtask must not resolve a description"),
     buildRuntimeInstruction: () => "runtime",
     appendRuntimeConstraints: (system, runtime) => `${system}|${runtime}`,
   });
@@ -141,6 +143,7 @@ test("PromptContextProjector refuses a response when terminal invalidation races
       return { systemStatic: "static", tools: [], externalSkills: [] };
     },
     readWorkspaceRepoNames: () => [],
+    resolveSubtaskDescription: () => assert.fail("hidden subtask must not resolve a description"),
     buildRuntimeInstruction: () => "runtime",
     appendRuntimeConstraints: (system, runtime) => `${system}|${runtime}`,
   });
@@ -174,6 +177,7 @@ test("PromptContextProjector reads fresh registered names on every request despi
       return { systemStatic: "static", tools: [{ name: "git", description: "Git base", inputSchema: {} }], externalSkills: [] };
     },
     readWorkspaceRepoNames(workspaceId) { reads.push(workspaceId); return [...names]; },
+    resolveSubtaskDescription: () => assert.fail("hidden subtask must not resolve a description"),
     buildRuntimeInstruction: () => "runtime",
     appendRuntimeConstraints: (system) => system,
   });
@@ -194,4 +198,57 @@ test("PromptContextProjector reads fresh registered names on every request despi
   assert.deepEqual(reads, ["workspace", "workspace", "workspace"]);
   assert.equal(first.tools, second.tools);
   assert.equal(second.tools[0]?.description, "Git base");
+});
+
+test("PromptContextProjector refreshes only the subtask description without mutating same-run static data", async () => {
+  let description = "Available agents: A, B";
+  let assembled = 0;
+  const reads: string[] = [];
+  const staticPrompt = {
+    systemStatic: "static instructions and skills",
+    tools: [
+      { name: "read", description: "Read base", inputSchema: {} },
+      Object.freeze({ name: "subtask", description: "Subtask base", inputSchema: { type: "object" } }),
+    ],
+    externalSkills: [{ skillId: "skill", skillDirectoryPath: "/workspace/skill" }],
+  };
+  const projector = new PromptContextProjector(new RunPromptStaticCache(), {
+    async resolveDynamicContext() {
+      return {
+        headMessageId: "head", sessionRevision: 1,
+        run: { runId: "run", subtaskDepth: 0, agentId: "agent", providerId: "provider", modelId: "model", triggerMessageId: null, runKind: "user", executionPhase: "work_pending", uiLocale: null },
+        pendingTools: [], lastResponseTotalTokens: null, uiLocale: null, messages: [],
+      };
+    },
+    resolveProfile: () => ({ agent: { name: "Agent", tools: ["subtask"] } }),
+    async assembleStatic() {
+      assembled += 1;
+      return staticPrompt;
+    },
+    readWorkspaceRepoNames: () => [],
+    resolveSubtaskDescription(workspaceId) { reads.push(workspaceId); return description; },
+    buildRuntimeInstruction: () => "runtime",
+    appendRuntimeConstraints: (system) => system,
+  });
+  const input = {
+    workspaceId: "workspace", sessionId: "session", session: { kind: "primary" as const, headMessageId: "head", revision: 1 },
+    run: { runId: "run", subtaskDepth: 0, agentId: "agent", providerId: "provider", modelId: "model", triggerMessageId: null },
+  };
+  const snapshots = [];
+  for (const next of ["Available agents: A, B", "Available agents: A", "No agents are currently available", "Available agents: B"]) {
+    description = next;
+    const context = await projector.getPromptContextForRun(input);
+    snapshots.push(context);
+    assert.equal(context.tools.find((tool) => tool.name === "subtask")?.description, next);
+    assert.equal(context.system, staticPrompt.systemStatic);
+    assert.equal(context.externalSkills, staticPrompt.externalSkills);
+    assert.equal(context.tools[0], staticPrompt.tools[0]);
+    assert.equal(context.tools[1]?.inputSchema, staticPrompt.tools[1]?.inputSchema);
+  }
+  assert.equal(assembled, 1);
+  assert.deepEqual(reads, Array(4).fill("workspace"));
+  assert.deepEqual(snapshots.map((snapshot) => snapshot.tools[1]?.description), [
+    "Available agents: A, B", "Available agents: A", "No agents are currently available", "Available agents: B",
+  ]);
+  assert.equal(staticPrompt.tools[1]?.description, "Subtask base");
 });

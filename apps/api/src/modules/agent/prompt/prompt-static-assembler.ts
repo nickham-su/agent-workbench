@@ -30,7 +30,6 @@ type PromptStaticAssemblerDependencies = {
   resolveWorkspaceContext: (workspaceId: string) => Promise<PromptWorkspaceContext>;
   scanBuiltinSkills: () => Promise<PromptStaticSkillSummary[]>;
   getMaxSubtaskDepth: () => number;
-  listSubtaskAgents: () => Array<{ id: string; name: string; summary: string }>;
   buildSystem: (input: {
     agentName: string;
     agentPrompt: string;
@@ -42,8 +41,7 @@ type PromptStaticAssemblerDependencies = {
   }) => string;
   buildOutputFormatInstruction: (input: { uiLocale: "zh-CN" | "en-US" | null }) => string;
   buildSkillsInstruction: (input: { builtin: PromptStaticSkillSummary[]; external: PromptStaticSkillSummary[] }) => string;
-  buildSubtaskDescription: (agents: Array<{ id: string; name: string; summary: string }>) => string;
-  describeTool: (name: string, options: { subtaskDescription?: string }) => string;
+  describeTool: (name: string) => string;
   getToolInputSchema: (name: string) => Record<string, unknown>;
 };
 
@@ -85,10 +83,6 @@ export class PromptStaticAssembler {
       enabledToolNames.length = 0;
       enabledToolNames.push(...filtered);
     }
-    const subtaskDescription = enabledToolNames.includes("subtask")
-      ? this.dependencies.buildSubtaskDescription(this.dependencies.listSubtaskAgents())
-      : undefined;
-
     return {
       systemStatic: this.dependencies.buildSystem({
         agentName: profile.agent.name,
@@ -101,7 +95,7 @@ export class PromptStaticAssembler {
       }),
       tools: enabledToolNames.map((name) => ({
         name,
-        description: this.dependencies.describeTool(name, { subtaskDescription }),
+        description: this.dependencies.describeTool(name),
         inputSchema: this.dependencies.getToolInputSchema(name)
       })),
       externalSkills: workspaceContext.availableExternalSkills.map(({ skillId, skillDirectoryPath }) => ({ skillId, skillDirectoryPath }))

@@ -15,15 +15,13 @@ test("PromptStaticAssembler preserves static prompt inputs, external skill order
     }),
     scanBuiltinSkills: async () => [{ skill: "builtin/skill", name: "Builtin" }],
     getMaxSubtaskDepth: () => 2,
-    listSubtaskAgents: () => [{ id: "subtask-agent", name: "Subtask", summary: "summary" }],
     buildSystem(input) {
       systemInputs.push(input);
       return "static system";
     },
     buildOutputFormatInstruction: ({ uiLocale }) => `format:${uiLocale}`,
     buildSkillsInstruction: ({ builtin, external }) => `${builtin.map((item) => item.skill).join(",")}|${external.map((item) => item.skill).join(",")}`,
-    buildSubtaskDescription: (agents) => `subtasks:${agents.map((agent) => agent.id).join(",")}`,
-    describeTool: (name, options) => `${name}:${options.subtaskDescription ?? ""}`,
+    describeTool: (name) => `${name}:base`,
     getToolInputSchema: (name) => ({ name })
   });
 
@@ -44,7 +42,7 @@ test("PromptStaticAssembler preserves static prompt inputs, external skill order
   }]);
   assert.equal(result.systemStatic, "static system");
   assert.deepEqual(result.tools.map((tool) => tool.name), ["read", "skill", "archive_read", "archive_search", "bash", "subtask"]);
-  assert.equal(result.tools.at(-1)?.description, "subtask:subtasks:subtask-agent");
+  assert.equal(result.tools.at(-1)?.description, "subtask:base");
   assert.deepEqual(result.externalSkills, [
     { skillId: "a/review", skillDirectoryPath: "/workspace/a/review" },
     { skillId: "z/review", skillDirectoryPath: "/workspace/z/review" }
@@ -57,11 +55,9 @@ test("PromptStaticAssembler always exposes archive tools without duplicates for 
     resolveWorkspaceContext: async () => ({ enabledAgentsInstructions: [], availableExternalSkills: [] }),
     scanBuiltinSkills: async () => [],
     getMaxSubtaskDepth: () => 1,
-    listSubtaskAgents: () => [],
     buildSystem: () => "",
     buildOutputFormatInstruction: () => "",
     buildSkillsInstruction: () => "",
-    buildSubtaskDescription: () => "",
     describeTool: (name) => name,
     getToolInputSchema: () => ({})
   });
@@ -89,11 +85,9 @@ test("PromptStaticAssembler removes subtask from static tools at the established
     resolveWorkspaceContext: async () => ({ enabledAgentsInstructions: [], availableExternalSkills: [] }),
     scanBuiltinSkills: async () => [],
     getMaxSubtaskDepth: () => 1,
-    listSubtaskAgents: () => [],
     buildSystem: () => "",
     buildOutputFormatInstruction: () => "",
     buildSkillsInstruction: () => "",
-    buildSubtaskDescription: () => "",
     describeTool: (name) => name,
     getToolInputSchema: () => ({})
   });
@@ -114,11 +108,9 @@ test("PromptStaticAssembler removes subtask when the run depth is unknown", asyn
     resolveWorkspaceContext: async () => ({ enabledAgentsInstructions: [], availableExternalSkills: [] }),
     scanBuiltinSkills: async () => [],
     getMaxSubtaskDepth: () => 2,
-    listSubtaskAgents: () => [],
     buildSystem: () => "",
     buildOutputFormatInstruction: () => "",
     buildSkillsInstruction: () => "",
-    buildSubtaskDescription: () => "",
     describeTool: (name) => name,
     getToolInputSchema: () => ({})
   });

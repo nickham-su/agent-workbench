@@ -3052,6 +3052,21 @@ export class AgentRunner {
       if (signal.aborted) {
         return { aborted: true as const, assistantMessageId };
       }
+      if (retryCount > 0 && toolSet.subtask) {
+        // Refresh only the dynamic candidate description, preserving this turn's
+        // tool/schema, conversation-state, and availableToolNames snapshots.
+        const refreshedContext = await this.apiClient.getPromptContext({
+          workspaceId: run.workspaceId,
+          sessionId: run.sessionId,
+          runId: run.runId,
+        });
+        const subtask = refreshedContext.tools.find((item) => item.name === "subtask");
+        if (!subtask) throw new Error("subtask tool description is unavailable during model retry");
+        requestBase.tools = {
+          ...toolSet,
+          subtask: { ...toolSet.subtask, description: subtask.description },
+        };
+      }
       // Preparation errors are local failures: never enter the Provider retry catch below.
       // The conversation-state adapter ran exactly once on the original assistant ordinals.
       const materializedMessages = firstAttemptMessages ?? await materializePromptAttachments({
