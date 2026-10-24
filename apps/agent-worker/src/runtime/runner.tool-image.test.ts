@@ -14,6 +14,7 @@ import type { ExecutionProfile } from "./apiClient.js";
 import { AgentRunner, materializePromptAttachments, projectAssistantDebugRecordForTest } from "./runner.js";
 import { chatEndpointDigest } from "./providers/conversation-state/endpoint-identity.js";
 
+const missingImageText = "此前已成功查看该图片，但源文件当前不存在，无法再次加载。";
 const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x45]);
 const jpg = Buffer.from([0xff, 0xd8, 0xff, 0x45]);
 const assistant = { role: "assistant" as const, content: [
@@ -123,6 +124,68 @@ for (const providerNpm of ["@ai-sdk/openai", "@ai-sdk/anthropic", "@ai-sdk/opena
     }
   }));
 }
+
+for (const providerNpm of ["@ai-sdk/openai", "@ai-sdk/anthropic", "@ai-sdk/openai-compatible", "@ai-sdk/moonshotai", "@ai-sdk/deepseek"]) {
+  for (const removed of ["file", "directory"] as const) {
+    test(`${providerNpm}: missing historical image ${removed} becomes tool text`, async () => withImages(async (workspacePath) => {
+      const input = [assistant, toolResults] as Input["messages"];
+      const original = JSON.stringify(input);
+      await prepare(workspacePath, providerNpm, input);
+      await fs.rm(path.join(workspacePath, removed === "file" ? "screens/a.png" : "screens"), { recursive: true });
+      const messages = await prepare(workspacePath, providerNpm, input);
+      const native = providerNpm === "@ai-sdk/openai" || providerNpm === "@ai-sdk/anthropic";
+      const results = (messages[1] as Extract<ModelMessage, { role: "tool" }>).content;
+      assert.deepEqual(results.map((result) => result.toolCallId), ["call-a", "call-b"]);
+      const placeholder = native ? { type: "content", value: [{ type: "text", text: missingImageText }] }
+        : { type: "text", value: missingImageText };
+      assert.deepEqual(results[0]?.output, placeholder);
+      if (removed === "directory") {
+        assert.deepEqual(results[1]?.output, placeholder);
+        assert.equal(messages.length, 2, "no synthetic user message without a surviving image");
+      } else if (native) {
+        assert.equal(messages.length, 2);
+        const output = results[1]!.output;
+        assert.ok(output.type === "content" && output.value[0]?.type === "media");
+      } else {
+        assert.equal(messages.length, 3);
+        const content = (messages[2] as Extract<ModelMessage, { role: "user" }>).content;
+        assert.ok(Array.isArray(content));
+        assert.deepEqual(content.map((part) => part.type), ["text", "file"]);
+        assert.ok(content[1]?.type === "file" && content[1].filename === "b.jpg");
+      }
+      assert.equal(JSON.stringify(input), original, "projection must not rewrite historical results");
+    }));
+  }
+}
+
+test("missing historical image preserves adjacent tool text segments", async () => withImages(async (workspacePath) => {
+  await fs.rm(path.join(workspacePath, "screens/a.png"));
+  const input = [assistant, { ...toolResults, content: [
+    { ...toolResults.content[0]!, output: [{ type: "text", value: "before" }, toolResults.content[0]!.output, { type: "text", value: "after" }] },
+    toolResults.content[1]!,
+  ] }] as Input["messages"];
+  for (const providerNpm of ["@ai-sdk/openai", "@ai-sdk/deepseek"]) {
+    const messages = await prepare(workspacePath, providerNpm, input);
+    const output = (messages[1] as Extract<ModelMessage, { role: "tool" }>).content[0]!.output;
+    assert.deepEqual(output, providerNpm === "@ai-sdk/openai"
+      ? { type: "content", value: ["before", missingImageText, "after"].map((text) => ({ type: "text", text })) }
+      : { type: "text", value: ["before", missingImageText, "after"].join("\n") });
+  }
+}));
+
+test("non-missing historical image errors remain local failures", async (t) => withImages(async (workspacePath) => {
+  const originalOpen = fs.open.bind(fs);
+  for (const code of ["EACCES", "EPERM", "EIO", "ENOTDIR"]) {
+    const mocked = t.mock.method(fs, "open", async (...args: Parameters<typeof fs.open>) => {
+      if (String(args[0]).endsWith("/a.png")) throw Object.assign(new Error("fixture read failure"), { code });
+      return originalOpen(...args);
+    });
+    await assert.rejects(prepare(workspacePath, "@ai-sdk/openai", [assistant, toolResults] as Input["messages"]), /cannot read a valid tool image/);
+    mocked.mock.restore();
+  }
+  await fs.writeFile(path.join(workspacePath, "screens/a.png"), jpg);
+  await assert.rejects(prepare(workspacePath, "@ai-sdk/deepseek", [assistant, toolResults] as Input["messages"]), /cannot read a valid tool image/);
+}));
 
 test("mixed, failed and separate turns never attach an unrelated image", async () => withImages(async (workspacePath) => {
   const mixed: Input["messages"] = [assistant, { role: "tool", content: [
@@ -329,43 +392,52 @@ for (const provider of [
             messages: originalMessages, providerReplay: reasoningHistory(profile, [1, 3, 5]) },
           step: 1, signal: new AbortController().signal, repeatedToolCallCounter: new Map(),
         });
-        if (nextImage === "remove") await assert.rejects(execute, /cannot read a valid tool image/);
-        else await execute;
+        await execute;
         assert.deepEqual(retryDelays, [2_000]);
         assert.equal(JSON.stringify(originalMessages), originalJson, "the retry must not mutate original context");
-        assert.equal(wireBodies.length, nextImage === "remove" ? 1 : 2,
-          "missing image fails in preparation before a second SDK call");
+        assert.equal(wireBodies.length, 2, "missing historical images must not prevent the next SDK call");
         assert.equal(runnerRequests.length, wireBodies.length);
         for (const [index, body] of wireBodies.entries()) {
+          const missing = index === 1 && nextImage === "remove";
           const messages = runnerRequests[index]!;
           assert.deepEqual(messages.map((message) => message.role),
-            ["user", "assistant", "tool", "user", "assistant", "tool", "user", "assistant"]);
+            missing ? ["user", "assistant", "tool", "user", "assistant", "tool", "assistant"]
+              : ["user", "assistant", "tool", "user", "assistant", "tool", "user", "assistant"]);
           assert.deepEqual(messages.filter((message) => message.role === "assistant").map((message) =>
             Array.isArray(message.content) ? message.content.filter((part) => part.type === "reasoning")
               .map((part) => part.text) : []), [["reasoning-1"], ["reasoning-2"], ["reasoning-3"]]);
           const wire = body.messages as Array<Record<string, unknown>>;
           assert.deepEqual(wire.map((message) => message.role),
-            ["user", "assistant", "tool", "tool", "user", "assistant", "tool", "user", "assistant"]);
+            missing ? ["user", "assistant", "tool", "tool", "user", "assistant", "tool", "assistant"]
+              : ["user", "assistant", "tool", "tool", "user", "assistant", "tool", "user", "assistant"]);
           assert.deepEqual(wire.filter((message) => message.role === "tool").map((message) => message.tool_call_id),
             ["call-a", "call-b", "call-c"]);
-          assert.deepEqual([wire[1]?.reasoning_content, wire[5]?.reasoning_content, wire[8]?.reasoning_content],
+          assert.deepEqual(wire.filter((message) => message.role === "assistant").map((message) => message.reasoning_content),
             provider.npm === "@ai-sdk/moonshotai"
               ? ["reasoning-1", "reasoning-2", "reasoning-3"]
-              : [undefined, undefined, "reasoning-3"], "reasoning must not drift across synthetic lastUser");
+              : [undefined, missing ? "reasoning-2" : undefined, "reasoning-3"],
+            "DeepSeek retains reasoning after the actual last user; a missing image adds no synthetic user");
           if (provider.npm === "@ai-sdk/moonshotai") assert.deepEqual(body.thinking, { type: "enabled", keep: "all" });
-          const userImages = [wire[4], wire[7]].map((message) =>
+          const userImages = wire.filter((message) => message.role === "user" && Array.isArray(message.content)).map((message) =>
             (message?.content as Array<{ type: string; image_url?: { url: string } }>).filter((part) => part.type === "image_url")
               .map((part) => part.image_url?.url));
-          assert.deepEqual(userImages.map((images) => images.length), [2, 1]);
-          const expectedPng = (index === 0 ? png : replacement).toString("base64");
-          assert.ok(userImages[0]![0]?.endsWith(expectedPng) && userImages[1]![0]?.endsWith(expectedPng));
-          assert.ok(userImages[0]![1]?.endsWith(jpg.toString("base64")));
+          assert.deepEqual(userImages.map((images) => images.length), missing ? [1] : [2, 1]);
+          if (missing) {
+            assert.ok(userImages[0]![0]?.endsWith(jpg.toString("base64")));
+            for (const callId of ["call-a", "call-c"]) {
+              assert.equal(wire.find((message) => message.tool_call_id === callId)?.content, missingImageText);
+            }
+          } else {
+            const expectedPng = (index === 0 ? png : replacement).toString("base64");
+            assert.ok(userImages[0]![0]?.endsWith(expectedPng) && userImages[1]![0]?.endsWith(expectedPng));
+            assert.ok(userImages[0]![1]?.endsWith(jpg.toString("base64")));
+          }
         }
       }));
   }
 }
 
-test("Runner reopens persisted tool image after remote error; deletion fails locally before second SDK call", async () => withImages(async (workspacePath) => {
+test("Runner reopens persisted tool image after remote error; deletion uses a placeholder on retry", async () => withImages(async (workspacePath) => {
   const originalSetTimeout = globalThis.setTimeout;
   (globalThis as any).setTimeout = ((fn: (...args: any[]) => void, _delay?: number, ...args: any[]) => originalSetTimeout(fn, 0, ...args)) as typeof setTimeout;
   try {
@@ -405,10 +477,12 @@ test("Runner reopens persisted tool image after remote error; deletion fails loc
           providerReplay: [], tools: [], system: "", sessionRevision: 0, headMessageId: null },
         step: 1, signal: new AbortController().signal, repeatedToolCallCounter: new Map(),
       });
-      if (secondAttempt === "remove") await assert.rejects(execute, /cannot read a valid tool image/);
-      else await execute;
-      assert.equal(requests.length, secondAttempt === "remove" ? 1 : 2);
-      if (requests.length === 2) {
+      await execute;
+      assert.equal(requests.length, 2);
+      if (secondAttempt === "remove") {
+        const result = (requests[1]!.messages[2] as Extract<ModelMessage, { role: "tool" }>).content[0]!;
+        assert.deepEqual(result.output, { type: "content", value: [{ type: "text", text: missingImageText }] });
+      } else {
         const media = (message: ModelMessage[]) => (((message[2] as any).content[0].output.value[0]) as { data: string }).data;
         assert.notEqual(media(requests[0]!.messages), media(requests[1]!.messages));
       }
@@ -431,7 +505,7 @@ test("user and tool images share the same per-request budget", async () => withI
   }), /20 MiB/);
 }));
 
-test("each preparation reopens original file and missing or over-budget images fail locally", async () => withImages(async (workspacePath) => {
+test("each preparation reopens original file, missing images become text and over-budget images fail locally", async () => withImages(async (workspacePath) => {
   const input = [assistant, toolResults] as Input["messages"];
   const first = await prepare(workspacePath, "@ai-sdk/openai", input);
   const firstData = (((first[1] as any).content[0].output.value[0]) as { data: string }).data;
@@ -440,7 +514,9 @@ test("each preparation reopens original file and missing or over-budget images f
   const secondData = (((second[1] as any).content[0].output.value[0]) as { data: string }).data;
   assert.notEqual(firstData, secondData);
   await fs.rm(path.join(workspacePath, "screens/a.png"));
-  await assert.rejects(prepare(workspacePath, "@ai-sdk/openai", input));
+  const missing = await prepare(workspacePath, "@ai-sdk/openai", input);
+  assert.deepEqual((missing[1] as Extract<ModelMessage, { role: "tool" }>).content[0]!.output,
+    { type: "content", value: [{ type: "text", text: missingImageText }] });
   await fs.writeFile(path.join(workspacePath, "screens/a.png"), Buffer.concat([png, Buffer.alloc(8 * 1024 * 1024)]));
   await fs.writeFile(path.join(workspacePath, "screens/b.jpg"), Buffer.concat([jpg, Buffer.alloc(8 * 1024 * 1024)]));
   await assert.rejects(prepare(workspacePath, "@ai-sdk/openai", [assistant, toolResults, assistant, toolResults] as Input["messages"]), /20 MiB/);

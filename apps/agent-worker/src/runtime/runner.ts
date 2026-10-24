@@ -1546,9 +1546,16 @@ export async function materializePromptAttachments(params: {
             nativeParts.push({ type: "text", text: part.value });
             textParts.push(part.value);
           } else if (part.type === "image_ref") {
-            const image = await readWorkspaceImage({ workspacePath: params.run.workspacePath, path: part.path }).catch(() => {
+            const image = await readWorkspaceImage({ workspacePath: params.run.workspacePath, path: part.path }).catch((error: unknown) => {
+              if (error instanceof WorkspaceImageNotFoundError) return null;
               throw new Error("cannot read a valid tool image in this Workspace");
             });
+            if (!image) {
+              const text = "此前已成功查看该图片，但源文件当前不存在，无法再次加载。";
+              nativeParts.push({ type: "text", text });
+              textParts.push(text);
+              continue;
+            }
             countImage(image.bytes);
             const label = `Image for toolCallId=${result.toolCallId}, path=${part.path}`;
             if (nativeToolMedia) nativeParts.push({ type: "media", data: Buffer.from(image.bytes).toString("base64"), mediaType: image.mediaType });
@@ -4069,4 +4076,4 @@ export async function finalizeToolTextForTest(params: {
 }) {
   return finalizeToolText(params);
 }
-import { readWorkspaceImage, WORKSPACE_IMAGE_MAX_BYTES } from "./workspaceImageReader.js";
+import { readWorkspaceImage, WORKSPACE_IMAGE_MAX_BYTES, WorkspaceImageNotFoundError } from "./workspaceImageReader.js";

@@ -67,6 +67,17 @@ test("view_image rejects traversal, forged types, symlinks, empty and oversized 
   await assert.rejects(() => provider.execute("view_image", { path: "repo/screenshots/page.png" }, { ...ctx, run: { ...ctx.run, workspacePath: path.join(base, "other-workspace") } }));
 });
 
+test("a new view_image call still fails after its source directory was deleted", async (t) => {
+  const { workspacePath, provider, ctx } = await fixture(t);
+  const imagePath = "repo/screenshots/page.png";
+  await fs.writeFile(path.join(workspacePath, imagePath), png);
+  await provider.execute("view_image", { path: imagePath }, ctx);
+  await fs.rm(path.join(workspacePath, "repo/screenshots"), { recursive: true });
+  await assert.rejects(provider.execute("view_image", { path: imagePath }, ctx), {
+    message: "view_image cannot read a valid Workspace image at this path",
+  });
+});
+
 test("view_image inode competition never returns bytes or reads a sibling file", async (t) => {
   const { base, workspacePath, provider, ctx } = await fixture(t);
   const image = path.join(workspacePath, "repo", "screenshots", "page.png");
