@@ -17,10 +17,11 @@
       <a-alert v-else-if="loadError" type="error" :message="loadError" show-icon />
       <div v-else-if="configs.length === 0" class="config-empty">{{ t('terminal.config.empty') }}</div>
       <div v-for="(config, index) in displayedConfigs" v-else :key="config.id" class="config-row"
-        :class="{ 'config-drop-before': dragOverId === config.id && !dropAfter(index), 'config-drop-after': dragOverId === config.id && dropAfter(index) }"
-        @dragenter.prevent="dragOver(config.id)" @dragover.prevent="dragOver(config.id)" @drop.prevent="drop(index)">
+        :class="{ 'config-selectable': !ordering, 'config-drop-before': dragOverId === config.id && !dropAfter(index), 'config-drop-after': dragOverId === config.id && dropAfter(index) }"
+        @click="select(config, $event)" @dragenter.prevent="dragOver(config.id)" @dragover.prevent="dragOver(config.id)" @drop.prevent="drop(index)">
         <button v-if="ordering" type="button" class="config-drag" :draggable="!orderSaving" :disabled="orderSaving" :aria-label="t('terminal.config.drag')" @dragstart="startDrag($event, config.id)" @dragend="endDrag"><HolderOutlined /></button>
-        <span class="config-name" :title="config.name">{{ config.name }}</span>
+        <span v-if="ordering" class="config-name" :title="config.name">{{ config.name }}</span>
+        <button v-else type="button" class="config-name config-select" :title="config.name">{{ config.name }}</button>
         <template v-if="ordering">
           <a-button type="text" class="config-icon" :disabled="orderSaving || index === 0" :aria-label="t('terminal.config.moveUp')" @click="moveOrder(index, index - 1)"><ArrowUpOutlined /></a-button>
           <a-button type="text" class="config-icon" :disabled="orderSaving || index === displayedConfigs.length - 1" :aria-label="t('terminal.config.moveDown')" @click="moveOrder(index, index + 1)"><ArrowDownOutlined /></a-button>
@@ -34,7 +35,7 @@
           </a-button>
           <a-dropdown :trigger="['click']">
             <a-button type="text" class="config-icon" :aria-label="t('terminal.config.more')"><MoreOutlined /></a-button>
-            <template #overlay><a-menu @click="handleMenu(String($event.key), config)"><a-menu-item key="edit">{{ t('terminal.config.edit') }}</a-menu-item><a-menu-item key="delete" danger>{{ t('terminal.config.delete') }}</a-menu-item></a-menu></template>
+            <template #overlay><a-menu class="config-menu" @click="handleMenu(String($event.key), config)"><a-menu-item key="edit">{{ t('terminal.config.edit') }}</a-menu-item><a-menu-item key="delete" danger>{{ t('terminal.config.delete') }}</a-menu-item></a-menu></template>
           </a-dropdown>
         </template>
       </div>
@@ -68,7 +69,7 @@ import { TERMINAL_CONFIG_COMMAND_MAX_LENGTH, type TerminalConfigRecord, type Ter
 import { ApiError, createTerminalConfig, deleteTerminalConfig, getWorkspace, listTerminalConfigs, reorderTerminalConfigs, runTerminalConfig, updateTerminalConfig } from "@/shared/api";
 
 const props = withDefaults(defineProps<{ workspaceId: string; active?: boolean }>(), { active: true });
-const emit = defineEmits<{ close: []; created: [terminal: TerminalRecord]; runStarted: [request: { workspaceId: string; configId: string }] }>();
+const emit = defineEmits<{ close: []; created: [terminal: TerminalRecord]; runStarted: [request: { workspaceId: string; configId: string }]; select: [request: { workspaceId: string; configId: string }] }>();
 const { t } = useI18n();
 const configs = ref<TerminalConfigRecord[]>([]);
 const orderDraft = ref<TerminalConfigRecord[]>([]);
@@ -188,6 +189,13 @@ async function save() {
   } catch (error) { if (!disposed && workspaceId === props.workspaceId) saveError.value = errorText(error); }
   finally { saving.value = false; }
 }
+function select(config: TerminalConfigRecord, event: MouseEvent) {
+  if (disposed || !props.active || !cacheActive.value || loading.value || ordering.value || draggingId.value || config.workspaceId !== props.workspaceId) return;
+  // Action controls own their clicks, including clicks on a disabled button's
+  // descendants that some browsers still bubble to the row.
+  if (event.target instanceof Element && event.target.closest(".config-icon, .config-drag, .config-menu")) return;
+  emit("select", { workspaceId: props.workspaceId, configId: config.id });
+}
 async function run(config: TerminalConfigRecord) {
   if (ordering.value || runningIds.has(config.id)) return;
   const workspaceId = props.workspaceId;
@@ -239,6 +247,9 @@ function handleMenu(key: string, config: TerminalConfigRecord) {
 .config-list { flex: 1; min-height: 0; overflow-y: auto; padding: 0; }
 .config-name { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .config-row { border-radius: 0; }
+.config-selectable { cursor: pointer; }
+.config-select { padding: 0; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: inherit; }
+.config-select:focus-visible { outline: 2px solid var(--text-secondary); outline-offset: 2px; }
 .config-row:hover { background: var(--panel-bg-elevated); }
 .config-icon { width: 28px; height: 28px; flex: 0 0 28px; padding: 0; }
 .config-run { display: inline-flex; align-items: center; justify-content: center; color: #fff; }

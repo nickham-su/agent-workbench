@@ -14,7 +14,7 @@
         @minimize="minimizeSelf"
       />
     </div>
-    <TerminalConfigPanel v-if="configOpened" v-show="configOpen" :key="workspaceId" :workspace-id="workspaceId" :active="configOpen" @close="configOpen = false" @created="onConfigTerminalCreated" @run-started="onConfigRunStarted" />
+    <TerminalConfigPanel v-if="configOpened" v-show="configOpen" :key="workspaceId" :workspace-id="workspaceId" :active="configOpen" @close="configOpen = false" @created="onConfigTerminalCreated" @run-started="activateConfigTerminal" @select="activateConfigTerminal" />
   </div>
 </template>
 
@@ -41,7 +41,7 @@ const terminalTabs = ref<InstanceType<typeof TerminalTabs>>();
 const configOpen = ref(true);
 const configOpened = ref(true);
 function openConfig() { configOpened.value = true; configOpen.value = true; }
-function onConfigRunStarted(request: { workspaceId: string; configId: string }) {
+function activateConfigTerminal(request: { workspaceId: string; configId: string }) {
   if (disposed || request.workspaceId !== props.workspaceId) return;
   const terminal = terminals.value.find((term) => term.configId === request.configId);
   if (terminal) terminalTabs.value?.activateTerminal(terminal.id);

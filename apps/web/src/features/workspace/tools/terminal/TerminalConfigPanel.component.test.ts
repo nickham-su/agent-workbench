@@ -88,6 +88,44 @@ test("compact configuration pane aligns headings and actions without extra row c
   await wrapper.get('[aria-label="收起配置"]').trigger("click"); assert.equal(wrapper.emitted("close")?.length, 1);
 });
 
+test("row, name and native keyboard activation only request selection without running or reloading", async () => {
+  const { wrapper, state, counts } = setup(); await settle();
+  const listCalls = state.listCalls, row = wrapper.get(".config-row"), name = row.get("button.config-select");
+  assert.equal(name.attributes("type"), "button");
+  assert.equal(name.text(), "前端开发");
+  assert.equal(name.find("button").exists(), false);
+  await row.trigger("click");
+  await name.trigger("click");
+  // Browsers activate native buttons with a detail=0 click for Enter/Space.
+  // jsdom does not synthesize that default action from a keydown event.
+  await name.trigger("click", { detail: 0 }); await settle();
+  assert.deepEqual(wrapper.emitted("select"), Array.from({ length: 3 }, () => [{ workspaceId: "ws", configId: "config" }]));
+  assert.equal(wrapper.emitted("runStarted"), undefined); assert.equal(wrapper.emitted("created"), undefined);
+  assert.deepEqual(counts(), { runs: 0, creates: 0, updates: 0, deletes: 0 });
+  assert.equal(state.listCalls, listCalls);
+});
+
+test("more and menu item clicks cannot select their configuration row", async () => {
+  const { wrapper, counts } = setup(); await settle();
+  await wrapper.get('[aria-label="更多"]').trigger("click");
+  // The stub keeps the overlay inside its row; real overlays may be teleported.
+  for (const item of wrapper.get(".config-menu").findAll("span")) await item.trigger("click");
+  assert.equal(wrapper.emitted("select"), undefined);
+  assert.equal(wrapper.emitted("runStarted"), undefined);
+  assert.deepEqual(counts(), { runs: 0, creates: 0, updates: 0, deletes: 0 });
+});
+
+test("hidden or stale Workspace configurations cannot emit a selection", async () => {
+  const { wrapper } = setup(); await settle();
+  await wrapper.setProps({ active: false });
+  await wrapper.get(".config-row").trigger("click");
+  assert.equal(wrapper.emitted("select"), undefined);
+  // This fixture deliberately still returns the former Workspace's records.
+  await wrapper.setProps({ workspaceId: "ws2", active: true }); await settle();
+  await wrapper.get(".config-row").trigger("click");
+  assert.equal(wrapper.emitted("select"), undefined);
+});
+
 test("run events carry stable managed identity and each fresh physical session", async () => {
   const { wrapper, counts } = setup(); await settle();
   await wrapper.get('button[aria-label="运行"]').trigger("click"); await settle();
@@ -98,6 +136,7 @@ test("run events carry stable managed identity and each fresh physical session",
   const first = events[0]![0] as { id: string; sessionName: string }, second = events[1]![0] as { id: string; sessionName: string };
   assert.equal(first.id, second.id); assert.notEqual(first.sessionName, second.sessionName);
   assert.deepEqual(wrapper.emitted("runStarted"), [[{ workspaceId: "ws", configId: "config" }], [{ workspaceId: "ws", configId: "config" }]]);
+  assert.equal(wrapper.emitted("select"), undefined);
 });
 
 for (const outcome of ["success", "failure"] as const) {
@@ -133,6 +172,10 @@ for (const outcome of ["success", "failure"] as const) {
     assert.equal(runButton.find(".anticon-caret-right").exists(), false);
     assert.equal(runButton.attributes("aria-busy"), "true");
     assert.equal(runButton.attributes("disabled"), ""); assertFixedSlot();
+    // Disabled controls' descendants can still bubble clicks in some browsers.
+    iconSlot.dispatchEvent(new MouseEvent("click", { bubbles: true })); await settle();
+    assert.equal(wrapper.emitted("select"), undefined);
+    assert.equal(calls, 1);
     assert.deepEqual(wrapper.emitted("runStarted"), [[{ workspaceId: "ws", configId: "config" }]]);
     await runButton.trigger("click"); await settle(); assert.equal(calls, 1);
     if (outcome === "success") {
@@ -175,6 +218,7 @@ test("editing and confirmed deletion only update configuration APIs, not termina
   assert.equal(counts().deletes, 0); assert.ok(confirmation);
   await confirmation.onOk?.(); await settle();
   assert.equal(counts().deletes, 1); assert.equal(counts().runs, 0); assert.equal(wrapper.findAll(".config-row").length, 0);
+  assert.equal(wrapper.emitted("select"), undefined);
 });
 
 
@@ -202,6 +246,9 @@ test("order draft disables mutations, supports accessible moves and cancel/no-ch
   for (const label of ["新建配置", "收起配置"]) assert.equal(wrapper.find(`[aria-label="${label}"]`).exists(), false);
   assert.deepEqual(wrapper.findAll(".config-heading button").map((node) => node.attributes("aria-label")), ["完成", "取消"]);
   assert.equal(wrapper.find(".config-run").exists(), false);
+  assert.equal(wrapper.find("button.config-select").exists(), false);
+  await wrapper.get(".config-row").trigger("click");
+  await wrapper.get(".config-drag").trigger("click");
   assert.equal(wrapper.find('[aria-label="更多"]').exists(), false);
   assert.equal(wrapper.findAll('[aria-label="上移"]')[0].attributes("disabled"), "");
   assert.equal(wrapper.findAll('[aria-label="下移"]')[2].attributes("disabled"), "");
@@ -217,6 +264,7 @@ test("order draft disables mutations, supports accessible moves and cancel/no-ch
   assert.equal(wrapper.find(".config-drag").exists(), false);
   assert.deepEqual(state.orders, []);
   assert.deepEqual(counts(), { runs: 0, creates: 0, updates: 0, deletes: 0 });
+  assert.equal(wrapper.emitted("select"), undefined);
 });
 
 test("native drag/drop has feedback and completion saves one full ordered ID list; new configs append", async () => {
@@ -227,6 +275,8 @@ test("native drag/drop has feedback and completion saves one full ordered ID lis
   await rows[2].trigger("dragover");
   assert.equal(rows[2].classes().includes("config-drop-after"), true);
   await rows[2].trigger("drop");
+  await rows[0].trigger("click");
+  assert.equal(wrapper.emitted("select"), undefined);
   assert.deepEqual(rowNames(wrapper), ["配置2", "配置3", "前端开发"]);
   rows = wrapper.findAll(".config-row");
   await rows[2].get(".config-drag").trigger("dragstart");

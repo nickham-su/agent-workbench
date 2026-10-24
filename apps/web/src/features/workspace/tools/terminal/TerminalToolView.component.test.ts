@@ -100,7 +100,7 @@ function responseFixture(t: TestContext, realConfigs = false) {
         "a-tabs": { props: ["activeKey"], template: '<div><slot name="rightExtra" /><slot /></div>' },
         "a-tab-pane": { template: '<div><slot name="tab" /><slot /></div>' },
         TerminalView: { name: "TestTerminal", props: ["terminal", "active"], emits: ["exited", "invalidated"], template: '<div :data-terminal="terminal.id" :data-workspace="terminal.workspaceId" :data-active="active" />' },
-        ...(realConfigs ? {} : { TerminalConfigPanel: { name: "TestConfigs", props: ["workspaceId", "active"], emits: ["created", "close"], template: '<aside data-configs />' } }),
+        ...(realConfigs ? {} : { TerminalConfigPanel: { name: "TestConfigs", props: ["workspaceId", "active"], emits: ["created", "close", "select"], template: '<aside data-configs />' } }),
         "a-spin": { template: "<span />" },
         "a-alert": { props: ["message"], template: "<p>{{message}}</p>" },
         "a-dropdown": { template: "<span><slot /></span>" },
@@ -253,6 +253,39 @@ test("same-Workspace stale failures are ignored while the current refresh failur
   f.lists[3]!.reject(new Error("current fixture failure")); await settle();
   assert.equal(errors.length, 1); assert.equal(f.minimized(), 0);
   assert.equal(f.wrapper.get('[data-terminal="current"]').attributes("data-active"), "true");
+});
+
+test("selecting a configuration activates only its existing managed tab without requests", async (t) => {
+  const f = responseFixture(t, true); await settle();
+  const managed = { ...terminal("A", "managed"), configId: "config" };
+  f.lists[0]!.resolve([terminal("A", "first"), managed]); await settle();
+  assert.equal(f.wrapper.get('[data-terminal="first"]').attributes("data-active"), "true");
+  await f.wrapper.get(".config-row").trigger("click"); await settle();
+  assert.equal(f.wrapper.get('[data-terminal="managed"]').attributes("data-active"), "true");
+  assert.equal(f.wrapper.get('[data-terminal="first"]').attributes("data-active"), "false");
+  assert.equal(f.lists.length, 1); assert.equal(f.creates.length, 0); assert.equal(f.runs(), 0);
+  assert.equal(f.wrapper.findAll("[data-terminal]").length, 2);
+});
+
+test("selecting a configuration without an existing tab does nothing and never creates or runs", async (t) => {
+  const f = responseFixture(t, true); await settle();
+  f.lists[0]!.resolve([terminal("A", "first")]); await settle();
+  await f.wrapper.get(".config-row").trigger("click");
+  await f.wrapper.get("button.config-select").trigger("click", { detail: 0 }); await settle();
+  assert.equal(f.wrapper.get('[data-terminal="first"]').attributes("data-active"), "true");
+  assert.equal(f.wrapper.findAll("[data-terminal]").length, 1);
+  assert.equal(f.lists.length, 1); assert.equal(f.creates.length, 0); assert.equal(f.runs(), 0);
+});
+
+test("configuration selections from an earlier Workspace cannot activate the current Workspace's tab", async (t) => {
+  const f = responseFixture(t); await settle();
+  f.lists[0]!.resolve([terminal("A", "a-first")]); await settle();
+  await f.wrapper.setProps({ workspaceId: "B" }); await settle();
+  f.lists[1]!.resolve([terminal("B", "b-first"), { ...terminal("B", "b-managed"), configId: "config" }]); await settle();
+  f.wrapper.findComponent({ name: "TestConfigs" }).vm.$emit("select", { workspaceId: "A", configId: "config" }); await settle();
+  assert.equal(f.wrapper.get('[data-terminal="b-first"]').attributes("data-active"), "true");
+  assert.equal(f.wrapper.get('[data-terminal="b-managed"]').attributes("data-active"), "false");
+  assert.equal(f.lists.length, 2); assert.equal(f.creates.length, 0); assert.equal(f.runs(), 0);
 });
 
 test("clicking run activates its managed tab while pending and applies the new generation before refresh", async (t) => {
