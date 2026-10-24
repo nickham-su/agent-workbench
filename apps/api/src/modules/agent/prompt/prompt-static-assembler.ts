@@ -71,7 +71,7 @@ export class PromptStaticAssembler {
       skill: item.skillId, name: item.name, ...(item.description ? { description: item.description } : {})
     }));
 
-    const baselineToolNames = ["read", "skill"];
+    const baselineToolNames = ["read", "skill", "archive_read", "archive_search"];
     const enabledToolNames: string[] = [];
     const enabledToolNameSet = new Set<string>();
     for (const name of [...baselineToolNames, ...profile.agent.tools]) {

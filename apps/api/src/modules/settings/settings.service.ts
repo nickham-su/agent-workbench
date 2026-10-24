@@ -808,7 +808,7 @@ function normalizeAgentTools(raw: unknown): AgentToolName[] {
       item !== "read" &&
       item !== "skill"
     ) continue;
-    if (item === "read" || item === "skill") {
+    if (item === "read" || item === "skill" || item === "archive_read" || item === "archive_search") {
       continue;
     }
     if (seen.has(item)) continue;

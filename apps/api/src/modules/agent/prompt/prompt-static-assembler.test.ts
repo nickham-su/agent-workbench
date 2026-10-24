@@ -43,12 +43,44 @@ test("PromptStaticAssembler preserves static prompt inputs, external skill order
     skillsInstruction: "builtin/skill|a/review,z/review"
   }]);
   assert.equal(result.systemStatic, "static system");
-  assert.deepEqual(result.tools.map((tool) => tool.name), ["read", "skill", "bash", "subtask"]);
+  assert.deepEqual(result.tools.map((tool) => tool.name), ["read", "skill", "archive_read", "archive_search", "bash", "subtask"]);
   assert.equal(result.tools.at(-1)?.description, "subtask:subtasks:subtask-agent");
   assert.deepEqual(result.externalSkills, [
     { skillId: "a/review", skillDirectoryPath: "/workspace/a/review" },
     { skillId: "z/review", skillDirectoryPath: "/workspace/z/review" }
   ]);
+});
+
+test("PromptStaticAssembler always exposes archive tools without duplicates for main and subtask runs", async () => {
+  const assembler = new PromptStaticAssembler({
+    getGlobalPrompts: () => ({ items: [] }),
+    resolveWorkspaceContext: async () => ({ enabledAgentsInstructions: [], availableExternalSkills: [] }),
+    scanBuiltinSkills: async () => [],
+    getMaxSubtaskDepth: () => 1,
+    listSubtaskAgents: () => [],
+    buildSystem: () => "",
+    buildOutputFormatInstruction: () => "",
+    buildSkillsInstruction: () => "",
+    buildSubtaskDescription: () => "",
+    describeTool: (name) => name,
+    getToolInputSchema: () => ({})
+  });
+
+  for (const tools of [[], ["archive_read", "archive_search", "archive_read"]]) {
+    for (const subtaskDepth of [0, 1, null]) {
+      const result = await assembler.assemble({
+        workspaceId: "workspace",
+        run: { subtaskDepth },
+        profile: { agent: { name: "Agent", tools } },
+        uiLocale: null
+      });
+
+      assert.deepEqual(
+        result.tools.map((tool) => tool.name),
+        ["read", "skill", "archive_read", "archive_search"]
+      );
+    }
+  }
 });
 
 test("PromptStaticAssembler removes subtask from static tools at the established depth limit", async () => {

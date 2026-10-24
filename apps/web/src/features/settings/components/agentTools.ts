@@ -12,9 +12,7 @@ const CONFIGURABLE_AGENT_TOOLS: AgentToolName[] = [
   "git",
   "scratchpad",
   "todolist",
-  "view_image",
-  "archive_read",
-  "archive_search"
+  "view_image"
 ];
 
 export function normalizeAgentTools(raw: readonly AgentToolName[]) {
