@@ -214,7 +214,7 @@ export function projectToolExecutionResult(execution: RuntimeTranscriptExecution
     case "cancelled":
       return { type: error ? "error-text" : "text", value: error ?? preview ?? CANCELLED_TOOL_EXECUTION_RESULT };
     case "failed":
-      return { type: "error-text", value: error ?? preview ?? FAILED_TOOL_EXECUTION_RESULT };
+      return { type: "error-text", value: preview ?? error ?? FAILED_TOOL_EXECUTION_RESULT };
     case "completed":
       return { type: "text", value: preview ?? EMPTY_COMPLETED_TOOL_EXECUTION_RESULT };
     case "queued":

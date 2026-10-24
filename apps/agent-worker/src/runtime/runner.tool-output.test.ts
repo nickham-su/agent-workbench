@@ -8,6 +8,8 @@ import { promisify } from "node:util";
 import test, { after } from "node:test";
 import {
   AgentRunner,
+  ControlWritePermanentError,
+  FencedWriteIgnoredError,
   buildProviderOptionsWithPromptCacheKeyForTest,
   buildToolExecutionBatchesForTest,
   executeToolForTest,
@@ -1654,6 +1656,154 @@ test("subtask executeTool 失败时 failed output 保留错误状态与完整结
     });
   });
 });
+
+for (const session of [
+  { mode: "new" },
+  { mode: "fork" },
+  { mode: "existing", sessionId: "existing-child" },
+  { mode: "fork", sourceSessionId: "source" },
+]) {
+  for (const failAt of ["start", "nested", "status", "result", "frozen", "timeout"] as const) {
+    test(`subtask ${JSON.stringify(session)} ${failAt} failure writes the known Child identity without changing execution semantics`, async () => {
+      await withTempWorkspace(async (workspacePath) => {
+        const updates: Array<{ status?: string; resultPreview?: string; structuredResult?: unknown; error?: string }> = [];
+        const failure = new Error(`failure at ${failAt}`);
+        if (failAt === "frozen") Object.freeze(failure);
+        let nestedCalls = 0;
+        let resultCalls = 0;
+        const runner = new AgentRunner({
+          async updateToolExecution(input: (typeof updates)[number]) {
+            updates.push(input);
+            return { result: "updated" };
+          },
+          async getSubtaskPreforkPlan() { return { shouldPrefork: false }; },
+          async startSubtaskRun() {
+            if (failAt === "start") throw failure;
+            return { sessionId: "known-child", runId: "child-run", workspacePath, agentName: "Child",
+              reused: failAt === "timeout", sourceSessionId: "source" };
+          },
+          async getSubtaskStatus() {
+            if (failAt === "status") throw failure;
+            return { status: failAt === "timeout" ? "running" : "completed" };
+          },
+          async getSubtaskResult() {
+            resultCalls++;
+            if (failAt === "result") throw failure;
+            return { resultText: "unused result" };
+          },
+        } as any, {} as any, { info() {}, warn() {}, error() {} }, 1);
+        (runner as any).processRun = async () => {
+          nestedCalls++;
+          if (failAt === "nested" || failAt === "frozen") throw failure;
+        };
+        const previousTimeout = process.env.AWB_SUBTASK_REUSED_WAIT_TIMEOUT_MS;
+        const previousPoll = process.env.AWB_SUBTASK_REUSED_POLL_INTERVAL_MS;
+        if (failAt === "timeout") {
+          process.env.AWB_SUBTASK_REUSED_WAIT_TIMEOUT_MS = "1";
+          process.env.AWB_SUBTASK_REUSED_POLL_INTERVAL_MS = "1";
+        }
+        try {
+          await executeToolForTest(runner, {
+            profile: testProfile("subtask"), run: testRun(workspacePath),
+            tool: pendingTool({ executionId: "subtask-failure", toolName: "subtask", args: {
+              description: "child", prompt: "do work", agentId: "child-agent", session,
+            } }),
+            parentSessionId: "sess_baseline", signal: new AbortController().signal, promptContext: testPromptContext(),
+          });
+        } finally {
+          if (previousTimeout === undefined) delete process.env.AWB_SUBTASK_REUSED_WAIT_TIMEOUT_MS;
+          else process.env.AWB_SUBTASK_REUSED_WAIT_TIMEOUT_MS = previousTimeout;
+          if (previousPoll === undefined) delete process.env.AWB_SUBTASK_REUSED_POLL_INTERVAL_MS;
+          else process.env.AWB_SUBTASK_REUSED_POLL_INTERVAL_MS = previousPoll;
+        }
+        const failed = latestUpdate(updates, "failed");
+        assert.ok(failed);
+        assert.match(failed.resultPreview ?? "", /^tool: subtask\nstatus: failed\n/);
+        assert.ok(failed.resultPreview?.includes(failed.error!));
+        if (failAt === "start") {
+          assert.doesNotMatch(failed.resultPreview ?? "", /subtask_session_id|source_session_id/);
+          assert.equal(failed.structuredResult, undefined);
+        } else {
+          const sourceMetadata = "sourceSessionId" in session ? { sourceSessionId: "source" } : {};
+          assert.deepEqual(failed.structuredResult, { subtaskSessionId: "known-child", ...sourceMetadata });
+          assert.match(failed.resultPreview ?? "", /subtask_session_id: known-child/);
+          if ("sourceSessionId" in session) assert.match(failed.resultPreview ?? "", /source_session_id: "source"/);
+          else assert.doesNotMatch(failed.resultPreview ?? "", /source_session_id/);
+        }
+        if (failAt === "timeout") {
+          assert.match(failed.error ?? "", /reused-child wait timed out.*child may still be running and was not modified/);
+          assert.equal(nestedCalls, 0);
+          assert.equal(resultCalls, 0);
+        } else {
+          assert.equal(failed.error, failure.message);
+        }
+        if (failAt === "frozen") {
+          assert.equal(Object.isFrozen(failure), true);
+          assert.equal(Object.hasOwn(failure, "subtaskSessionId"), false);
+        }
+      });
+    });
+  }
+}
+
+for (const rejection of ["fence", "permanent"] as const) {
+  test(`subtask started: provider running ${rejection} rejection propagates without failed writeback or Child execution`, async () => {
+    await withTempWorkspace(async (workspacePath) => {
+      const updates: Array<{ status?: string; structuredResult?: unknown }> = [];
+      const rpcError = new InternalRpcHttpError({ status: 403, method: "POST", endpoint: "/fixture/provider-running" });
+      let startCalls = 0;
+      let nestedCalls = 0;
+      let queryCalls = 0;
+      let retrySleeps = 0;
+      const runner = new AgentRunner({
+        async updateToolExecution(input: (typeof updates)[number]) {
+          updates.push(input);
+          if (updates.length === 2) {
+            assert.equal(startCalls, 1);
+            assert.equal(input.status, "running");
+            assert.equal((input.structuredResult as { subtaskSessionId: string }).subtaskSessionId, "known-child");
+            if (rejection === "fence") return { result: "ignored" };
+            throw rpcError;
+          }
+          return { result: "updated" };
+        },
+        async startSubtaskRun() {
+          startCalls++;
+          return { sessionId: "known-child", runId: "child-run", workspacePath, agentName: "Child", reused: false };
+        },
+        async getSubtaskStatus() { queryCalls++; return { status: "completed" }; },
+        async getSubtaskResult() { queryCalls++; return { resultText: "unexpected result" }; },
+      } as any, {} as any, { info() {}, warn() {}, error() {} }, 1, {
+        controlWriteSleep: async () => { retrySleeps++; return false; },
+      });
+      (runner as any).processRun = async () => { nestedCalls++; };
+
+      await assert.rejects(executeToolSafelyForTest(runner, {
+        profile: testProfile("subtask"), run: testRun(workspacePath),
+        tool: pendingTool({ executionId: "subtask-running-rejected", toolName: "subtask", args: {
+          description: "child", prompt: "do work", agentId: "child-agent", session: { mode: "new" },
+        } }),
+        parentSessionId: "sess_baseline", signal: new AbortController().signal, promptContext: testPromptContext(),
+      }), (error: unknown) => {
+        if (rejection === "fence") {
+          assert.ok(error instanceof FencedWriteIgnoredError);
+          assert.equal(error.message, "fenced write ignored: tool execution running");
+        } else {
+          assert.ok(error instanceof ControlWritePermanentError);
+          assert.equal(error.operation, "tool execution running");
+          assert.equal(error.cause, rpcError);
+        }
+        assert.equal((error as Error & { subtaskSessionId?: string }).subtaskSessionId, "known-child");
+        return true;
+      });
+      assert.equal(startCalls, 1);
+      assert.deepEqual(updates.map((input) => input.status), ["running", "running"]);
+      assert.equal(nestedCalls, 0);
+      assert.equal(queryCalls, 0);
+      assert.equal(retrySleeps, 0);
+    });
+  });
+}
 
 test("bash 后接 subtask 时拆成两个并发段", () => {
   const batches = buildToolExecutionBatchesForTest([

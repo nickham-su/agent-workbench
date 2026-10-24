@@ -138,6 +138,7 @@ test("RuntimeTranscriptProjector creates exactly one ordered envelope for each t
 });
 
 test("RuntimeTranscriptProjector follows terminal result projection rules without structured results or artifacts", () => {
+  const failedPreview = "tool: bash\nstatus: failed\n\ncommand could not start";
   const statuses = ["unknown", "cancelled", "failed", "completed"] as const;
   const calls = statuses.map((status, position) => ({
     id: `call-${status}`, messageId: "assistant", position, type: "tool_call" as const, toolName: "bash" as const,
@@ -149,7 +150,7 @@ test("RuntimeTranscriptProjector follows terminal result projection rules withou
     executions: [
       { callPartId: "call-unknown", status: "unknown", resultPreview: "maybe", error: null },
       { callPartId: "call-cancelled", status: "cancelled", resultPreview: null, error: null },
-      { callPartId: "call-failed", status: "failed", resultPreview: "preview", error: "error first" },
+      { callPartId: "call-failed", status: "failed", resultPreview: failedPreview, error: "command could not start" },
       { callPartId: "call-completed", status: "completed", resultPreview: "success preview", error: "ignored" }
     ]
   });
@@ -157,10 +158,27 @@ test("RuntimeTranscriptProjector follows terminal result projection rules withou
   assert.deepEqual(tools.content.map((entry) => entry.output), [
     { type: "error-text", value: `${UNKNOWN_TOOL_EXECUTION_RESULT}\n\nReliable result preview:\nmaybe` },
     { type: "text", value: CANCELLED_TOOL_EXECUTION_RESULT },
-    { type: "error-text", value: "error first" },
+    { type: "error-text", value: failedPreview },
     { type: "text", value: "success preview" }
   ]);
 });
+
+for (const preview of [null, "", " \t\n"]) {
+  for (const error of ["original safe error", null]) {
+    test(`RuntimeTranscriptProjector failed without a usable preview=${JSON.stringify(preview)} falls back to error=${JSON.stringify(error)}`, () => {
+      const result = projector.project({
+        workspaceId: "ws", triggerMessageId: null,
+        messages: [message({ id: "assistant", type: "assistant", status: "completed", parts: [
+          { id: "call", messageId: "assistant", position: 0, type: "tool_call", toolName: "read", input: {}, providerToolCallId: "provider-call", updatedRevision: 1, createdAt: 1, updatedAt: 1 }
+        ] })],
+        executions: [{ callPartId: "call", status: "failed", resultPreview: preview, error }]
+      });
+      assert.deepEqual(result[1], { role: "tool", content: [
+        { type: "tool-result", toolCallId: "provider-call", toolName: "read", output: { type: "error-text", value: error ?? FAILED_TOOL_EXECUTION_RESULT } }
+      ] });
+    });
+  }
+}
 
 test("RuntimeTranscriptProjector rejects non-terminal or missing executions instead of silently projecting an incomplete turn", () => {
   const assistant = message({ id: "assistant", type: "assistant", status: "completed", parts: [

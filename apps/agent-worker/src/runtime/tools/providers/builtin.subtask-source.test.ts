@@ -183,6 +183,29 @@ for (const failAt of ["running", "nested", "status", "result"] as const) {
   });
 }
 
+for (const session of [{ mode: "new" }, { mode: "fork" }, { mode: "existing", sessionId: "existing" }]) {
+  for (const failAt of ["running", "nested", "status", "result"] as const) {
+    test(`${session.mode} post-start ${failAt} failure retains Child identity without inventing source metadata`, async () => {
+      const h = harness({ failAt });
+      await assert.rejects(h.execute(session), (error: unknown) => {
+        assert.equal(error, h.failure);
+        assert.equal((error as { subtaskSessionId: string }).subtaskSessionId, "child");
+        assert.equal(Object.hasOwn(error as object, "sourceSessionId"), false);
+        return true;
+      });
+    });
+  }
+  for (const failure of [Object.freeze(new Error("frozen failure")), "original primitive failure"]) {
+    test(`${session.mode} preserves ${typeof failure === "string" ? "primitive" : "frozen"} post-start failure identity`, async () => {
+      const h = harness({ failAt: "nested", failure });
+      await assert.rejects(h.execute(session), (error: unknown) => {
+        assert.equal(error, failure);
+        return true;
+      });
+    });
+  }
+}
+
 for (const terminal of ["failed", "cancelled"] as const) {
   test(`child terminal ${terminal} retains source and partial output without claiming success`, async () => {
     const h = harness({ terminal });

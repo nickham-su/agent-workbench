@@ -641,14 +641,14 @@ export class BuiltinToolProvider implements ToolProvider {
           }
           return result;
         } catch (error) {
-          if (sourceSessionId !== undefined) {
+          if ((error !== null && typeof error === "object") || sourceSessionId !== undefined) {
             // Keep error identity/name (including RPC fences and AbortError).
             // Optional metadata must never replace a read-only original error.
             const carrier = error !== null && typeof error === "object"
               ? error
               : new Error(typeof error === "string" ? error : "subtask failed after start", { cause: error });
             try {
-              Object.assign(carrier, { subtaskSessionId: started.sessionId, sourceSessionId });
+              Object.assign(carrier, { subtaskSessionId: started.sessionId, ...sourceMetadata });
             } catch {
               // Frozen error objects still follow their original failure path.
             }

@@ -2047,6 +2047,7 @@ export class AgentRunner {
     let phase: "running_writeback" | "provider_execute" | "completed_output_build" | "completed_writeback" = "running_writeback";
     let providerResult: unknown;
     let providerReturned = false;
+    let subtaskStartedMetadata: { subtaskSessionId: string; sourceSessionId?: string } | undefined;
     try {
       await writeback("initial_running", {
         status: "running",
@@ -2079,6 +2080,17 @@ export class AgentRunner {
         updateToolExecution: async ({ status, resultPreview, structuredResult }) => {
           if (status !== "running") {
             throw new Error("provider terminal tool writeback is not supported by tool error capture");
+          }
+          if (tool.toolName === "subtask") {
+            const result = toRecordObject(structuredResult);
+            if (typeof result?.subtaskSessionId === "string") {
+              // The successful start response is already known locally. Keep it
+              // even when a later error is frozen or running writeback fails.
+              subtaskStartedMetadata = {
+                subtaskSessionId: result.subtaskSessionId,
+                sourceSessionId: readSubtaskSourceSessionId(result)
+              };
+            }
           }
           await writeback("provider_running_update", { status, output: { text: resultPreview, result: structuredResult } });
         },
@@ -2188,12 +2200,12 @@ export class AgentRunner {
           ? formatSubtaskStartError(err, tool.args)
           : toolErrorMessage(err);
       const errorRecord = toErrorRecord(err);
-      const subtaskSessionId = String(errorRecord?.subtaskSessionId || "").trim();
+      const subtaskSessionId = String(subtaskStartedMetadata?.subtaskSessionId || errorRecord?.subtaskSessionId || "").trim();
       const subtaskResultText = typeof errorRecord?.subtaskResultText === "string"
         ? errorRecord.subtaskResultText
         : undefined;
       const sourceSessionId = tool.toolName === "subtask"
-        ? readSubtaskSourceSessionId(errorRecord)
+        ? readSubtaskSourceSessionId(subtaskStartedMetadata ?? errorRecord)
         : undefined;
       const isSubtaskWithResult = tool.toolName === "subtask" && (subtaskSessionId || sourceSessionId !== undefined || typeof subtaskResultText === "string");
       const errorText = isSubtaskWithResult
