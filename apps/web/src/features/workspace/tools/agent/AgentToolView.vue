@@ -94,7 +94,6 @@
       </a-tab-pane>
     </a-tabs>
 
-    <div v-if="targetOpeningSessionId" data-testid="agent-target-loading" class="text-[color:var(--text-tertiary)]">{{ t("common.loading") }}</div>
     <a-button v-if="failedSessionTitleSync[effectiveActiveKey]" size="small" @click="syncSessionTitle(effectiveActiveKey)">{{ t("agent.client.retryTitleSync") }}</a-button>
 
     <a-modal

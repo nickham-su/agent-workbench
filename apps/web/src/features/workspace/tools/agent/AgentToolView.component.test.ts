@@ -444,6 +444,32 @@ test("AgentToolView：打开子任务仅查询目标，再乐观 PUT 持久化",
   }
 });
 
+test("AgentToolView：打开子任务等待GET和可见性确认时不显示底部加载提示", async () => {
+  const { gets, puts } = zeroVisibleTargetHarness({ origin: true });
+  const wrapper = mountView();
+  try {
+    await settle();
+    const vm = wrapper.vm as any;
+    const opening = vm.onOpenSubtask("target");
+    await settle();
+    assert.equal(gets.length, 1);
+    assert.equal(vm.targetOpeningSessionId, "target");
+    assert.equal(wrapper.find("[data-testid='agent-target-loading']").exists(), false);
+
+    gets[0]!.respond(200, session("target", "ws-a", "subtask"));
+    await settle();
+    assert.equal(puts.length, 1);
+    assert.equal(vm.targetOpeningSessionId, "target");
+    assert.equal(wrapper.find("[data-testid='agent-target-loading']").exists(), false);
+
+    confirmTarget(puts[0]!);
+    await opening;
+    await settle();
+    assert.equal(vm.targetOpeningSessionId, "");
+    assert.equal(vm.effectiveActiveKey, "target");
+  } finally { wrapper.unmount(); }
+});
+
 test("AgentToolView：关闭创建中的草稿会将关闭意图转交给真实 Session，且不抢回活动 Tab", async () => {
   let createRequest: FakeXMLHttpRequest | undefined;
   FakeXMLHttpRequest.requests = [];
