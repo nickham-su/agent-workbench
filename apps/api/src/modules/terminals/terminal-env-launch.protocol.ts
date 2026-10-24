@@ -1,3 +1,4 @@
+import type { TerminalRunLocator } from "./terminal-run-control.protocol.js";
 import { createHash } from "node:crypto";
 import type { Stats } from "node:fs";
 import {
@@ -43,6 +44,7 @@ export type TerminalEnvironmentLaunchLocator = {
   dataRoot: TerminalEnvironmentIdentity; launchRoot: TerminalEnvironmentIdentity;
   attemptDirectory: TerminalEnvironmentIdentity; payload: TerminalEnvironmentIdentity; status: TerminalEnvironmentIdentity;
   bootstrap?: TerminalEnvironmentIdentity;
+  runControl?: TerminalRunLocator;
 };
 
 export function isTerminalEnvironmentSafeSegment(value: unknown): value is string {
@@ -150,8 +152,9 @@ export function assertTerminalLaunchStatus(value: unknown, attemptId: string): a
     || !TERMINAL_ENV_STATUS_CODES.includes(value.code as TerminalLaunchStatusCode)) terminalEnvironmentProtocolError();
 }
 export function assertTerminalEnvironmentLaunchLocator(value: unknown): asserts value is TerminalEnvironmentLaunchLocator {
-  if (!object(value) || !exactKeys(value, ["version", "attemptId", "dataDir", "directoryName", "ownerUid", "dataRoot", "launchRoot", "attemptDirectory", "payload", "status", ...(Object.hasOwn(value, "bootstrap") ? ["bootstrap"] : [])])
+  if (!object(value) || !exactKeys(value, ["version", "attemptId", "dataDir", "directoryName", "ownerUid", "dataRoot", "launchRoot", "attemptDirectory", "payload", "status", ...(Object.hasOwn(value, "bootstrap") ? ["bootstrap"] : []), ...(Object.hasOwn(value, "runControl") ? ["runControl"] : [])])
     || (Object.hasOwn(value, "bootstrap") && !isTerminalEnvironmentIdentity(value.bootstrap))
+    || (Object.hasOwn(value, "runControl") && (!object(value.runControl) || !Object.hasOwn(value, "bootstrap")))
     || value.version !== 1 || !isTerminalEnvironmentSafeSegment(value.attemptId) || !validString(value.dataDir) || !value.dataDir.startsWith("/")
     || typeof value.directoryName !== "string" || !/^[A-Za-z0-9_-]{3,129}$/.test(value.directoryName)
     || typeof value.ownerUid !== "number" || !Number.isSafeInteger(value.ownerUid) || value.ownerUid < 0

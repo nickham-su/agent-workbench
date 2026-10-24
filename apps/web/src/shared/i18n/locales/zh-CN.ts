@@ -654,6 +654,8 @@ export default {
       collapse: "收起配置",
       empty: "暂无配置",
       run: "运行",
+      legacyRun: "旧版终端无法确认服务已停止，请手动停止旧服务并关闭此标签后重新运行。",
+      guardUnavailable: "运行配置需要 Linux、/usr/bin/python3（支持 pidfd）及子进程监督能力。",
       restartStoppedUnconfirmed: "重启失败：无法确认旧运行环境已停止并完成清理，未启动新的运行。请稍后重试。",
       more: "更多",
       edit: "编辑配置",

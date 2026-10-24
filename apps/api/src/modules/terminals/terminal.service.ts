@@ -1,3 +1,8 @@
+import { setTimeout as delay } from "node:timers/promises";
+import {
+  getTerminalRunControl, preflightTerminalRunGuard, armTerminalRunControl, prepareTerminalRunControl,
+  markTerminalRunLaunching, stopTerminalRunControl, cleanupTerminalRunControl, clearTerminalRunControl,
+} from "./terminal-run-control.js";
 import { resolveTerminalConfigCwd } from "./terminal-config.service.js";
 import type { FastifyBaseLogger } from "fastify";
 import type { TerminalRecord } from "@agent-workbench/shared";
@@ -70,11 +75,12 @@ export type TerminalRuntimeOperations = {
   prepareEnvironmentLaunch?: typeof prepareTerminalEnvironmentLaunch;
   waitEnvironmentLaunch?: typeof waitTerminalEnvironmentLaunch;
   cleanupEnvironmentLaunch?: typeof cleanupTerminalEnvironmentLaunch;
+  stopRunControl?: typeof stopTerminalRunControl;
 };
 
-type TerminalSettlementOperations = Pick<TerminalRuntimeOperations, "hasSession" | "cleanupAuthArtifacts" | "cleanupEnvironmentLaunch">;
-type TerminalStopOperations = Pick<TerminalRuntimeOperations, "hasSession" | "killSession">;
-export type TerminalSettlement = "closed" | "cleanup_pending" | "env_cleanup_pending" | "session_exists" | "session_unknown";
+type TerminalSettlementOperations = Pick<TerminalRuntimeOperations, "hasSession" | "cleanupAuthArtifacts" | "cleanupEnvironmentLaunch" | "stopRunControl">;
+type TerminalStopOperations = Pick<TerminalRuntimeOperations, "hasSession" | "killSession" | "stopRunControl">;
+export type TerminalSettlement = "closed" | "cleanup_pending" | "env_cleanup_pending" | "session_exists" | "session_unknown" | "run_unknown";
 
 const defaultTerminalRuntimeOperations: TerminalRuntimeOperations = {
   hasSession: tmuxHasSession,
@@ -312,15 +318,29 @@ function terminalCreateError(error: unknown): HttpError {
   return new HttpError(500, messages[code], code);
 }
 
+/** The last pane can disappear while tmux is answering a probe (e.g. "no
+ * current target"). Retry unknown responses briefly; only a fresh explicit
+ * not_found is evidence. This never substitutes for the guard's process proof. */
+async function terminalSessionPresence(
+  hasSession: TerminalRuntimeOperations["hasSession"], request: { sessionName: string; cwd: string },
+) {
+  for (let attempt = 0; ; attempt++) {
+    try { return await hasSession(request); }
+    catch (error) { if (attempt === 4) throw error; }
+    await delay(30);
+  }
+}
+
 /** A successful kill response alone is not absence evidence. Must run under Workspace admission. */
 export async function stopTerminalSession(
   ctx: AppContext, term: TerminalRecord, runtimeOperations: TerminalStopOperations = defaultTerminalRuntimeOperations,
 ): Promise<void> {
   try {
+    await (runtimeOperations.stopRunControl ?? stopTerminalRunControl)({ db: ctx.db, dataDir: ctx.dataDir, terminalId: term.id, sessionName: term.sessionName });
     const request = { sessionName: term.sessionName, cwd: ctx.dataDir };
-    if (await runtimeOperations.hasSession(request) === "not_found") return;
-    await runtimeOperations.killSession(request);
-    if (await runtimeOperations.hasSession(request) === "not_found") return;
+    if (await terminalSessionPresence(runtimeOperations.hasSession, request) === "not_found") return;
+    try { await runtimeOperations.killSession(request); } catch { /* A stopped launcher may have concurrently closed tmux. Re-probe. */ }
+    if (await terminalSessionPresence(runtimeOperations.hasSession, request) === "not_found") return;
   } catch { /* Never expose tmux stderr or spawn arguments. */ }
   throw new HttpError(503, "Terminal session could not be confirmed stopped.", "TERMINAL_SESSION_STOP_UNCONFIRMED");
 }
@@ -348,13 +368,19 @@ export async function cleanupTerminalEnvironmentAttempts(
 /** Only called in this module after current absence evidence (or before any tmux side effect). */
 async function settleStoppedTerminal(
   ctx: AppContext, logger: FastifyBaseLogger, terminalId: string,
-  runtimeOperations: Pick<TerminalRuntimeOperations, "cleanupAuthArtifacts" | "cleanupEnvironmentLaunch">,
+  runtimeOperations: Pick<TerminalRuntimeOperations, "cleanupAuthArtifacts" | "cleanupEnvironmentLaunch" | "stopRunControl">,
 ): Promise<"closed" | "cleanup_pending" | "env_cleanup_pending"> {
+  const term = getTerminal(ctx.db, terminalId);
+  if (term) {
+    try { await (runtimeOperations.stopRunControl ?? stopTerminalRunControl)({ db: ctx.db, dataDir: ctx.dataDir, terminalId, sessionName: term.sessionName }); }
+    catch { return "env_cleanup_pending"; }
+  }
   try { updateTerminalStatus(ctx.db, terminalId, "errored", nowMs()); }
   catch { return "env_cleanup_pending"; }
   let cleanAttempts: string[];
   try {
     cleanAttempts = await cleanupTerminalEnvironmentAttempts(ctx, terminalId, "stopped", runtimeOperations);
+    await cleanupTerminalRunControl(ctx.db, terminalId);
   } catch {
     logger.warn({ terminalId, code: "TERMINAL_ENV_CLEANUP_PENDING" }, "terminal environment cleanup remains pending");
     return "env_cleanup_pending";
@@ -421,11 +447,15 @@ export async function createTerminal(
     let baseEnv: Record<string, string>;
     try { baseEnv = copyTerminalEnvironmentLayer(process.env, true); }
     catch (error) { throw terminalCreateError(error); }
+    if (params.startup) await preflightTerminalRunGuard();
     const previous = params.configId ? getTerminalByConfig(ctx.db, workspaceId, params.configId) : null;
     const runtimeOperations = params.runtimeOperations ?? defaultTerminalRuntimeOperations;
     // Settle the old launch before entering the new launch's failure cleanup. Its
     // durable auth/environment locators must survive an uncertain stop.
     if (previous) {
+      if (!getTerminalRunControl(ctx.db, previous.id)) {
+        throw new HttpError(409, "This older terminal cannot confirm service shutdown. Stop its service manually, close this tab, then run the configuration again.", "TERMINAL_RUN_LEGACY");
+      }
       await stopTerminalSession(ctx, previous, runtimeOperations);
       const settlement = await settleTerminalAfterSessionStopped(ctx, logger, previous.id, runtimeOperations);
       if (settlement !== "closed") {
@@ -449,8 +479,9 @@ export async function createTerminal(
     let tmuxMayExist = false;
     try {
       ctx.db.transaction(() => {
-        if (previous) restartTerminalRecord(ctx.db, term);
+        if (previous) { clearTerminalRunControl(ctx.db, previous.id); restartTerminalRecord(ctx.db, term); }
         else insertTerminal(ctx.db, term);
+        if (params.startup) armTerminalRunControl(ctx.db, terminalId, sessionName);
       })();
       intentPersisted = true;
       const { envPairs } = await buildTerminalGitEnv({
@@ -469,15 +500,17 @@ export async function createTerminal(
         systemEnv[pair.slice(0, separator)] = pair.slice(separator + 1);
       }
       const cwd = startupCwd ?? await resolveTerminalCwd(ctx, ws);
+      const runControl = params.startup ? await prepareTerminalRunControl({ db: ctx.db, dataDir: ctx.dataDir, terminalId, sessionName }) : undefined;
       for (let index = 0; index < (params.startup ? 1 : 2); index++) {
         const shell = index === 0 ? specifiedShell || "bash" : "sh";
         const launch = await (runtimeOperations.prepareEnvironmentLaunch ?? prepareTerminalEnvironmentLaunch)({
           db: ctx.db, dataDir: ctx.dataDir, terminalId, shell, workspaceEnv, systemEnv, baseEnv,
-          startupCommand: params.startup?.command,
+          startupCommand: params.startup?.command, runControl,
         });
         const attempt = markTerminalEnvironmentLaunchStarting(ctx.db, launch.attempt.id);
         // Arm before the side effect: a response loss may still have created a live launcher.
         tmuxMayExist = true;
+        if (runControl) markTerminalRunLaunching(ctx.db, terminalId);
         const result = await newTmuxSessionWithPresence(runtimeOperations, { sessionName, cwd, command: launch.command });
         if (result === "not_found") {
           tmuxMayExist = false;
@@ -505,6 +538,12 @@ export async function createTerminal(
         if (await runtimeOperations.hasSession({ sessionName, cwd: ctx.dataDir }) !== "exists") {
           tmuxMayExist = false;
           throw new TerminalEnvironmentLaunchError("TERMINAL_ENV_SPAWN_FAILED");
+        }
+        if (runControl) {
+          const currentRun = getTerminalRunControl(ctx.db, terminalId);
+          if (currentRun?.phase !== "launching" || currentRun.sessionName !== sessionName || currentRun.locator?.runId !== runControl.runId) {
+            throw new TerminalEnvironmentLaunchError("TERMINAL_ENV_PROTOCOL_FAILED");
+          }
         }
         const liveAttempts = listTerminalEnvironmentLaunchAttempts(ctx.db, terminalId);
         if (liveAttempts.length !== 1 || liveAttempts[0]!.id !== attempt.id) {
@@ -548,6 +587,7 @@ export async function createTerminal(
       let settlement: "closed" | "cleanup_pending" | "env_cleanup_pending" = "env_cleanup_pending";
       try {
         if (tmuxMayExist) await stopTerminalSession(ctx, term, runtimeOperations);
+        else await (runtimeOperations.stopRunControl ?? stopTerminalRunControl)({ db: ctx.db, dataDir: ctx.dataDir, terminalId, sessionName });
         // No writer entered means these armed rows cannot have produced auth artifacts.
         if (!authArtifactWriteStarted) {
           ctx.db.transaction(() => {
@@ -592,7 +632,7 @@ export async function getTerminalForAttachment(
     catch { throw new HttpError(503, "Terminal session presence could not be confirmed.", "TERMINAL_SESSION_PRESENCE_UNKNOWN"); }
     if (presence === "not_found") {
       const settlement = await settleTerminalAfterSessionStopped(ctx, logger, terminalId, runtimeOperations);
-      if (settlement === "session_unknown") {
+      if (settlement === "session_unknown" || settlement === "run_unknown") {
         throw new HttpError(503, "Terminal session presence could not be confirmed.", "TERMINAL_SESSION_PRESENCE_UNKNOWN");
       }
       if (settlement !== "session_exists") throw new HttpError(410, "tmux session not found (may have exited)");
@@ -612,18 +652,20 @@ export async function settleTerminalAfterSessionStopped(
     const term = getTerminal(ctx.db, terminalId);
     if (!term) return "closed";
     try {
-      if (await runtimeOperations.hasSession({ sessionName: term.sessionName, cwd: ctx.dataDir }) === "exists") return "session_exists";
+      if (await terminalSessionPresence(runtimeOperations.hasSession, { sessionName: term.sessionName, cwd: ctx.dataDir }) === "exists") return "session_exists";
     } catch {
       logger.warn({ terminalId, code: "TERMINAL_SESSION_PRESENCE_UNKNOWN" }, "terminal presence remains unknown");
       return "session_unknown";
     }
+    try { await (runtimeOperations.stopRunControl ?? stopTerminalRunControl)({ db: ctx.db, dataDir: ctx.dataDir, terminalId: term.id, sessionName: term.sessionName }); }
+    catch { return "run_unknown"; }
     return settleStoppedTerminal(ctx, logger, term.id, runtimeOperations);
   });
 }
 
 export async function deleteTerminal(
   ctx: AppContext, logger: FastifyBaseLogger, terminalId: string,
-  runtimeOperations: Pick<TerminalRuntimeOperations, "hasSession" | "killSession" | "cleanupAuthArtifacts" | "cleanupEnvironmentLaunch"> = defaultTerminalRuntimeOperations,
+  runtimeOperations: Pick<TerminalRuntimeOperations, "hasSession" | "killSession" | "cleanupAuthArtifacts" | "cleanupEnvironmentLaunch" | "stopRunControl"> = defaultTerminalRuntimeOperations,
 ) {
   const candidate = await getTerminalById(ctx, terminalId);
   return workspaceLifecycleCoordinator.withAdmission(candidate.workspaceId, async () => {

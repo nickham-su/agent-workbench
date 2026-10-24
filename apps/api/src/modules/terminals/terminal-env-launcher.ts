@@ -1,3 +1,5 @@
+import { runManagedTerminalShell } from "./terminal-run-launcher.js";
+import { assertTerminalRunLocator } from "./terminal-run-control.protocol.js";
 import { TERMINAL_STARTUP_BOOTSTRAP_NAME, TERMINAL_STARTUP_BOOTSTRAP_MAX_BYTES } from "./terminal-startup-bootstrap.js";
 import { spawn, type ChildProcess } from "node:child_process";
 import type { FileHandle } from "node:fs/promises";
@@ -30,8 +32,10 @@ export async function runTerminalEnvironmentLauncher(locator: TerminalEnvironmen
   let stopped: NodeJS.Signals | null = null;
   let stopTimer: NodeJS.Timeout | undefined;
   let forceFinish: (() => void) | undefined;
+  let managedStop: (() => void) | undefined;
   const requestStop = (signal: NodeJS.Signals) => {
     stopped ??= signal;
+    if (locator.runControl) { managedStop?.(); return; }
     if (child) child.kill(signal);
     if (!stopTimer) stopTimer = setTimeout(() => {
       // Only the child object owned by THIS invocation, never an old persisted PID/process group.
@@ -94,6 +98,18 @@ export async function runTerminalEnvironmentLauncher(locator: TerminalEnvironmen
       await assertTerminalEnvironmentFileCurrent({ directory: dirs.directory, name: TERMINAL_STARTUP_BOOTSTRAP_NAME,
         identity: locator.bootstrap, ownerUid: locator.ownerUid, handle: bootstrapHandle });
       await assertTerminalEnvironmentDirectoriesCurrent(dirs, locator);
+    }
+    if (locator.runControl) {
+      assertTerminalRunLocator(locator.runControl);
+      if (!bootstrapHandle || locator.runControl.dataDir !== locator.dataDir
+        || locator.directoryName !== `${locator.runControl.terminalId}-${locator.attemptId}`
+        || locator.runControl.dataRoot.dev !== locator.dataRoot.dev || locator.runControl.dataRoot.ino !== locator.dataRoot.ino) terminalEnvironmentProtocolError();
+      return await runManagedTerminalShell({
+        locator: locator.runControl, env, shell: payload.shell, bootstrap: bootstrapHandle, attemptId: locator.attemptId,
+        onReady: () => publish({ version: 1, attemptId: locator.attemptId, state: "spawned" }),
+        onSpawnError: () => publish({ version: 1, attemptId: locator.attemptId, state: "spawn-error", code: "SHELL_SPAWN_FAILED" }),
+        installStop: (stop) => { managedStop = stop; if (stopped) stop(); }, initiallyStopped: () => stopped !== null,
+      });
     }
     try {
       // Ordinary terminals are unchanged. For configuration launches FD 3 pins the

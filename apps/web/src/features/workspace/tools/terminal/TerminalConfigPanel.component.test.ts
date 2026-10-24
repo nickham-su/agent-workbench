@@ -384,3 +384,15 @@ test("a destroyed configuration panel cannot publish a late run generation", asy
   resolve({ data: { id: "late", workspaceId: "ws", configId: "config", sessionName: "late-session", status: "active", createdAt: 1, updatedAt: 1 }, status: 200, statusText: "OK", headers: {}, config: request });
   await settle(); assert.equal(f.wrapper.emitted("created"), undefined);
 });
+
+
+for (const [code, key] of [["TERMINAL_RUN_LEGACY", "legacyRun"], ["TERMINAL_RUN_GUARD_UNAVAILABLE", "guardUnavailable"]] as const) {
+  test(`${code} uses message.error without publishing a new terminal`, async (t) => {
+    const f = setup(); await settle();
+    apiClient.defaults.adapter = async () => { throw Object.assign(new Error("fixture"), { isAxiosError: true, response: { status: 503, data: { message: "fixture", code } } }); };
+    const error = t.mock.method(message, "error", () => (() => {}) as ReturnType<typeof message.error>);
+    await f.wrapper.get('button[aria-label="运行"]').trigger("click"); await settle();
+    assert.equal(error.mock.callCount(), 1); assert.equal(error.mock.calls[0]?.arguments[0], zhCN.terminal.config[key]);
+    assert.equal(f.wrapper.emitted("created"), undefined);
+  });
+}

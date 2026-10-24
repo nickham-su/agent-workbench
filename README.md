@@ -76,6 +76,17 @@ Default port is 4310. If you change `AWB_PORT` in `.env`, replace the port in th
 | `http://127.0.0.1:4310/api/health` | Health check |
 | `http://127.0.0.1:4310/api/docs` | API docs |
 
+**Terminal run configurations**
+
+Reliable restart/close of configured services requires Linux (kernel 5.3+),
+`/usr/bin/python3` (Python 3.9+ with `pidfd_open`/`pidfd_send_signal`), and Linux
+child-subreaper support with procfs mounted. The Docker image already provides these prerequisites.
+Missing capabilities fail explicitly instead of starting an untracked service.
+Runs created by older versions must be stopped manually and their terminal tab
+closed once before creating a new managed run. Already-orphaned services are not
+guessed or killed by port. External service managers such as PM2/Docker retain
+responsibility for services started through them.
+
 **Workspace Dev Ports**
 
 To avoid reconfiguring `docker-compose.yml` for every new project, the default Compose setup also publishes a reserved local port range for services started inside workspaces (HTTP servers, RPC, etc.):

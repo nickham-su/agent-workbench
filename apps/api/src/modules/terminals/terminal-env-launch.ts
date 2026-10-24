@@ -1,3 +1,4 @@
+import type { TerminalRunLocator } from "./terminal-run-control.protocol.js";
 import { buildTerminalStartupBootstrap, TERMINAL_STARTUP_BOOTSTRAP_NAME } from "./terminal-startup-bootstrap.js";
 import fs from "node:fs/promises";
 import { constants, existsSync, type Stats } from "node:fs";
@@ -72,7 +73,7 @@ async function checkDirectory(directory: SecureDirectory, data: SecureDirectory,
 export async function prepareTerminalEnvironmentLaunch(params: {
   db: Db; dataDir: string; terminalId: string; shell: string;
   workspaceEnv: Readonly<Record<string, string>>; systemEnv: Record<string, string>;
-  baseEnv?: NodeJS.ProcessEnv; hooks?: TerminalEnvironmentLaunchTestHooks; startupCommand?: string;
+  baseEnv?: NodeJS.ProcessEnv; hooks?: TerminalEnvironmentLaunchTestHooks; startupCommand?: string; runControl?: TerminalRunLocator;
 }): Promise<PreparedTerminalEnvironmentLaunch> {
   const id = newId("te");
   const directoryName = terminalEnvironmentDirectoryName(params.terminalId, id);
@@ -138,7 +139,9 @@ export async function prepareTerminalEnvironmentLaunch(params: {
     }
     assertTerminalEnvironmentPayload(payload, id);
     attempt = updateTerminalEnvironmentLaunchAttempt(params.db, id, { phase: "prepared" });
-    const command = resolveTerminalEnvironmentLauncherCommand(terminalEnvironmentLaunchLocator(params.dataDir, attempt));
+    const locator = terminalEnvironmentLaunchLocator(params.dataDir, attempt);
+    if (params.runControl) locator.runControl = params.runControl;
+    const command = resolveTerminalEnvironmentLauncherCommand(locator);
     return { attempt, command };
   } catch (error) {
     if (armed) {

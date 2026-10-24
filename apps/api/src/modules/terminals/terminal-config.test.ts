@@ -63,6 +63,9 @@ function runtime(status: "spawned" | "missing" | "timeout" = "spawned") {
       } finally { await closeTerminalEnvironmentDirectories(dirs); }
     },
     waitEnvironmentLaunch: (params) => waitTerminalEnvironmentLaunch({ ...params, timeoutMs: 80, pollMs: 5 }),
+    // Unit fixture simulates the owned supervisor's ECHILD proof, not tmux
+    // disappearance. Real process semantics live in terminal-run.integration.
+    stopRunControl: async ({ db, terminalId }) => { db.prepare("update terminal_run_controls set phase = 'stopped' where terminal_id = ?").run(terminalId); },
     cleanupAuthArtifacts: async () => {}
   };
   return { operations, starts, bootstraps };

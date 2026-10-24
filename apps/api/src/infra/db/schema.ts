@@ -365,6 +365,12 @@ function createBaseSchema(db: Db) {
     create index if not exists idx_workspace_terminal_configs_order
       on workspace_terminal_configs(workspace_id, sort_order, created_at, id);
   `);
+  db.exec(`create table if not exists terminal_run_controls (
+    terminal_id text primary key references terminals(id) on delete cascade,
+    session_name text not null,
+    phase text not null check (phase in ('preparing', 'prepared', 'launching', 'stopped')),
+    locator_json text
+  )`);
   ensureTerminalEnvironmentLaunchAttemptSchema(db);
   ensureTerminalAuthCleanupIntentSchema(db);
   createScheduledTaskSchema(db);

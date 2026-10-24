@@ -1,3 +1,4 @@
+import { cleanupTerminalRunControl } from "../terminals/terminal-run-control.js";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -672,6 +673,7 @@ export async function deleteWorkspace(
       const cleanAttempts = new Map<string, string[]>();
       for (const term of terms) {
         cleanAttempts.set(term.id, await cleanupTerminalEnvironmentAttempts(ctx, term.id, "stopped", terminalOperations));
+        await cleanupTerminalRunControl(ctx.db, term.id);
         try {
           const intents = listTerminalAuthCleanupIntents(ctx.db, term.id);
           if (intents.some((intent) => intent.phase !== "recoverable")) {

@@ -656,6 +656,8 @@ export default {
       collapse: "Collapse configurations",
       empty: "No configurations",
       run: "Run",
+      legacyRun: "This older terminal cannot confirm service shutdown. Stop its service manually, close this tab, then run again.",
+      guardUnavailable: "Run configurations require Linux, /usr/bin/python3 with pidfd support, and child-subreaper capability.",
       restartStoppedUnconfirmed: "Restart failed: the previous environment could not be confirmed stopped and cleaned up. No new run was started. Please try again later.",
       more: "More",
       edit: "Edit configuration",

@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 
 const required = [
   "src/infra/db/schema.test.ts",
+  "src/modules/terminals/terminal-run.integration.test.ts",
   "src/modules/agent/agent-message.store.test.ts",
   "src/modules/agent/read-side.api.test.ts",
   "src/modules/agent/run-lifecycle-baseline.api.test.ts",

@@ -1,3 +1,4 @@
+import { armTerminalRunControl, prepareTerminalRunControl, openTerminalRunControl, closeTerminalRunControl, claimTerminalRunStart, markTerminalRunLaunching, writeTerminalRunStatus, getTerminalRunControl } from "../terminals/terminal-run-control.js";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -1178,4 +1179,28 @@ test("files/list: 子目录不存在应返回 404", async () => {
     () => listWorkspaceFiles(fixture.ctx, wsId, { dir: "missing" }),
     (err) => err instanceof HttpError && err.statusCode === 404
   );
+});
+
+
+test("Workspace deletion never cleans data or auth while a managed run lacks stopped proof", async () => {
+  const fixture = await createFixture();
+  const terminalId = "term_guard_unknown", sessionName = "term_guard_unknown";
+  let cleanups = 0;
+  try {
+    insertTerminal(fixture.ctx.db, { id: terminalId, workspaceId: fixture.workspaceId, sessionName, status: "active", createdAt: 1, updatedAt: 1 });
+    armTerminalRunControl(fixture.ctx.db, terminalId, sessionName);
+    const locator = await prepareTerminalRunControl({ db: fixture.ctx.db, dataDir: fixture.ctx.dataDir, terminalId, sessionName });
+    const control = await openTerminalRunControl(locator);
+    try {
+      assert.equal(await claimTerminalRunStart(control), true);
+      await writeTerminalRunStatus(control, { version: 1, runId: locator.runId, requestId: "fixture", state: "unknown" });
+    } finally { await closeTerminalRunControl(control); }
+    markTerminalRunLaunching(fixture.ctx.db, terminalId);
+    await assert.rejects(deleteWorkspace(fixture.ctx, createLogger(), fixture.workspaceId, {
+      hasSession: async () => "not_found", killSession: async () => {}, cleanupAuthArtifacts: async () => { cleanups++; },
+    }), (error: unknown) => error instanceof HttpError && error.code === "TERMINAL_KILL_FAILED");
+    assert.equal(cleanups, 0); assert.ok(getWorkspace(fixture.ctx.db, fixture.workspaceId));
+    assert.equal(await pathExists(fixture.workspacePath), true);
+    assert.equal(getTerminalRunControl(fixture.ctx.db, terminalId)?.phase, "launching");
+  } finally { workspaceDeletingFence.end(fixture.workspaceId); fixture.ctx.db.close(); }
 });

@@ -232,3 +232,12 @@ npm run dev
 
 - `docs/design/feishu-plugin-ts-rewrite-and-sse-broadcast.md`
   - 飞书插件 TS 重写与平台级 SSE 广播方案（最终版）
+
+### 运行配置的进程停止边界
+
+运行配置可靠重跑/关闭需要 Linux 5.3+、固定路径 `/usr/bin/python3`
+（Python 3.9+，提供 `pidfd_open`、`pidfd_send_signal`）及子进程监督能力、可读取自身进程元数据的 procfs。
+Docker 镜像已包含这些前提；能力缺失会明确报错，不退回仅结束 tmux 的旧行为。
+升级前已创建的配置终端需先手动停止旧服务、关闭标签，再运行一次建立受管环境。
+已残留的孤儿服务不会按端口猜测并自动结束。通过 PM2、Docker 等外部服务管理器
+启动的独立服务仍由对应管理器负责停止。

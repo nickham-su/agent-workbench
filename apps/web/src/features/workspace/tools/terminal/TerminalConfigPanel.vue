@@ -196,7 +196,10 @@ async function run(config: TerminalConfigRecord) {
   } catch (error) {
     if (!disposed && workspaceId === props.workspaceId) {
       const stopFailed = error instanceof ApiError && ["TERMINAL_SESSION_STOP_UNCONFIRMED", "TERMINAL_RESTART_CLEANUP_PENDING"].includes(error.code ?? "");
-      message.error(stopFailed ? t("terminal.config.restartStoppedUnconfirmed") : errorText(error));
+      const legacyRun = error instanceof ApiError && error.code === "TERMINAL_RUN_LEGACY";
+      const guardUnavailable = error instanceof ApiError && error.code === "TERMINAL_RUN_GUARD_UNAVAILABLE";
+      message.error(legacyRun ? t("terminal.config.legacyRun") : guardUnavailable ? t("terminal.config.guardUnavailable")
+        : stopFailed ? t("terminal.config.restartStoppedUnconfirmed") : errorText(error));
     }
   }
   finally { runningIds.delete(config.id); }
