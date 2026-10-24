@@ -26,7 +26,12 @@
           <a-button type="text" class="config-icon" :disabled="orderSaving || index === displayedConfigs.length - 1" :aria-label="t('terminal.config.moveDown')" @click="moveOrder(index, index + 1)"><ArrowDownOutlined /></a-button>
         </template>
         <template v-else>
-          <a-button type="text" class="config-icon config-run" :loading="runningIds.has(config.id)" :disabled="runningIds.has(config.id)" :aria-label="t('terminal.config.run')" @click="run(config)"><CaretRightOutlined v-if="!runningIds.has(config.id)" /></a-button>
+          <a-button type="text" class="config-icon config-run" :disabled="runningIds.has(config.id)" :aria-busy="runningIds.has(config.id)" :aria-label="t('terminal.config.run')" @click="run(config)">
+            <span class="config-run-icon" aria-hidden="true">
+              <LoadingOutlined v-if="runningIds.has(config.id)" spin />
+              <CaretRightOutlined v-else />
+            </span>
+          </a-button>
           <a-dropdown :trigger="['click']">
             <a-button type="text" class="config-icon" :aria-label="t('terminal.config.more')"><MoreOutlined /></a-button>
             <template #overlay><a-menu @click="handleMenu(String($event.key), config)"><a-menu-item key="edit">{{ t('terminal.config.edit') }}</a-menu-item><a-menu-item key="delete" danger>{{ t('terminal.config.delete') }}</a-menu-item></a-menu></template>
@@ -58,7 +63,7 @@
 import { computed, onActivated, onBeforeUnmount, onDeactivated, reactive, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { Modal, message, type FormInstance } from "ant-design-vue";
-import { ArrowDownOutlined, ArrowUpOutlined, CaretRightOutlined, CloseOutlined, DownOutlined, HolderOutlined, MoreOutlined, PlusOutlined, SortAscendingOutlined } from "@ant-design/icons-vue";
+import { ArrowDownOutlined, ArrowUpOutlined, CaretRightOutlined, CloseOutlined, DownOutlined, HolderOutlined, LoadingOutlined, MoreOutlined, PlusOutlined, SortAscendingOutlined } from "@ant-design/icons-vue";
 import { TERMINAL_CONFIG_COMMAND_MAX_LENGTH, type TerminalConfigRecord, type TerminalRecord } from "@agent-workbench/shared";
 import { ApiError, createTerminalConfig, deleteTerminalConfig, getWorkspace, listTerminalConfigs, reorderTerminalConfigs, runTerminalConfig, updateTerminalConfig } from "@/shared/api";
 
@@ -236,7 +241,9 @@ function handleMenu(key: string, config: TerminalConfigRecord) {
 .config-row { border-radius: 0; }
 .config-row:hover { background: var(--panel-bg-elevated); }
 .config-icon { width: 28px; height: 28px; flex: 0 0 28px; padding: 0; }
-.config-run { color: #fff; }
+.config-run { display: inline-flex; align-items: center; justify-content: center; color: #fff; }
+/* Keep one fixed slot; Ant Button's built-in loading icon animates its width. */
+.config-run .config-run-icon { display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; flex: 0 0 14px; }
 .config-drag { display: flex; align-items: center; justify-content: center; flex: 0 0 16px; padding: 0; border: 0; background: none; color: var(--text-tertiary); cursor: grab; }
 .config-drag:active { cursor: grabbing; }
 .config-drag:disabled { cursor: default; }

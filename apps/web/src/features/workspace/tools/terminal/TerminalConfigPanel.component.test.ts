@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { mount, flushPromises, type VueWrapper } from "@vue/test-utils";
 import { createI18n } from "vue-i18n";
 import { defineComponent, h, KeepAlive, nextTick } from "vue";
-import { Modal, message } from "ant-design-vue";
+import { Button, Modal, message } from "ant-design-vue";
 import { apiClient } from "@/shared/api";
 import zhCN from "@/shared/i18n/locales/zh-CN";
 import TerminalConfigPanel from "./TerminalConfigPanel.vue";
@@ -39,7 +39,7 @@ const CachedPanelHost = defineComponent({
       : h(OtherTool) });
   }
 });
-function setup(options: { count?: number; listWait?: Promise<void>; keepAlive?: boolean } = {}) {
+function setup(options: { count?: number; listWait?: Promise<void>; keepAlive?: boolean; realButtons?: boolean } = {}) {
   let runs = 0, creates = 0, updates = 0, deletes = 0;
   const config = { id: "config", workspaceId: "ws", name: "前端开发", cwd: "repo/apps/web", command: "npm run dev", createdAt: 1, updatedAt: 1 };
   let items: TerminalConfigRecord[] = Array.from({ length: options.count ?? 1 }, (_, index) => ({ ...config, id: index ? `config-${index + 1}` : "config", name: index ? `配置${index + 1}` : config.name, createdAt: index + 1 }));
@@ -66,7 +66,7 @@ function setup(options: { count?: number; listWait?: Promise<void>; keepAlive?: 
     else { state.listCalls++; const snapshot = items.map((item) => ({ ...item })); await state.listWait; data = snapshot; }
     return { data, status: 200, statusText: "OK", headers: {}, config: request };
   };
-  const wrapper = mount(options.keepAlive ? CachedPanelHost : TerminalConfigPanel, { attachTo: document.body, props: { workspaceId: "ws" }, global: { plugins: [createI18n({ legacy: false, locale: "zh-CN", messages: { "zh-CN": zhCN } })], stubs } });
+  const wrapper = mount(options.keepAlive ? CachedPanelHost : TerminalConfigPanel, { attachTo: document.body, props: { workspaceId: "ws" }, global: { plugins: [createI18n({ legacy: false, locale: "zh-CN", messages: { "zh-CN": zhCN } })], components: { "a-button": Button }, stubs: { ...stubs, ...(options.realButtons ? { "a-button": false } : {}) } } });
   wrappers.push(wrapper);
   return { wrapper, state, counts: () => ({ runs, creates, updates, deletes }),
     setServerOrder(orderedIds: string[]) { items = orderedIds.map((id) => items.find((item) => item.id === id)!); }
@@ -99,6 +99,56 @@ test("run events carry stable managed identity and each fresh physical session",
   assert.equal(first.id, second.id); assert.notEqual(first.sessionName, second.sessionName);
   assert.deepEqual(wrapper.emitted("runStarted"), [[{ workspaceId: "ws", configId: "config" }], [{ workspaceId: "ws", configId: "config" }]]);
 });
+
+for (const outcome of ["success", "failure"] as const) {
+  test(`run icon keeps one fixed slot through pending and ${outcome} without Ant loading-width animation`, async (t) => {
+    const { wrapper } = setup({ realButtons: true }); await settle();
+    const runButton = wrapper.get(".config-run");
+    const iconSlot = runButton.get(".config-run-icon").element;
+    const error = t.mock.method(message, "error", () => (() => {}) as ReturnType<typeof message.error>);
+    let resolve!: (response: { data: unknown; status: number; statusText: string; headers: object; config: unknown }) => void;
+    let reject!: (error: Error) => void;
+    let request: unknown, calls = 0;
+    apiClient.defaults.adapter = (config) => {
+      calls++; request = config;
+      return new Promise((done, fail) => { resolve = done as typeof resolve; reject = fail; });
+    };
+    const assertFixedSlot = () => {
+      assert.equal(runButton.element, wrapper.get(".config-run").element);
+      assert.equal(runButton.get(".config-run-icon").element, iconSlot);
+      assert.equal(runButton.find(".ant-btn-loading-icon").exists(), false);
+      assert.equal(runButton.classes().includes("ant-btn-loading"), false);
+      assert.equal(runButton.classes().includes("ant-btn-icon-only"), false);
+      // Verify the declared layout contract, not jsdom's non-existent geometry.
+      const slotStyle = getComputedStyle(iconSlot);
+      assert.equal(slotStyle.width, "14px"); assert.equal(slotStyle.height, "14px");
+      assert.equal(slotStyle.flexShrink, "0");
+      assert.equal(getComputedStyle(runButton.element).width, "28px");
+      assert.equal(runButton.get(".config-run-icon").attributes("aria-hidden"), "true");
+    };
+    assert.equal(runButton.find(".anticon-caret-right").exists(), true);
+    assert.equal(runButton.attributes("aria-busy"), "false"); assertFixedSlot();
+    await runButton.trigger("click"); await settle();
+    assert.equal(runButton.find(".anticon-loading.anticon-spin").exists(), true);
+    assert.equal(runButton.find(".anticon-caret-right").exists(), false);
+    assert.equal(runButton.attributes("aria-busy"), "true");
+    assert.equal(runButton.attributes("disabled"), ""); assertFixedSlot();
+    assert.deepEqual(wrapper.emitted("runStarted"), [[{ workspaceId: "ws", configId: "config" }]]);
+    await runButton.trigger("click"); await settle(); assert.equal(calls, 1);
+    if (outcome === "success") {
+      resolve({ data: { id: "term", workspaceId: "ws", configId: "config", sessionName: "session", status: "active", createdAt: 1, updatedAt: 1 }, status: 200, statusText: "OK", headers: {}, config: request });
+    } else {
+      reject(new Error("fixture run failed"));
+    }
+    await settle();
+    assert.equal(runButton.find(".anticon-caret-right").exists(), true);
+    assert.equal(runButton.find(".anticon-loading").exists(), false);
+    assert.equal(runButton.attributes("aria-busy"), "false");
+    assert.equal(runButton.attributes("disabled"), undefined); assertFixedSlot();
+    assert.equal(wrapper.emitted("created")?.length ?? 0, outcome === "success" ? 1 : 0);
+    assert.equal(error.mock.callCount(), outcome === "failure" ? 1 : 0);
+  });
+}
 
 test("new configuration supports repository choices and free relative cwd; saving never runs", async () => {
   const { wrapper, counts } = setup(); await settle();

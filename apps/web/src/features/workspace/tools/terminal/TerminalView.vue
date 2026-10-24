@@ -53,6 +53,9 @@ let fitBurstTimers: number[] = [];
 let didResizeNudge = false;
 let removeElListeners: (() => void) | null = null;
 let stopWatchFontSize: (() => void) | null = null;
+let displayedSessionName = props.terminal.sessionName;
+let sessionChangeRevision = 0;
+let disposed = false;
 
 function focusIfActive() {
   if (!term) return;
@@ -444,14 +447,39 @@ onMounted(() => {
   );
 });
 
-// A rerun keeps the tab/xterm instance, but replaces its physical tmux session.
+// A successful configuration rerun starts a fresh screen in the same tab.
+// Failed/creating generations must retain the last displayed run's output.
 watch(
-  () => props.terminal.sessionName,
-  () => {
-    if (!term) return;
-    reconnectAttempts = 0;
-    didResizeNudge = false;
-    connect(false);
+  () => [props.terminal.sessionName, props.terminal.status, props.terminal.configId] as const,
+  ([sessionName, status, configId]) => {
+    const terminal = term;
+    const revision = ++sessionChangeRevision;
+    if (!terminal || disposed || sessionName === displayedSessionName) return;
+
+    clearReconnectTimer();
+    clearFitBurst();
+    cleanupWs(); // Invalidate old socket callbacks before draining queued output.
+    const reconnect = () => {
+      displayedSessionName = sessionName;
+      reconnectAttempts = 0;
+      didResizeNudge = false;
+      connect(false);
+    };
+    if (!configId) { reconnect(); return; } // Ordinary terminals retain their history.
+    if (status !== "active") return;
+
+    const { id, workspaceId } = props.terminal;
+    // reset() is synchronous: it does not discard queued writes or cancel an
+    // unfinished escape sequence. CAN ends that sequence without erasing text;
+    // its public write callback is also a barrier after all old queued output.
+    terminal.write("\x18", () => {
+      if (disposed || term !== terminal || revision !== sessionChangeRevision
+        || props.terminal.id !== id || props.terminal.workspaceId !== workspaceId
+        || props.terminal.sessionName !== sessionName || props.terminal.status !== "active"
+        || props.terminal.configId !== configId) return;
+      terminal.reset();
+      reconnect();
+    });
   }
 );
 
@@ -471,6 +499,8 @@ watch(
 );
 
 onBeforeUnmount(async () => {
+  disposed = true;
+  sessionChangeRevision++;
   window.removeEventListener("resize", tryFitAndResize);
   resizeObserver?.disconnect();
   resizeObserver = null;
