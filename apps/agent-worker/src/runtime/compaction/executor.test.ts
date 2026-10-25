@@ -4,7 +4,7 @@ import { getPromptText } from "@agent-workbench/shared/prompts";
 import { ApiConflictError, InternalRpcHttpError, InternalRpcInvalidResponseError, InternalRpcNetworkError } from "../apiClient.js";
 import type { ExecutionProfile } from "../apiClient.js";
 import { CompactionExecutor, CompactionWorkDeadlineExceededError } from "./executor.js";
-import { testProfile, testSource } from "./test-fixtures.js";
+import { addAssistantReplay, testProfile, testSource } from "./test-fixtures.js";
 
 function createExecutor(input?: {
   source?: ReturnType<typeof testSource>;
@@ -20,6 +20,7 @@ function createExecutor(input?: {
   onSummaryRetry?: (input: { retryAttempt: number; maxRetries: number; delayMs: number; abortSignal: AbortSignal }) => Promise<void>;
   confirm?: () => Promise<{ outcome: "committed" | "not_committed" }>;
   commit?: (request: Record<string, unknown>) => Promise<{ result: "updated" | "ignored"; summaryMessageId: string | null }>;
+  logger?: Pick<Console, "warn">;
 }) {
   const requests: Record<string, unknown>[] = [];
   const commitSignals: AbortSignal[] = [];
@@ -45,6 +46,7 @@ function createExecutor(input?: {
         return input?.confirm ? await input.confirm() : { outcome: "not_committed" as const };
       },
     } as any,
+    logger: input?.logger,
     nowMs: input?.nowMs,
     workDeadlineMsByMode: input?.workDeadlineMsByMode,
     summaryRetrySleep: input?.summaryRetrySleep,
@@ -102,6 +104,68 @@ test("executor consumes only frozen compaction source, summaries sanitized Summa
   assert.equal(requests[0]?.retainedFromMessageId, "m2");
   assert.equal(requests[0]?.expectedHeadMessageId, source.headMessageId);
   assert.equal(requests[0]?.expectedRevision, source.sessionRevision);
+});
+
+for (const npm of ["@ai-sdk/openai", "@ai-sdk/deepseek", "@ai-sdk/moonshotai"] as const) {
+  test(`${npm} replay completes proactive/manual compaction across summary prefix and retained tail`, async () => {
+    for (const mode of ["proactive", "manual"] as const) {
+      const source = testSource({ texts: ["x".repeat(100_000), "recent user", "recent answer"], types: ["assistant", "user", "assistant"] });
+      addAssistantReplay(source.blocks[0]!, npm);
+      addAssistantReplay(source.blocks[2]!, npm);
+      const original = structuredClone(source);
+      // Historical replay must be validated by its own protocol, not the active model.
+      for (const activeNpm of [npm, "@ai-sdk/openai-compatible"] as const) {
+        const profile: ExecutionProfile = { ...testProfile, provider: { ...testProfile.provider, npm: activeNpm } };
+        const { executor, requests, summaries } = createExecutor({ source, profile });
+        const result = await executor.execute({ ...args, profile, mode });
+        assert.equal(result.kind, "committed");
+        if (result.kind !== "committed") continue;
+        assert.deepEqual(result.plan.prefixSourceBlockIds, ["m1"]);
+        assert.deepEqual(result.plan.retainedSourceBlockIds, ["m2", "m3"]);
+        assert.equal(requests[0]?.retainedFromMessageId, "m2");
+        assert.equal(summaries.length, 1);
+        const summaryInput = JSON.stringify(summaries[0]!.messages);
+        assert.equal(summaryInput.includes("[Tool call: bash]"), true);
+        assert.equal(summaryInput.includes("[Tool result: bash]"), true);
+        assert.equal(summaryInput.includes("PRIVATE_ENCRYPTED_REPLAY"), false);
+        assert.equal(summaryInput.includes("endpointDigest"), false);
+        assert.deepEqual(source, original, "source replay in both prefix and tail must remain unchanged");
+      }
+    }
+  });
+}
+
+test("compaction data-invariant diagnostics contain controlled reasons, never source or exception content", async () => {
+  const source = testSource({ texts: ["private prompt"], types: ["assistant"] });
+  const block = addAssistantReplay(source.blocks[0]!, "@ai-sdk/openai");
+  block.sourceMessageId = "PRIVATE_SOURCE_ID\nforged log";
+  const call = block.message.parts.find((part) => part.type === "tool_call")!;
+  assert.ok(call.type === "tool_call");
+  call.input = { command: "PRIVATE_TOOL_ARGUMENTS" };
+  block.providerReplay.at(-1)!.partId = "missing";
+  const warnings: string[] = [];
+  const logger = { warn: (message: string) => { warnings.push(message); } };
+  const { executor, summaries, requests } = createExecutor({ source, logger });
+  assert.deepEqual(await executor.execute({ ...args, mode: "proactive" }), { kind: "failed", reason: "data_invariant" });
+  assert.equal(summaries.length, 0);
+  assert.equal(requests.length, 0);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0]!, /reason=data_invariant invariant=replay_part_mismatch/);
+  assert.match(warnings[0]!, /session="session" run="run"/);
+  for (const sensitive of ["PRIVATE_SOURCE_ID", "forged log", "private prompt", "PRIVATE_TOOL_ARGUMENTS", "PRIVATE_ENCRYPTED_REPLAY", "secret"]) {
+    assert.equal(warnings[0]!.includes(sensitive), false);
+  }
+
+  const unknown = createExecutor({
+    logger,
+    onGetCompactionSource() { throw new Error("PRIVATE_EXCEPTION https://private.invalid?token=PRIVATE_TOKEN"); },
+  });
+  assert.deepEqual(await unknown.executor.execute({ ...args, mode: "manual" }), { kind: "failed", reason: "data_invariant" });
+  assert.match(warnings[1]!, /invariant=unknown_invariant/);
+  assert.equal(warnings[1]!.includes("PRIVATE"), false);
+
+  const brokenLogger = createExecutor({ source, logger: { warn() { throw new Error("logger unavailable"); } } });
+  assert.deepEqual(await brokenLogger.executor.execute({ ...args, mode: "proactive" }), { kind: "failed", reason: "data_invariant" });
 });
 
 test("both compaction modes append the Run locale prompt as the final user message", async () => {

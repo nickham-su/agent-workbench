@@ -105,4 +105,30 @@ export function testSource(input?: {
   } satisfies CompactionSource;
 }
 
+export function addAssistantReplay(block: SourceBlock, npm: "@ai-sdk/openai" | "@ai-sdk/deepseek" | "@ai-sdk/moonshotai") {
+  const text = block.message.parts.find((part) => part.type === "text")!;
+  const base = { messageId: block.message.id, updatedRevision: 1, createdAt: 0, updatedAt: 0 };
+  const reason = { ...base, id: `${block.sourceMessageId}-reason`, position: 0, type: "reasoning" as const, text: "visible analysis" };
+  const call = { ...base, id: `${block.sourceMessageId}-call`, position: 2, type: "tool_call" as const, toolName: "bash", input: { command: "example" }, providerToolCallId: `${block.sourceMessageId}-provider-call` };
+  block.message.parts = [reason, { ...text, position: 1 }, call];
+  block.toolExecutions = [{ id: `${block.sourceMessageId}-execution`, callPartId: call.id, status: "completed", resultPreview: "tool completed", error: null, startedAt: 0, completedAt: 1 }];
+  block.providerReplay = block.message.parts.map((part) => ({
+    partId: part.id,
+    envelope: npm === "@ai-sdk/openai" ? {
+      version: 1,
+      provider: { npm, api: "responses", providerId: "openai", model: "gpt-5" },
+      item: part.type === "reasoning"
+        ? { type: "reasoning", itemId: part.id, encryptedContent: "PRIVATE_ENCRYPTED_REPLAY" }
+        : part.type === "tool_call"
+          ? { type: "function_call", itemId: part.id }
+          : { type: "text", itemId: part.id },
+    } : {
+      version: 1,
+      provider: { npm, api: "chat-completions", protocolVersion: 1, providerId: "chat", model: "chat-model", endpointDigest: "a".repeat(64) },
+      item: { type: part.type === "tool_call" ? "tool_call" : part.type === "reasoning" ? "reasoning" : "text" },
+    },
+  }));
+  return block;
+}
+
 export type { SourcePart };

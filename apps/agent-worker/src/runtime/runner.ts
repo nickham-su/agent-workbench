@@ -2553,6 +2553,7 @@ export class AgentRunner {
     let noticeWritesDisabled = false;
     const executor = new CompactionExecutor({
       apiClient: this.apiClient,
+      logger: this.logger,
       nowMs: this.nowMsFn,
       newId: newSortableId,
       onSummaryRetry: async ({ expectedRevision, retryAttempt, maxRetries, delayMs, abortSignal }) => {
