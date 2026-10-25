@@ -1498,15 +1498,14 @@ export async function materializePromptAttachments(params: {
   providerNpm: string;
 }): Promise<ModelMessage[]> {
   const messages: ModelMessage[] = [];
-  let totalImageBytes = 0;
-  const countImage = (bytes: Uint8Array) => {
+  const validateImageBytes = (bytes: Uint8Array) => {
     if (bytes.byteLength < 1 || bytes.byteLength > WORKSPACE_IMAGE_MAX_BYTES) throw new Error("model image exceeds 10 MiB per-image budget");
-    totalImageBytes += bytes.byteLength;
-    if (totalImageBytes > 2 * WORKSPACE_IMAGE_MAX_BYTES) throw new Error("model images exceed 20 MiB combined budget");
   };
+  // Count every input role, before deferred image user messages are added below.
+  const toolImageWindowStart = Math.max(0, params.messages.length - 10);
   const nativeToolMedia = params.providerNpm === "@ai-sdk/openai" || params.providerNpm === "@ai-sdk/anthropic";
   let precedingAssistantCalls: string[] = [];
-  for (const message of params.messages) {
+  for (const [messageIndex, message] of params.messages.entries()) {
     if (message.role === "assistant") {
       precedingAssistantCalls = Array.isArray(message.content)
         ? message.content.filter((part) => part.type === "tool-call").map((part) => part.toolCallId)
@@ -1546,17 +1545,23 @@ export async function materializePromptAttachments(params: {
             nativeParts.push({ type: "text", text: part.value });
             textParts.push(part.value);
           } else if (part.type === "image_ref") {
-            const image = await readWorkspaceImage({ workspacePath: params.run.workspacePath, path: part.path }).catch((error: unknown) => {
-              if (error instanceof WorkspaceImageNotFoundError) return null;
-              throw new Error("cannot read a valid tool image in this Workspace");
-            });
-            if (!image) {
-              const text = "此前已成功查看该图片，但源文件当前不存在，无法再次加载。";
+            if (messageIndex < toolImageWindowStart) {
+              const text = "图片已超出加载范围，如需查看请重新调用 view_image。";
               nativeParts.push({ type: "text", text });
               textParts.push(text);
               continue;
             }
-            countImage(image.bytes);
+            const image = await readWorkspaceImage({ workspacePath: params.run.workspacePath, path: part.path }).catch((error: unknown) => {
+              if (error instanceof WorkspaceImageNotFoundError) return "此前已成功查看该图片，但源文件当前不存在，无法再次加载。";
+              if (error instanceof WorkspaceImageTooLargeError) return "图片超过大小限制，本轮未加载。";
+              throw new Error("cannot read a valid tool image in this Workspace");
+            });
+            if (typeof image === "string") {
+              nativeParts.push({ type: "text", text: image });
+              textParts.push(image);
+              continue;
+            }
+            validateImageBytes(image.bytes);
             const label = `Image for toolCallId=${result.toolCallId}, path=${part.path}`;
             if (nativeToolMedia) nativeParts.push({ type: "media", data: Buffer.from(image.bytes).toString("base64"), mediaType: image.mediaType });
             else {
@@ -1598,7 +1603,7 @@ export async function materializePromptAttachments(params: {
       }).catch(() => {
         throw new Error("cannot read a valid user image in this Workspace");
       });
-      countImage(attachment.bytes);
+      validateImageBytes(attachment.bytes);
       content.push({
         type: "file",
         data: attachment.bytes,
@@ -4076,4 +4081,4 @@ export async function finalizeToolTextForTest(params: {
 }) {
   return finalizeToolText(params);
 }
-import { readWorkspaceImage, WORKSPACE_IMAGE_MAX_BYTES, WorkspaceImageNotFoundError } from "./workspaceImageReader.js";
+import { readWorkspaceImage, WORKSPACE_IMAGE_MAX_BYTES, WorkspaceImageNotFoundError, WorkspaceImageTooLargeError } from "./workspaceImageReader.js";

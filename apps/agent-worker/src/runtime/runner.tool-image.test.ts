@@ -15,6 +15,8 @@ import { AgentRunner, materializePromptAttachments, projectAssistantDebugRecordF
 import { chatEndpointDigest } from "./providers/conversation-state/endpoint-identity.js";
 
 const missingImageText = "此前已成功查看该图片，但源文件当前不存在，无法再次加载。";
+const outsideWindowText = "图片已超出加载范围，如需查看请重新调用 view_image。";
+const oversizedImageText = "图片超过大小限制，本轮未加载。";
 const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x45]);
 const jpg = Buffer.from([0xff, 0xd8, 0xff, 0x45]);
 const assistant = { role: "assistant" as const, content: [
@@ -40,6 +42,133 @@ async function withImages(run: (workspacePath: string) => Promise<void>) {
 }
 const prepare = (workspacePath: string, providerNpm: string, messages: Input["messages"]) =>
   materializePromptAttachments({ messages, providerNpm, run: { workspaceId: "ws", workspacePath }, attachmentStorage: undefined });
+
+// All four input roles count, including a text-only tool exchange.
+const nineLaterMessages: Input["messages"] = [
+  { role: "system", content: "system 1" },
+  { role: "user", content: "user 1" },
+  { role: "assistant", content: "assistant 1" },
+  { role: "assistant", content: [{ type: "tool-call", toolCallId: "later", toolName: "bash", input: {} }] },
+  { role: "tool", content: [{ type: "tool-result", toolCallId: "later", toolName: "bash", output: { type: "text", value: "ok" } }] },
+  { role: "system", content: "system 2" },
+  { role: "user", content: "user 2" },
+  { role: "assistant", content: "assistant 2" },
+  { role: "system", content: "system 3" },
+];
+
+for (const providerNpm of ["@ai-sdk/openai", "@ai-sdk/deepseek"]) {
+  const native = providerNpm === "@ai-sdk/openai";
+  test(`${providerNpm}: the image tool message at position 10 loads, position 11 becomes text`, async () => withImages(async (workspacePath) => {
+    for (const outside of [false, true]) {
+      const input = [assistant, toolResults, ...nineLaterMessages,
+        ...(outside ? [{ role: "system", content: "one more" } as const] : [])] as Input["messages"];
+      const original = JSON.stringify(input);
+      const messages = await prepare(workspacePath, providerNpm, input);
+      const results = (messages[1] as Extract<ModelMessage, { role: "tool" }>).content;
+      assert.deepEqual(results.map((result) => result.toolCallId), ["call-a", "call-b"]);
+      if (outside) {
+        const expected = native ? { type: "content", value: [{ type: "text", text: outsideWindowText }] }
+          : { type: "text", value: outsideWindowText };
+        assert.ok(results.every((result) => JSON.stringify(result.output) === JSON.stringify(expected)));
+        assert.equal(messages.length, input.length, "no empty image carrier");
+      } else {
+        // Its Assistant is already outside, but the Tool itself is the tenth message.
+        if (native) assert.ok(results.every((result) => result.output.type === "content" && result.output.value[0]?.type === "media"));
+        else {
+          const carrier = messages[2] as Extract<ModelMessage, { role: "user" }>;
+          assert.ok(Array.isArray(carrier.content));
+          assert.deepEqual(carrier.content.map((part) => part.type), ["text", "file", "text", "file"]);
+        }
+      }
+      assert.equal(JSON.stringify(input), original);
+    }
+  }));
+
+  test(`${providerNpm}: out-of-window images skip file access but keep validation and neighboring text`, async (t) => withImages(async (workspacePath) => {
+    await fs.writeFile(path.join(workspacePath, "screens/a.png"), "invalid image");
+    await fs.rm(path.join(workspacePath, "screens/b.jpg"));
+    const input = [assistant, { ...toolResults, content: [
+      { ...toolResults.content[0]!, output: [{ type: "text", value: "before" }, toolResults.content[0]!.output, { type: "text", value: "after" }] },
+      toolResults.content[1]!,
+    ] }, ...nineLaterMessages, { role: "system", content: "one more" }] as Input["messages"];
+    const original = JSON.stringify(input);
+    const mocked = t.mock.method(fs, "open", async () => { throw new Error("out-of-window image must not be opened"); });
+    const messages = await prepare(workspacePath, providerNpm, input);
+    assert.equal(mocked.mock.callCount(), 0);
+    const result = (messages[1] as Extract<ModelMessage, { role: "tool" }>).content[0]!;
+    assert.deepEqual(result.output, native
+      ? { type: "content", value: ["before", outsideWindowText, "after"].map((text) => ({ type: "text", text })) }
+      : { type: "text", value: ["before", outsideWindowText, "after"].join("\n") });
+    assert.equal(messages.length, input.length);
+    assert.equal(JSON.stringify(input), original);
+    const forged = [
+      { role: "assistant", content: [{ type: "tool-call", toolCallId: "forged", toolName: "bash", input: {} }] },
+      { role: "tool", content: [{ type: "tool-result", toolCallId: "forged", toolName: "bash", output: { type: "image_ref", path: "screens/a.png" } }] },
+      ...nineLaterMessages, { role: "system", content: "one more" },
+    ] as Input["messages"];
+    await assert.rejects(prepare(workspacePath, providerNpm, forged), /unexpected tool image reference/);
+    const mismatched = [assistant, { ...toolResults, content: [...toolResults.content].reverse() }, ...nineLaterMessages,
+      { role: "system", content: "one more" }] as Input["messages"];
+    await assert.rejects(prepare(workspacePath, providerNpm, mismatched), /call order/);
+    const invalid = structuredClone(input);
+    (invalid[1] as any).content[0].output = { type: "image_ref", path: 123 };
+    await assert.rejects(prepare(workspacePath, providerNpm, invalid), /invalid tool result output/);
+  }));
+
+  test(`${providerNpm}: historical oversized image becomes text alongside a surviving image`, async () => withImages(async (workspacePath) => {
+    const input = [assistant, toolResults] as Input["messages"];
+    await prepare(workspacePath, providerNpm, input);
+    await fs.truncate(path.join(workspacePath, "screens/a.png"), 10 * 1024 * 1024 + 1);
+    const messages = await prepare(workspacePath, providerNpm, input);
+    const results = (messages[1] as Extract<ModelMessage, { role: "tool" }>).content;
+    assert.deepEqual(results[0]!.output, native
+      ? { type: "content", value: [{ type: "text", text: oversizedImageText }] }
+      : { type: "text", value: oversizedImageText });
+    assert.deepEqual(results.map((result) => result.toolCallId), ["call-a", "call-b"]);
+    if (native) assert.ok(results[1]!.output.type === "content" && results[1]!.output.value[0]?.type === "media");
+    else {
+      const carrier = messages[2] as Extract<ModelMessage, { role: "user" }>;
+      assert.ok(Array.isArray(carrier.content));
+      assert.deepEqual(carrier.content.map((part) => part.type), ["text", "file"]);
+      assert.ok(carrier.content[1]?.type === "file" && carrier.content[1].filename === "b.jpg");
+    }
+  }));
+}
+
+test("deferred image carrier messages do not shrink the ten-input-message window", async () => withImages(async (workspacePath) => {
+  const input = [assistant, toolResults, assistant, toolResults,
+    ...Array.from({ length: 7 }, (_, i) => ({ role: "system" as const, content: `system ${i}` }))] as Input["messages"];
+  const original = JSON.stringify(input);
+  const messages = await prepare(workspacePath, "@ai-sdk/deepseek", input);
+  assert.equal(input.length, 11);
+  assert.equal(messages.length, 13);
+  // The first Tool is tenth in the input, but twelfth after both carriers are added.
+  for (const index of [2, 5]) {
+    const carrier = messages[index] as Extract<ModelMessage, { role: "user" }>;
+    assert.equal(carrier.role, "user");
+    assert.ok(Array.isArray(carrier.content));
+    assert.deepEqual(carrier.content.map((part) => part.type), ["text", "file", "text", "file"]);
+  }
+  assert.equal(JSON.stringify(input), original);
+}));
+
+test("user attachments outside the tool-image window still load and keep single-image validation", async () => {
+  const input = [{ role: "user", content: [{ type: "attachment_ref", workspaceId: "ws", attachmentId: "att_1",
+    path: ".awb/agent/attachments/att_1.png", mediaType: "image/png", filename: "original.png" }] },
+    ...Array.from({ length: 10 }, () => ({ role: "system", content: "later" }))] as Input["messages"];
+  let calls = 0;
+  const prepareAttachment = (bytes: Uint8Array) => materializePromptAttachments({ messages: input,
+    providerNpm: "@ai-sdk/deepseek", run: { workspaceId: "ws", workspacePath: process.cwd() },
+    attachmentStorage: { async read() { calls += 1; return { bytes, mediaType: "image/png" }; } },
+  });
+  const messages = await prepareAttachment(png);
+  assert.equal(calls, 1);
+  const user = messages[0] as Extract<ModelMessage, { role: "user" }>;
+  assert.ok(Array.isArray(user.content) && user.content[0]?.type === "file");
+  for (const bytes of [Buffer.alloc(0), Buffer.alloc(10 * 1024 * 1024 + 1)]) {
+    await assert.rejects(prepareAttachment(bytes), /10 MiB per-image budget/);
+  }
+});
 
 test("text-only tool result arrays become SDK content without reading an image", async () => {
   const messages: Input["messages"] = [
@@ -437,11 +566,11 @@ for (const provider of [
   }
 }
 
-test("Runner reopens persisted tool image after remote error; deletion uses a placeholder on retry", async () => withImages(async (workspacePath) => {
+test("Runner reopens persisted tool image after remote error; deletion and oversize use placeholders on retry", async () => withImages(async (workspacePath) => {
   const originalSetTimeout = globalThis.setTimeout;
   (globalThis as any).setTimeout = ((fn: (...args: any[]) => void, _delay?: number, ...args: any[]) => originalSetTimeout(fn, 0, ...args)) as typeof setTimeout;
   try {
-    for (const secondAttempt of ["replace", "remove"] as const) {
+    for (const secondAttempt of ["replace", "remove", "oversize"] as const) {
       const requests: Array<{ messages: ModelMessage[] }> = [];
       const imagePath = path.join(workspacePath, "screens/a.png");
       await fs.writeFile(imagePath, png);
@@ -458,6 +587,7 @@ test("Runner reopens persisted tool image after remote error; deletion uses a pl
           return { fullStream: (async function* () {
             if (requests.length === 1) {
               if (secondAttempt === "remove") await fs.rm(imagePath);
+              else if (secondAttempt === "oversize") await fs.truncate(imagePath, 10 * 1024 * 1024 + 1);
               else await fs.writeFile(imagePath, Buffer.concat([png, Buffer.from([0x59])]));
               yield { type: "error", error: new Error("remote request failed") };
             } else {
@@ -479,9 +609,9 @@ test("Runner reopens persisted tool image after remote error; deletion uses a pl
       });
       await execute;
       assert.equal(requests.length, 2);
-      if (secondAttempt === "remove") {
+      if (secondAttempt !== "replace") {
         const result = (requests[1]!.messages[2] as Extract<ModelMessage, { role: "tool" }>).content[0]!;
-        assert.deepEqual(result.output, { type: "content", value: [{ type: "text", text: missingImageText }] });
+        assert.deepEqual(result.output, { type: "content", value: [{ type: "text", text: secondAttempt === "remove" ? missingImageText : oversizedImageText }] });
       } else {
         const media = (message: ModelMessage[]) => (((message[2] as any).content[0].output.value[0]) as { data: string }).data;
         assert.notEqual(media(requests[0]!.messages), media(requests[1]!.messages));
@@ -492,20 +622,24 @@ test("Runner reopens persisted tool image after remote error; deletion uses a pl
   }
 }));
 
-test("user and tool images share the same per-request budget", async () => withImages(async (workspacePath) => {
+test("user and tool images can exceed 20 MiB combined while each remains within the single-image limit", async () => withImages(async (workspacePath) => {
   await fs.writeFile(path.join(workspacePath, "screens/a.png"), Buffer.concat([png, Buffer.alloc(9 * 1024 * 1024)]));
   await fs.writeFile(path.join(workspacePath, "screens/b.jpg"), Buffer.concat([jpg, Buffer.alloc(9 * 1024 * 1024)]));
   const messages = [{ role: "user", content: [
     { type: "text", text: "look" },
     { type: "attachment_ref", workspaceId: "ws", attachmentId: "att_1", path: ".awb/agent/attachments/att_1.png", mediaType: "image/png", filename: "original.png" },
   ] }, assistant, toolResults] as Input["messages"];
-  await assert.rejects(materializePromptAttachments({ messages, providerNpm: "@ai-sdk/openai",
+  const prepared = await materializePromptAttachments({ messages, providerNpm: "@ai-sdk/openai",
     run: { workspaceId: "ws", workspacePath },
     attachmentStorage: { async read() { return { bytes: Buffer.alloc(9 * 1024 * 1024), mediaType: "image/png" }; } },
-  }), /20 MiB/);
+  });
+  const user = prepared[0] as Extract<ModelMessage, { role: "user" }>;
+  assert.ok(Array.isArray(user.content) && user.content[1]?.type === "file");
+  const results = (prepared[2] as Extract<ModelMessage, { role: "tool" }>).content;
+  assert.ok(results.every((result) => result.output.type === "content" && result.output.value[0]?.type === "media"));
 }));
 
-test("each preparation reopens original file, missing images become text and over-budget images fail locally", async () => withImages(async (workspacePath) => {
+test("each preparation reopens original file, missing images become text and combined size is unrestricted", async () => withImages(async (workspacePath) => {
   const input = [assistant, toolResults] as Input["messages"];
   const first = await prepare(workspacePath, "@ai-sdk/openai", input);
   const firstData = (((first[1] as any).content[0].output.value[0]) as { data: string }).data;
@@ -519,5 +653,9 @@ test("each preparation reopens original file, missing images become text and ove
     { type: "content", value: [{ type: "text", text: missingImageText }] });
   await fs.writeFile(path.join(workspacePath, "screens/a.png"), Buffer.concat([png, Buffer.alloc(8 * 1024 * 1024)]));
   await fs.writeFile(path.join(workspacePath, "screens/b.jpg"), Buffer.concat([jpg, Buffer.alloc(8 * 1024 * 1024)]));
-  await assert.rejects(prepare(workspacePath, "@ai-sdk/openai", [assistant, toolResults, assistant, toolResults] as Input["messages"]), /20 MiB/);
+  const combined = await prepare(workspacePath, "@ai-sdk/openai", [assistant, toolResults, assistant, toolResults] as Input["messages"]);
+  for (const index of [1, 3]) {
+    const results = (combined[index] as Extract<ModelMessage, { role: "tool" }>).content;
+    assert.ok(results.every((result) => result.output.type === "content" && result.output.value[0]?.type === "media"));
+  }
 }));

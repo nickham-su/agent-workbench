@@ -15,6 +15,13 @@ export class WorkspaceImageNotFoundError extends Error {
   }
 }
 
+export class WorkspaceImageTooLargeError extends Error {
+  constructor() {
+    super("Workspace image exceeds 10 MiB");
+    this.name = "WorkspaceImageTooLargeError";
+  }
+}
+
 function sameInode(a: { dev: number; ino: number }, b: { dev: number; ino: number }) {
   return a.dev === b.dev && a.ino === b.ino;
 }
@@ -115,7 +122,15 @@ export async function readWorkspaceImage(input: { workspacePath: string; path: s
     const stat = await file.stat();
     const entry = await fs.lstat(pinnedFilePath);
     if (!stat.isFile() || !entry.isFile() || entry.isSymbolicLink() || !sameInode(stat, entry)
-      || stat.size < 1 || stat.size > WORKSPACE_IMAGE_MAX_BYTES) throw new Error("unsafe Workspace image file or size");
+      || stat.size < 1) throw new Error("unsafe Workspace image file or size");
+    if (stat.size > WORKSPACE_IMAGE_MAX_BYTES) {
+      const current = await file.stat();
+      if (!sameInode(stat, current) || current.size !== stat.size || !sameInode(stat, await fs.lstat(pinnedFilePath))) {
+        throw new Error("Workspace image changed during read");
+      }
+      await assertAncestorsUnchanged();
+      throw new WorkspaceImageTooLargeError();
+    }
     const buffer = Buffer.alloc(stat.size + 1);
     let bytesRead = 0;
     while (bytesRead < buffer.length) {

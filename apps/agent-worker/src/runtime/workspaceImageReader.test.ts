@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { test, type TestContext } from "node:test";
-import { readWorkspaceImage, WorkspaceImageNotFoundError } from "./workspaceImageReader.js";
+import { readWorkspaceImage, WORKSPACE_IMAGE_MAX_BYTES, WorkspaceImageNotFoundError, WorkspaceImageTooLargeError } from "./workspaceImageReader.js";
 
 const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
@@ -66,5 +66,49 @@ test("Workspace image reader checks pinned ancestors before reporting a missing 
     return originalOpen(...args);
   });
   await assert.rejects(readWorkspaceImage({ workspacePath, path: "screens/missing.png" }), notMissing);
+  assert.equal(injected, true);
+});
+
+test("Workspace image reader accepts exactly 10 MiB and classifies only larger safe files as oversized", async (t) => {
+  const { workspacePath } = await fixture(t);
+  const input = { workspacePath, path: "screens/a.png" };
+  const imagePath = path.join(workspacePath, input.path);
+  await fs.truncate(imagePath, WORKSPACE_IMAGE_MAX_BYTES);
+  assert.equal((await readWorkspaceImage(input)).bytes.byteLength, WORKSPACE_IMAGE_MAX_BYTES);
+  await fs.truncate(imagePath, WORKSPACE_IMAGE_MAX_BYTES + 1);
+  await assert.rejects(readWorkspaceImage(input), (error: unknown) => {
+    assert.ok(error instanceof WorkspaceImageTooLargeError);
+    assert.equal(error.message, "Workspace image exceeds 10 MiB");
+    assert.equal(error.message.includes(workspacePath), false);
+    return true;
+  });
+});
+
+test("Workspace image reader does not classify oversized symlinks or replaced ancestors as oversized", async (t) => {
+  const { base, workspacePath } = await fixture(t);
+  const imagePath = path.join(workspacePath, "screens/a.png");
+  await fs.truncate(imagePath, WORKSPACE_IMAGE_MAX_BYTES + 1);
+  const notOversized = (error: unknown) => {
+    assert.ok(error instanceof Error);
+    assert.equal(error instanceof WorkspaceImageTooLargeError, false);
+    return true;
+  };
+  await fs.symlink("a.png", path.join(workspacePath, "screens/link.png"));
+  await assert.rejects(readWorkspaceImage({ workspacePath, path: "screens/link.png" }), notOversized);
+  const screens = path.join(workspacePath, "screens");
+  const replacement = path.join(base, "replacement");
+  await fs.mkdir(replacement);
+  const originalOpen = fs.open.bind(fs);
+  let injected = false;
+  t.mock.method(fs, "open", async (...args: Parameters<typeof fs.open>) => {
+    const handle = await originalOpen(...args);
+    if (String(args[0]).endsWith("/a.png")) {
+      injected = true;
+      await fs.rename(screens, `${screens}.old`);
+      await fs.symlink(replacement, screens);
+    }
+    return handle;
+  });
+  await assert.rejects(readWorkspaceImage({ workspacePath, path: "screens/a.png" }), notOversized);
   assert.equal(injected, true);
 });
