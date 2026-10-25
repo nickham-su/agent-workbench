@@ -1554,7 +1554,21 @@ export async function materializePromptAttachments(params: {
             const image = await readWorkspaceImage({ workspacePath: params.run.workspacePath, path: part.path }).catch((error: unknown) => {
               if (error instanceof WorkspaceImageNotFoundError) return "此前已成功查看该图片，但源文件当前不存在，无法再次加载。";
               if (error instanceof WorkspaceImageTooLargeError) return "图片超过大小限制，本轮未加载。";
-              throw new Error("cannot read a valid tool image in this Workspace");
+              if (error instanceof WorkspaceImageReadError) {
+                if (error.reason === "invalid_content") return "图片格式无效，本轮未加载。";
+                if (error.reason === "unsafe_path") return "图片未通过安全校验，本轮未加载。";
+                if (error.reason === "unavailable") return "当前环境无法安全读取图片，本轮未加载。";
+              }
+              // Do not expose filesystem messages, paths, or arbitrary error content.
+              const code = error instanceof Error ? (error as NodeJS.ErrnoException).code : undefined;
+              switch (code) {
+                case "EACCES": case "EPERM": return "图片读取权限不足，本轮未加载。";
+                case "ENOENT": case "ENOTDIR": return "图片路径当前不可用，本轮未加载。";
+                case "ELOOP": return "图片未通过安全校验，本轮未加载。";
+                case "EIO": case "EMFILE": case "ENFILE": case "EBADF": case "EBUSY":
+                  return "图片文件读取失败，本轮未加载。";
+                default: return "图片读取失败，本轮未加载。";
+              }
             });
             if (typeof image === "string") {
               nativeParts.push({ type: "text", text: image });
@@ -4082,4 +4096,4 @@ export async function finalizeToolTextForTest(params: {
 }) {
   return finalizeToolText(params);
 }
-import { readWorkspaceImage, WORKSPACE_IMAGE_MAX_BYTES, WorkspaceImageNotFoundError, WorkspaceImageTooLargeError } from "./workspaceImageReader.js";
+import { readWorkspaceImage, WORKSPACE_IMAGE_MAX_BYTES, WorkspaceImageNotFoundError, WorkspaceImageTooLargeError, WorkspaceImageReadError } from "./workspaceImageReader.js";

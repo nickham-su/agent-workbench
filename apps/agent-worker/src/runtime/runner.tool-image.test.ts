@@ -17,6 +17,8 @@ import { chatEndpointDigest } from "./providers/conversation-state/endpoint-iden
 const missingImageText = "此前已成功查看该图片，但源文件当前不存在，无法再次加载。";
 const outsideWindowText = "图片已超出加载范围，如需查看请重新调用 view_image。";
 const oversizedImageText = "图片超过大小限制，本轮未加载。";
+const invalidImageText = "图片格式无效，本轮未加载。";
+const unsafeImageText = "图片未通过安全校验，本轮未加载。";
 const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x45]);
 const jpg = Buffer.from([0xff, 0xd8, 0xff, 0x45]);
 const assistant = { role: "assistant" as const, content: [
@@ -112,6 +114,8 @@ for (const providerNpm of ["@ai-sdk/openai", "@ai-sdk/deepseek"]) {
     await assert.rejects(prepare(workspacePath, providerNpm, mismatched), /call order/);
     const invalid = structuredClone(input);
     (invalid[1] as any).content[0].output = { type: "image_ref", path: 123 };
+    await assert.rejects(prepare(workspacePath, providerNpm, invalid), /invalid tool result output/);
+    (invalid[1] as any).content[0].output = { type: "image_ref", path: "../private.png" };
     await assert.rejects(prepare(workspacePath, providerNpm, invalid), /invalid tool result output/);
   }));
 
@@ -302,19 +306,109 @@ test("missing historical image preserves adjacent tool text segments", async () 
   }
 }));
 
-test("non-missing historical image errors remain local failures", async (t) => withImages(async (workspacePath) => {
-  const originalOpen = fs.open.bind(fs);
-  for (const code of ["EACCES", "EPERM", "EIO", "ENOTDIR"]) {
-    const mocked = t.mock.method(fs, "open", async (...args: Parameters<typeof fs.open>) => {
-      if (String(args[0]).endsWith("/a.png")) throw Object.assign(new Error("fixture read failure"), { code });
+for (const providerNpm of ["@ai-sdk/openai", "@ai-sdk/deepseek"]) {
+  const native = providerNpm === "@ai-sdk/openai";
+  const placeholder = (texts: string[]) => native
+    ? { type: "content", value: texts.map((text) => ({ type: "text", text })) }
+    : { type: "text", value: texts.join("\n") };
+
+  test(`${providerNpm}: every historical read rejection becomes a controlled, private placeholder`, async (t) => withImages(async (workspacePath) => {
+    const input = [assistant, { ...toolResults, content: [
+      { ...toolResults.content[0]!, output: [{ type: "text", value: "before" }, toolResults.content[0]!.output, { type: "text", value: "after" }] },
+      toolResults.content[1]!,
+    ] }] as Input["messages"];
+    const original = JSON.stringify(input);
+    const originalOpen = fs.open.bind(fs);
+    const secret = "private-read-detail-not-for-model";
+    for (const [code, text] of [
+      ["EACCES", "图片读取权限不足，本轮未加载。"], ["EPERM", "图片读取权限不足，本轮未加载。"],
+      ["EIO", "图片文件读取失败，本轮未加载。"], ["ENOTDIR", "图片路径当前不可用，本轮未加载。"],
+      ["ELOOP", unsafeImageText], ["UNRECOGNIZED_ERRNO", "图片读取失败，本轮未加载。"],
+      [undefined, "图片读取失败，本轮未加载。"],
+    ] as const) {
+      const mocked = t.mock.method(fs, "open", async (...args: Parameters<typeof fs.open>) => {
+        if (String(args[0]).endsWith("/a.png")) throw Object.assign(new Error(secret), { code, path: `${workspacePath}/${secret}` });
+        return originalOpen(...args);
+      });
+      try {
+        const messages = await prepare(workspacePath, providerNpm, input);
+        const results = (messages[1] as Extract<ModelMessage, { role: "tool" }>).content;
+        assert.equal(results[0]!.toolCallId, "call-a");
+        assert.deepEqual(results[0]!.output, placeholder(["before", text, "after"]));
+        assert.equal(messages.length, native ? 2 : 3);
+        if (native) assert.ok(results[1]!.output.type === "content" && results[1]!.output.value[0]?.type === "media");
+        else {
+          const carrier = (messages[2] as Extract<ModelMessage, { role: "user" }>).content;
+          assert.ok(Array.isArray(carrier) && carrier[1]?.type === "file" && carrier[1].filename === "b.jpg");
+        }
+        assert.equal(JSON.stringify(messages).includes(secret), false);
+        assert.equal(JSON.stringify(messages).includes(workspacePath), false);
+        assert.equal(JSON.stringify(messages).includes("UNRECOGNIZED_ERRNO"), false);
+        assert.equal(JSON.stringify(input), original);
+      } finally { mocked.mock.restore(); }
+    }
+    // A non-Error rejection is still contained; an untrusted string is never echoed.
+    const mocked = t.mock.method(fs, "open", async () => { throw secret; });
+    try {
+      const messages = await prepare(workspacePath, providerNpm, [assistant, toolResults] as Input["messages"]);
+      assert.equal(messages.length, 2, "all failures must not create an empty image carrier");
+      for (const result of (messages[1] as Extract<ModelMessage, { role: "tool" }>).content) {
+        assert.deepEqual(result.output, placeholder(["图片读取失败，本轮未加载。"]));
+      }
+      assert.equal(JSON.stringify(messages).includes(secret), false);
+    } finally { mocked.mock.restore(); }
+    const rawMissingRoot = t.mock.method(fs, "open", async (...args: Parameters<typeof fs.open>) => {
+      if (String(args[0]) === workspacePath) throw Object.assign(new Error(secret), { code: "ENOENT" });
       return originalOpen(...args);
     });
-    await assert.rejects(prepare(workspacePath, "@ai-sdk/openai", [assistant, toolResults] as Input["messages"]), /cannot read a valid tool image/);
-    mocked.mock.restore();
+    try {
+      const messages = await prepare(workspacePath, providerNpm, [assistant, toolResults] as Input["messages"]);
+      assert.deepEqual((messages[1] as Extract<ModelMessage, { role: "tool" }>).content[0]!.output,
+        placeholder(["图片路径当前不可用，本轮未加载。"]), "unverified ENOENT must not claim the image was deleted");
+    } finally { rawMissingRoot.mock.restore(); }
+  }));
+
+  for (const failure of ["signature", "empty", "directory", "symlink"] as const) {
+    test(`${providerNpm}: historical ${failure} rejection becomes text without hiding a valid image`, async () => withImages(async (workspacePath) => {
+      const imagePath = path.join(workspacePath, "screens/a.png");
+      if (failure === "signature") await fs.writeFile(imagePath, jpg);
+      else if (failure === "empty") await fs.truncate(imagePath, 0);
+      else {
+        await fs.rm(imagePath);
+        if (failure === "directory") await fs.mkdir(imagePath);
+        else await fs.symlink("b.jpg", imagePath);
+      }
+      const messages = await prepare(workspacePath, providerNpm, [assistant, toolResults] as Input["messages"]);
+      const results = (messages[1] as Extract<ModelMessage, { role: "tool" }>).content;
+      assert.deepEqual(results[0]!.output, placeholder([failure === "signature" || failure === "empty" ? invalidImageText : unsafeImageText]));
+      assert.equal(messages.length, native ? 2 : 3);
+      assert.equal(results[1]!.toolCallId, "call-b");
+    }));
   }
-  await fs.writeFile(path.join(workspacePath, "screens/a.png"), jpg);
-  await assert.rejects(prepare(workspacePath, "@ai-sdk/deepseek", [assistant, toolResults] as Input["messages"]), /cannot read a valid tool image/);
-}));
+
+  test(`${providerNpm}: an ancestor replaced during reading is rejected and projected as text`, async (t) => withImages(async (workspacePath) => {
+    const originalOpen = fs.open.bind(fs);
+    const screens = path.join(workspacePath, "screens");
+    const replacement = path.join(workspacePath, "replacement");
+    await fs.mkdir(replacement);
+    let replaced = false;
+    t.mock.method(fs, "open", async (...args: Parameters<typeof fs.open>) => {
+      const handle = await originalOpen(...args);
+      if (!replaced && String(args[0]).endsWith("/a.png")) {
+        replaced = true;
+        await fs.rename(screens, `${screens}.old`);
+        await fs.symlink(replacement, screens);
+      }
+      return handle;
+    });
+    const messages = await prepare(workspacePath, providerNpm, [assistant, toolResults] as Input["messages"]);
+    assert.equal(replaced, true);
+    assert.equal(messages.length, 2);
+    for (const result of (messages[1] as Extract<ModelMessage, { role: "tool" }>).content) {
+      assert.deepEqual(result.output, placeholder([unsafeImageText]));
+    }
+  }));
+}
 
 test("mixed, failed and separate turns never attach an unrelated image", async () => withImages(async (workspacePath) => {
   const mixed: Input["messages"] = [assistant, { role: "tool", content: [
@@ -566,13 +660,14 @@ for (const provider of [
   }
 }
 
-test("Runner reopens persisted tool image after remote error; deletion and oversize use placeholders on retry", async () => withImages(async (workspacePath) => {
+test("Runner reopens persisted tool image after remote error; read rejections use placeholders on retry", async () => withImages(async (workspacePath) => {
   const originalSetTimeout = globalThis.setTimeout;
   (globalThis as any).setTimeout = ((fn: (...args: any[]) => void, _delay?: number, ...args: any[]) => originalSetTimeout(fn, 0, ...args)) as typeof setTimeout;
   try {
-    for (const secondAttempt of ["replace", "remove", "oversize"] as const) {
+    for (const secondAttempt of ["replace", "remove", "oversize", "invalid", "symlink"] as const) {
       const requests: Array<{ messages: ModelMessage[] }> = [];
       const imagePath = path.join(workspacePath, "screens/a.png");
+      await fs.rm(imagePath, { force: true });
       await fs.writeFile(imagePath, png);
       const runner = new AgentRunner({
         async createStreamingAssistant() { return { result: "updated" }; },
@@ -588,6 +683,11 @@ test("Runner reopens persisted tool image after remote error; deletion and overs
             if (requests.length === 1) {
               if (secondAttempt === "remove") await fs.rm(imagePath);
               else if (secondAttempt === "oversize") await fs.truncate(imagePath, 10 * 1024 * 1024 + 1);
+              else if (secondAttempt === "invalid") await fs.writeFile(imagePath, jpg);
+              else if (secondAttempt === "symlink") {
+                await fs.rm(imagePath);
+                await fs.symlink("b.jpg", imagePath);
+              }
               else await fs.writeFile(imagePath, Buffer.concat([png, Buffer.from([0x59])]));
               yield { type: "error", error: new Error("remote request failed") };
             } else {
@@ -611,7 +711,8 @@ test("Runner reopens persisted tool image after remote error; deletion and overs
       assert.equal(requests.length, 2);
       if (secondAttempt !== "replace") {
         const result = (requests[1]!.messages[2] as Extract<ModelMessage, { role: "tool" }>).content[0]!;
-        assert.deepEqual(result.output, { type: "content", value: [{ type: "text", text: secondAttempt === "remove" ? missingImageText : oversizedImageText }] });
+        assert.deepEqual(result.output, { type: "content", value: [{ type: "text", text: secondAttempt === "remove" ? missingImageText
+            : secondAttempt === "oversize" ? oversizedImageText : secondAttempt === "invalid" ? invalidImageText : unsafeImageText }] });
       } else {
         const media = (message: ModelMessage[]) => (((message[2] as any).content[0].output.value[0]) as { data: string }).data;
         assert.notEqual(media(requests[0]!.messages), media(requests[1]!.messages));

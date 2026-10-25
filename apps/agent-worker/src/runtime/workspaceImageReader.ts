@@ -7,7 +7,7 @@ import type { AgentImageMediaType } from "@agent-workbench/shared/internal-contr
 
 export const WORKSPACE_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
 
-/** Only a missing image entry below an unchanged, validated Workspace is recoverable. */
+/** Identifies a missing image entry below an unchanged, validated Workspace. */
 export class WorkspaceImageNotFoundError extends Error {
   constructor() {
     super("Workspace image source does not exist");
@@ -19,6 +19,14 @@ export class WorkspaceImageTooLargeError extends Error {
   constructor() {
     super("Workspace image exceeds 10 MiB");
     this.name = "WorkspaceImageTooLargeError";
+  }
+}
+
+/** A controlled reason for a rejected read; never includes filesystem error details. */
+export class WorkspaceImageReadError extends Error {
+  constructor(readonly reason: "invalid_content" | "unsafe_path" | "unavailable", message: string) {
+    super(message);
+    this.name = "WorkspaceImageReadError";
   }
 }
 
@@ -42,7 +50,7 @@ async function workspaceRootAncestors(absoluteRoot: string) {
   for (const part of parts) {
     logicalPath = path.join(logicalPath, part);
     const stat = await fs.lstat(logicalPath);
-    if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("unsafe Workspace root ancestor");
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw new WorkspaceImageReadError("unsafe_path", "unsafe Workspace root ancestor");
     ancestors.push({ logicalPath, stat });
   }
   return ancestors;
@@ -62,36 +70,36 @@ function mediaTypeForExtension(filename: string): AgentImageMediaType | null {
  * are returned until all ancestors and the final entry have been checked again.
  */
 export async function readWorkspaceImage(input: { workspacePath: string; path: string }): Promise<{ bytes: Uint8Array; mediaType: AgentImageMediaType }> {
-  if (!Value.Check(AgentWorkspaceImagePathSchema, input.path)) throw new Error("invalid Workspace image path");
+  if (!Value.Check(AgentWorkspaceImagePathSchema, input.path)) throw new WorkspaceImageReadError("unsafe_path", "invalid Workspace image path");
   const segments = input.path.split("/");
   const expectedType = mediaTypeForExtension(segments[segments.length - 1]!);
-  if (!expectedType) throw new Error("unsupported Workspace image extension");
+  if (!expectedType) throw new WorkspaceImageReadError("invalid_content", "unsupported Workspace image extension");
   const absoluteRoot = path.resolve(input.workspacePath);
-  if (process.platform !== "linux" && process.platform !== "darwin") throw new Error("secure Workspace image read is unavailable on this platform");
+  if (process.platform !== "linux" && process.platform !== "darwin") throw new WorkspaceImageReadError("unavailable", "secure Workspace image read is unavailable on this platform");
   const prefix = process.platform === "linux" ? "/proc/self/fd" : "/dev/fd";
   const opened: Array<{ handle: fs.FileHandle; logicalPath: string; stat: import("node:fs").Stats }> = [];
   let file: fs.FileHandle | null = null;
   try {
     const rootAncestors = await workspaceRootAncestors(absoluteRoot);
     const rootLstat = await fs.lstat(absoluteRoot);
-    if (!rootLstat.isDirectory() || rootLstat.isSymbolicLink()) throw new Error("unsafe Workspace root");
+    if (!rootLstat.isDirectory() || rootLstat.isSymbolicLink()) throw new WorkspaceImageReadError("unsafe_path", "unsafe Workspace root");
     const root = await fs.open(absoluteRoot, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
     opened.push({ handle: root, logicalPath: absoluteRoot, stat: await root.stat() });
-    if (!sameInode(rootLstat, opened[0]!.stat)) throw new Error("Workspace root changed");
+    if (!sameInode(rootLstat, opened[0]!.stat)) throw new WorkspaceImageReadError("unsafe_path", "Workspace root changed");
     const assertAncestorsUnchanged = async () => {
       for (let i = opened.length - 1; i >= 0; i -= 1) {
         const dir = opened[i]!;
         const current = await fs.lstat(dir.logicalPath);
-        if (current.isSymbolicLink() || !current.isDirectory() || !sameInode(dir.stat, current)) throw new Error("Workspace image directory changed during read");
+        if (current.isSymbolicLink() || !current.isDirectory() || !sameInode(dir.stat, current)) throw new WorkspaceImageReadError("unsafe_path", "Workspace image directory changed during read");
         if (i > 0) {
           const parentDir = opened[i - 1]!;
           const pinned = await fs.lstat(path.join(prefix, String(parentDir.handle.fd), segments[i - 1]!));
-          if (!sameInode(pinned, dir.stat) || pinned.isSymbolicLink()) throw new Error("Workspace image ancestor changed during read");
+          if (!sameInode(pinned, dir.stat) || pinned.isSymbolicLink()) throw new WorkspaceImageReadError("unsafe_path", "Workspace image ancestor changed during read");
         }
       }
       for (const ancestor of rootAncestors) {
         const current = await fs.lstat(ancestor.logicalPath);
-        if (!current.isDirectory() || current.isSymbolicLink() || !sameInode(ancestor.stat, current)) throw new Error("Workspace root ancestor changed during read");
+        if (!current.isDirectory() || current.isSymbolicLink() || !sameInode(ancestor.stat, current)) throw new WorkspaceImageReadError("unsafe_path", "Workspace root ancestor changed during read");
       }
     };
     const readImageEntry = async <T>(read: () => Promise<T>): Promise<T> => {
@@ -110,23 +118,25 @@ export async function readWorkspaceImage(input: { workspacePath: string; path: s
       const parent = opened[opened.length - 1]!;
       const pinnedPath = path.join(prefix, String(parent.handle.fd), segment);
       const entry = await readImageEntry(() => fs.lstat(pinnedPath));
-      if (!entry.isDirectory() || entry.isSymbolicLink()) throw new Error("unsafe Workspace image directory");
+      if (!entry.isDirectory() || entry.isSymbolicLink()) throw new WorkspaceImageReadError("unsafe_path", "unsafe Workspace image directory");
       const directory = await fs.open(pinnedPath, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
       const stat = await directory.stat();
       opened.push({ handle: directory, logicalPath: path.join(parent.logicalPath, segment), stat });
-      if (!sameInode(entry, stat)) throw new Error("Workspace image directory changed");
+      if (!sameInode(entry, stat)) throw new WorkspaceImageReadError("unsafe_path", "Workspace image directory changed");
     }
     const parent = opened[opened.length - 1]!;
     const pinnedFilePath = path.join(prefix, String(parent.handle.fd), segments[segments.length - 1]!);
     file = await readImageEntry(() => fs.open(pinnedFilePath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK));
     const stat = await file.stat();
     const entry = await fs.lstat(pinnedFilePath);
-    if (!stat.isFile() || !entry.isFile() || entry.isSymbolicLink() || !sameInode(stat, entry)
-      || stat.size < 1) throw new Error("unsafe Workspace image file or size");
+    if (!stat.isFile() || !entry.isFile() || entry.isSymbolicLink() || !sameInode(stat, entry)) {
+      throw new WorkspaceImageReadError("unsafe_path", "unsafe Workspace image file or size");
+    }
+    if (stat.size < 1) throw new WorkspaceImageReadError("invalid_content", "Workspace image is empty");
     if (stat.size > WORKSPACE_IMAGE_MAX_BYTES) {
       const current = await file.stat();
       if (!sameInode(stat, current) || current.size !== stat.size || !sameInode(stat, await fs.lstat(pinnedFilePath))) {
-        throw new Error("Workspace image changed during read");
+        throw new WorkspaceImageReadError("unsafe_path", "Workspace image changed during read");
       }
       await assertAncestorsUnchanged();
       throw new WorkspaceImageTooLargeError();
@@ -139,11 +149,11 @@ export async function readWorkspaceImage(input: { workspacePath: string; path: s
       bytesRead += result.bytesRead;
     }
     if (bytesRead !== stat.size || !sameInode(stat, await file.stat()) || (await file.stat()).size !== stat.size) {
-      throw new Error("Workspace image changed during read");
+      throw new WorkspaceImageReadError("unsafe_path", "Workspace image changed during read");
     }
     const mediaType = detectWorkspaceImageMediaType(buffer.subarray(0, bytesRead));
-    if (!mediaType || mediaType !== expectedType) throw new Error("Workspace image signature does not match its extension");
-    if (!sameInode(stat, await fs.lstat(pinnedFilePath))) throw new Error("Workspace image path changed during read");
+    if (!mediaType || mediaType !== expectedType) throw new WorkspaceImageReadError("invalid_content", "Workspace image signature does not match its extension");
+    if (!sameInode(stat, await fs.lstat(pinnedFilePath))) throw new WorkspaceImageReadError("unsafe_path", "Workspace image path changed during read");
     await assertAncestorsUnchanged();
     return { bytes: buffer.subarray(0, bytesRead), mediaType };
   } finally {

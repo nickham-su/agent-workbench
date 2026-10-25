@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { test, type TestContext } from "node:test";
-import { readWorkspaceImage, WORKSPACE_IMAGE_MAX_BYTES, WorkspaceImageNotFoundError, WorkspaceImageTooLargeError } from "./workspaceImageReader.js";
+import { readWorkspaceImage, WORKSPACE_IMAGE_MAX_BYTES, WorkspaceImageNotFoundError, WorkspaceImageTooLargeError, WorkspaceImageReadError } from "./workspaceImageReader.js";
 
 const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
@@ -111,4 +111,65 @@ test("Workspace image reader does not classify oversized symlinks or replaced an
   });
   await assert.rejects(readWorkspaceImage({ workspacePath, path: "screens/a.png" }), notOversized);
   assert.equal(injected, true);
+});
+
+
+test("Workspace image reader classifies invalid content but still rejects without bytes and closes handles", async (t) => {
+  const { workspacePath } = await fixture(t);
+  const originalOpen = fs.open.bind(fs);
+  const handles: fs.FileHandle[] = [];
+  t.mock.method(fs, "open", async (...args: Parameters<typeof fs.open>) => {
+    const handle = await originalOpen(...args);
+    handles.push(handle);
+    return handle;
+  });
+  for (const bytes of [Buffer.alloc(0), Buffer.from("not an image")]) {
+    await fs.writeFile(path.join(workspacePath, "screens/a.png"), bytes);
+    await assert.rejects(readWorkspaceImage({ workspacePath, path: "screens/a.png" }), (error: unknown) => {
+      assert.ok(error instanceof WorkspaceImageReadError);
+      assert.equal(error.reason, "invalid_content");
+      return true;
+    });
+    assert.ok(handles.length > 0);
+    assert.ok(handles.every((handle) => handle.fd === -1), "rejected reads must close file and directory handles");
+  }
+});
+
+test("Workspace image reader rejects unsafe paths without following a sibling symlink", async (t) => {
+  const { base, workspacePath } = await fixture(t);
+  const sibling = path.join(base, "private.png");
+  await fs.writeFile(sibling, png);
+  await fs.symlink(sibling, path.join(workspacePath, "screens/link.png"));
+  const originalOpen = fs.open.bind(fs);
+  let reads = 0;
+  const handles: fs.FileHandle[] = [];
+  t.mock.method(fs, "open", async (...args: Parameters<typeof fs.open>) => {
+    const handle = await originalOpen(...args);
+    handles.push(handle);
+    const originalRead = handle.read.bind(handle);
+    t.mock.method(handle, "read", (...readArgs: Parameters<typeof handle.read>) => {
+      reads += 1;
+      return originalRead(...readArgs);
+    });
+    return handle;
+  });
+  for (const imagePath of ["screens/link.png", "../private.png", "screens"]) {
+    await assert.rejects(readWorkspaceImage({ workspacePath, path: imagePath }));
+  }
+  assert.equal(reads, 0, "no image content may be read through the symlink");
+  assert.ok(handles.every((handle) => handle.fd === -1));
+});
+
+test("Workspace image reader preserves permission errors instead of returning image bytes", async (t) => {
+  const { workspacePath } = await fixture(t);
+  const originalOpen = fs.open.bind(fs);
+  for (const code of ["EACCES", "EPERM"]) {
+    const failure = Object.assign(new Error("private permission detail"), { code });
+    const mocked = t.mock.method(fs, "open", async (...args: Parameters<typeof fs.open>) => {
+      if (String(args[0]).endsWith("/a.png")) throw failure;
+      return originalOpen(...args);
+    });
+    try { await assert.rejects(readWorkspaceImage({ workspacePath, path: "screens/a.png" }), (error) => error === failure); }
+    finally { mocked.mock.restore(); }
+  }
 });

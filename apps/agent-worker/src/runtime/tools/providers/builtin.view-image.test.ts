@@ -94,3 +94,22 @@ test("view_image inode competition never returns bytes or reads a sibling file",
     await fs.unlink(`${image}.old`);
   }
 });
+
+
+test("a new view_image permission failure remains a tool error, never an image placeholder", async (t) => {
+  const { workspacePath, provider, ctx } = await fixture(t);
+  const imagePath = "repo/screenshots/page.png";
+  await fs.writeFile(path.join(workspacePath, imagePath), png);
+  const originalOpen = fs.open.bind(fs);
+  for (const code of ["EACCES", "EPERM"]) {
+    const mocked = t.mock.method(fs, "open", async (...args: Parameters<typeof fs.open>) => {
+      if (String(args[0]).endsWith("/page.png")) throw Object.assign(new Error("private permission details"), { code });
+      return originalOpen(...args);
+    });
+    try {
+      await assert.rejects(provider.execute("view_image", { path: imagePath }, ctx), {
+        message: "view_image cannot read a valid Workspace image at this path",
+      });
+    } finally { mocked.mock.restore(); }
+  }
+});
