@@ -89,6 +89,8 @@ function spawnedRuntime(options: {
   const sessions = new Set<string>();
   const commands: string[][] = [], payloads: TerminalEnvironmentPayload[] = [], killed: string[] = [];
   const operations: TerminalRuntimeOperations = {
+    readRunIdentity: async () => "11111111-2222-3333-4444-555555555555:100",
+    preflightRunGuard: async () => {},
     hasSession: async ({ sessionName }) => sessions.has(sessionName) ? "exists" : "not_found",
     killSession: async ({ sessionName }) => { killed.push(sessionName); sessions.delete(sessionName); },
     prepareEnvironmentLaunch: async (params) => {

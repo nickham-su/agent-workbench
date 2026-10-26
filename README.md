@@ -82,10 +82,19 @@ Reliable restart/close of configured services requires Linux (kernel 5.3+),
 `/usr/bin/python3` (Python 3.9+ with `pidfd_open`/`pidfd_send_signal`), and Linux
 child-subreaper support with procfs mounted. The Docker image already provides these prerequisites.
 Missing capabilities fail explicitly instead of starting an untracked service.
-Runs created by older versions must be stopped manually and their terminal tab
-closed once before creating a new managed run. Already-orphaned services are not
+Runs created before managed run controls were introduced must be stopped manually
+and their terminal tab closed once before creating a new managed run. Already-orphaned services are not
 guessed or killed by port. External service managers such as PM2/Docker retain
 responsibility for services started through them.
+
+After a full container or machine restart, existing terminal APIs clean stale runs
+whose tmux sessions are absent, without waiting for the previous launcher. Runs
+are identified by the kernel boot ID and PID 1 starttime. **The first upgrade to
+this recovery behavior requires a full container or machine restart, not just an
+API restart:** old terminal sessions without this identity will be treated as
+stale; terminal configurations and workspace files are preserved. Use one API
+instance per data directory and a private PID namespace (the default Compose
+setup); do not share its data with another running container or machine.
 
 **Workspace Dev Ports**
 

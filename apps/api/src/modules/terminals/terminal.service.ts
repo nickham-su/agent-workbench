@@ -1,4 +1,5 @@
 import { setTimeout as delay } from "node:timers/promises";
+import type { readTerminalRunIdentity } from "./terminal-run-identity.js";
 import {
   getTerminalRunControl, preflightTerminalRunGuard, armTerminalRunControl, prepareTerminalRunControl,
   markTerminalRunLaunching, stopTerminalRunControl, cleanupTerminalRunControl, clearTerminalRunControl,
@@ -76,10 +77,12 @@ export type TerminalRuntimeOperations = {
   waitEnvironmentLaunch?: typeof waitTerminalEnvironmentLaunch;
   cleanupEnvironmentLaunch?: typeof cleanupTerminalEnvironmentLaunch;
   stopRunControl?: typeof stopTerminalRunControl;
+  readRunIdentity?: typeof readTerminalRunIdentity;
+  preflightRunGuard?: typeof preflightTerminalRunGuard;
 };
 
-type TerminalSettlementOperations = Pick<TerminalRuntimeOperations, "hasSession" | "cleanupAuthArtifacts" | "cleanupEnvironmentLaunch" | "stopRunControl">;
-type TerminalStopOperations = Pick<TerminalRuntimeOperations, "hasSession" | "killSession" | "stopRunControl">;
+type TerminalSettlementOperations = Pick<TerminalRuntimeOperations, "hasSession" | "cleanupAuthArtifacts" | "cleanupEnvironmentLaunch" | "stopRunControl" | "readRunIdentity">;
+type TerminalStopOperations = Pick<TerminalRuntimeOperations, "hasSession" | "killSession" | "stopRunControl" | "readRunIdentity">;
 export type TerminalSettlement = "closed" | "cleanup_pending" | "env_cleanup_pending" | "session_exists" | "session_unknown" | "run_unknown";
 
 const defaultTerminalRuntimeOperations: TerminalRuntimeOperations = {
@@ -336,7 +339,7 @@ export async function stopTerminalSession(
   ctx: AppContext, term: TerminalRecord, runtimeOperations: TerminalStopOperations = defaultTerminalRuntimeOperations,
 ): Promise<void> {
   try {
-    await (runtimeOperations.stopRunControl ?? stopTerminalRunControl)({ db: ctx.db, dataDir: ctx.dataDir, terminalId: term.id, sessionName: term.sessionName });
+    await (runtimeOperations.stopRunControl ?? stopTerminalRunControl)({ db: ctx.db, dataDir: ctx.dataDir, terminalId: term.id, sessionName: term.sessionName, readIdentity: runtimeOperations.readRunIdentity, hasSession: runtimeOperations.hasSession });
     const request = { sessionName: term.sessionName, cwd: ctx.dataDir };
     if (await terminalSessionPresence(runtimeOperations.hasSession, request) === "not_found") return;
     try { await runtimeOperations.killSession(request); } catch { /* A stopped launcher may have concurrently closed tmux. Re-probe. */ }
@@ -368,11 +371,11 @@ export async function cleanupTerminalEnvironmentAttempts(
 /** Only called in this module after current absence evidence (or before any tmux side effect). */
 async function settleStoppedTerminal(
   ctx: AppContext, logger: FastifyBaseLogger, terminalId: string,
-  runtimeOperations: Pick<TerminalRuntimeOperations, "cleanupAuthArtifacts" | "cleanupEnvironmentLaunch" | "stopRunControl">,
+  runtimeOperations: Pick<TerminalRuntimeOperations, "hasSession" | "cleanupAuthArtifacts" | "cleanupEnvironmentLaunch" | "stopRunControl" | "readRunIdentity">,
 ): Promise<"closed" | "cleanup_pending" | "env_cleanup_pending"> {
   const term = getTerminal(ctx.db, terminalId);
   if (term) {
-    try { await (runtimeOperations.stopRunControl ?? stopTerminalRunControl)({ db: ctx.db, dataDir: ctx.dataDir, terminalId, sessionName: term.sessionName }); }
+    try { await (runtimeOperations.stopRunControl ?? stopTerminalRunControl)({ db: ctx.db, dataDir: ctx.dataDir, terminalId, sessionName: term.sessionName, readIdentity: runtimeOperations.readRunIdentity, hasSession: runtimeOperations.hasSession }); }
     catch { return "env_cleanup_pending"; }
   }
   try { updateTerminalStatus(ctx.db, terminalId, "errored", nowMs()); }
@@ -447,9 +450,9 @@ export async function createTerminal(
     let baseEnv: Record<string, string>;
     try { baseEnv = copyTerminalEnvironmentLayer(process.env, true); }
     catch (error) { throw terminalCreateError(error); }
-    if (params.startup) await preflightTerminalRunGuard();
-    const previous = params.configId ? getTerminalByConfig(ctx.db, workspaceId, params.configId) : null;
     const runtimeOperations = params.runtimeOperations ?? defaultTerminalRuntimeOperations;
+    if (params.startup) await (runtimeOperations.preflightRunGuard ?? preflightTerminalRunGuard)();
+    const previous = params.configId ? getTerminalByConfig(ctx.db, workspaceId, params.configId) : null;
     // Settle the old launch before entering the new launch's failure cleanup. Its
     // durable auth/environment locators must survive an uncertain stop.
     if (previous) {
@@ -500,7 +503,7 @@ export async function createTerminal(
         systemEnv[pair.slice(0, separator)] = pair.slice(separator + 1);
       }
       const cwd = startupCwd ?? await resolveTerminalCwd(ctx, ws);
-      const runControl = params.startup ? await prepareTerminalRunControl({ db: ctx.db, dataDir: ctx.dataDir, terminalId, sessionName }) : undefined;
+      const runControl = params.startup ? await prepareTerminalRunControl({ db: ctx.db, dataDir: ctx.dataDir, terminalId, sessionName, readIdentity: runtimeOperations.readRunIdentity }) : undefined;
       for (let index = 0; index < (params.startup ? 1 : 2); index++) {
         const shell = index === 0 ? specifiedShell || "bash" : "sh";
         const launch = await (runtimeOperations.prepareEnvironmentLaunch ?? prepareTerminalEnvironmentLaunch)({
@@ -587,7 +590,7 @@ export async function createTerminal(
       let settlement: "closed" | "cleanup_pending" | "env_cleanup_pending" = "env_cleanup_pending";
       try {
         if (tmuxMayExist) await stopTerminalSession(ctx, term, runtimeOperations);
-        else await (runtimeOperations.stopRunControl ?? stopTerminalRunControl)({ db: ctx.db, dataDir: ctx.dataDir, terminalId, sessionName });
+        else await (runtimeOperations.stopRunControl ?? stopTerminalRunControl)({ db: ctx.db, dataDir: ctx.dataDir, terminalId, sessionName, readIdentity: runtimeOperations.readRunIdentity, hasSession: runtimeOperations.hasSession });
         // No writer entered means these armed rows cannot have produced auth artifacts.
         if (!authArtifactWriteStarted) {
           ctx.db.transaction(() => {
@@ -657,7 +660,7 @@ export async function settleTerminalAfterSessionStopped(
       logger.warn({ terminalId, code: "TERMINAL_SESSION_PRESENCE_UNKNOWN" }, "terminal presence remains unknown");
       return "session_unknown";
     }
-    try { await (runtimeOperations.stopRunControl ?? stopTerminalRunControl)({ db: ctx.db, dataDir: ctx.dataDir, terminalId: term.id, sessionName: term.sessionName }); }
+    try { await (runtimeOperations.stopRunControl ?? stopTerminalRunControl)({ db: ctx.db, dataDir: ctx.dataDir, terminalId: term.id, sessionName: term.sessionName, readIdentity: runtimeOperations.readRunIdentity, hasSession: runtimeOperations.hasSession }); }
     catch { return "run_unknown"; }
     return settleStoppedTerminal(ctx, logger, term.id, runtimeOperations);
   });
@@ -665,7 +668,7 @@ export async function settleTerminalAfterSessionStopped(
 
 export async function deleteTerminal(
   ctx: AppContext, logger: FastifyBaseLogger, terminalId: string,
-  runtimeOperations: Pick<TerminalRuntimeOperations, "hasSession" | "killSession" | "cleanupAuthArtifacts" | "cleanupEnvironmentLaunch" | "stopRunControl"> = defaultTerminalRuntimeOperations,
+  runtimeOperations: Pick<TerminalRuntimeOperations, "hasSession" | "killSession" | "cleanupAuthArtifacts" | "cleanupEnvironmentLaunch" | "stopRunControl" | "readRunIdentity"> = defaultTerminalRuntimeOperations,
 ) {
   const candidate = await getTerminalById(ctx, terminalId);
   return workspaceLifecycleCoordinator.withAdmission(candidate.workspaceId, async () => {

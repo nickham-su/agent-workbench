@@ -6,6 +6,8 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import type { Db } from "../../infra/db/db.js";
+import { tmuxHasSession } from "../../infra/tmux/session.js";
+import { isTerminalRunIdentity, readTerminalRunIdentity } from "./terminal-run-identity.js";
 import { newId } from "../../utils/ids.js";
 import { HttpError } from "../../app/errors.js";
 import {
@@ -140,9 +142,15 @@ export async function readTerminalRunRequest(control: OpenTerminalRunControl): P
 /** A durable mailbox is the control endpoint: no socket path limit or inherited
  * listener. Only the gated API writes requests; only this run's launcher writes
  * status. Both use pinned private inodes. No command/env is stored here. */
-export async function prepareTerminalRunControl(params: { db: Db; dataDir: string; terminalId: string; sessionName: string }): Promise<TerminalRunLocator> {
+export async function prepareTerminalRunControl(params: {
+  db: Db; dataDir: string; terminalId: string; sessionName: string; readIdentity?: () => Promise<string>;
+}): Promise<TerminalRunLocator> {
   const armed = getTerminalRunControl(params.db, params.terminalId);
   if (!armed || armed.phase !== "preparing" || armed.sessionName !== params.sessionName) terminalEnvironmentProtocolError();
+  // Missing identity is compatible only with old runs deployed through a full
+  // container/machine restart. Never authorize a new run without its identity.
+  const runtimeIdentity = await (params.readIdentity ?? readTerminalRunIdentity)();
+  if (!isTerminalRunIdentity(runtimeIdentity)) throw new HttpError(503, "The terminal runtime identity could not be confirmed. No new run was started.", "TERMINAL_RUN_IDENTITY_UNAVAILABLE");
   const runId = newId("tr"), uid = process.getuid!();
   let data: SecureDirectory | undefined, root: SecureDirectory | undefined, directory: SecureDirectory | undefined;
   let preparation: TerminalRunPreparation | undefined;
@@ -158,7 +166,7 @@ export async function prepareTerminalRunControl(params: { db: Db; dataDir: strin
     await fs.mkdir(path.join(root.fdPath, runId), { mode: 0o700 });
     directory = await openExistingSecureChildDirectory(root, runId);
     preparation = {
-      version: 1, preparing: true, runId, terminalId: params.terminalId, sessionName: params.sessionName, dataDir: path.resolve(params.dataDir), ownerUid: uid,
+      version: 1, preparing: true, runId, terminalId: params.terminalId, sessionName: params.sessionName, dataDir: path.resolve(params.dataDir), ownerUid: uid, runtimeIdentity,
       dataRoot: terminalEnvironmentIdentity(data.stat), runRoot: terminalEnvironmentIdentity(root.stat),
       directory: terminalEnvironmentIdentity(directory.stat), request: null, status: null,
     };
@@ -208,7 +216,10 @@ export async function claimTerminalRunStart(control: OpenTerminalRunControl): Pr
   await assertTerminalRunControlCurrent(control);
   return true;
 }
-export async function stopTerminalRunControl(params: { db: Db; dataDir: string; terminalId: string; sessionName: string; timeoutMs?: number }): Promise<void> {
+export async function stopTerminalRunControl(params: {
+  db: Db; dataDir: string; terminalId: string; sessionName: string; timeoutMs?: number;
+  readIdentity?: () => Promise<string>; hasSession?: typeof tmuxHasSession;
+}): Promise<void> {
   const record = getTerminalRunControl(params.db, params.terminalId);
   if (!record) return;
   if (record.sessionName !== params.sessionName) terminalEnvironmentProtocolError();
@@ -224,6 +235,9 @@ export async function stopTerminalRunControl(params: { db: Db; dataDir: string; 
   }
   if (!record.locator || path.resolve(params.dataDir) !== record.locator.dataDir) terminalEnvironmentProtocolError();
   const locator = record.locator;
+  const markStopped = () => {
+    if (params.db.prepare("update terminal_run_controls set phase = 'stopped' where terminal_id = ? and session_name = ? and locator_json = ?").run(params.terminalId, params.sessionName, JSON.stringify(locator)).changes !== 1) terminalEnvironmentProtocolError();
+  };
   let control: OpenTerminalRunControl | undefined;
   try {
     control = await openTerminalRunControl(locator);
@@ -231,6 +245,18 @@ export async function stopTerminalRunControl(params: { db: Db; dataDir: string; 
       // We cancelled before a launcher won start ownership; it can never spawn.
       await writeTerminalRunStatus(control, { version: 1, runId: locator.runId, requestId: "cancelled", state: "stopped" });
     } else {
+      let currentIdentity: string | undefined;
+      try { currentIdentity = await (params.readIdentity ?? readTerminalRunIdentity)(); }
+      catch { /* Unknown identity is not restart proof; retain the stop protocol. */ }
+      if (isTerminalRunIdentity(currentIdentity) && locator.runtimeIdentity !== currentIdentity) {
+        // DELETE/restart stop before probing tmux. Only a fresh probe inside the
+        // same Workspace gate may authorize this cross-runtime shortcut.
+        if (await (params.hasSession ?? tmuxHasSession)({ sessionName: params.sessionName, cwd: params.dataDir }) === "not_found") {
+          await assertTerminalRunControlCurrent(control);
+          markStopped();
+          return;
+        }
+      }
       const request: TerminalRunMessage = { version: 1, runId: locator.runId, requestId: newId("stop"), action: "stop" };
       await writePinned(control, "request", request);
     }
@@ -239,7 +265,7 @@ export async function stopTerminalRunControl(params: { db: Db; dataDir: string; 
       try {
         const status = await readTerminalRunStatus(control);
         if (status.state === "stopped") {
-          if (params.db.prepare("update terminal_run_controls set phase = 'stopped' where terminal_id = ? and session_name = ? and locator_json = ?").run(params.terminalId, params.sessionName, JSON.stringify(locator)).changes !== 1) terminalEnvironmentProtocolError();
+          markStopped();
           return;
         }
         if (status.state === "unknown") break;

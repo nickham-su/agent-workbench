@@ -22,6 +22,7 @@ import { runTerminalEnvironmentLauncher } from "./terminal-env-launcher.js";
 import { getTerminal, getTerminalByConfig, listVisibleTerminalsByWorkspace } from "./terminal.store.js";
 import { terminalSshKeyPath } from "./terminal.gitAuth.js";
 import { armTerminalAuthCleanupIntent, listTerminalAuthCleanupIntents, updateTerminalAuthCleanupIntent } from "./terminal-auth-cleanup-intent.store.js";
+import { openTerminalRunControl, closeTerminalRunControl, claimTerminalRunStart, stopTerminalRunControl, getTerminalRunControl } from "./terminal-run-control.js";
 import { buildTerminalStartupBootstrap, TERMINAL_STARTUP_BOOTSTRAP_NAME } from "./terminal-startup-bootstrap.js";
 
 const fixtures: Array<{ root: string; db: Database.Database }> = [];
@@ -43,6 +44,8 @@ function runtime(status: "spawned" | "missing" | "timeout" = "spawned") {
   const bootstraps: string[] = [];
   const sessions = new Set<string>(), starts: Array<{ sessionName: string; cwd: string; command: string[] }> = [];
   const operations: TerminalRuntimeOperations = {
+    readRunIdentity: async () => "11111111-2222-3333-4444-555555555555:100",
+    preflightRunGuard: async () => {},
     hasSession: async ({ sessionName }) => sessions.has(sessionName) ? "exists" : "not_found",
     killSession: async ({ sessionName }) => { sessions.delete(sessionName); },
     newSession: async (params) => {
@@ -552,5 +555,39 @@ test("explicit close with environment cleanup pending keeps its managed tab and 
   assert.deepEqual(getTerminalEnvironmentLaunchAttempt(f.db, pending.attempt.id), attempt);
   assert.deepEqual(listTerminalAuthCleanupIntents(f.db, first.id), artifact.intents);
   assert.equal(await fs.readFile(artifact.filename, "utf8"), "fixture-auth-material");
+  await app.close();
+});
+
+test("rerun after runtime restart uses the shared stop recovery and persists the new identity", async () => {
+  const f = await fixture(), app = Fastify(), fake = runtime();
+  const config = await saveWorkspaceTerminalConfig(f.ctx, "ws", { name: "recover", cwd: ".", command: "true" });
+  const first = await runWorkspaceTerminalConfig(f.ctx, app.log, "ws", config.id, fake.operations);
+  const before = getTerminalRunControl(f.db, first.id)!;
+  assert.equal(before.locator?.runtimeIdentity, "11111111-2222-3333-4444-555555555555:100");
+  const control = await openTerminalRunControl(before.locator!);
+  try { assert.equal(await claimTerminalRunStart(control), true); } finally { await closeTerminalRunControl(control); }
+  const nextIdentity = "11111111-2222-3333-4444-555555555555:200";
+  const rerun = await runWorkspaceTerminalConfig(f.ctx, app.log, "ws", config.id, {
+    ...fake.operations,
+    readRunIdentity: async () => nextIdentity,
+    hasSession: async (params) => params.sessionName === first.sessionName ? "not_found" : fake.operations.hasSession(params),
+    stopRunControl: (params) => stopTerminalRunControl({ ...params, timeoutMs: 0 }),
+  });
+  assert.equal(rerun.id, first.id); assert.notEqual(rerun.sessionName, first.sessionName);
+  assert.equal(getTerminalRunControl(f.db, first.id)?.locator?.runtimeIdentity, nextIdentity);
+  assert.equal(fake.starts.length, 2);
+  assert.equal(listVisibleTerminalsByWorkspace(f.db, "ws").length, 1);
+  await app.close();
+});
+
+test("unavailable runtime identity never authorizes a new managed process", async () => {
+  const f = await fixture(), app = Fastify(), fake = runtime();
+  const config = await saveWorkspaceTerminalConfig(f.ctx, "ws", { name: "no-identity", cwd: ".", command: "true" });
+  await assert.rejects(runWorkspaceTerminalConfig(f.ctx, app.log, "ws", config.id, {
+    ...fake.operations, readRunIdentity: async () => { throw new HttpError(503, "Identity unavailable.", "TERMINAL_RUN_IDENTITY_UNAVAILABLE"); },
+  }), (error: unknown) => error instanceof HttpError && error.code === "TERMINAL_RUN_IDENTITY_UNAVAILABLE");
+  assert.equal(fake.starts.length, 0);
+  assert.equal(listVisibleTerminalsByWorkspace(f.db, "ws")[0]?.status, "closed");
+  assert.deepEqual(listTerminalEnvironmentLaunchAttempts(f.db, listVisibleTerminalsByWorkspace(f.db, "ws")[0]!.id), []);
   await app.close();
 });
