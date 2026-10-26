@@ -55,6 +55,9 @@
         :input="part.input"
         :execution="execution"
         :now="now"
+        :interactive="viewImagePath !== null"
+        :show-title="part.toolName !== 'view_image'"
+        @activate="openImage"
       />
     </div>
   </section>
@@ -74,6 +77,7 @@ import AgentTodoListCard from "./AgentTodoListCard.vue";
 import AgentToolCallRow from "./AgentToolCallRow.vue";
 import AgentWriteCard from "./AgentWriteCard.vue";
 import { parseTodoDisplay } from "./agentToolExecutionDisplay";
+import { getAgentViewImagePath } from "./agentViewImage";
 
 const props = defineProps<{
   workspaceId: string;
@@ -90,8 +94,14 @@ const props = defineProps<{
 const emit = defineEmits<{
   "request-detail": [executionId: string];
   "open-subtask": [sessionId: string];
+  "open-image": [path: string];
   "toggle-todo": [];
 }>();
+const viewImagePath = computed(() => getAgentViewImagePath(props.part, props.execution));
+function openImage() {
+  if (viewImagePath.value !== null) emit("open-image", viewImagePath.value);
+}
+
 const todo = computed(() => parseTodoDisplay(props.detail?.structuredResult));
 const compactToolStyle = {
   fontSize: "calc(var(--agent-font-size, 13px) - 3px)",

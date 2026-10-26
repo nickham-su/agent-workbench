@@ -16,6 +16,7 @@ export const componentTests = [
   "src/features/workspace/tools/agent/agentArtifactCards.component.test.ts",
   "src/features/workspace/tools/agent/agentMarkdownFileLinks.component.test.ts",
   "src/features/workspace/tools/agent/agentRichToolCards.component.test.ts",
+  "src/features/workspace/tools/agent/agentViewImage.component.test.ts",
   "src/features/workspace/tools/agent/agentSystemMessage.component.test.ts",
   "src/features/workspace/tools/agent/AgentAttachmentPreviewModal.component.test.ts",
   "src/features/workspace/tools/agent/AgentClientPane.component.test.ts",

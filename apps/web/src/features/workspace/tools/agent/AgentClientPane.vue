@@ -171,6 +171,7 @@
               :now="now"
               @request-detail="ensureToolDetail"
               @open-subtask="emit('open-subtask', $event)"
+              @open-image="onOpenImage"
               @toggle-todo="toggleTodoCollapse(row.part.id)"
             />
           </article>
@@ -455,6 +456,7 @@ import AssistantMarkdownMessage from "./AssistantMarkdownMessage.vue";
 import { workspaceContextKey } from "../../context";
 import { workspaceHostKey } from "../../host";
 import { resolveAgentMarkdownFileLink, type AgentMarkdownFileLink, type AgentMarkdownFileLinkError } from "./agentMarkdownFileLinks";
+import { getAgentViewImagePath } from "./agentViewImage";
 import {
   agentUserMessageDraftText,
   buildConversationParts,
@@ -715,6 +717,13 @@ function onInvalidMarkdownFileLink(reason: AgentMarkdownFileLinkError) {
   message.warning(t(reason === "invalid_position" ? "agent.client.fileLinkInvalidPosition" : "agent.client.fileLinkInvalidPath"));
 }
 
+function onOpenImage(path: string) {
+  workspaceHost?.callFrom(props.toolId, "editor", {
+    type: "editor.openFile",
+    payload: { path, mode: "preview" },
+  });
+}
+
 async function onOpenMarkdownFile(link: AgentMarkdownFileLink, isSourceCurrent: () => boolean) {
   const sequence = ++markdownFileRequestSequence;
   const workspaceId = props.workspaceId;
@@ -859,9 +868,10 @@ function messageClass(row: ConversationPart) {
     : row.part?.type === "tool_call"
       ? row.part.toolName === "todolist" || row.part.toolName === "subtask"
         ? "p-0"
-        : (row.part.toolName === "write" ||
-            row.part.toolName === "apply_patch") &&
-          row.execution?.status === "completed"
+        : ((row.part.toolName === "write" ||
+             row.part.toolName === "apply_patch") &&
+          row.execution?.status === "completed") ||
+          getAgentViewImagePath(row.part, row.execution) !== null
           ? "px-2 py-0 transition-colors duration-100 hover:bg-[var(--hover-bg)]"
           : "px-2 py-0"
       : row.message.type === "system"
