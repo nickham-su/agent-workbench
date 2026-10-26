@@ -4,11 +4,11 @@ import type { AppContext } from "../../app/context.js";
 import { ErrorResponseSchema } from "@agent-workbench/shared";
 import { CreateTerminalRequestSchema, TerminalRecordSchema } from "@agent-workbench/shared";
 import { getWorkspaceById } from "../workspaces/workspace.service.js";
-import { createTerminal, deleteTerminal, getTerminalById, reconcileWorkspaceActiveTerminals } from "./terminal.service.js";
+import { createTerminal, deleteTerminal, getTerminalById, reconcileWorkspaceTerminals, type TerminalSettlementOperations } from "./terminal.service.js";
 import { workspaceLifecycleCoordinator } from "../../infra/locks/workspace-lifecycle-coordinator.js";
 import { listVisibleTerminalsByWorkspace } from "./terminal.store.js";
 
-export async function registerTerminalsRoutes(app: FastifyInstance, ctx: AppContext) {
+export async function registerTerminalsRoutes(app: FastifyInstance, ctx: AppContext, runtimeOperations?: TerminalSettlementOperations) {
   await registerTerminalConfigRoutes(app, ctx);
   app.get(
     "/api/workspaces/:workspaceId/terminals",
@@ -22,7 +22,7 @@ export async function registerTerminalsRoutes(app: FastifyInstance, ctx: AppCont
       const params = req.params as { workspaceId: string };
       return workspaceLifecycleCoordinator.withAdmission(params.workspaceId, async () => {
         await getWorkspaceById(ctx, params.workspaceId);
-        await reconcileWorkspaceActiveTerminals(ctx, app.log, params.workspaceId);
+        await reconcileWorkspaceTerminals(ctx, app.log, params.workspaceId, runtimeOperations);
         return listVisibleTerminalsByWorkspace(ctx.db, params.workspaceId);
       });
     }

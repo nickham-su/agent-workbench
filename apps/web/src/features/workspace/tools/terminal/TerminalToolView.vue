@@ -113,7 +113,8 @@ async function onTerminalExited() {
 }
 
 async function onTerminalInvalidated() {
-  await refreshAndEnsureTerminal();
+  const request = await refreshTerminals();
+  if (request && isRefreshCurrent(request) && terminals.value.length === 0) minimizeSelf();
 }
 
 async function onDeleted() {

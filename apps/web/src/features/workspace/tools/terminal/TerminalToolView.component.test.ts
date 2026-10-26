@@ -325,3 +325,36 @@ test("a failed restart uses message.error and retains the selected existing tab 
   assert.equal(f.wrapper.findAll('[data-terminal]').length, 2);
   assert.equal(f.creates.length, 0);
 });
+
+test("an invalidated terminal disappears after cleanup without auto-creating a replacement", async (t) => {
+  const f = responseFixture(t); await settle();
+  f.lists[0]!.resolve([terminal("A", "ended")]); await settle();
+  f.wrapper.findComponent({ name: "TerminalTabs" }).vm.$emit("terminalInvalidated", "ended"); await settle();
+  f.lists[1]!.resolve([]); await settle();
+  assert.equal(f.wrapper.findAll("[data-terminal]").length, 0);
+  assert.equal(f.minimized(), 1); assert.equal(f.creates.length, 0);
+});
+
+test("a stale invalidation refresh cannot close a newly rerun terminal", async (t) => {
+  const f = responseFixture(t); await settle();
+  const previous = { ...terminal("A", "managed"), configId: "config" };
+  f.lists[0]!.resolve([previous]); await settle();
+  f.wrapper.findComponent({ name: "TerminalTabs" }).vm.$emit("terminalInvalidated", previous.id); await settle();
+  const rerun = { ...previous, sessionName: "new-session", updatedAt: 2 };
+  await f.created(rerun);
+  f.lists[2]!.resolve([rerun]); await settle();
+  f.lists[1]!.resolve([]); await settle();
+  const view = f.wrapper.findComponent({ name: "TestTerminal" });
+  assert.equal(view.props("terminal").sessionName, "new-session");
+  assert.equal(f.minimized(), 0); assert.equal(f.creates.length, 0);
+});
+
+test("invalidation retains a terminal whose cleanup is still pending", async (t) => {
+  const f = responseFixture(t); await settle();
+  const active = { ...terminal("A", "managed"), configId: "config" };
+  f.lists[0]!.resolve([active]); await settle();
+  f.wrapper.findComponent({ name: "TerminalTabs" }).vm.$emit("terminalInvalidated", active.id); await settle();
+  f.lists[1]!.resolve([{ ...active, status: "errored" }]); await settle();
+  assert.equal(f.wrapper.findComponent({ name: "TestTerminal" }).props("terminal").status, "errored");
+  assert.equal(f.minimized(), 0); assert.equal(f.creates.length, 0);
+});

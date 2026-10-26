@@ -1,4 +1,4 @@
-import { deleteTerminal, settleTerminalAfterSessionStopped, reconcileWorkspaceActiveTerminals } from "./terminal.service.js";
+import { deleteTerminal, settleTerminalAfterSessionStopped, reconcileWorkspaceTerminals } from "./terminal.service.js";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -381,23 +381,27 @@ test("restart-authorized cleanup failure keeps durable stop authority and retrie
 test("six missing sessions reconcile without six launcher timeout loops", async () => {
   const f = await fixture();
   try {
+    const firstConfig = await saveWorkspaceTerminalConfig(f.ctx, "ws", { name: "first", cwd: ".", command: "true" });
+    f.db.prepare("update terminals set config_id = ? where id = 'term_fixture'").run(firstConfig.id);
     await launched(f);
     for (let i = 1; i < 6; i++) {
       const id = `term_fixture_${i}`;
-      f.db.prepare("insert into terminals(id,workspace_id,session_name,status,created_at,updated_at) values(?,'ws',?,'active',1,1)").run(id, id);
+      const config = await saveWorkspaceTerminalConfig(f.ctx, "ws", { name: `service ${i}`, cwd: ".", command: "true" });
+      f.db.prepare("insert into terminals(id,workspace_id,config_id,session_name,status,created_at,updated_at) values(?,'ws',?,?,'active',1,1)").run(id, config.id, id);
       armTerminalRunControl(f.db, id, id);
       const locator = await prepareTerminalRunControl({ db: f.db, dataDir: f.root, terminalId: id, sessionName: id, readIdentity });
       const control = await openTerminalRunControl(locator);
       try { assert.equal(await claimTerminalRunStart(control), true); } finally { await closeTerminalRunControl(control); }
       markTerminalRunLaunching(f.db, id);
     }
-    await reconcileWorkspaceActiveTerminals(f.ctx, logger, "ws", {
+    await reconcileWorkspaceTerminals(f.ctx, logger, "ws", {
       readRunIdentity: async () => nextIdentity, hasSession: async () => "not_found", cleanupAuthArtifacts: async () => {},
       // A zero polling budget makes this test fail if it falls back to awaiting the dead launcher.
       stopRunControl: (params) => stopTerminalRunControl({ ...params, timeoutMs: 0 }),
     });
-    assert.deepEqual(f.db.prepare("select distinct status from terminals").all(), [{ status: "closed" }]);
-    assert.deepEqual(f.db.prepare("select distinct phase from terminal_run_controls").all(), [{ phase: "stopped" }]);
+    assert.deepEqual(f.db.prepare("select * from terminals").all(), []);
+    assert.deepEqual(f.db.prepare("select * from terminal_run_controls").all(), []);
+    assert.equal((f.db.prepare("select count(*) as n from workspace_terminal_configs").get() as { n: number }).n, 6);
     assert.deepEqual(await fs.readdir(path.join(f.root, TERMINAL_RUN_ROOT)), []);
   } finally { await f.close(); }
 });
@@ -442,3 +446,79 @@ test("runtime identity is optional only for legacy locators and malformed values
     assert.throws(() => assertTerminalRunLocator({ ...locator, extra: true }));
   } finally { await f.close(); }
 });
+
+test("listing retires historical closed runs but neither probes creating runs nor deletes live sessions", async () => {
+  const f = await fixture();
+  try {
+    const config = await saveWorkspaceTerminalConfig(f.ctx, "ws", { name: "history", cwd: ".", command: "true" });
+    f.db.prepare("update terminals set status = 'closed', config_id = ? where id = 'term_fixture'").run(config.id);
+    for (const [id, status] of [["term_creating", "creating"], ["term_live", "active"], ["term_errored_live", "errored"]]) {
+      f.db.prepare("insert into terminals(id,workspace_id,session_name,status,created_at,updated_at) values(?,'ws',?,?,1,1)").run(id, id, status);
+    }
+    const probed: string[] = [];
+    await reconcileWorkspaceTerminals(f.ctx, logger, "ws", {
+      readRunIdentity: readIdentity,
+      hasSession: async ({ sessionName }) => { probed.push(sessionName); return sessionName === "term_fixture" ? "not_found" : "exists"; },
+      cleanupAuthArtifacts: async () => {},
+    });
+    assert.equal(f.db.prepare("select id from terminals where id = 'term_fixture'").get(), undefined);
+    assert.equal(f.db.prepare("select id from workspace_terminal_configs where id = ?").get(config.id) !== undefined, true);
+    assert.equal(probed.includes("term_creating"), false);
+    assert.deepEqual(f.db.prepare("select id, status from terminals order by id").all(), [
+      { id: "term_creating", status: "creating" }, { id: "term_errored_live", status: "errored" }, { id: "term_live", status: "active" },
+    ]);
+  } finally { await f.close(); }
+});
+
+test("listing retains errored environment cleanup and deletes the run only after a successful retry", async () => {
+  const f = await fixture();
+  try {
+    const config = await saveWorkspaceTerminalConfig(f.ctx, "ws", { name: "pending", cwd: ".", command: "true" });
+    f.db.prepare("update terminals set config_id = ? where id = 'term_fixture'").run(config.id);
+    await launched(f, nextIdentity);
+    const pending = await prepareTerminalEnvironmentLaunch({ db: f.db, dataDir: f.root, terminalId: "term_fixture", shell: "bash", baseEnv: {}, systemEnv: {}, workspaceEnv: {}, startupCommand: "true" });
+    const before = listTerminalEnvironmentLaunchAttempts(f.db, "term_fixture");
+    const operations = {
+      readRunIdentity: readIdentity, hasSession: async () => "not_found" as const, cleanupAuthArtifacts: async () => {},
+      stopRunControl: (params: Parameters<typeof stopTerminalRunControl>[0]) => stopTerminalRunControl({ ...params, timeoutMs: 0 }),
+    };
+    await reconcileWorkspaceTerminals(f.ctx, logger, "ws", { ...operations, cleanupEnvironmentLaunch: async () => "pending" });
+    assert.deepEqual(listTerminalEnvironmentLaunchAttempts(f.db, "term_fixture"), before);
+    assert.equal(listVisibleTerminalsByWorkspace(f.db, "ws")[0]?.status, "errored");
+    assert.equal(listVisibleTerminalsByWorkspace(f.db, "ws")[0]?.configId, config.id);
+    assert.equal(getTerminalRunControl(f.db, "term_fixture")?.phase, "stopped");
+    await reconcileWorkspaceTerminals(f.ctx, logger, "ws", operations);
+    assert.deepEqual(listVisibleTerminalsByWorkspace(f.db, "ws"), []);
+    assert.equal(f.db.prepare("select id from terminals where id = 'term_fixture'").get(), undefined);
+    assert.equal(getTerminalRunControl(f.db, "term_fixture"), null);
+    assert.deepEqual(listTerminalEnvironmentLaunchAttempts(f.db, "term_fixture"), []);
+    assert.equal(f.db.prepare("select id from terminal_env_launch_attempts where id = ?").get(pending.attempt.id), undefined);
+    assert.equal(f.db.prepare("select id from workspace_terminal_configs where id = ?").get(config.id) !== undefined, true);
+  } finally { await f.close(); }
+});
+
+for (const mode of ["same runtime", "session exists", "presence unknown", "identity unavailable", "fresh presence unknown"] as const) {
+  test(`listing retains run and configuration when ${mode} prevents a stopped proof`, async () => {
+    const f = await fixture();
+    try {
+      const config = await saveWorkspaceTerminalConfig(f.ctx, "ws", { name: "retained", cwd: ".", command: "true" });
+      f.db.prepare("update terminals set config_id = ? where id = 'term_fixture'").run(config.id);
+      await launched(f, mode === "same runtime" ? identity : nextIdentity);
+      let probes = 0, cleanups = 0;
+      await reconcileWorkspaceTerminals(f.ctx, logger, "ws", {
+        readRunIdentity: async () => { if (mode === "identity unavailable") throw new Error("unavailable"); return identity; },
+        hasSession: async () => {
+          probes++;
+          if (mode === "presence unknown" || (mode === "fresh presence unknown" && probes > 1)) throw new Error("unknown");
+          return mode === "session exists" ? "exists" : "not_found";
+        },
+        stopRunControl: (params) => stopTerminalRunControl({ ...params, timeoutMs: 0 }),
+        cleanupAuthArtifacts: async () => { cleanups++; },
+      });
+      assert.equal(cleanups, 0);
+      assert.equal(listVisibleTerminalsByWorkspace(f.db, "ws")[0]?.id, "term_fixture");
+      assert.equal(listVisibleTerminalsByWorkspace(f.db, "ws")[0]?.configId, config.id);
+      assert.equal(getTerminalRunControl(f.db, "term_fixture")?.phase, "launching");
+    } finally { await f.close(); }
+  });
+}

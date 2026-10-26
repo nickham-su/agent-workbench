@@ -34,7 +34,6 @@ import {
   updateTerminalStatus,
   clearTerminalConfigAssociation,
   deleteTerminalRecord,
-  listActiveTerminalsByWorkspace,
   listTerminalsByWorkspace
 } from "./terminal.store.js";
 import {
@@ -81,7 +80,7 @@ export type TerminalRuntimeOperations = {
   preflightRunGuard?: typeof preflightTerminalRunGuard;
 };
 
-type TerminalSettlementOperations = Pick<TerminalRuntimeOperations, "hasSession" | "cleanupAuthArtifacts" | "cleanupEnvironmentLaunch" | "stopRunControl" | "readRunIdentity">;
+export type TerminalSettlementOperations = Pick<TerminalRuntimeOperations, "hasSession" | "cleanupAuthArtifacts" | "cleanupEnvironmentLaunch" | "stopRunControl" | "readRunIdentity">;
 type TerminalStopOperations = Pick<TerminalRuntimeOperations, "hasSession" | "killSession" | "stopRunControl" | "readRunIdentity">;
 export type TerminalSettlement = "closed" | "cleanup_pending" | "env_cleanup_pending" | "session_exists" | "session_unknown" | "run_unknown";
 
@@ -718,17 +717,24 @@ export async function reconcilePendingTerminals(ctx: AppContext, logger: Fastify
   }
 }
 
-export async function reconcileWorkspaceActiveTerminals(
+/** Listing retires stopped runs only after all cleanup succeeds; reruns keep their own identity. */
+export async function reconcileWorkspaceTerminals(
   ctx: AppContext, logger: FastifyBaseLogger, workspaceId: string,
   runtimeOperations: TerminalSettlementOperations = defaultTerminalRuntimeOperations,
 ) {
-  const candidates = listActiveTerminalsByWorkspace(ctx.db, workspaceId);
+  const candidates = listTerminalsByWorkspace(ctx.db, workspaceId).filter((term) => term.status !== "creating");
   // Sequential await also applies to the ALS-reentrant case; Promise.all would bypass exclusion.
   for (const candidate of candidates) {
     await workspaceLifecycleCoordinator.withAdmission(workspaceId, async () => {
       const term = getTerminal(ctx.db, candidate.id);
-      if (!term || term.status !== "active") return;
-      try { await settleTerminalAfterSessionStopped(ctx, logger, term.id, runtimeOperations); }
+      if (!term || term.status === "creating") return;
+      try {
+        const settlement = await settleTerminalAfterSessionStopped(ctx, logger, term.id, runtimeOperations);
+        if (settlement === "closed") {
+          ctx.db.transaction(() => { deleteTerminalRecord(ctx.db, term.id); })();
+          logger.info({ terminalId: term.id }, "stopped terminal retired after cleanup");
+        }
+      }
       catch {
         logger.warn({ terminalId: term.id, code: "TERMINAL_CLEANUP_PENDING" }, "reconcile terminal failed");
       }

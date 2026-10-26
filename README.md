@@ -95,6 +95,8 @@ API restart:** old terminal sessions without this identity will be treated as
 stale; terminal configurations and workspace files are preserved. Use one API
 instance per data directory and a private PID namespace (the default Compose
 setup); do not share its data with another running container or machine.
+Terminal listing deletes stopped session records only after all cleanup succeeds,
+removing their tabs while preserving configurations; a later run gets a new session ID.
 
 **Workspace Dev Ports**
 

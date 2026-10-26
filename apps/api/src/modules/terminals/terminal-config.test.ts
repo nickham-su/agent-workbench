@@ -13,14 +13,14 @@ import { workspaceLifecycleCoordinator } from "../../infra/locks/workspace-lifec
 import { registerTerminalConfigRoutes } from "./terminal-config.routes.js";
 import { normalizeTerminalConfig, resolveTerminalConfigCwd, saveWorkspaceTerminalConfig, deleteWorkspaceTerminalConfig, listWorkspaceTerminalConfigs, reorderWorkspaceTerminalConfigs } from "./terminal-config.service.js";
 import { runWorkspaceTerminalConfig } from "./terminal-config-run.service.js";
-import { createTerminal, deleteTerminal, type TerminalRuntimeOperations } from "./terminal.service.js";
+import { createTerminal, deleteTerminal, reconcileWorkspaceTerminals, type TerminalRuntimeOperations } from "./terminal.service.js";
 import { prepareTerminalEnvironmentLaunch, cleanupTerminalEnvironmentLaunch, terminalEnvironmentLaunchLocator, markTerminalEnvironmentLaunchStarting, waitTerminalEnvironmentLaunch } from "./terminal-env-launch.js";
 import { getTerminalEnvironmentLaunchAttempt, listTerminalEnvironmentLaunchAttempts } from "./terminal-env-launch-attempt.store.js";
 import { closeTerminalEnvironmentDirectories, openTerminalEnvironmentDirectories, openTerminalEnvironmentFile, writeTerminalEnvironmentStatus } from "./terminal-env-launch.files.js";
 import { TERMINAL_ENV_LAUNCH_ROOT, type TerminalEnvironmentLaunchLocator } from "./terminal-env-launch.protocol.js";
 import { runTerminalEnvironmentLauncher } from "./terminal-env-launcher.js";
 import { getTerminal, getTerminalByConfig, listVisibleTerminalsByWorkspace } from "./terminal.store.js";
-import { terminalSshKeyPath } from "./terminal.gitAuth.js";
+import { cleanupTerminalGitAuthArtifacts, terminalSshKeyPath } from "./terminal.gitAuth.js";
 import { armTerminalAuthCleanupIntent, listTerminalAuthCleanupIntents, updateTerminalAuthCleanupIntent } from "./terminal-auth-cleanup-intent.store.js";
 import { openTerminalRunControl, closeTerminalRunControl, claimTerminalRunStart, stopTerminalRunControl, getTerminalRunControl } from "./terminal-run-control.js";
 import { buildTerminalStartupBootstrap, TERMINAL_STARTUP_BOOTSTRAP_NAME } from "./terminal-startup-bootstrap.js";
@@ -433,25 +433,32 @@ test("real Bash recalls the raw startup command on first up-arrow after completi
   }
 });
 
-test("terminal listing waits for restart and retains managed closed tabs, but hides ordinary closed tabs", async () => {
-  const f = await fixture(), app = Fastify();
+test("terminal listing waits for restart, cleans closed records and keeps their configuration", async () => {
+  const f = await fixture(), app = Fastify(), fake = runtime();
   const config = await saveWorkspaceTerminalConfig(f.ctx, "ws", { name: "Dev", cwd: ".", command: "true" });
-  f.db.prepare("insert into terminals(id,workspace_id,config_id,session_name,status,created_at,updated_at) values('managed','ws',?,'new-session','creating',1,1)").run(config.id);
+  const managed = await runWorkspaceTerminalConfig(f.ctx, app.log, "ws", config.id, fake.operations);
+  f.db.prepare("update terminals set status = 'creating' where id = ?").run(managed.id);
   f.db.prepare("insert into terminals(id,workspace_id,session_name,status,created_at,updated_at) values('plain','ws','plain-session','closed',1,1)").run();
+  const witness = path.join(f.workspace, "preserved.txt"); await fs.writeFile(witness, "workspace file");
   let release!: () => void, entered!: () => void;
   const gateEntered = new Promise<void>((resolve) => { entered = resolve; });
   const held = workspaceLifecycleCoordinator.withMutation("ws", async () => {
     entered(); await new Promise<void>((resolve) => { release = resolve; });
-    f.db.prepare("update terminals set status = 'closed' where id = 'managed'").run();
+    f.db.prepare("update terminals set status = 'closed' where id = ?").run(managed.id);
   });
-  await gateEntered; await registerTerminalsRoutes(app, f.ctx);
+  await gateEntered;
+  await registerTerminalsRoutes(app, f.ctx, { ...fake.operations, hasSession: async () => "not_found" });
   let returned = false;
   const listing = app.inject({ method: "GET", url: "/api/workspaces/ws/terminals" }).then((response) => { returned = true; return response; });
   try {
     await new Promise((resolve) => setTimeout(resolve, 20)); assert.equal(returned, false);
     release(); await held;
     const response = await listing; assert.equal(response.statusCode, 200);
-    assert.deepEqual(response.json().map((term: { id: string; status: string }) => [term.id, term.status]), [["managed", "closed"]]);
+    assert.deepEqual(response.json(), []);
+    assert.equal(getTerminal(f.db, managed.id), null); assert.equal(getTerminal(f.db, "plain"), null);
+    assert.equal(getTerminalRunControl(f.db, managed.id), null);
+    assert.equal((await listWorkspaceTerminalConfigs(f.ctx, "ws"))[0]?.id, config.id);
+    assert.equal(await fs.readFile(witness, "utf8"), "workspace file");
   } finally { release(); await held; await app.close(); }
 });
 
@@ -591,3 +598,71 @@ test("unavailable runtime identity never authorizes a new managed process", asyn
   assert.deepEqual(listTerminalEnvironmentLaunchAttempts(f.db, listVisibleTerminalsByWorkspace(f.db, "ws")[0]!.id), []);
   await app.close();
 });
+
+test("listing preserves managed Git cleanup intents and retries errored records before deleting", async () => {
+  const f = await fixture(), fake = runtime(), app = Fastify();
+  const config = await saveWorkspaceTerminalConfig(f.ctx, "ws", { name: "Dev", cwd: ".", command: "true" });
+  const first = await runWorkspaceTerminalConfig(f.ctx, app.log, "ws", config.id, fake.operations);
+  const artifact = await seedRecoverableAuthArtifact(f, first.id);
+  const operations = { ...fake.operations, hasSession: async () => "not_found" as const };
+  await reconcileWorkspaceTerminals(f.ctx, app.log, "ws", {
+    ...operations, cleanupAuthArtifacts: async () => { throw new Error("fixture auth cleanup pending"); },
+  });
+  assert.equal(getTerminal(f.db, first.id)?.status, "errored");
+  assert.equal(getTerminalByConfig(f.db, "ws", config.id)?.id, first.id);
+  assert.deepEqual(listTerminalAuthCleanupIntents(f.db, first.id), artifact.intents);
+  assert.equal(await fs.readFile(artifact.filename, "utf8"), "fixture-auth-material");
+  await reconcileWorkspaceTerminals(f.ctx, app.log, "ws", { ...operations, cleanupAuthArtifacts: cleanupTerminalGitAuthArtifacts });
+  assert.equal(getTerminal(f.db, first.id), null); assert.equal(getTerminalRunControl(f.db, first.id), null);
+  assert.deepEqual(listTerminalAuthCleanupIntents(f.db, first.id), []);
+  await assert.rejects(fs.access(artifact.filename), { code: "ENOENT" });
+  assert.equal((await listWorkspaceTerminalConfigs(f.ctx, "ws"))[0]?.id, config.id);
+  await app.close();
+});
+
+for (const firstOperation of ["listing", "rerun"] as const) {
+  test(`${firstOperation} before the other operation preserves the current run across the Workspace gate`, { timeout: 30_000 }, async () => {
+    const f = await fixture(), fake = runtime(), app = Fastify();
+    const config = await saveWorkspaceTerminalConfig(f.ctx, "ws", { name: "Dev", cwd: ".", command: "true" });
+    const first = await runWorkspaceTerminalConfig(f.ctx, app.log, "ws", config.id, fake.operations);
+    let entered!: () => void, release!: () => void;
+    const arrived = new Promise<void>((resolve) => { entered = resolve; });
+    const proceed = new Promise<void>((resolve) => { release = resolve; });
+    const listOperations = firstOperation === "listing" ? {
+      ...fake.operations, hasSession: async (params: { sessionName: string; cwd: string }) => {
+        if (params.sessionName === first.sessionName) { entered(); await proceed; return "not_found" as const; }
+        return fake.operations.hasSession(params);
+      },
+    } : fake.operations;
+    const runOperations = firstOperation === "rerun" ? {
+      ...fake.operations, newSession: async (params: Parameters<TerminalRuntimeOperations["newSession"]>[0]) => {
+        entered(); await proceed; await fake.operations.newSession(params);
+      },
+    } : fake.operations;
+    await registerTerminalsRoutes(app, f.ctx, listOperations);
+    const list = () => app.inject({ method: "GET", url: "/api/workspaces/ws/terminals" }).then((response) => response);
+    const run = () => runWorkspaceTerminalConfig(f.ctx, app.log, "ws", config.id, runOperations);
+    const earlier = firstOperation === "listing" ? list() : run();
+    await arrived;
+    const later = firstOperation === "listing" ? run() : list();
+    try {
+      release();
+      const [earlyResult, lateResult] = await Promise.all([earlier, later]);
+      const response = (firstOperation === "listing" ? earlyResult : lateResult) as Awaited<ReturnType<typeof list>>;
+      const current = (firstOperation === "listing" ? lateResult : earlyResult) as Awaited<ReturnType<typeof run>>;
+      assert.equal(response.statusCode, 200);
+      assert.notEqual(current.sessionName, first.sessionName);
+      assert.equal(getTerminalByConfig(f.db, "ws", config.id)?.id, current.id);
+      if (firstOperation === "listing") {
+        assert.deepEqual(response.json(), []); assert.notEqual(current.id, first.id);
+        assert.equal(getTerminal(f.db, first.id), null); assert.equal(getTerminalRunControl(f.db, first.id), null);
+      } else {
+        assert.equal(current.id, first.id);
+        assert.deepEqual(response.json().map((term: { sessionName: string }) => term.sessionName), [current.sessionName]);
+      }
+      const refreshed = await list();
+      assert.deepEqual(refreshed.json().map((term: { id: string }) => term.id), [current.id]);
+      assert.equal((await listWorkspaceTerminalConfigs(f.ctx, "ws"))[0]?.id, config.id);
+    } finally { release(); await Promise.allSettled([earlier, later]); await app.close(); }
+  });
+}

@@ -13,7 +13,7 @@ import { insertWorkspace, getWorkspace } from "../workspaces/workspace.store.js"
 import { deleteWorkspace } from "../workspaces/workspace.service.js";
 import { getWorkspaceEnvironmentService } from "../workspaces/workspace-environment.service.js";
 import { workspaceDeletingFence } from "../agent/lifecycle/workspace-deleting-fence.js";
-import { createTerminal, deleteTerminal, reconcilePendingTerminals, reconcileWorkspaceActiveTerminals,
+import { createTerminal, deleteTerminal, reconcilePendingTerminals, reconcileWorkspaceTerminals,
   settleTerminalAfterSessionStopped, getTerminalForAttachment, type TerminalRuntimeOperations } from "./terminal.service.js";
 import { insertTerminal, getTerminal, listTerminalsByWorkspace, deleteTerminalRecord, updateTerminalStatus } from "./terminal.store.js";
 import { prepareTerminalEnvironmentLaunch, cleanupTerminalEnvironmentLaunch } from "./terminal-env-launch.js";
@@ -364,9 +364,9 @@ test("ALS reentrant active reconcile processes same Workspace sequentially", { t
   const operations = { ...runtime.operations, hasSession: async () => {
     concurrent++; maximum = Math.max(maximum, concurrent); await turn(); concurrent--; return "not_found" as const;
   } };
-  await workspaceLifecycleCoordinator.withAdmission(f.workspaceId, () => reconcileWorkspaceActiveTerminals(f.ctx, logger().log, f.workspaceId, operations));
+  await workspaceLifecycleCoordinator.withAdmission(f.workspaceId, () => reconcileWorkspaceTerminals(f.ctx, logger().log, f.workspaceId, operations));
   assert.equal(maximum, 1);
-  assert.ok(listTerminalsByWorkspace(f.ctx.db, f.workspaceId).every((term) => term.status === "closed"));
+  assert.deepEqual(listTerminalsByWorkspace(f.ctx.db, f.workspaceId), []);
 });
 
 test("different Workspace creation can progress while first holds handshake gate", { timeout: 30_000 }, async () => {
@@ -439,11 +439,11 @@ for (const finalStatus of ["spawned", "SHELL_NOT_FOUND"] as const) {
   });
 }
 
-test("active session absence also converges a residual env attempt before closed", { timeout: 30_000 }, async () => {
+test("active session absence retires the record only after its residual env attempt converges", { timeout: 30_000 }, async () => {
   const f = await fixture(), runtime = spawnedRuntime();
   const prepared = await pendingAttempt(f);
   updateTerminalStatus(f.ctx.db, prepared.attempt.terminalId, "active", Date.now());
-  await reconcileWorkspaceActiveTerminals(f.ctx, logger().log, f.workspaceId, runtime.operations);
-  assert.equal(getTerminal(f.ctx.db, prepared.attempt.terminalId)?.status, "closed");
+  await reconcileWorkspaceTerminals(f.ctx, logger().log, f.workspaceId, runtime.operations);
+  assert.equal(getTerminal(f.ctx.db, prepared.attempt.terminalId), null);
   assert.deepEqual(listTerminalEnvironmentLaunchAttempts(f.ctx.db, prepared.attempt.terminalId), []);
 });
