@@ -31,4 +31,10 @@ ensure_writable_dir "${AWB_DATA_DIR:-}"
 
 mkdir -p "${NPM_CONFIG_PREFIX:-${HOME}/.npm-global}" "${NPM_CONFIG_CACHE:-${HOME}/.npm-cache}"
 
+startup_script="${HOME}/awb-startup.sh"
+if [ -f "${startup_script}" ]; then
+  echo "Running user startup script: ${startup_script}" >&2
+  bash "${startup_script}"
+fi
+
 exec "$@"

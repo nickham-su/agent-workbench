@@ -117,6 +117,40 @@ Two named volumes are used by default:
 
 > Note: `docker compose down -v` will delete volumes and all data.
 
+**Optional Personal Startup Script**
+
+To install tools needed only by you, create `~/awb-startup.sh` **inside the container** (`/home/dev/awb-startup.sh`), without changing the Dockerfile or Compose configuration. For example, open an editor:
+
+```bash
+docker compose exec agent-workbench nano /home/dev/awb-startup.sh
+```
+
+Example script to install the PostgreSQL client only when missing:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+if ! command -v psql >/dev/null 2>&1; then
+  sudo -n apt-get update
+  sudo -n env DEBIAN_FRONTEND=noninteractive \
+    apt-get install -y --no-install-recommends postgresql-client
+fi
+```
+
+The entrypoint runs this optional script with Bash as `dev`, after preparing the home/data directories and before starting the application. No executable permission is required. If the script is absent, startup proceeds normally; if it exits with a nonzero status, the application does not start and the container exits. With the default restart policy, Docker will retry startup. Only use scripts you trust: `dev` has passwordless `sudo` inside the container.
+
+The script runs on **every container start**, including restarts and recreations during upgrades, so keep it safe to run repeatedly. The home volume preserves the script across `git pull` + `docker compose up -d --build`, but system packages installed with `apt-get` are lost when the container is recreated. Check for the actual tool rather than storing an “installed” marker in the persistent home directory. Network or package installation failures can prevent startup.
+
+After saving the script, restart the container to run it, then inspect its output:
+
+```bash
+docker compose restart agent-workbench
+docker compose logs -f agent-workbench
+```
+
+A script in the **host's** home directory is not automatically available inside the container. This hook runs at container startup, not on each terminal session or application-only restart.
+
 **Security**
 
 The Compose file publishes `AWB_PORT`, `AWB_PREVIEW_PORT` (default `4311`), and `AWB_WORKSPACE_PORT_RANGE` on all interfaces by default for convenience
