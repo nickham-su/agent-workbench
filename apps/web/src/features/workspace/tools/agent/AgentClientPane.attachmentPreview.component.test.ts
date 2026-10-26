@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { AxiosResponse, InternalAxiosRequestConfig } from "axios";
-import type { AgentImagePart, AgentMessage } from "@agent-workbench/shared";
+import type { AgentImagePart, AgentMessage, AgentMessagePart } from "@agent-workbench/shared";
 import { computed, nextTick } from "vue";
 import { mount, flushPromises } from "@vue/test-utils";
 import { createI18n } from "vue-i18n";
@@ -15,7 +15,7 @@ async function settle() {
   await flushPromises();
   await nextTick();
 }
-async function mountPane(realPreview = false) {
+async function mountPane(realPreview = false, text?: string) {
   const wrapper = mount(AgentClientPane, {
     attachTo: document.body,
     props: {
@@ -33,10 +33,17 @@ async function mountPane(realPreview = false) {
       },
     },
   });
-  const parts = ["a", "b"].map((id, index) => ({
+  const parts: AgentMessagePart[] = ["a", "b"].map((id, index) => ({
     id: `image-${id}`, messageId: "user-images", position: index, type: "image", attachmentId: `attachment-${id}`,
     mediaType: "image/png", filename: `${id}.png`, updatedRevision: 1, createdAt: 1, updatedAt: 1,
   } as AgentImagePart));
+  if (text !== undefined) {
+    parts.forEach((part) => { part.position += 1; });
+    parts.unshift({
+      id: "empty-text", messageId: "user-images", position: 0, type: "text", text,
+      updatedRevision: 1, createdAt: 1, updatedAt: 1,
+    });
+  }
   const message = {
     id: "user-images", workspaceId: "ws-a", previousMessageId: null, replacesMessageId: null, depth: 0, type: "user", status: "completed",
     originSessionId: null, originRunId: null, updatedRevision: 1, createdAt: 1, updatedAt: 1, parts,
@@ -77,6 +84,30 @@ function mockAttachments() {
     },
     restore() { apiClient.defaults.adapter = adapter; URL.createObjectURL = create; URL.revokeObjectURL = revoke; },
   };
+}
+
+for (const text of ["", " \t\n　"]) {
+  test(`纯图片用户消息：${JSON.stringify(text)} 文本不生成空气泡，图片入口可正常预览`, async () => {
+    const mock = mockAttachments();
+    const pane = await mountPane(false, text);
+    try {
+      const rows = pane.wrapper.findAll('article[data-message-id="user-images"]');
+      assert.equal(rows.length, 1, "只生成聚合图片行，不生成空文本 article");
+      assert.equal(rows[0]!.classes().includes("border-blue-500/60"), false);
+      assert.equal(rows[0]!.classes().includes("bg-blue-500/20"), false);
+      assert.equal(rows[0]!.findComponent({ name: "AgentUserMessage" }).exists(), false);
+      assert.equal(rows[0]!.get("button").text(), "2 张图片");
+      await pane.open();
+      assert.equal(pane.preview().props("open"), true);
+      assert.equal(pane.preview().props("count"), 2);
+      assert.equal(mock.requests.length, 1);
+      await mock.respond(0);
+      assert.equal(pane.preview().props("url"), "blob:preview-1");
+    } finally {
+      pane.wrapper.unmount();
+      mock.restore();
+    }
+  });
 }
 
 test("附件数据流：只加载选中的图片，失败后可切回缓存图片，关闭回收 URL", async () => {

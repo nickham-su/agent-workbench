@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { AgentCompactionMessage, AgentOrdinaryMessage, AgentMessage, AgentTimelineDeltaResponse, AgentTimelineToolExecution } from "@agent-workbench/shared";
+import type { AgentCompactionMessage, AgentOrdinaryMessage, AgentMessage, AgentMessagePart, AgentTimelineDeltaResponse, AgentTimelineToolExecution } from "@agent-workbench/shared";
 import {
   agentUserMessageDraftText,
   applyAgentTimelineDelta,
@@ -275,6 +275,48 @@ test("Conversation 将同一消息的多个 ImagePart 汇总为一个展示行",
   assert.deepEqual(rows[0]?.imageParts, []);
   assert.deepEqual(rows[1]?.imageParts.map((part) => part.id), ["image-a", "image-b"]);
 });
+
+for (const { name, type, texts, imageCount, hideText } of [
+  { name: "空串加图片隐藏文本行", type: "user", texts: [""], imageCount: 1, hideText: true },
+  { name: "纯空白加图片隐藏文本行", type: "user", texts: [" \t\n　"], imageCount: 1, hideText: true },
+  { name: "多段空文本加多图仅保留聚合图片行", type: "user", texts: ["", " \n", "\t　"], imageCount: 2, hideText: true },
+  { name: "无 TextPart 的纯图片保持聚合展示", type: "user", texts: [], imageCount: 2, hideText: true },
+  { name: "有效正文加空白加图片保留所有文本原文", type: "user", texts: ["", "  查看\n图片  ", " \t\n　"], imageCount: 2, hideText: false },
+  { name: "有效正文无图片不裁剪原文", type: "user", texts: ["  查看\n文字  "], imageCount: 0, hideText: false },
+  { name: "空白用户文本无图片仍保留", type: "user", texts: ["", " \n"], imageCount: 0, hideText: false },
+  { name: "Assistant 空文本加图片不受影响", type: "assistant", texts: ["", " \n"], imageCount: 2, hideText: false },
+  { name: "System 空文本加图片不受影响", type: "system", texts: ["", " \n"], imageCount: 1, hideText: false },
+  { name: "Runtime 空文本加图片不受影响", type: "runtime", texts: ["", " \n"], imageCount: 1, hideText: false },
+] as const) {
+  test(`Conversation ${name}`, () => {
+    const parts: AgentMessagePart[] = [
+      ...texts.map((text, position) => ({
+        id: `text-${position}`, messageId: "image-message", position, type: "text" as const, text,
+        updatedRevision: 1, createdAt: 1, updatedAt: 1,
+      })),
+      ...Array.from({ length: imageCount }, (_, index) => ({
+        id: `image-${index}`, messageId: "image-message", position: texts.length + index, type: "image" as const,
+        attachmentId: `attachment-${index}`, mediaType: "image/png" as const, filename: `${index}.png`,
+        updatedRevision: 1, createdAt: 1, updatedAt: 1,
+      })),
+    ];
+    const original = message({ id: "image-message", type, parts: parts.reverse() });
+    const snapshot = structuredClone(original);
+
+    const rows = buildConversationParts({ messages: [original], toolExecutions: [] });
+
+    assert.deepEqual(rows.filter((row) => row.part?.type === "text").map((row) => row.part?.type === "text" ? row.part.text : null), hideText ? [] : [...texts]);
+    assert.equal(rows.length, (hideText ? 0 : texts.length) + (imageCount > 0 ? 1 : 0));
+    assert.deepEqual(rows.map((row) => row.isFirstRowForMessage), rows.map((_, index) => index === 0));
+    if (imageCount > 0) {
+      const imageRow = rows.find((row) => row.part?.type === "image");
+      assert.equal(imageRow?.part?.id, "image-0");
+      assert.deepEqual(imageRow.imageParts.map((part) => part.id), Array.from({ length: imageCount }, (_, index) => `image-${index}`));
+    }
+    assert.ok(rows.every((row) => row.message === original));
+    assert.deepEqual(original, snapshot, "展示过滤不得改写原始消息或 Part 顺序");
+  });
+}
 
 test("Conversation 为无 Part 和非 Text Assistant 提供唯一操作锚点", () => {
   const assistants = [
