@@ -873,3 +873,46 @@ test("retention keeps open signal facts while pruning completed facts and receip
     closeAnalyticsDb(db);
   }
 });
+
+
+test("preparation averages use only measured attempts across statuses, raw/rollup, late updates and comparisons", async () => {
+  const db = await database();
+  try {
+    const hour = HOUR_MS;
+    db.prepare("UPDATE analytics_domain_state SET status='healthy',collection_started_at=0,reconciled_through=? WHERE domain='model'").run(4 * hour);
+    const insert = db.prepare(`INSERT INTO analytics_model_call_fact
+      (model_call_id,execution_id,run_id,attempt_no,provider_id,model_id,started_at,ended_at,status,completion_quality,total_source,cache_comparable,cache_write_verified,observed_at,updated_at,collected_at,request_preparation_ms)
+      VALUES(?,'execution','run',1,'provider','model',?,? ,?,'observed','unavailable',0,0,?,?,?,?)`);
+    for (const [id, at, status, preparation] of [
+      ["previous", 100, "completed", 40], ["unknown", hour + 100, "completed", null],
+      ["zero", hour + 200, "failed", 0], ["cancelled", hour + 300, "cancelled", 20],
+      ["timeout", hour + 400, "timed_out", 40],
+    ] as const) insert.run(id, at, at + 5, status, at + 5, at + 5, at + 5, preparation);
+    const request = { rangeKind: "custom" as const, timezone: "UTC", from: hour, to: 2 * hour };
+    const read = () => {
+      const response = queryDashboard(db, request, 4 * hour);
+      assert.equal(response.kind, "success");
+      assert.ok(Value.Check(DashboardQuerySuccessResponseSchema, response));
+      return response.data.model;
+    };
+    const raw = read();
+    assert.deepEqual(raw.metrics.averagePreparationDuration.value, { durationMs: 20, reliableSampleCount: 3 });
+    assert.equal(raw.metrics.averagePreparationDuration.comparison.delta, -0.5);
+    assert.equal(raw.trends.averagePreparationDuration.data?.[0]?.durationMs, 20);
+    for (const at of [0, hour]) markDirtyHour(db, "model", at, 4 * hour);
+    rebuildDirtyRollups(db, 4 * hour);
+    assert.deepEqual(db.prepare("SELECT preparation_duration_sum_ms,preparation_duration_sample_count FROM dashboard_model_1h WHERE bucket_start=?").get(hour),
+      { preparation_duration_sum_ms: 60, preparation_duration_sample_count: 3 });
+    assert.deepEqual(read(), raw);
+    // Late preparation evidence invalidates the hour and replacement rebuild remains identical.
+    db.prepare("UPDATE analytics_model_call_fact SET request_preparation_ms=100 WHERE model_call_id='unknown'").run();
+    markDirtyHour(db, "model", hour, 4 * hour);
+    const lateRaw = read();
+    assert.deepEqual(lateRaw.metrics.averagePreparationDuration.value, { durationMs: 40, reliableSampleCount: 4 });
+    rebuildDirtyRollups(db, 4 * hour);
+    assert.deepEqual(read(), lateRaw);
+    const unknown = queryDashboard(db, { ...request, from: 2 * hour, to: 3 * hour }, 4 * hour);
+    assert.equal(unknown.kind, "success");
+    assert.deepEqual(unknown.data.model.metrics.averagePreparationDuration.value, { durationMs: null, reliableSampleCount: 0 });
+  } finally { closeAnalyticsDb(db); }
+});

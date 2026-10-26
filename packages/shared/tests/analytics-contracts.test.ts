@@ -154,9 +154,14 @@ test("Dashboard data exposes independent results for all cards, trends, distribu
   assert.ok(properties.agent.properties.toolDetails);
   assert.ok(properties.agent.properties.toolStatusDistribution);
   assert.deepEqual(Object.keys(properties.agent.properties.trends.properties).sort(), ["assistantMessageCount", "autoCompactionCount", "manualCompactionCount", "primaryRunCount", "runCount", "subtaskRunCount", "toolCallCount", "toolSuccessRate", "totalDuration", "userMessageCount"]);
-  assert.deepEqual(Object.keys(properties.model.properties.trends.properties).sort(), ["cacheHitRate", "completedAverageDuration", "requests", "successRate", "timeoutRate", "tokens"]);
+  assert.deepEqual(Object.keys(properties.model.properties.trends.properties).sort(), ["averagePreparationDuration", "cacheHitRate", "completedAverageDuration", "requests", "successRate", "timeoutRate", "tokens"]);
   assert.ok(properties.model.properties.metrics.properties.timeoutKindBreakdown);
   assert.ok(properties.model.properties.metrics.properties.completedAverageDuration);
+  const preparation = properties.model.properties.metrics.properties.averagePreparationDuration;
+  assert.ok(preparation);
+  for (const [durationMs, reliableSampleCount] of [[null, 0], [0, 1], [25, 3]]) {
+    assert.equal(Value.Check(preparation, { status: "available", value: { durationMs, reliableSampleCount }, completeness: "complete", dataIncomplete: false, requiredDomains: ["model"], comparison }), true);
+  }
   assert.equal(Value.Check(properties.model.properties.metrics.properties.inputTokens, {
     status: "available", value: { count: null }, completeness: "complete", dataIncomplete: false, requiredDomains: ["model"], comparison
   }), true);

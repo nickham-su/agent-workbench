@@ -126,6 +126,9 @@ const modelBase = {
   providerId: SafeLabel,
   modelId: SafeLabel,
   startedAt: Timestamp,
+  /** Context fetch + application request preparation for this attempt (no SDK/network, controls or backoff).
+   * Shared preparation belongs only to attempt one; absent in older durable signals. */
+  requestPreparationMs: Type.Optional(Nullable(Count)),
   inputTokens: Nullable(Count),
   outputTokens: Nullable(Count),
   totalTokens: Nullable(Count),

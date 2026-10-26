@@ -1635,6 +1635,8 @@ type AgentRunnerDeps = {
   dataDir?: string;
   streamText?: RuntimeStreamText;
   nowMs?: () => number;
+  /** Monotonic clock for application-side preparation segments. */
+  preparationNowMs?: () => number;
   warningNowMs?: () => number;
   attachmentStorage?: AgentAttachmentStorage;
   /** 仅用于测试控制面固定短间隔重试，不影响 Provider 退避。 */
@@ -1666,6 +1668,7 @@ export class AgentRunner {
 
   private readonly streamTextFn: RuntimeStreamText;
   private readonly nowMsFn: () => number;
+  private readonly preparationNowMsFn: () => number;
   private readonly warningNowMsFn: () => number;
   private readonly attachmentStorage: AgentAttachmentStorage | undefined;
   private readonly controlWriteSleepFn: (ms: number, signal: AbortSignal) => Promise<boolean>;
@@ -1684,6 +1687,7 @@ export class AgentRunner {
   ) {
     this.streamTextFn = deps.streamText ?? streamText<RuntimeToolSet>;
     this.nowMsFn = deps.nowMs ?? nowMs;
+    this.preparationNowMsFn = deps.preparationNowMs ?? (() => performance.now());
     this.warningNowMsFn = deps.warningNowMs ?? nowMs;
     this.attachmentStorage = deps.attachmentStorage;
     this.controlWriteSleepFn = deps.controlWriteSleep ?? sleepMsWithAbort;
@@ -2658,6 +2662,7 @@ export class AgentRunner {
     profile: ExecutionProfile;
     run: QueuedRun;
     context: PromptContext;
+    contextPreparationMs?: number;
     step: number;
     emptyResponseCount?: number;
     signal: AbortSignal;
@@ -2668,6 +2673,7 @@ export class AgentRunner {
     if (context.pendingTools.length > 0) {
       throw new Error("cannot invoke model while ToolExecution remains queued or running");
     }
+    const sharedPreparationStartedAt = this.preparationNowMsFn();
     const conversationStateAdapter = this.providerConversationStateAdapterRegistry.resolve(profile);
     const model = createLanguageModel(profile);
     const runtimeOptions = buildModelRuntimeOptions(profile);
@@ -2741,6 +2747,9 @@ export class AgentRunner {
       providerNpm: profile.provider.npm,
     });
     let attemptDebugRequest = projectAssistantDebugRecord({ status: "running", request: { ...requestBase, messages: firstAttemptMessages } }).request;
+
+    // Stop before Assistant control-plane writes; shared work belongs only to attempt one.
+    const sharedPreparationMs = (params.contextPreparationMs ?? 0) + this.preparationNowMsFn() - sharedPreparationStartedAt;
 
     let assistantMessageId: string;
     if (recoveryContinuation.messageId) {
@@ -3091,6 +3100,7 @@ export class AgentRunner {
       if (signal.aborted) {
         return { aborted: true as const, assistantMessageId };
       }
+      const attemptPreparationStartedAt = this.preparationNowMsFn();
       if (retryCount > 0 && toolSet.subtask) {
         // Refresh only the dynamic candidate description, preserving this turn's
         // tool/schema, conversation-state, and availableToolNames snapshots.
@@ -3170,6 +3180,9 @@ export class AgentRunner {
         messages: materializedMessages
       } satisfies RuntimeStreamRequest;
 
+      const requestPreparationMs = Math.max(0, Math.round(
+        (retryCount === 0 ? sharedPreparationMs : 0) + this.preparationNowMsFn() - attemptPreparationStartedAt,
+      ));
       const analyticsModelStartedAt = this.nowMsFn();
       const analyticsAttemptNo = retryCount + 1;
       const analyticsModelCallId = newSortableId("model");
@@ -3178,7 +3191,7 @@ export class AgentRunner {
       let finishEvents = 0;
       let analyticsFinishUsage: AnalyticsUsage | null = null;
       try {
-        const analyticsModelPayload = { modelCallId: analyticsModelCallId, runId: run.runId, executionId: run.runId, attemptNo: analyticsAttemptNo, providerId: profile.provider.id ?? "unknown", modelId: profile.model.id ?? "unknown", startedAt: analyticsModelStartedAt, endedAt: null, status: "running" as const, completionQuality: "unknown" as const, timeoutKind: null, inputTokens: null, cacheInputTokens: null, cacheWriteTokens: null, cacheComparable: false, cacheWriteVerified: false, failureKind: null };
+        const analyticsModelPayload = { modelCallId: analyticsModelCallId, runId: run.runId, executionId: run.runId, attemptNo: analyticsAttemptNo, providerId: profile.provider.id ?? "unknown", modelId: profile.model.id ?? "unknown", startedAt: analyticsModelStartedAt, requestPreparationMs, endedAt: null, status: "running" as const, completionQuality: "unknown" as const, timeoutKind: null, inputTokens: null, cacheInputTokens: null, cacheWriteTokens: null, cacheComparable: false, cacheWriteVerified: false, failureKind: null };
         this.analyticsSignals?.emitModel(analyticsModelPayload, "model_invoked", analyticsModelCallId);
         const stream = this.streamTextFn(request);
         attemptStream = stream;
@@ -3469,7 +3482,7 @@ export class AgentRunner {
             finishedSteps > 1)
           : normalizeAnalyticsUsage(null);
         const analyticsAttemptStatus = requestController.signal.aborted ? (idleTimedOut || totalTimedOut ? "timed_out" : "cancelled") : (attemptSucceeded ? "completed" : "failed");
-        this.analyticsSignals?.emitModel({ modelCallId: analyticsModelCallId, runId: run.runId, executionId: run.runId, attemptNo: analyticsAttemptNo, providerId: profile.provider.id ?? "unknown", modelId: profile.model.id ?? "unknown", startedAt: analyticsModelStartedAt, endedAt: this.nowMsFn(), status: analyticsAttemptStatus, completionQuality: "observed", timeoutKind: idleTimedOut ? "idle" : totalTimedOut ? "total" : null, ...analyticsUsage, failureKind: analyticsAttemptStatus === "completed" ? null : analyticsAttemptStatus === "timed_out" ? "timeout" : analyticsAttemptStatus === "cancelled" ? "cancelled" : attemptLocalFailure ? "other" : "provider" }, "model_finished", analyticsModelCallId);
+        this.analyticsSignals?.emitModel({ modelCallId: analyticsModelCallId, runId: run.runId, executionId: run.runId, attemptNo: analyticsAttemptNo, providerId: profile.provider.id ?? "unknown", modelId: profile.model.id ?? "unknown", startedAt: analyticsModelStartedAt, requestPreparationMs, endedAt: this.nowMsFn(), status: analyticsAttemptStatus, completionQuality: "observed", timeoutKind: idleTimedOut ? "idle" : totalTimedOut ? "total" : null, ...analyticsUsage, failureKind: analyticsAttemptStatus === "completed" ? null : analyticsAttemptStatus === "timed_out" ? "timeout" : analyticsAttemptStatus === "cancelled" ? "cancelled" : attemptLocalFailure ? "other" : "provider" }, "model_finished", analyticsModelCallId);
 
         if (idleTimer) clearInterval(idleTimer);
         if (totalTimer) clearTimeout(totalTimer);
@@ -3816,11 +3829,14 @@ export class AgentRunner {
       // pending tools must finish before that step can start.
       let autoCompactionAttemptedForNextModelStep = false;
       while (!signal.aborted) {
+        const contextPreparationStartedAt = this.preparationNowMsFn();
         let context = await this.apiClient.getPromptContext({
           workspaceId: run.workspaceId,
           sessionId: run.sessionId,
           runId: run.runId
         });
+
+        let contextPreparationMs = this.preparationNowMsFn() - contextPreparationStartedAt;
 
         // 快照只允许命中“紧接着的一次 pending-tools 检查机会”；若本轮没有 pendingTools，必须立刻丢弃，避免跨 compaction/下一模型 step 泄漏。
         const nextPendingToolNamesSnapshot = pendingToolNamesSnapshot;
@@ -3863,9 +3879,11 @@ export class AgentRunner {
           // the prompt snapshot above. Refresh once before the model step, but
           // do not re-enter auto-compaction until after that step.
           autoCompactionAttemptedForNextModelStep = true;
+          const refreshedPreparationStartedAt = this.preparationNowMsFn();
           context = await this.apiClient.getPromptContext({
             workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId,
           });
+          contextPreparationMs = this.preparationNowMsFn() - refreshedPreparationStartedAt;
           if (context.pendingTools.length > 0) {
             const pendingResult = await this.executePendingTools({ profile, run, context, signal });
             if (pendingResult.paused || signal.aborted) {
@@ -3887,6 +3905,7 @@ export class AgentRunner {
           profile,
           run,
           context,
+          contextPreparationMs,
           step,
           emptyResponseCount,
           signal,

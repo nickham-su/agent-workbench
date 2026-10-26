@@ -563,6 +563,8 @@ type ModelHourRow = {
   request_count: number;
   duration_sum: number;
   duration_samples: number;
+  preparation_sum: number;
+  preparation_samples: number;
   input_tokens: number;
   input_reported_count: number;
   output_tokens: number;
@@ -585,6 +587,7 @@ function modelRowsForRange(
   const fact =
     db.prepare(`SELECT provider_id, model_id, status, timeout_kind, COUNT(*) AS request_count,
     COALESCE(SUM(CASE WHEN status='completed' AND ended_at IS NOT NULL THEN ended_at-started_at ELSE 0 END),0) AS duration_sum, SUM(status='completed' AND ended_at IS NOT NULL) AS duration_samples,
+    COALESCE(SUM(request_preparation_ms),0) AS preparation_sum, COUNT(request_preparation_ms) AS preparation_samples,
     COALESCE(SUM(input_tokens),0) AS input_tokens, SUM(input_tokens IS NOT NULL) AS input_reported_count, COALESCE(SUM(output_tokens),0) AS output_tokens, SUM(output_tokens IS NOT NULL) AS output_reported_count,
     COALESCE(SUM(total_tokens),0) AS total_tokens, SUM(total_source='reported') AS total_reported_count, SUM(total_source='derived') AS total_derived_count,
     COALESCE(SUM(CASE WHEN cache_comparable=1 THEN cache_read_tokens ELSE 0 END),0) AS cache_read_tokens, SUM(cache_comparable=1) AS cache_comparable_count,
@@ -592,6 +595,7 @@ function modelRowsForRange(
     FROM analytics_model_call_fact WHERE started_at>=? AND started_at<? GROUP BY provider_id,model_id,status,timeout_kind`);
   const rollup =
     db.prepare(`SELECT provider_id, model_id, status, timeout_kind, request_count, completed_duration_sum_ms AS duration_sum, completed_duration_sample_count AS duration_samples,
+    preparation_duration_sum_ms AS preparation_sum, preparation_duration_sample_count AS preparation_samples,
     input_tokens,input_reported_count,output_tokens,output_reported_count,total_tokens,total_reported_count,total_derived_count,cache_read_tokens,cache_comparable_count,comparable_input_tokens,comparable_cache_read_tokens
     FROM dashboard_model_dimension_1h WHERE bucket_start=?`);
   const rows: ModelHourRow[] = [];
@@ -1120,6 +1124,8 @@ function queryDashboardSnapshot(
     other: number;
     durationSum: number;
     durationSamples: number;
+    preparationSum: number;
+    preparationSamples: number;
     inputTokens: number;
     outputTokens: number;
     totalTokens: number;
@@ -1138,6 +1144,8 @@ function queryDashboardSnapshot(
     other: 0,
     durationSum: 0,
     durationSamples: 0,
+    preparationSum: 0,
+    preparationSamples: 0,
     inputTokens: 0,
     outputTokens: 0,
     totalTokens: 0,
@@ -1164,6 +1172,8 @@ function queryDashboardSnapshot(
       else row.other += fact.request_count;
       row.durationSum += fact.duration_sum;
       row.durationSamples += fact.duration_samples;
+      row.preparationSum += fact.preparation_sum;
+      row.preparationSamples += fact.preparation_samples;
       row.inputTokens += fact.input_tokens;
       row.inputCount += fact.input_reported_count;
       row.outputTokens += fact.output_tokens;
@@ -1206,6 +1216,8 @@ function queryDashboardSnapshot(
         (row.timeout_kind === "total" ? row.request_count : 0),
       durationSum: total.durationSum + row.duration_sum,
       durationSamples: total.durationSamples + row.duration_samples,
+      preparationSum: total.preparationSum + row.preparation_sum,
+      preparationSamples: total.preparationSamples + row.preparation_samples,
       inputTokens: total.inputTokens + row.input_tokens,
       outputTokens: total.outputTokens + row.output_tokens,
       totalTokens: total.totalTokens + row.total_tokens,
@@ -1230,6 +1242,8 @@ function queryDashboardSnapshot(
       totalTimeouts: 0,
       durationSum: 0,
       durationSamples: 0,
+      preparationSum: 0,
+      preparationSamples: 0,
       inputTokens: 0,
       outputTokens: 0,
       totalTokens: 0,
@@ -1289,6 +1303,11 @@ function queryDashboardSnapshot(
       sum: modelAggregate.durationSum ?? 0,
       samples: durationSamples,
     },
+  );
+  const preparationSamples = modelAggregate.preparationSamples ?? 0;
+  data.model.metrics.averagePreparationDuration = modelMetric(
+    { durationMs: preparationSamples ? Math.floor((modelAggregate.preparationSum ?? 0) / preparationSamples) : null, reliableSampleCount: preparationSamples },
+    { kind: "average", sum: modelAggregate.preparationSum ?? 0, samples: preparationSamples },
   );
   data.model.metrics.inputTokens = modelMetric({
     count: sumOrNull(modelAggregate.inputTokens, inputCount),
@@ -1374,6 +1393,16 @@ function queryDashboardSnapshot(
     modelRatioTrend("timedOut"),
     modelKnown,
     { kind: "ratio", numerator: timedOut, denominator: terminal },
+  );
+  data.model.trends.averagePreparationDuration = panel(
+    model,
+    ["model"],
+    buckets.map((bucket, index) => {
+      const row = modelBucketStats[index]!;
+      return { ...bucket, durationMs: row.preparationSamples ? Math.floor(row.preparationSum / row.preparationSamples) : null, reliableSampleCount: row.preparationSamples };
+    }),
+    modelKnown,
+    { kind: "average", sum: modelAggregate.preparationSum ?? 0, samples: preparationSamples },
   );
   data.model.trends.completedAverageDuration = panel(
     model,

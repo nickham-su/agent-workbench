@@ -76,12 +76,12 @@ function buildEmptyDashboardData(params: { asOf: number; states: AnalyticsDomain
     model: {
       metrics: {
         requestCount: modelMetric(), successRate: modelMetric(), timeoutRate: modelMetric(), timeoutKindBreakdown: modelMetric(),
-        completedAverageDuration: modelMetric(), inputTokens: modelMetric(), outputTokens: modelMetric(), totalTokens: modelMetric(),
+        completedAverageDuration: modelMetric(), averagePreparationDuration: modelMetric(), inputTokens: modelMetric(), outputTokens: modelMetric(), totalTokens: modelMetric(),
         cacheReadTokens: modelMetric(), inputReportedCount: modelMetric(), outputReportedCount: modelMetric(), totalReportedCount: modelMetric(),
         totalDerivedCount: modelMetric(), cacheComparableCount: modelMetric(), inputTokenCoverage: modelMetric(), outputTokenCoverage: modelMetric(),
         totalTokenCoverage: modelMetric(), inputCacheCoverage: modelMetric()
       },
-      trends: { requests: modelPanel(), successRate: modelPanel(), timeoutRate: modelPanel(), completedAverageDuration: modelPanel(), tokens: modelPanel(), cacheHitRate: modelPanel() },
+      trends: { requests: modelPanel(), successRate: modelPanel(), timeoutRate: modelPanel(), completedAverageDuration: modelPanel(), averagePreparationDuration: modelPanel(), tokens: modelPanel(), cacheHitRate: modelPanel() },
       byModel: modelPanel()
     },
     worker: {

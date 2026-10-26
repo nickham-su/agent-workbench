@@ -187,7 +187,7 @@ test("模型六卡、趋势与覆盖双栏及模型对比表按原型组织", as
   assert.match(wrapper.get("[data-testid='model-metric-tokens']").text(), /5/);
   assert.deepEqual(wrapper.findAll(".token-comparison").map((item) => item.text()), ["+10%", "+10%"]);
   assert.deepEqual(wrapper.findAll(".coverage-comparison").map((item) => item.text()), ["+10%", "+10%", "+10%", "+10%"]);
-  for (const key of ["requestCount", "successRate", "timeoutRate", "completedAverageDuration", "tokens", "cacheHitRate"]) {
+  for (const key of ["requestCount", "successRate", "averagePreparationDuration", "completedAverageDuration", "tokens", "cacheHitRate"]) {
     await wrapper.get(`[data-testid='model-metric-${key}'] button`).trigger("click");
     assert.equal(wrapper.get(`[data-testid='model-metric-${key}'] button`).attributes("aria-pressed"), "true");
     assert.ok(wrapper.find(`[data-testid='model-trend-${key === "requestCount" ? "requests" : key}']`).exists());
@@ -1133,4 +1133,28 @@ test("Agent 分布全零时环图及条图键盘读数不把未知占比说成�
       wrapper.unmount();
     }
   }
+});
+
+
+test("平均准备耗时替换第三卡并切换时长趋势，未知与真实零不混淆", async () => {
+  const source = dashboardSuccessFixture.data.model;
+  const wrapper = mount(ModelSection, { ...options, props: { model: source, cacheHitRate: dashboardSuccessFixture.data.overview.cacheHitRate, timezone: "UTC" } });
+  const cards = wrapper.findAll(".model-primary-metrics > *");
+  assert.equal(cards[2]!.attributes("data-testid"), "model-metric-averagePreparationDuration");
+  assert.match(cards[2]!.text(), /平均准备耗时|Average preparation time/);
+  assert.equal(wrapper.find("[data-testid='model-metric-timeoutRate']").exists(), false);
+  await cards[2]!.get("button").trigger("click");
+  const trend = wrapper.get("[data-testid='model-trend-averagePreparationDuration']");
+  assert.match(trend.text(), /平均准备耗时|Average preparation time/);
+  const chart = wrapper.findComponent(TrendChart);
+  assert.equal(chart.props("kind"), "duration");
+  assert.deepEqual(chart.props("panel"), source.trends.averagePreparationDuration);
+  for (const durationMs of [null, 0]) {
+    const metric = source.metrics.averagePreparationDuration;
+    assert.notEqual(metric.status, "unavailable");
+    await wrapper.setProps({ model: { ...source, metrics: { ...source.metrics, averagePreparationDuration: { ...metric, value: { durationMs, reliableSampleCount: durationMs === null ? 0 : 1 } } } } });
+    const text = wrapper.get("[data-testid='model-metric-averagePreparationDuration'] .metric-value").text();
+    assert.equal(text, durationMs === null ? "—" : "0ms");
+  }
+  wrapper.unmount();
 });

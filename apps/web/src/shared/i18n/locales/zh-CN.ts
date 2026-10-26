@@ -1475,6 +1475,7 @@ export default {
     }
   },
   dashboard: {
+    averagePreparationDuration: "平均准备耗时",
     title: "数据看板", subtitle: "回看 Agent、模型、工具与 Worker 使用情况 · 所有统计仅保存在本机",
     overview: "概览", agent: "Agent", model: "模型", worker: "Worker", refresh: "刷新",
     range: "时间范围", custom: "自定义范围", preset_24h: "近 24 小时", preset_7d: "近 7 天", preset_30d: "近 30 天", preset_90d: "近 90 天", apply: "应用", from: "开始", to: "结束",

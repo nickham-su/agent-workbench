@@ -2140,3 +2140,32 @@ test("legal delayed execution start cannot overwrite observed finish in a nonter
   assert.deepEqual(db.prepare("SELECT status, ended_at, effective_ended_at, end_time_quality, end_reason FROM analytics_execution_fact WHERE execution_id='active-finish'").get(), { status: "ended", ended_at: 30, effective_ended_at: 30, end_time_quality: "observed", end_reason: "completed" });
   assert.equal((db.prepare("SELECT lifecycle FROM analytics_producer_generation WHERE domain='execution' AND producer_generation='g1'").get() as { lifecycle: string }).lifecycle, "registered");
 });
+
+
+test("preparation signals accept legacy unknowns and zero, preserve measured values on late legacy events", async (t) => {
+  const root = await dataDir();
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const db = await openAnalyticsDb(root, 1);
+  t.after(() => closeAnalyticsDb(db));
+  enableWorkerFactDomains(db);
+  assert.equal(acceptAnalyticsSignal(db, checkpoint({ kind: "register", domain: "model", producerGeneration: "preparation-generation", sentAt: 10, controlSequence: 1, committedSequence: 0 }), 10).accepted, true);
+  const payload = {
+    modelCallId: "preparation-call", executionId: "execution", runId: "run", attemptNo: 1,
+    providerId: "provider", modelId: "model", startedAt: 100, endedAt: 200,
+    status: "failed", completionQuality: "observed", timeoutKind: null,
+    inputTokens: null, outputTokens: null, totalTokens: null, totalSource: "unavailable",
+    cacheReadTokens: null, cacheWriteTokens: null, cacheComparable: false, cacheWriteVerified: false, failureKind: "provider",
+  };
+  const signal = (sequence: number, patch: Record<string, unknown> = {}) => event({
+    domain: "model", eventType: "model_finished", producerGeneration: "preparation-generation", subjectIdentity: "model:preparation-call",
+    eventId: `preparation-event-${sequence}`, sequence, observedAt: 200 + sequence, payload: { ...payload, ...patch } as any,
+  });
+  const value = () => (db.prepare("SELECT request_preparation_ms FROM analytics_model_call_fact").get() as { request_preparation_ms: number | null }).request_preparation_ms;
+  for (const [sequence, patch, expected] of [[1, {}, null], [2, { requestPreparationMs: 0 }, 0], [3, {}, 0]] as const) {
+    assert.equal(isCanonicalAnalyticsSignal(signal(sequence, patch)), true);
+    assert.equal(acceptAnalyticsSignal(db, signal(sequence, patch), 200 + sequence).accepted, true);
+    assert.equal(value(), expected);
+  }
+  assert.equal(isCanonicalAnalyticsSignal(signal(4, { requestPreparationMs: -1 })), false);
+  assert.equal(isCanonicalAnalyticsSignal(signal(4, { requestPreparationMs: 1.5 })), false);
+});

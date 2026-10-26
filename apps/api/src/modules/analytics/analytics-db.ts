@@ -6,7 +6,8 @@ import {
 } from "@agent-workbench/shared/node/analytics-root";
 
 /** Version 20 separates the cache hit denominator from SDK input token totals. */
-export const ANALYTICS_SCHEMA_VERSION = 20;
+export const ANALYTICS_SCHEMA_VERSION = 21;
+const V20_SCHEMA_VERSION = 20;
 const V19_SCHEMA_VERSION = 19;
 const V18_SCHEMA_VERSION = 18;
 const PRE_GIT_SCHEMA_VERSION = 11;
@@ -590,7 +591,7 @@ function verifyFactRows(db: AnalyticsDb, table: string, textFields: readonly str
   }
 }
 
-function verifySignalSchema(db: AnalyticsDb, includeCollectedAtIndexes = true, legacyWorkerEvents = false, legacyFactIdentity = false, legacyReceiptEvents = false, legacyExecutionEndQuality = false, cacheInputColumn = false) {
+function verifySignalSchema(db: AnalyticsDb, includeCollectedAtIndexes = true, legacyWorkerEvents = false, legacyFactIdentity = false, legacyReceiptEvents = false, legacyExecutionEndQuality = false, cacheInputColumn = false, preparationColumn = false) {
   const required = ["analytics_producer_slot", "analytics_producer_generation", "analytics_producer_checkpoint", "analytics_event_receipt", "analytics_signal_coverage_gap", "analytics_execution_fact", "analytics_model_call_fact", "analytics_worker_event_fact", "analytics_worker_live_snapshot"];
   for (const table of required) {
     const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?").get(table) as SchemaObject | undefined;
@@ -599,7 +600,7 @@ function verifySignalSchema(db: AnalyticsDb, includeCollectedAtIndexes = true, l
       : table === "analytics_event_receipt" && legacyReceiptEvents
         ? expectedDdl(table, "table").replace(", 'worker_controlled_stop'", "")
         : expectedDdl(table, "table");
-    const expected = cacheInputColumn && table === "analytics_model_call_fact"
+    let expected = cacheInputColumn && table === "analytics_model_call_fact"
       ? baseExpected.replace(", check (ended_at is null", ", cache_input_tokens integer check (cache_input_tokens >= 0), check (ended_at is null") : baseExpected;
     if (legacyExecutionEndQuality && table === "analytics_execution_fact") {
       const actual = normalizedSql(row?.sql ?? null);
@@ -608,6 +609,7 @@ function verifySignalSchema(db: AnalyticsDb, includeCollectedAtIndexes = true, l
       if (!v17 && !relabelledCurrent) unavailableSchema();
       continue;
     }
+    if (preparationColumn && table === "analytics_model_call_fact") expected = expected.replace(", check (ended_at is null", ", request_preparation_ms integer check (request_preparation_ms >= 0), check (ended_at is null");
     const legacyExpected = legacyFactIdentity && table === "analytics_execution_fact"
       ? expected.replace(", producer_namespace text, producer_id text, producer_generation text", "").replace(", check ((producer_namespace is null and producer_id is null and producer_generation is null) or (producer_namespace in ('agent_worker', 'api_local_fallback') and producer_id is not null and producer_generation is not null))", "")
       : legacyFactIdentity && table === "analytics_model_call_fact"
@@ -745,6 +747,22 @@ function migrateV19ToV20(db: AnalyticsDb, testFaultAt?: "after_cache_fact_reset"
       UPDATE dashboard_model_dimension_1h SET cache_comparable_count=0,
         comparable_input_tokens=0, comparable_cache_read_tokens=0;`);
     if (testFaultAt === "after_cache_fact_reset") throw new Error("injected v20 migration failure");
+    db.prepare("UPDATE analytics_schema_meta SET schema_version=? WHERE singleton=1").run(V20_SCHEMA_VERSION);
+  })();
+}
+
+// Additive migration: historic facts remain unknown and historic aggregates have zero samples.
+function addPreparationColumns(db: AnalyticsDb) {
+  db.exec(`ALTER TABLE analytics_model_call_fact ADD COLUMN request_preparation_ms INTEGER CHECK (request_preparation_ms >= 0);
+    ALTER TABLE dashboard_model_1h ADD COLUMN preparation_duration_sum_ms INTEGER NOT NULL DEFAULT 0 CHECK (preparation_duration_sum_ms >= 0);
+    ALTER TABLE dashboard_model_1h ADD COLUMN preparation_duration_sample_count INTEGER NOT NULL DEFAULT 0 CHECK (preparation_duration_sample_count >= 0);
+    ALTER TABLE dashboard_model_dimension_1h ADD COLUMN preparation_duration_sum_ms INTEGER NOT NULL DEFAULT 0 CHECK (preparation_duration_sum_ms >= 0);
+    ALTER TABLE dashboard_model_dimension_1h ADD COLUMN preparation_duration_sample_count INTEGER NOT NULL DEFAULT 0 CHECK (preparation_duration_sample_count >= 0);`);
+}
+function migrateV20ToV21(db: AnalyticsDb, testFaultAt?: "after_preparation_columns") {
+  db.transaction(() => {
+    addPreparationColumns(db);
+    if (testFaultAt === "after_preparation_columns") throw new Error("injected v21 migration failure");
     db.prepare("UPDATE analytics_schema_meta SET schema_version=? WHERE singleton=1").run(ANALYTICS_SCHEMA_VERSION);
   })();
 }
@@ -800,8 +818,8 @@ function verifySignalRows(db: AnalyticsDb) {
 
 type GenerationValidationRow = { lifecycle: string; final_sequence: number | null; committed_sequence: number; known_drop: number; dropped_since_sequence: number | null; outbox_pending: number; oldest_pending_at: number | null };
 
-function verifyDashboardSchema(db: AnalyticsDb, includeGit = true) {
-  verifyDashboardSchemaNames(db, ["analytics_dirty_hour", "dashboard_model_1h", "dashboard_model_dimension_1h", "dashboard_tool_1h", "dashboard_message_1h", "dashboard_collected_1h", "analytics_rollup_hour", "analytics_maintenance_state"], ["analytics_dirty_hour_domain_bucket", "analytics_rollup_hour_domain_bucket", "dashboard_model_dimension_1h_bucket", "dashboard_collected_1h_bucket"], includeGit);
+function verifyDashboardSchema(db: AnalyticsDb, includeGit = true, preparationColumns = false) {
+  verifyDashboardSchemaNames(db, ["analytics_dirty_hour", "dashboard_model_1h", "dashboard_model_dimension_1h", "dashboard_tool_1h", "dashboard_message_1h", "dashboard_collected_1h", "analytics_rollup_hour", "analytics_maintenance_state"], ["analytics_dirty_hour_domain_bucket", "analytics_rollup_hour_domain_bucket", "dashboard_model_dimension_1h_bucket", "dashboard_collected_1h_bucket"], includeGit, preparationColumns);
 }
 
 function verifyV9DashboardSchema(db: AnalyticsDb) {
@@ -817,10 +835,15 @@ function verifyOldMessageRollupSchema(db: AnalyticsDb) {
   if (!message?.sql || normalizedSql(message.sql) !== oldMessageDdl) unavailableSchema();
 }
 
-function verifyDashboardSchemaNames(db: AnalyticsDb, tables: readonly string[], indexes: readonly string[], includeGit = true) {
+function verifyDashboardSchemaNames(db: AnalyticsDb, tables: readonly string[], indexes: readonly string[], includeGit = true, preparationColumns = false) {
   for (const table of tables) {
     const row = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name=?").get(table) as SchemaObject | undefined;
-    if (!row?.sql || normalizedSql(row.sql) !== (!includeGit && table === "dashboard_collected_1h" ? normalizedSql(currentCollectedDdl()) : expectedDdl(table, "table"))) unavailableSchema();
+    let expected = !includeGit && table === "dashboard_collected_1h" ? normalizedSql(currentCollectedDdl()) : expectedDdl(table, "table");
+    if (preparationColumns && (table === "dashboard_model_1h" || table === "dashboard_model_dimension_1h")) {
+      const columns = ", preparation_duration_sum_ms integer not null default 0 check (preparation_duration_sum_ms >= 0), preparation_duration_sample_count integer not null default 0 check (preparation_duration_sample_count >= 0)";
+      expected = table === "dashboard_model_dimension_1h" ? expected.replace(", primary key", columns + ", primary key") : expected.replace(/\)$/, columns + ")");
+    }
+    if (!row?.sql || normalizedSql(row.sql) !== expected) unavailableSchema();
   }
   for (const index of indexes) {
     const row = db.prepare("SELECT sql FROM sqlite_master WHERE type='index' AND name=?").get(index) as SchemaObject | undefined;
@@ -890,8 +913,8 @@ function verifyGitSchema(db: AnalyticsDb) {
 function verifyV19Schema(db: AnalyticsDb, version = V19_SCHEMA_VERSION) {
   verifyBaseSchema(db, version, true);
   verifyFacts(db);
-  verifySignalSchema(db, true, false, false, false, false, version >= ANALYTICS_SCHEMA_VERSION);
-  verifyDashboardSchema(db, false);
+  verifySignalSchema(db, true, false, false, false, false, version >= V20_SCHEMA_VERSION, version >= ANALYTICS_SCHEMA_VERSION);
+  verifyDashboardSchema(db, false, version >= ANALYTICS_SCHEMA_VERSION);
   const oldTables = db.prepare("SELECT name FROM sqlite_master WHERE name GLOB 'analytics_git_*' AND type IN ('table','index')").all();
   if (oldTables.length !== 0) unavailableSchema();
 }
@@ -899,7 +922,8 @@ function verifyV19Schema(db: AnalyticsDb, version = V19_SCHEMA_VERSION) {
 function verifyCurrentSchema(db: AnalyticsDb) {
   verifyV19Schema(db, ANALYTICS_SCHEMA_VERSION);
   if (db.prepare(`SELECT 1 FROM analytics_model_call_fact WHERE
-    (cache_input_tokens IS NOT NULL AND (typeof(cache_input_tokens) <> 'integer' OR cache_input_tokens > 9007199254740991))
+    (request_preparation_ms IS NOT NULL AND (typeof(request_preparation_ms) <> 'integer' OR request_preparation_ms > 9007199254740991))
+    OR (cache_input_tokens IS NOT NULL AND (typeof(cache_input_tokens) <> 'integer' OR cache_input_tokens > 9007199254740991))
     OR (cache_comparable=1 AND (cache_input_tokens IS NULL OR cache_read_tokens IS NULL OR cache_read_tokens>cache_input_tokens))
     LIMIT 1`).get()) unavailableSchema();
 }
@@ -947,7 +971,7 @@ function verifyV6SignalSchema(db: AnalyticsDb) {
   }
 }
 
-function inspectSchema(db: AnalyticsDb): "new" | "v2" | "v3" | "legacy-v3" | "v4" | "v5" | "v6" | "v7" | "v8" | "v9" | "v10" | "v11" | "v12" | "v13" | "v14" | "v15" | "v16" | "v17" | "v18" | "v19" | "current" {
+function inspectSchema(db: AnalyticsDb): "new" | "v2" | "v3" | "legacy-v3" | "v4" | "v5" | "v6" | "v7" | "v8" | "v9" | "v10" | "v11" | "v12" | "v13" | "v14" | "v15" | "v16" | "v17" | "v18" | "v19" | "v20" | "current" {
   if (db.prepare("SELECT name FROM sqlite_master WHERE type IN ('table', 'index', 'trigger', 'view') LIMIT 1").all().length === 0) return "new";
   const meta = db.prepare("SELECT schema_version, typeof(schema_version) AS storage_type FROM analytics_schema_meta").all() as Array<{ schema_version: unknown; storage_type: unknown }>;
   if (meta.length !== 1 || !isSafeSqliteInteger(meta[0]?.schema_version, meta[0]?.storage_type)) unavailableSchema();
@@ -969,6 +993,7 @@ function inspectSchema(db: AnalyticsDb): "new" | "v2" | "v3" | "legacy-v3" | "v4
   if (meta[0]?.schema_version === V17_SCHEMA_VERSION) { verifyBaseSchema(db, V17_SCHEMA_VERSION, true); verifyFacts(db); verifySignalSchema(db, true, false, false, false, true); verifyDashboardSchema(db); verifyGitSchema(db); return "v17"; }
   if (meta[0]?.schema_version === V18_SCHEMA_VERSION) { verifyBaseSchema(db, V18_SCHEMA_VERSION, true); verifyFacts(db); verifySignalSchema(db); verifyDashboardSchema(db); verifyGitSchema(db); return "v18"; }
   if (meta[0]?.schema_version === V19_SCHEMA_VERSION) { verifyV19Schema(db); return "v19"; }
+  if (meta[0]?.schema_version === V20_SCHEMA_VERSION) { verifyV19Schema(db, V20_SCHEMA_VERSION); return "v20"; }
   if (meta[0]?.schema_version === 4) {
     // Do not treat a relabelled current schema as a migratable legacy store.
     // The v4 execution fact had `state`; v5 has the formal `status` contract.
@@ -1014,6 +1039,7 @@ function initializeNewSchema(db: AnalyticsDb, nowMs: number) {
     db.exec(SIGNAL_TABLE_SQL);
     db.exec("ALTER TABLE analytics_model_call_fact ADD COLUMN cache_input_tokens INTEGER CHECK (cache_input_tokens >= 0)");
     db.exec(CURRENT_DASHBOARD_TABLE_SQL);
+    addPreparationColumns(db);
   })();
 }
 
@@ -1312,7 +1338,7 @@ function migrateV14ToV15(db: AnalyticsDb, testFaultAt?: "after_source_control_cr
  * real v11/v13 tables and indexes (not a current schema with a relabelled
  * metadata row).  Do not use in production startup paths.
  */
-export function createHistoricalSchemaForTest(db: AnalyticsDb, version: 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19) {
+export function createHistoricalSchemaForTest(db: AnalyticsDb, version: 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 20) {
   if (inspectSchema(db) === "current") db.transaction(() => {
     // DROP COLUMN changes SQLite's formatting and does not reproduce the
     // released v19 DDL fingerprint needed by older migration fixtures.
@@ -1326,9 +1352,20 @@ export function createHistoricalSchemaForTest(db: AnalyticsDb, version: 11 | 12 
       ${rawExpectedDdl("idx_analytics_model_range", "index")}
       ${rawExpectedDdl("idx_analytics_model_open", "index")}
       ${rawExpectedDdl("idx_analytics_model_collected_at", "index")}`);
-    db.prepare("UPDATE analytics_schema_meta SET schema_version=19 WHERE singleton=1").run();
+    for (const table of ["dashboard_model_1h", "dashboard_model_dimension_1h"]) {
+      db.exec(`ALTER TABLE ${table} RENAME TO preparation_rollup_backup;`);
+      if (table === "dashboard_model_dimension_1h") db.exec("DROP INDEX dashboard_model_dimension_1h_bucket");
+      db.exec(rawExpectedDdl(table, "table"));
+      const fields = (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((column) => column.name).join(",");
+      db.exec(`INSERT INTO ${table} (${fields}) SELECT ${fields} FROM preparation_rollup_backup; DROP TABLE preparation_rollup_backup;`);
+      if (table === "dashboard_model_dimension_1h") db.exec(rawExpectedDdl("dashboard_model_dimension_1h_bucket", "index"));
+    }
+    if (version === 20) {
+      db.exec("ALTER TABLE analytics_model_call_fact ADD COLUMN cache_input_tokens INTEGER CHECK (cache_input_tokens >= 0)");
+      db.prepare("UPDATE analytics_schema_meta SET schema_version=20 WHERE singleton=1").run();
+    } else db.prepare("UPDATE analytics_schema_meta SET schema_version=19 WHERE singleton=1").run();
   })();
-  if (version === 19) return;
+  if (version === 19 || version === 20) return;
   // Tests start from a fresh current store; restore the last released domain
   // and collected-cache layout before invoking earlier release migrations.
   if (inspectSchema(db) === "v19") db.transaction(() => {
@@ -1374,7 +1411,7 @@ export function createHistoricalSchemaForTest(db: AnalyticsDb, version: 11 | 12 
 }
 
 /** Opens the isolated Analytics store. Production callers are restricted to the Analytics child process. */
-export async function openAnalyticsDb(dataDir: string, nowMs = Date.now(), options?: { testFaultAt?: "v8_after_dashboard_rebuild" | "v13_after_worker_event_rebuild" | "v14_after_fact_identity_rebuild" | "v15_after_source_control_create" | "v16_after_baseline_rewrite" | "v17_after_empty_baseline" | "v18_after_execution_rebuild" | "v19_after_collected_rebuild" | "v20_after_cache_fact_reset"; afterFilePinnedForTest?: () => Promise<void> | void }): Promise<AnalyticsDb> {
+export async function openAnalyticsDb(dataDir: string, nowMs = Date.now(), options?: { testFaultAt?: "v8_after_dashboard_rebuild" | "v13_after_worker_event_rebuild" | "v14_after_fact_identity_rebuild" | "v15_after_source_control_create" | "v16_after_baseline_rewrite" | "v17_after_empty_baseline" | "v18_after_execution_rebuild" | "v19_after_collected_rebuild" | "v20_after_cache_fact_reset" | "v21_after_preparation_columns"; afterFilePinnedForTest?: () => Promise<void> | void }): Promise<AnalyticsDb> {
   const root = await openSecureAnalyticsRoot(dataDir);
   let db: AnalyticsDb | null = null;
   let pinned: FileHandle | null = null;
@@ -1416,6 +1453,7 @@ export async function openAnalyticsDb(dataDir: string, nowMs = Date.now(), optio
       if (inspectSchema(db) === "v17") migrateV17ToV18(db, options?.testFaultAt === "v18_after_execution_rebuild" ? "after_execution_rebuild" : undefined);
       if (inspectSchema(db) === "v18") migrateV18ToV19(db, options?.testFaultAt === "v19_after_collected_rebuild" ? "after_collected_rebuild" : undefined);
       if (inspectSchema(db) === "v19") migrateV19ToV20(db, options?.testFaultAt === "v20_after_cache_fact_reset" ? "after_cache_fact_reset" : undefined);
+      if (inspectSchema(db) === "v20") migrateV20ToV21(db, options?.testFaultAt === "v21_after_preparation_columns" ? "after_preparation_columns" : undefined);
       verifyCurrentSchema(db);
     }
     db.pragma("busy_timeout = 1000");

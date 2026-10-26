@@ -1393,9 +1393,10 @@ function applyFact(db: AnalyticsDb, event: AnalyticsSignalEvent, now: number) {
             : "provider";
     db.prepare(
       `INSERT INTO analytics_model_call_fact
-      (model_call_id, execution_id, run_id, attempt_no, producer_namespace, producer_id, producer_generation, provider_id, model_id, started_at, ended_at, status, completion_quality, timeout_kind, input_tokens, output_tokens, total_tokens, total_source, cache_read_tokens, cache_write_tokens, cache_comparable, cache_write_verified, failure_kind, observed_at, updated_at, collected_at, cache_input_tokens)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (model_call_id, execution_id, run_id, attempt_no, producer_namespace, producer_id, producer_generation, provider_id, model_id, started_at, ended_at, status, completion_quality, timeout_kind, input_tokens, output_tokens, total_tokens, total_source, cache_read_tokens, cache_write_tokens, cache_comparable, cache_write_verified, failure_kind, observed_at, updated_at, collected_at, cache_input_tokens, request_preparation_ms)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(model_call_id) DO UPDATE SET
+        request_preparation_ms=COALESCE(analytics_model_call_fact.request_preparation_ms, excluded.request_preparation_ms),
         producer_namespace=COALESCE(analytics_model_call_fact.producer_namespace, excluded.producer_namespace),
         producer_id=COALESCE(analytics_model_call_fact.producer_id, excluded.producer_id),
         producer_generation=COALESCE(analytics_model_call_fact.producer_generation, excluded.producer_generation),
@@ -1438,6 +1439,7 @@ function applyFact(db: AnalyticsDb, event: AnalyticsSignalEvent, now: number) {
       now,
       now,
       cacheComparable ? cacheInput : null,
+      p.requestPreparationMs ?? null,
     );
     markDirtyHour(db, "model", p.startedAt as number, now);
     return;

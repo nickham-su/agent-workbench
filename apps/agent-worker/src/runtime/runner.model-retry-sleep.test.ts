@@ -16,6 +16,7 @@ type RunnerTestAccess = {
 
 function fixture(deps: Deps = {}, options: {
   failures?: number;
+  contextPreparationMs?: number;
   failNoticeOnce?: boolean;
   tools?: ResolvedToolDefinition[];
   context?: Partial<PromptContext>;
@@ -93,6 +94,7 @@ function fixture(deps: Deps = {}, options: {
         context: { pendingTools: [], tools: [], headMessageId: null, sessionRevision: 0, system: "", messages: [],
           providerReplay: [], lastResponseTotalTokens: null, uiLocale: null, workspaceRepoNames: [], externalSkills: [],
           ...options.context },
+        contextPreparationMs: options.contextPreparationMs ?? 0,
         step: 1, signal, repeatedToolCallCounter: new Map(),
       });
     },
@@ -291,3 +293,61 @@ test("subtask 重试刷新缺失描述时拒绝发送旧候选列表", async () 
   await assert.rejects(runner.invoke(new AbortController().signal, 3), /subtask tool description is unavailable/);
   assert.equal(runner.calls, 1);
 });
+
+
+test("准备计时分段累加，排除 Assistant 写入与退避，共享准备仅归属首次 attempt", async () => {
+  const clock = [10, 30, 1000, 1005, 10000, 10007];
+  const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+  const harness = fixture({
+    preparationNowMs: () => { const value = clock.shift(); assert.notEqual(value, undefined); return value!; },
+    modelRetrySleep: async () => true,
+    analyticsSignals: { emitModel(payload: Record<string, unknown>, type: string) { events.push({ type, payload }); } } as any,
+  }, { contextPreparationMs: 13 });
+  await harness.invoke(new AbortController().signal);
+  assert.equal(harness.calls, 2);
+  assert.deepEqual(events.filter((event) => event.type === "model_invoked").map((event) => event.payload.requestPreparationMs), [38, 7]);
+  assert.deepEqual(events.filter((event) => event.type === "model_finished").map((event) => event.payload.requestPreparationMs), [38, 7]);
+  assert.equal(clock.length, 0);
+});
+
+for (const scenario of ["direct", "pending_tools", "compaction_committed", "compaction_skipped"] as const) {
+  test(`请求准备只归属最终上下文，不累加工具与压缩轮次：${scenario}`, async () => {
+    let monotonic = 0;
+    let reads = 0;
+    let shouldCompactCalls = 0;
+    const preparedContexts: number[] = [];
+    const terminals: string[] = [];
+    const apiClient = {
+      async markRunWorkInProgress() { return { result: "updated" }; },
+      async getExecutionProfile() { return { model: {}, provider: {}, agent: {}, runtime: {} }; },
+      async getPromptContext() {
+        reads++;
+        monotonic += scenario !== "direct" && reads === 1 ? 900 : 10;
+        return {
+          pendingTools: scenario === "pending_tools" && reads === 1 ? [{ status: "queued" }] : [],
+          messages: [], tools: [], sessionRevision: 1,
+        };
+      },
+      async persistRunTerminalIntent(input: { status: string }) { terminals.push(input.status); return { result: "updated" }; },
+      async convergeRunTerminal() { return { kind: "transitioned", finalStatus: "completed" }; },
+    };
+    const runner = new AgentRunner(apiClient as any, {} as any, { info() {}, warn() {}, error() {} }, 1, {
+      preparationNowMs: () => monotonic,
+    });
+    const access = runner as any;
+    access.shouldAutoCompact = () => scenario.startsWith("compaction") && ++shouldCompactCalls === 1;
+    access.executeCompaction = async () => {
+      monotonic += 5000;
+      return scenario === "compaction_committed" ? { kind: "committed" } : { kind: "skipped", reason: "below_threshold" };
+    };
+    access.executePendingTools = async () => { monotonic += 5000; return { paused: false }; };
+    access.runModelStep = async (params: { contextPreparationMs: number }) => {
+      preparedContexts.push(params.contextPreparationMs);
+      return { aborted: false, toolCallCount: 0, hasVisibleText: true, assistantMessageId: "assistant" };
+    };
+    await access.processRun({ workspaceId: "ws", sessionId: "session", runId: "run", runKind: "user", workspacePath: process.cwd(), workspaceRepoDirNames: [] }, new AbortController().signal);
+    assert.deepEqual(preparedContexts, [10]);
+    assert.equal(reads, scenario === "direct" ? 1 : 2);
+    assert.deepEqual(terminals, ["completed"]);
+  });
+}

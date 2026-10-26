@@ -1477,6 +1477,7 @@ export default {
     }
   },
   dashboard: {
+    averagePreparationDuration: "Average preparation time",
     title: "Analytics dashboard", subtitle: "Review Agent, model, tool, and Worker activity. All analytics stay local.",
     overview: "Overview", agent: "Agent", model: "Models", worker: "Worker", refresh: "Refresh",
     range: "Range", custom: "Custom range", preset_24h: "24 hours", preset_7d: "7 days", preset_30d: "30 days", preset_90d: "90 days", apply: "Apply", from: "From", to: "To",

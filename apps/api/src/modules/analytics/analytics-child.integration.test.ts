@@ -250,4 +250,13 @@ test("internal Signal preserves nullable values through Fastify, supervisor IPC 
   const stored = new Database(analyticsDbPath(fixture.dataDir), { readonly: true });
   t.after(() => stored.close());
   assert.deepEqual(stored.prepare("SELECT ended_at, input_tokens, output_tokens, cache_read_tokens FROM analytics_model_call_fact WHERE model_call_id='model:null-call'").get(), { ended_at: null, input_tokens: null, output_tokens: null, cache_read_tokens: null });
+  assert.deepEqual(stored.prepare("SELECT request_preparation_ms FROM analytics_model_call_fact WHERE model_call_id='model:null-call'").get(), { request_preparation_ms: null });
+  const measured = { ...unsigned, sequence: 2, eventId: randomUUID(), eventType: "model_finished" as const, observedAt: 200,
+    payload: { ...unsigned.payload, requestPreparationMs: 45, endedAt: 200, status: "failed" as const, completionQuality: "observed" as const, failureKind: "provider" as const } };
+  const measuredResponse = await app.inject({ method: "POST", url: "/api/analytics/internal/signal",
+    headers: { "x-awb-agent-internal-token": fixture.ctx.agentInternalToken },
+    payload: { ...measured, fingerprint: analyticsFingerprint(measured as Parameters<typeof analyticsFingerprint>[0]) } });
+  assert.equal(measuredResponse.statusCode, 200);
+  assert.equal(measuredResponse.json().accepted, true);
+  assert.deepEqual(stored.prepare("SELECT request_preparation_ms FROM analytics_model_call_fact WHERE model_call_id='model:null-call'").get(), { request_preparation_ms: 45 });
 });

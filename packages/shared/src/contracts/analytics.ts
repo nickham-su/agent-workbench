@@ -275,6 +275,7 @@ export const DashboardDataSchema = StrictObject({
       requestCount: MetricResultSchema(NonNegativeIntegerSchema), successRate: MetricResultSchema(RatioValueSchema), timeoutRate: MetricResultSchema(RatioValueSchema),
       timeoutKindBreakdown: MetricResultSchema(StrictObject({ idle: NonNegativeIntegerSchema, total: NonNegativeIntegerSchema, none: NonNegativeIntegerSchema })),
       completedAverageDuration: MetricResultSchema(CompletedDurationValueSchema),
+      averagePreparationDuration: MetricResultSchema(CompletedDurationValueSchema),
       inputTokens: MetricResultSchema(NullableCountValueSchema), outputTokens: MetricResultSchema(NullableCountValueSchema),
       totalTokens: MetricResultSchema(NullableCountValueSchema), cacheReadTokens: MetricResultSchema(NullableCountValueSchema),
       inputReportedCount: MetricResultSchema(NonNegativeIntegerSchema), outputReportedCount: MetricResultSchema(NonNegativeIntegerSchema),
@@ -285,6 +286,7 @@ export const DashboardDataSchema = StrictObject({
     trends: StrictObject({
       requests: PanelResultSchema(Type.Array(ModelRequestTrendPointSchema)), successRate: PanelResultSchema(Type.Array(RatioTrendPointSchema)),
       timeoutRate: PanelResultSchema(Type.Array(RatioTrendPointSchema)), completedAverageDuration: PanelResultSchema(Type.Array(ModelCompletedDurationTrendPointSchema)),
+      averagePreparationDuration: PanelResultSchema(Type.Array(ModelCompletedDurationTrendPointSchema)),
       tokens: PanelResultSchema(Type.Array(ModelTokenTrendPointSchema)), cacheHitRate: PanelResultSchema(Type.Array(RatioTrendPointSchema))
     }),
     byModel: PanelResultSchema(ModelTableSchema)
