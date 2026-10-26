@@ -16,7 +16,7 @@ type RunnerTestAccess = {
 
 function fixture(deps: Deps = {}, options: {
   failures?: number;
-  contextPreparationMs?: number;
+  contextPreparationMs?: number | null;
   failNoticeOnce?: boolean;
   tools?: ResolvedToolDefinition[];
   context?: Partial<PromptContext>;
@@ -54,6 +54,7 @@ function fixture(deps: Deps = {}, options: {
     {} as ConstructorParameters<typeof AgentRunner>[1],
     { info() {}, warn() {}, error() {} }, 1,
     {
+      preparationRandom: () => 0,
       streamText: ((request: Parameters<NonNullable<Deps["streamText"]>>[0]) => {
         calls++;
         requests.push(request);
@@ -94,7 +95,7 @@ function fixture(deps: Deps = {}, options: {
         context: { pendingTools: [], tools: [], headMessageId: null, sessionRevision: 0, system: "", messages: [],
           providerReplay: [], lastResponseTotalTokens: null, uiLocale: null, workspaceRepoNames: [], externalSkills: [],
           ...options.context },
-        contextPreparationMs: options.contextPreparationMs ?? 0,
+        contextPreparationMs: options.contextPreparationMs === undefined ? 0 : options.contextPreparationMs,
         step: 1, signal, repeatedToolCallCounter: new Map(),
       });
     },
@@ -310,44 +311,98 @@ test("准备计时分段累加，排除 Assistant 写入与退避，共享准备
   assert.equal(clock.length, 0);
 });
 
-for (const scenario of ["direct", "pending_tools", "compaction_committed", "compaction_skipped"] as const) {
-  test(`请求准备只归属最终上下文，不累加工具与压缩轮次：${scenario}`, async () => {
-    let monotonic = 0;
-    let reads = 0;
-    let shouldCompactCalls = 0;
-    const preparedContexts: number[] = [];
-    const terminals: string[] = [];
-    const apiClient = {
-      async markRunWorkInProgress() { return { result: "updated" }; },
-      async getExecutionProfile() { return { model: {}, provider: {}, agent: {}, runtime: {} }; },
-      async getPromptContext() {
-        reads++;
-        monotonic += scenario !== "direct" && reads === 1 ? 900 : 10;
-        return {
-          pendingTools: scenario === "pending_tools" && reads === 1 ? [{ status: "queued" }] : [],
-          messages: [], tools: [], sessionRevision: 1,
-        };
-      },
-      async persistRunTerminalIntent(input: { status: string }) { terminals.push(input.status); return { result: "updated" }; },
-      async convergeRunTerminal() { return { kind: "transitioned", finalStatus: "completed" }; },
-    };
-    const runner = new AgentRunner(apiClient as any, {} as any, { info() {}, warn() {}, error() {} }, 1, {
-      preparationNowMs: () => monotonic,
+for (const firstSampled of [false, true]) {
+  for (const retryRandom of [0.099999, 0.1]) {
+    test(`准备耗时独立采样：首轮=${firstSampled}，重试随机值=${retryRandom}`, async () => {
+      const retrySampled = retryRandom < 0.1;
+      const clock = [...(firstSampled ? [10, 30, 1000, 1005] : []), ...(retrySampled ? [10000, 10007] : [])];
+      let randomCalls = 0;
+      const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+      const harness = fixture({
+        preparationRandom: () => { randomCalls++; return retryRandom; },
+        preparationNowMs: () => {
+          assert.ok(clock.length > 0, "未采样 attempt 不应读取计时时钟");
+          return clock.shift()!;
+        },
+        modelRetrySleep: async () => true,
+        analyticsSignals: { emitModel(payload: Record<string, unknown>, type: string) { events.push({ type, payload }); } } as any,
+      }, { contextPreparationMs: firstSampled ? 13 : null });
+      await harness.invoke(new AbortController().signal);
+      const expected = [firstSampled ? 38 : null, retrySampled ? 7 : null];
+      assert.deepEqual(events.filter((event) => event.type === "model_invoked").map((event) => event.payload.requestPreparationMs), expected);
+      assert.deepEqual(events.filter((event) => event.type === "model_finished").map((event) => event.payload.requestPreparationMs), expected);
+      assert.equal(events.length, 4, "未采样仍完整保留模型开始和结束事件");
+      assert.equal(harness.calls, 2);
+      assert.equal(randomCalls, 1, "首次复用上下文的采样决定，重试单独抽样");
+      assert.equal(clock.length, 0);
     });
-    const access = runner as any;
-    access.shouldAutoCompact = () => scenario.startsWith("compaction") && ++shouldCompactCalls === 1;
-    access.executeCompaction = async () => {
-      monotonic += 5000;
-      return scenario === "compaction_committed" ? { kind: "committed" } : { kind: "skipped", reason: "below_threshold" };
-    };
-    access.executePendingTools = async () => { monotonic += 5000; return { paused: false }; };
-    access.runModelStep = async (params: { contextPreparationMs: number }) => {
-      preparedContexts.push(params.contextPreparationMs);
-      return { aborted: false, toolCallCount: 0, hasVisibleText: true, assistantMessageId: "assistant" };
-    };
-    await access.processRun({ workspaceId: "ws", sessionId: "session", runId: "run", runKind: "user", workspacePath: process.cwd(), workspaceRepoDirNames: [] }, new AbortController().signal);
-    assert.deepEqual(preparedContexts, [10]);
-    assert.equal(reads, scenario === "direct" ? 1 : 2);
-    assert.deepEqual(terminals, ["completed"]);
-  });
+  }
+}
+
+test("采样后真实零耗时保持为零，不冒充未采样", async () => {
+  const values: unknown[] = [];
+  const harness = fixture({
+    preparationNowMs: () => 100,
+    analyticsSignals: { emitModel(payload: Record<string, unknown>) { values.push(payload.requestPreparationMs); } } as any,
+  }, { failures: 0, contextPreparationMs: 0 });
+  await harness.invoke(new AbortController().signal);
+  assert.deepEqual(values, [0, 0]);
+});
+
+for (const scenario of ["direct", "pending_tools", "compaction_committed", "compaction_skipped"] as const) {
+  const draws = scenario === "direct" ? [[0], [0.099999], [0.1]] : [[0, 0], [0, 0.1], [0.1, 0], [0.1, 0.1]];
+  for (const samples of draws) {
+    test(`最终上下文独立采样，不累加工具与压缩轮次：${scenario} ${samples}`, async () => {
+      let monotonic = 0;
+      let clockCalls = 0;
+      let randomCalls = 0;
+      let pendingDraw: number | undefined;
+      const remainingDraws = [...samples];
+      let reads = 0;
+      let shouldCompactCalls = 0;
+      const preparedContexts: Array<number | null> = [];
+      const terminals: string[] = [];
+      const apiClient = {
+        async markRunWorkInProgress() { return { result: "updated" }; },
+        async getExecutionProfile() { return { model: {}, provider: {}, agent: {}, runtime: {} }; },
+        async getPromptContext() {
+          assert.notEqual(pendingDraw, undefined, "必须在上下文读取前决定采样");
+          pendingDraw = undefined;
+          reads++;
+          monotonic += scenario !== "direct" && reads === 1 ? 900 : 10;
+          return {
+            pendingTools: scenario === "pending_tools" && reads === 1 ? [{ status: "queued" }] : [],
+            messages: [], tools: [], sessionRevision: 1,
+          };
+        },
+        async persistRunTerminalIntent(input: { status: string }) { terminals.push(input.status); return { result: "updated" }; },
+        async convergeRunTerminal() { return { kind: "transitioned", finalStatus: "completed" }; },
+      };
+      const runner = new AgentRunner(apiClient as any, {} as any, { info() {}, warn() {}, error() {} }, 1, {
+        preparationRandom: () => {
+          randomCalls++;
+          return pendingDraw = remainingDraws.shift()!;
+        },
+        preparationNowMs: () => { clockCalls++; return monotonic; },
+      });
+      const access = runner as any;
+      access.shouldAutoCompact = () => scenario.startsWith("compaction") && ++shouldCompactCalls === 1;
+      access.executeCompaction = async () => {
+        monotonic += 5000;
+        return scenario === "compaction_committed" ? { kind: "committed" } : { kind: "skipped", reason: "below_threshold" };
+      };
+      access.executePendingTools = async () => { monotonic += 5000; return { paused: false }; };
+      access.runModelStep = async (params: { contextPreparationMs: number | null }) => {
+        preparedContexts.push(params.contextPreparationMs);
+        return { aborted: false, toolCallCount: 0, hasVisibleText: true, assistantMessageId: "assistant" };
+      };
+      await access.processRun({ workspaceId: "ws", sessionId: "session", runId: "run", runKind: "user", workspacePath: process.cwd(), workspaceRepoDirNames: [] }, new AbortController().signal);
+      assert.deepEqual(preparedContexts, [samples.at(-1)! < 0.1 ? 10 : null]);
+      assert.equal(reads, scenario === "direct" ? 1 : 2);
+      assert.equal(randomCalls, samples.length);
+      assert.equal(clockCalls, samples.filter((value) => value < 0.1).length * 2);
+      assert.equal(remainingDraws.length, 0);
+      assert.deepEqual(terminals, ["completed"]);
+    });
+  }
 }

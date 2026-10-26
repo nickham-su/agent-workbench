@@ -93,6 +93,7 @@ const LOOP_REPEAT_TOOL_CALL_THRESHOLD = parseIntOrDefault(process.env.AWB_AGENT_
 const CONTROL_WRITE_RETRY_DELAY_MS = 100;
 const COMPACTION_NOTICE_TIMEOUT_MS = 1_000;
 const EMPTY_RESPONSE_COMPLETE_THRESHOLD = 6;
+const REQUEST_PREPARATION_SAMPLE_RATE = 0.1;
 const TOOL_OUTPUT_TEXT_MAX_CHARS = Math.max(1_000, parseIntOrDefault(process.env.AWB_TOOL_OUTPUT_TEXT_MAX_CHARS, 8_000));
 const TOOL_OUTPUT_TEXT_PREVIEW_CHARS = Math.max(
   500,
@@ -1637,6 +1638,8 @@ type AgentRunnerDeps = {
   nowMs?: () => number;
   /** Monotonic clock for application-side preparation segments. */
   preparationNowMs?: () => number;
+  /** Independent random source for the 10% preparation-duration sample. */
+  preparationRandom?: () => number;
   warningNowMs?: () => number;
   attachmentStorage?: AgentAttachmentStorage;
   /** 仅用于测试控制面固定短间隔重试，不影响 Provider 退避。 */
@@ -1669,6 +1672,7 @@ export class AgentRunner {
   private readonly streamTextFn: RuntimeStreamText;
   private readonly nowMsFn: () => number;
   private readonly preparationNowMsFn: () => number;
+  private readonly preparationRandomFn: () => number;
   private readonly warningNowMsFn: () => number;
   private readonly attachmentStorage: AgentAttachmentStorage | undefined;
   private readonly controlWriteSleepFn: (ms: number, signal: AbortSignal) => Promise<boolean>;
@@ -1688,6 +1692,7 @@ export class AgentRunner {
     this.streamTextFn = deps.streamText ?? streamText<RuntimeToolSet>;
     this.nowMsFn = deps.nowMs ?? nowMs;
     this.preparationNowMsFn = deps.preparationNowMs ?? (() => performance.now());
+    this.preparationRandomFn = deps.preparationRandom ?? Math.random;
     this.warningNowMsFn = deps.warningNowMs ?? nowMs;
     this.attachmentStorage = deps.attachmentStorage;
     this.controlWriteSleepFn = deps.controlWriteSleep ?? sleepMsWithAbort;
@@ -2662,7 +2667,8 @@ export class AgentRunner {
     profile: ExecutionProfile;
     run: QueuedRun;
     context: PromptContext;
-    contextPreparationMs?: number;
+    /** Null means the first attempt was not sampled before reading this context. */
+    contextPreparationMs?: number | null;
     step: number;
     emptyResponseCount?: number;
     signal: AbortSignal;
@@ -2673,7 +2679,7 @@ export class AgentRunner {
     if (context.pendingTools.length > 0) {
       throw new Error("cannot invoke model while ToolExecution remains queued or running");
     }
-    const sharedPreparationStartedAt = this.preparationNowMsFn();
+    const sharedPreparationStartedAt = params.contextPreparationMs != null ? this.preparationNowMsFn() : null;
     const conversationStateAdapter = this.providerConversationStateAdapterRegistry.resolve(profile);
     const model = createLanguageModel(profile);
     const runtimeOptions = buildModelRuntimeOptions(profile);
@@ -2749,7 +2755,9 @@ export class AgentRunner {
     let attemptDebugRequest = projectAssistantDebugRecord({ status: "running", request: { ...requestBase, messages: firstAttemptMessages } }).request;
 
     // Stop before Assistant control-plane writes; shared work belongs only to attempt one.
-    const sharedPreparationMs = (params.contextPreparationMs ?? 0) + this.preparationNowMsFn() - sharedPreparationStartedAt;
+    const sharedPreparationMs = sharedPreparationStartedAt === null
+      ? null
+      : params.contextPreparationMs! + this.preparationNowMsFn() - sharedPreparationStartedAt;
 
     let assistantMessageId: string;
     if (recoveryContinuation.messageId) {
@@ -3100,7 +3108,9 @@ export class AgentRunner {
       if (signal.aborted) {
         return { aborted: true as const, assistantMessageId };
       }
-      const attemptPreparationStartedAt = this.preparationNowMsFn();
+      // Retry attempts sample independently; never charge them the shared preparation again.
+      const preparationSampled = retryCount === 0 ? sharedPreparationMs !== null : this.preparationRandomFn() < REQUEST_PREPARATION_SAMPLE_RATE;
+      const attemptPreparationStartedAt = preparationSampled ? this.preparationNowMsFn() : null;
       if (retryCount > 0 && toolSet.subtask) {
         // Refresh only the dynamic candidate description, preserving this turn's
         // tool/schema, conversation-state, and availableToolNames snapshots.
@@ -3180,8 +3190,8 @@ export class AgentRunner {
         messages: materializedMessages
       } satisfies RuntimeStreamRequest;
 
-      const requestPreparationMs = Math.max(0, Math.round(
-        (retryCount === 0 ? sharedPreparationMs : 0) + this.preparationNowMsFn() - attemptPreparationStartedAt,
+      const requestPreparationMs = attemptPreparationStartedAt === null ? null : Math.max(0, Math.round(
+        (retryCount === 0 ? sharedPreparationMs! : 0) + this.preparationNowMsFn() - attemptPreparationStartedAt,
       ));
       const analyticsModelStartedAt = this.nowMsFn();
       const analyticsAttemptNo = retryCount + 1;
@@ -3829,14 +3839,17 @@ export class AgentRunner {
       // pending tools must finish before that step can start.
       let autoCompactionAttemptedForNextModelStep = false;
       while (!signal.aborted) {
-        const contextPreparationStartedAt = this.preparationNowMsFn();
+        // Decide before reading context so unselected requests do not call the timing clock.
+        const contextPreparationStartedAt = this.preparationRandomFn() < REQUEST_PREPARATION_SAMPLE_RATE ? this.preparationNowMsFn() : null;
         let context = await this.apiClient.getPromptContext({
           workspaceId: run.workspaceId,
           sessionId: run.sessionId,
           runId: run.runId
         });
 
-        let contextPreparationMs = this.preparationNowMsFn() - contextPreparationStartedAt;
+        let contextPreparationMs = contextPreparationStartedAt === null
+          ? null
+          : this.preparationNowMsFn() - contextPreparationStartedAt;
 
         // 快照只允许命中“紧接着的一次 pending-tools 检查机会”；若本轮没有 pendingTools，必须立刻丢弃，避免跨 compaction/下一模型 step 泄漏。
         const nextPendingToolNamesSnapshot = pendingToolNamesSnapshot;
@@ -3879,11 +3892,14 @@ export class AgentRunner {
           // the prompt snapshot above. Refresh once before the model step, but
           // do not re-enter auto-compaction until after that step.
           autoCompactionAttemptedForNextModelStep = true;
-          const refreshedPreparationStartedAt = this.preparationNowMsFn();
+          // Discard the old context and its sampling decision after compaction.
+          const refreshedPreparationStartedAt = this.preparationRandomFn() < REQUEST_PREPARATION_SAMPLE_RATE ? this.preparationNowMsFn() : null;
           context = await this.apiClient.getPromptContext({
             workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId,
           });
-          contextPreparationMs = this.preparationNowMsFn() - refreshedPreparationStartedAt;
+          contextPreparationMs = refreshedPreparationStartedAt === null
+            ? null
+            : this.preparationNowMsFn() - refreshedPreparationStartedAt;
           if (context.pendingTools.length > 0) {
             const pendingResult = await this.executePendingTools({ profile, run, context, signal });
             if (pendingResult.paused || signal.aborted) {

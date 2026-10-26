@@ -1142,6 +1142,8 @@ test("平均准备耗时替换第三卡并切换时长趋势，未知与真实�
   const cards = wrapper.findAll(".model-primary-metrics > *");
   assert.equal(cards[2]!.attributes("data-testid"), "model-metric-averagePreparationDuration");
   assert.match(cards[2]!.text(), /平均准备耗时|Average preparation time/);
+  assert.match(cards[2]!.get('.metric-description').text(), /10%.*(?:随机采样|random)/);
+  assert.equal(wrapper.findAll('.metric-description').length, 1, '仅准备耗时卡展示采样说明');
   assert.equal(wrapper.find("[data-testid='model-metric-timeoutRate']").exists(), false);
   await cards[2]!.get("button").trigger("click");
   const trend = wrapper.get("[data-testid='model-trend-averagePreparationDuration']");
@@ -1155,6 +1157,27 @@ test("平均准备耗时替换第三卡并切换时长趋势，未知与真实�
     await wrapper.setProps({ model: { ...source, metrics: { ...source.metrics, averagePreparationDuration: { ...metric, value: { durationMs, reliableSampleCount: durationMs === null ? 0 : 1 } } } } });
     const text = wrapper.get("[data-testid='model-metric-averagePreparationDuration'] .metric-value").text();
     assert.equal(text, durationMs === null ? "—" : "0ms");
+    assert.match(wrapper.get('[data-testid="model-metric-averagePreparationDuration"] .metric-description').text(), new RegExp(`(?:有效样本数：|Valid samples: )${durationMs === null ? 0 : 1}$`));
   }
   wrapper.unmount();
+});
+
+test("准备耗时卡展示当前采样规则和可靠样本数，中英文及不可用状态不伪造零", async () => {
+  for (const locale of ['zh-CN', 'en-US']) {
+    const source = structuredClone(dashboardSuccessFixture.data.model);
+    const metric = source.metrics.averagePreparationDuration;
+    assert.notEqual(metric.status, 'unavailable');
+    metric.value.reliableSampleCount = 1234;
+    const localI18n = createI18n({ legacy: false, locale, messages: { 'zh-CN': i18n.global.getLocaleMessage('zh-CN'), 'en-US': enUS } });
+    const wrapper = mount(ModelSection, { global: { plugins: [localI18n] }, props: { model: source, cacheHitRate: dashboardSuccessFixture.data.overview.cacheHitRate, timezone: 'UTC' } });
+    const description = () => wrapper.get('[data-testid="model-metric-averagePreparationDuration"] .metric-description').text();
+    assert.match(description(), locale === 'zh-CN' ? /当前按 10% 随机采样 · 有效样本数：1,234/ : /Current sampling: 10% random · Valid samples: 1,234/);
+    await wrapper.setProps({ model: { ...source, metrics: { ...source.metrics, averagePreparationDuration: {
+      status: 'unavailable', value: null, dataIncomplete: true, unavailableReason: 'no_safe_data', requiredDomains: ['model'],
+      comparison: { status: 'not_applicable', kind: null, delta: null },
+    } } } });
+    assert.match(description(), /—$/);
+    assert.equal(wrapper.get('[data-testid="model-metric-averagePreparationDuration"] .metric-value').text(), '—');
+    wrapper.unmount();
+  }
 });
