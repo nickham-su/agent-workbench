@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { createRequire } from "node:module";
 import { resolve } from "node:path";
@@ -87,6 +88,72 @@ test("bootstrap file URL safely handles spaces and preserves inherited Node opti
   assert.ok(url.includes("%22"));
   assert.equal(command.options.env.TEST_SENTINEL, "kept");
   assert.equal(env.NODE_OPTIONS, "--trace-warnings");
+});
+
+function runBootstrapAssertion(source) {
+  const { executable, options } = componentCommand("unused.component.test.ts");
+  execFileSync(executable, ["--input-type=module", "--eval", source], {
+    ...options,
+    timeout: 10_000,
+  });
+}
+
+test("bootstrap initializes Vue without late DevTools replay or duplicate emitted events", () => {
+  runBootstrapAssertion(`
+    import assert from "node:assert/strict";
+    import { h } from "vue";
+    import { mount } from "@vue/test-utils";
+    assert.equal(globalThis.__VUE__, true);
+    assert.equal(globalThis.__VUE_DEVTOOLS_GLOBAL_HOOK__, undefined);
+    assert.equal(globalThis.__VUE_DEVTOOLS_HOOK_REPLAY__, undefined);
+    const wrappers = [];
+    try {
+      for (let i = 0; i < 3; i++) {
+        const wrapper = mount({ emits: ["example"], render: () => h("div") });
+        wrappers.push(wrapper);
+        for (const mounted of wrappers) {
+          mounted.vm.$emit("example", i);
+          assert.equal(mounted.emitted("example").length, i - wrappers.indexOf(mounted) + 1);
+        }
+      }
+      assert.equal(globalThis.__VUE_DEVTOOLS_HOOK_REPLAY__, undefined);
+    } finally {
+      for (const wrapper of wrappers) wrapper.unmount();
+    }
+  `);
+});
+
+test("bootstrap disables real navigation while preserving link and cancellation semantics", () => {
+  runBootstrapAssertion(`
+    import assert from "node:assert/strict";
+    const navigation = window.happyDOM.settings.navigation;
+    assert.equal(navigation.disableMainFrameNavigation, true);
+    assert.equal(navigation.disableChildFrameNavigation, true);
+    assert.equal(navigation.disableChildPageNavigation, true);
+    assert.equal(navigation.disableFallbackToSetURL, true);
+    const originalUrl = window.location.href;
+    for (const target of ["_self", "_blank", "test-frame"]) {
+      const link = document.createElement("a");
+      link.href = "https://example.invalid/navigation-test";
+      link.target = target;
+      document.body.append(link);
+      let clicked = false;
+      link.addEventListener("click", () => { clicked = true; });
+      const event = new MouseEvent("click", { bubbles: true, cancelable: true });
+      assert.equal(link.dispatchEvent(event), true);
+      assert.equal(clicked, true);
+      assert.equal(event.defaultPrevented, false);
+      assert.equal(link.href, "https://example.invalid/navigation-test");
+      assert.equal(link.target, target);
+      link.addEventListener("click", (event) => event.preventDefault());
+      const cancelled = new MouseEvent("click", { bubbles: true, cancelable: true });
+      assert.equal(link.dispatchEvent(cancelled), false);
+      assert.equal(cancelled.defaultPrevented, true);
+      link.remove();
+    }
+    await window.happyDOM.waitUntilComplete();
+    assert.equal(window.location.href, originalUrl);
+  `);
 });
 
 test("default component list contains thirty unique files including view_image preview", () => {
