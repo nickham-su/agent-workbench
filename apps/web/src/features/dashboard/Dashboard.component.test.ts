@@ -202,6 +202,25 @@ test("模型六卡、趋势与覆盖双栏及模型对比表按原型组织", as
   assert.match(cells[4]!, /^0/);
   wrapper.unmount();
 });
+test("模型输入输出 Token 卡片缩写为一位小数且不添加悬停提示", () => {
+  const source = dashboardSuccessFixture.data.model;
+  const model = { ...source, metrics: {
+    ...source.metrics,
+    inputTokens: { ...source.metrics.inputTokens, value: { count: 788_108_165 } },
+    outputTokens: { ...source.metrics.outputTokens, value: { count: 3_677_857 } },
+  } };
+  const wrapper = mount(ModelSection, { ...options, props: {
+    model, cacheHitRate: dashboardSuccessFixture.data.overview.cacheHitRate, timezone: "UTC",
+  } });
+  const card = wrapper.get("[data-testid='model-metric-tokens']");
+  assert.deepEqual(card.findAll(".token-values strong").map((value) => value.text()), ["788.1M", "3.7M"]);
+  assert.equal(card.find("[title], [role='tooltip']").exists(), false);
+  assert.deepEqual(card.findAll(".token-comparison").map((value) => value.text()), ["+10%", "+10%"]);
+  assert.equal(model.metrics.inputTokens.value.count, 788_108_165);
+  assert.equal(model.metrics.outputTokens.value.count, 3_677_857);
+  wrapper.unmount();
+});
+
 test("模型覆盖率未知不画零，安全零显示零；双 Token 值互不冒充且 partial 不展示采集文案", async () => {
   const source = dashboardSuccessFixture.data.model;
   const metrics = source.metrics;

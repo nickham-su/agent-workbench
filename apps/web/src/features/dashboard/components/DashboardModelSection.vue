@@ -11,12 +11,12 @@
           <span class="token-values">
             <span>
               <span class="token-label">{{ t('dashboard.inputTokens') }}</span>
-              <strong>{{ formatCount(metricNullableCountValue(model.metrics.inputTokens), locale) }}</strong>
+              <strong>{{ formatTokenCount(metricNullableCountValue(model.metrics.inputTokens), locale) }}</strong>
               <span v-if="comparisonLabel(model.metrics.inputTokens, metricNullableCountValue(model.metrics.inputTokens) !== null)" class="token-comparison">{{ comparisonLabel(model.metrics.inputTokens, true) }}</span>
             </span>
             <span>
               <span class="token-label">{{ t('dashboard.outputTokens') }}</span>
-              <strong>{{ formatCount(metricNullableCountValue(model.metrics.outputTokens), locale) }}</strong>
+              <strong>{{ formatTokenCount(metricNullableCountValue(model.metrics.outputTokens), locale) }}</strong>
               <span v-if="comparisonLabel(model.metrics.outputTokens, metricNullableCountValue(model.metrics.outputTokens) !== null)" class="token-comparison">{{ comparisonLabel(model.metrics.outputTokens, true) }}</span>
             </span>
           </span>
@@ -45,7 +45,7 @@
 import { computed, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import type { DashboardData, MetricResult } from "@agent-workbench/shared";
-import { formatComparison, formatCount, formatDuration, formatRatio } from "../dashboard-formatters";
+import { formatComparison, formatCount, formatDuration, formatRatio, formatTokenCount } from "../dashboard-formatters";
 import { metricNumberValue, metricNullableCountValue, metricRatioValue } from "../dashboard-types";
 import DashboardMetricCard from "./DashboardMetricCard.vue";
 import DashboardMiniRatioChart from "./DashboardMiniRatioChart.vue";
