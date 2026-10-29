@@ -52,6 +52,8 @@ test("A-DISCOVER-AGENT: config order, minimal fields, empty success and one shar
   const human = await execute(["agent", "list", "--workspace", "w"], { agents });
   assert.equal(human.stdout.includes("\u001b"), false);
   assert.ok(human.stdout.includes("摘要\\n\\u001b[31m"));
+  assert.match(human.stdout, /Agent 总数：2\n$/);
+  assert.doesNotMatch(human.stdout, /不保证|可用仅|可用只|Worker/);
   const empty = await execute(["agent", "list", "-w", "w", "--json"], { agents: [] });
   assert.deepEqual(JSON.parse(empty.stdout).data.items, []);
   assert.equal(selectAgent(agents).id, "z");
@@ -81,6 +83,10 @@ test("A-CONTROL-STATUS: only busy/idle, no activeRunId, runtime notice or succes
     assert.deepEqual(output.requests, ["/api/agent/sessions/s/run-state?workspaceId=w"]);
     assert.deepEqual(JSON.parse(output.stdout).data, { workspaceId: "w", sessionId: "s", status });
     assert.equal(output.stdout.includes("private-"), false);
+    const human = await execute(["session", "status", "-w", "w", "-s", "s"], stateFixture(status));
+    assert.equal(human.code, 0);
+    assert.equal(human.stdout, `Workspace：w\nSession ID：s\n状态：${status}\n`);
+    assert.equal(human.stderr, "");
   }
 });
 

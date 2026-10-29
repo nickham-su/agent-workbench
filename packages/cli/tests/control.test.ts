@@ -33,7 +33,7 @@ function controls(options: { kind?: string; busy?: boolean; conflict?: boolean; 
     if (url.pathname === "/api/agent/sessions/s") return jsonResult(agentSession({ kind: options.kind ?? "primary", headMessageId: "old" }));
     if (url.pathname.endsWith("/run-state")) return jsonResult(state(options.busy ? "r" : null));
     if (url.pathname.endsWith("/agents/available")) return jsonResult({ agents: [{ id: "first", name: "first", summary: "" }, { id: "second", name: "second", summary: "" }] });
-    if (url.pathname.endsWith("/cancel")) { assert.equal(request.method, "POST"); assert.deepEqual(request.body, { workspaceId: "w" }); return jsonResult({ ok: true, session: agentSession(), runState: state() }); }
+    if (url.pathname.endsWith("/cancel")) { assert.equal(request.method, "POST"); assert.deepEqual(request.body, { workspaceId: "w" }); return jsonResult({ ok: true, session: agentSession(), runState: state(options.busy ? "r" : null) }); }
     if (url.pathname.endsWith("/compact")) {
       assert.equal(request.method, "POST"); assert.equal((request.body as { agentId: string }).agentId, "first");
       if (options.conflict || options.empty) return jsonResult({ code: options.empty ? "AGENT_COMPACTION_EMPTY" : "SESSION_RUNNING" }, options.empty ? 400 : 409);
@@ -45,6 +45,37 @@ function controls(options: { kind?: string; busy?: boolean; conflict?: boolean; 
     assert.fail(`unexpected route ${url.pathname}`);
   };
 }
+
+test("normal cancel output reports the returned state without inventing a cancelled Run", async () => {
+  for (const busy of [false, true]) {
+    const expectedStatus = busy ? "running" : "idle";
+    const human = await executeFollow(["cancel", "-w", "w", "-s", "s"], controls({ busy }), false);
+    assert.equal(human.code, 0, human.stderr);
+    assert.equal(human.stdout, `取消请求已处理。\n状态：${expectedStatus}\n`);
+    assert.equal(human.stderr, "");
+    assert.equal(human.requests.length, 2);
+    const json = await executeFollow(["cancel", "-w", "w", "-s", "s"], controls({ busy }));
+    assert.equal(json.code, 0, json.stderr);
+    assert.deepEqual(JSON.parse(json.stdout), {
+      schemaVersion: 1, ok: true, command: "session cancel",
+      data: { workspaceId: "w", sessionId: "s", requested: true, status: expectedStatus }
+    });
+  }
+});
+
+test("normal compact output reports acceptance and keeps all Run identities", async () => {
+  const result = await executeFollow(["compact", "-w", "w", "-s", "s"], controls(), false);
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, /^压缩请求已受理。\n/);
+  assert.doesNotMatch(result.stdout, /不代表|不是排队|已经改变上下文/);
+  for (const entry of ["workspaceId：w", "sessionId：s", "agentId：first", "runId：r", "accepted：true", "scheduled：true", "deduplicated：false"]) {
+    assert.ok(result.stdout.includes(`${entry}\n`), entry);
+  }
+  const posted = result.requests.find(({ url }) => url.pathname.endsWith("/compact"));
+  assert.ok(posted);
+  assert.ok(result.stdout.includes(`clientRequestId：${(posted.request.body as { clientRequestId: string }).clientRequestId}\n`));
+  assert.equal(result.stderr, "");
+});
 
 test("A-CONTROL-CANCEL-TYPE/RACE: one primary precheck and one cancel, subtask refuses with zero writes", async () => {
   for (const kind of ["primary", "subtask"]) {

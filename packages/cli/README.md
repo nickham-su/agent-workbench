@@ -47,7 +47,7 @@ awb file download -w workspace-id --path reports --output ./reports.zip --json
 - URL 只接受 HTTP(S) origin，不支持代理子路径、用户口令、query 或 fragment。
 - Workspace 和最近更新时间窗口必须显式提供；窗口为正整数 `s/m/h/d`，最多90天。
 - 列表仅查主会话（包含 Fork 主会话），默认 `kind=primary`。`--kind primary` 是弃用兼容写法；`--kind subtask/all` 本地退出2且不联网，属于有意收缩旧CLI行为。已知子会话仍可用 show/status读取，不改原API。
-- status 为 `idle/running/all`，缺省 `all`。status命令仅表示忙闲，idle不表示上次执行成功。
+- 列表的 `--status` 为 `idle/running/all`，缺省 `all`；`session status` 返回当前忙闲状态 `idle/running`。
 - `-w/--workspace`、`-s/--session` 同义；同一单值参数不能重复，包括短长别名。ID不猜UUID，但禁止空白边界和控制字符，路径段拒绝字面点段。
 - `--json`、`--timeout` 可放在根、组或动作位置；单请求完整body时限默认30s，范围1s..24h，所有请求零自动重试。所有层级 `--help/-h` 都离线且无副作用。
 - 每条展示本 Session 的创建时间和最近更新时间（UTC ISO）；Fork 展示自身创建时间。窗口仍仅按更新时间筛选，创建时间不参与筛选、排序或计数。
@@ -58,14 +58,16 @@ awb file download -w workspace-id --path reports --output ./reports.zip --json
 
 ### 发送与消息快照
 
+正常输出直接展示结果和标识，帮助说明用途、参数及必要操作规则。`agent list` 列出当前工作区的可选 Agent；`send/compact` 默认返回受理信息，使用 `-f` 等待执行结果。实际失败时输出已确认原因、操作阶段及已知身份。
+
 - `send` 仅主会话可写，省略 `-s` 时创建一次再发送一次。默认 Agent 始终为当前工作区可用 user 列表第一个，包括继续已有会话；显式 `-a` 须在列表中。首个 Agent 配置错误不换第二个。
 - `--prompt`、`--prompt-file`、`--stdin` 最多一个；只有 `--stdin` 读取标准输入到 EOF，TTY 拒绝。至少有非空白文本或有效图片，可发送纯图。提示词 UTF-8 允许移除开头一个 BOM，文件必须为可读普通文件（显式本地软链到普通文件可用），文本源最多 1 MiB。
 - 图片按实际签名支持 PNG/JPEG/WebP，最多 4 张、单张 10 MiB、总计 20 MiB；重复文件累计。上传使用预检时持有的字节，仅带 basename 和检测 MIME，不重读原路径。
 - 纯文本最终 JSON 体最多 1 MiB，有图片的 multipart payload JSON 最多 64 KiB；按序列化 UTF-8 字节检查，创建前完成最终检查。multipart boundary 由 Fetch 生成。
-- 成功只代表受理，返回 `workspaceId/sessionId/agentId/messageId/runId/clientRequestId/sessionCreated/accepted/deduplicated`。创建失败、超时或响应丢失立即失败且不发送，可能遗留空会话；创建后发送失败不重建。所有请求零自动重试，不排队、不切 Agent、不取消/删除远端资源，不承诺创建发送整链 exactly-once。
+- `send` 默认受理后返回 `workspaceId/sessionId/agentId/messageId/runId/clientRequestId/sessionCreated/accepted/deduplicated`，使用 `-f` 等待执行结果。创建失败、超时或响应丢失立即失败且不发送，可能遗留空会话；创建后发送失败不重建。所有请求零自动重试，不排队、不切 Agent、不取消/删除远端资源。
 - 已受理后续签保存失败仍退出 7，错误保留已确认身份和 `effect=accepted`；发送断线为结果未知，不应自动重发。无法证明原 Agent 的意外去重响应明确失败，不伪造 Agent 身份。
 - `messages` 支持主/子会话，`--after` 与 `-n/--last` 恰选一个；`-n` 为无前导零的正安全整数。after 锚点可为普通、工具或压缩消息，必须在当前可见分支，排除锚点本身；找不到不会退化为全历史。
-- 普通消息只投影 user/assistant 的 text/image，过滤纯工具、纯推理、system/runtime/compaction 和 superseded。按 depth 正序，正文不截断；`-n 1` 不保证是成功回答。非跟随返回当时 streaming 状态，不伪称未来最终答案。
+- 普通消息只投影 user/assistant 的 text/image，过滤纯工具、纯推理、system/runtime/compaction 和 superseded。按 depth 正序，正文完整；`-n 1` 返回最近一条普通消息。非跟随查询保留消息当时的 `streaming/completed/failed/cancelled` 状态。
 - 消息 JSON data 含 `selection/items/count/complete:true` 及工作区/会话 ID；完整分页成功后才一次输出，失败不输出半个成功列表。human 正文保留正常换行但转义终端控制字符，JSON 保留业务原文。`-f` 使用下述有限跟随规则，不等待未来 Run。
 
 API 与 CLI 应同步升级，默认 Docker 镜像会一起构建发布。创建时间是响应必填字段；包含条目的新旧版本响应可能因严格字段校验退出6，未提供兼容模式。本地仅更新源码后需重新构建 API、shared 与CLI产物。
@@ -96,7 +98,7 @@ CLI测试会把单个产物复制到项目临时隔离目录，在新Node进程�
 
 退出码：0查询/登录成功（busy也可成功查询），2参数／输入错误，3缓存读取／结构错误，4认证失败，5网络或完整body传输失败，6HTTP／响应契约错误，7缓存或下载本地持久化失败，141输出管道关闭。跟随退出码8为Run失败、9为Run取消、10为整体超时、130/143为SIGINT/SIGTERM，详见[设计契约](../../docs/design/awb-cli-agent/02-cli-contract.md)。
 
-正常查询以 `查询结束：已输出 N 个 Session。` 结尾。API和CLI全量输出不代表工具链能收集任意大小结果：已有预览、artifact及bash硬上限可能截断，需结合超限标识和结束标记判断，不能把前缀当完整结果。本次不提高上限或增加隐式分页。
+正常查询以 `查询结束：已输出 N 个 Session。` 结尾。通过工具链采集较大结果时，结合超限标识和结束标记判断是否完整；预览、artifact及bash仍使用各自的现有限额，CLI保持显式查询方式。
 
 ## 有限跟随与会话控制
 
@@ -104,9 +106,9 @@ CLI测试会把单个产物复制到项目临时隔离目录，在新Node进程�
 - send 固定受理的 Run，compact 固定本次压缩 Run；messages 先预取历史再捕获活动 Run，之后不切换目标。Run 终态后仍会补读排干，再退出，不等待下一任务。`--after/-n` 只约束初始历史，不限制随后目标 Run 的普通消息。
 - messages 捕获 idle 时只做一次有界收尾，不永久等待未来任务。可信来源只取初始 head 本身：user 的 `originRunId` 可能为 null，不能跳过新 user 去猜旧 Run。未知来源而范围稳定的 user-only／继承／空历史可成功；初始化期间有无法证明归属的追加则 `OBSERVATION_INCOMPLETE/6`，可由调用者重新读取，不会自动重试。
 - JSON 跟随输出 JSONL，顺序为 metadata、零到多条 message upsert、唯一 terminal。按 `message.id` 和 `updatedRevision` 取最高版本完整替换，不能拼接正文。human 模式 streaming 只输出一次“生成中”，终结正文完整显示一次。推理、工具事件与压缩消息不输出。
-- terminal 的 `complete` 表示消息范围是否读完，和 Run 是否成功独立：`run_completed/0`、`run_failed/8`、`run_cancelled/9` 均可 `complete=true`；`no_active_run/0` 不代表以前 Run 成功。观察失败时 `complete=false`，认证4、传输或单请求超时5、契约/分支失效6、本地续签保存7、整体监听超时10优先于已知 Run 结果。
+- terminal 的 `complete` 表示消息范围是否读完，和 Run 是否成功独立：`run_completed/0`、`run_failed/8`、`run_cancelled/9` 均可 `complete=true`；`no_active_run/0` 表示查询捕获时没有活动Run。观察失败时 `complete=false`，认证4、传输或单请求超时5、契约/分支失效6、本地续签保存7、整体监听超时10优先于已知 Run 结果。
 - SIGINT/SIGTERM 分别130/143、stdout EPIPE为141，只停止本地请求/监听，绝不自动调用 cancel。stdout关闭或SIGKILL无法保证terminal，调用方须同时检查进程退出码。
-- `session cancel` 仅允许主会话，取消服务端处理时的当前执行及其活动子孙；预查存在竞态，没有 expectedRunId 原子保护，不回滚已写文件、不删除历史，也不承诺外部进程副作用已完全撤销。
+- `session cancel` 仅允许主会话，取消服务端处理请求时的当前执行及其活动后代，不回滚已写文件、不删除历史。正常输出“取消请求已处理”及返回的会话状态；空闲会话同样按实际状态展示。
 - `session compact` 仅空闲主会话，默认首个 user Agent，不公开 `-a`；busy冲突不排队。默认只返回受理，`-f` 从 Run 终态区分完成、无需压缩/无进展/尾部过大/需重发媒体和失败；空会话保留 `AGENT_COMPACTION_EMPTY` 错误。压缩不删除原始历史或工作区文件。
 - 每次发送/压缩使用独立随机请求 ID，不跨调用恢复。无法证明原 Agent 的意外去重会保留可信身份并失败，不假造成功或把去重当成无需压缩。
 
@@ -118,7 +120,7 @@ CLI测试会把单个产物复制到项目临时隔离目录，在新Node进程�
 - 默认拒绝覆盖文件、目录或 dangling symlink。完整响应流写入同目录随机独占 `0600` 临时文件，按背压写入并验证 Content-Length（如有），sync/close 后以 hard link 原子无覆盖发布；目标并发出现则失败，不使用可能覆盖的 rename/copy 降级。文件系统不支持可靠发布时 `PUBLISH_UNSUPPORTED/7`。
 - 成功只输出 summary：`workspaceId/path/output/format/bytes/published`，JSON 仍为单对象；二进制从不进入 stdout。HTTP 错误页、截断、超时、写盘或发布失败不发布半成品。失败只清理本次临时文件；发布后清理或输出失败仍保留完整目标，并在错误 context 中标记 `published=true`。不要因非零退出码就假定目标不存在。
 - SIGINT/SIGTERM/EPIPE 仅停止本地传输／输出。SIGKILL/掉电可能遗留随机临时文件，CLI 不自动扫描删除其他调用的遗留文件。
-- 现有服务器目录规则保持：源文件合计最多 100 MiB，遇 `.git` 或扫描到软链整次失败，空目录不保留；源目录可在下载时变化，不保证一致性快照。客户端词法过滤不能修复服务端 realpath/路径替换的独立 TOCTOU 风险。
+- 现有服务器目录规则保持：源文件合计最多 100 MiB，遇 `.git` 或扫描到软链整次失败，空目录不保留。服务端路径校验与源目录变化等技术边界见[独立安全事项及已知功能限制](../../docs/design/awb-cli-agent/06-decisions-and-references.md#独立安全事项)。
 
 ## 本次实施与验证
 

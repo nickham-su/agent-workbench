@@ -38,9 +38,9 @@
 | `D-HUMAN-ESCAPE` | 元信息转义，正文保留换行并转义终端控制；JSON原文不变 | 防止终端执行用户控制序列，不截断业务正文 |
 | `D-VISIBLE-MESSAGES` | 普通消息按text/image可见内容计数，不含tool-only/reasoning/compaction | -n1更接近最近可读回答，但仍不是成功结果API |
 | `D-CURRENT-BRANCH` | 当前可见分支读取，可恢复reset补页；不可恢复改链显式失败 | 不新增不可变事件日志；不承诺回退后旧token/所有瞬时消息永久无损 |
-| `D-CANCEL-CURRENT` | 取消服务端处理时的当前执行树 | 不新增expectedRunId；预查与提交存在竞态，帮助必须诚实说明 |
+| `D-CANCEL-CURRENT` | 取消服务端处理时的当前执行树 | 不新增expectedRunId；帮助简洁说明处理时当前执行及范围，预查竞态机制保留在技术文档，不作为正常结果的反复警告 |
 | `D-COMPACT-EXISTING` | 保留空会话400与Run终态skip语义 | 不把所有无需压缩结果即时化，不改变自动压缩/Worker流程 |
-| `D-DOWNLOAD-COMPAT` | 复用文件流/ZIP，不为CLI收紧原API | 客户端做词法过滤与本地无覆盖；现有限额/风险明确说明，不声称修复服务端边界 |
+| `D-DOWNLOAD-COMPAT` | 复用文件流/ZIP，不为CLI收紧原API | 客户端做词法过滤与本地无覆盖；帮助列使用限额，独立风险留技术文档，不声称修复服务端边界 |
 | `D-LOCAL-NO-CLOBBER` | 同目录temp完整接收后原子无覆盖发布 | 预查后目标仍可能并发出现；rename会覆盖，不可作为无覆盖实现 |
 | `D-HELP-OFFLINE` | 所有层级help本地无副作用 | 模型可渐进发现能力；帮助不能要求先有登录、文件或有效业务参数 |
 

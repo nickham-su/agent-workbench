@@ -11,7 +11,7 @@ export async function listWorkspaces(dependencies: ReadCommandDependencies): Pro
 }
 export async function listAgents(workspaceId: string, dependencies: ReadCommandDependencies): Promise<void> {
   const items = await (await AgentApi.connect(dependencies)).agents(workspaceId);
-  const human = `Workspace：${escapeDisplayText(workspaceId)}\n` + items.map((item) => `Agent ID：${escapeDisplayText(item.id)}\n名称：${escapeDisplayText(item.name)}\n用途：${escapeDisplayText(item.summary)}\n`).join("\n") + `Agent 总数：${items.length}\n可用仅表示范围和启用允许，不保证模型或 Worker 可运行。\n`;
+  const human = `Workspace：${escapeDisplayText(workspaceId)}\n` + items.map((item) => `Agent ID：${escapeDisplayText(item.id)}\n名称：${escapeDisplayText(item.name)}\n用途：${escapeDisplayText(item.summary)}\n`).join("\n") + `Agent 总数：${items.length}\n`;
   await writeSuccess(dependencies.io, Boolean(dependencies.json), "agent list", { workspaceId, items, count: items.length }, human, { phase: "discover", effect: "not_applicable", context: { workspaceId } });
 }
 export async function showSession(workspaceId: string, sessionId: string, dependencies: ReadCommandDependencies): Promise<void> {
@@ -23,5 +23,5 @@ export async function sessionStatus(workspaceId: string, sessionId: string, depe
   const state = await (await AgentApi.connect(dependencies)).runState(workspaceId, sessionId);
   const data = { workspaceId, sessionId, status: state.status };
   await writeSuccess(dependencies.io, Boolean(dependencies.json), "session status", data,
-    `Workspace：${escapeDisplayText(workspaceId)}\nSession ID：${escapeDisplayText(sessionId)}\n状态：${state.status}\nidle 不表示上次执行成功。\n`, { phase: "status", effect: "not_applicable", context: { workspaceId, sessionId } });
+    `Workspace：${escapeDisplayText(workspaceId)}\nSession ID：${escapeDisplayText(sessionId)}\n状态：${state.status}\n`, { phase: "status", effect: "not_applicable", context: { workspaceId, sessionId } });
 }

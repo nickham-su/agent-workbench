@@ -35,7 +35,7 @@ test("A-FOLLOW-UPDATES/METADATA: revisions are complete JSONL upserts, human pri
       assert.deepEqual(result.events.filter((event) => event.type === "message").map((event) => event.source), ["history", "follow", "follow"]);
       assert.equal((views.at(-1)!.parts[0] as { text: string }).text, "final\n完整\u001b[31m");
       assert.equal(result.events[0].agentId, undefined);
-    } else { assert.equal(result.stdout.split("生成中").length, 2); assert.equal(result.stdout.split("final").length, 2); assert.equal(result.stdout.includes("partial"), false); assert.equal(result.stdout.includes("\u001b"), false); }
+    } else { assert.match(result.stdout, /Message ID：a；生成中\n/); assert.doesNotMatch(result.stdout, /尚非最终正文/); assert.equal(result.stdout.split("生成中").length, 2); assert.equal(result.stdout.split("final").length, 2); assert.equal(result.stdout.includes("partial"), false); assert.equal(result.stdout.includes("\u001b"), false); }
   }
 });
 

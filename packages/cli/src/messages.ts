@@ -163,6 +163,6 @@ export async function listMessages(workspaceId: string, sessionId: string, selec
     const items = await completeHistory(api, frame, selection);
     const data = { workspaceId, sessionId, selection, items, count: items.length, complete: true };
     await writeSuccess(dependencies.io, Boolean(dependencies.json), "session messages", data,
-      items.map(renderMessage).join("\n") + `消息快照结束：已输出 ${items.length} 条普通消息；不代表未来最终答案。\n`, { phase: "history", effect: "not_applicable", context: { workspaceId, sessionId } });
+      items.map(renderMessage).join("\n") + `消息快照结束：已输出 ${items.length} 条普通消息。\n`, { phase: "history", effect: "not_applicable", context: { workspaceId, sessionId } });
   } catch (error) { throw withErrorDetails(error, { phase: "history", effect: "not_applicable", context: { workspaceId, sessionId } }); }
 }

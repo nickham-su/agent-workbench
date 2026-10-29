@@ -30,6 +30,25 @@ async function execute(args: string[] = [], handle: (call: Call) => HttpResult |
 }
 const posts = (calls: Call[]) => calls.filter((call) => call.request.method === "POST");
 
+test("normal send output reports acceptance and identities without a speculative warning", async () => {
+  const capture = captureIO();
+  const calls: Call[] = [];
+  const code = await runCli(["session", "send", "-w", "w", "--prompt", "hello"], {
+    io: capture.io, createConfigStore: () => connectionStore(),
+    http: { request: async (_origin, path, request = {}) => { const call = { path, request }; calls.push(call); return normal(call); } }
+  });
+  assert.equal(code, 0, capture.diagnostic());
+  assert.match(capture.output(), /^已受理。\n/);
+  assert.doesNotMatch(capture.output(), /不代表|不保证|执行成功/);
+  for (const entry of ["workspaceId：w", "sessionId：s", "agentId：a", "messageId：m", "runId：r", "sessionCreated：true", "accepted：true", "deduplicated：false"]) {
+    assert.ok(capture.output().includes(`${entry}\n`), entry);
+  }
+  const requestId = (posts(calls)[1].request.body as { clientRequestId: string }).clientRequestId;
+  assert.ok(capture.output().includes(`clientRequestId：${requestId}\n`));
+  assert.equal(posts(calls).length, 2);
+  assert.equal(capture.diagnostic(), "");
+});
+
 test("A-SEND-CREATE/REQUEST-ID: one create then one send, first Agent is fixed and every call has a fresh UUID", async () => {
   const ids: string[] = [];
   for (let i = 0; i < 2; i++) {

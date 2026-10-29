@@ -12,7 +12,7 @@
 
 | 标识 | 场景与输入 | 必须结果 |
 |---|---|---|
-| `A-HELP-LAYERS` | 根、每个组、每个动作分别 `--help/-h`，以及裸根/裸组 | 退出0；分层内容正确；配置工厂、HTTP、本地输入读取调用均为0 |
+| `A-HELP-LAYERS` | 根、每个组、每个动作分别 `--help/-h`，以及裸根/裸组 | 退出0；分层内容正确，正向说明用途和必要操作规则，不附加假设性可运行/成功免责声明；配置工厂、HTTP、本地输入读取调用均为0 |
 | `A-HELP-PRIORITY` | send 带 help、缺必填项、无效图片路径/负数参数；stdin 注入一个永不结束的流 | 仍显示对应帮助，不读文件/stdin、不等待 EOF、不做业务校验 |
 | `A-HELP-JSON` | 帮助配合 --json | 人类帮助、退出0，不尝试 JSON 业务输出 |
 | `A-HELP-ERROR` | 未知命令/选项、额外位置参数、参数缺值 | 退出2、stdout空、短诊断+正确帮助入口，不回显恶意/机密 argv |
@@ -28,7 +28,7 @@
 | 标识 | 场景 | 必须结果 |
 |---|---|---|
 | `A-DISCOVER-WORKSPACE` | 工作区同名/空标题、顺序不同、空数组 | 稳定码点排序；只输出id/name；空集合成功；不泄漏repo URL/路径/凭证字段 |
-| `A-DISCOVER-AGENT` | 多个Agent、order与名字排序相反 | 保留配置顺序；仅id/name/summary；发送默认首个，不沿用会话上次Agent |
+| `A-DISCOVER-AGENT` | 多个Agent、order与名字排序相反 | 保留配置顺序；仅id/name/summary；正常展示结果和数量，不附可运行免责声明；发送默认首个，不沿用会话上次Agent |
 | `A-DISCOVER-NONE` | 无可用user Agent | agent list成功空数组；send/compact失败，创建/发送/压缩POST均为0 |
 | `A-DISCOVER-BAD-FIRST` | 首Agent模型错误、第二个正常；或列表后首Agent被禁用 | 失败，不改用第二个，不重新发现后重发；无自动修配置 |
 | `A-SESSIONS-WINDOW` | `1s`、`90d`；缺值、0、负数、小数、复合单位、溢出、超90d | 合法值正确换算；非法退出2且不联网 |
@@ -47,7 +47,7 @@
 | `A-SEND-IMAGE-LIMIT` | 1/4/5张；10MiB及+1；总20MiB及+1；重复同文件 | 边界符合现有后端；重复按多张计数；超限创建请求0 |
 | `A-SEND-IMAGE-SIGNATURE` | PNG/JPEG/WebP签名、扩展名不符、SVG/空文件、源预检后被修改 | 按字节签名；不支持拒绝；发送的是已预检字节；上传不含本地绝对路径 |
 | `A-SEND-MULTIPART` | 纯图/混合图片请求 | payload恰一个、images有序、boundary正确、纯图不伪造prompt；服务端仍可独立拒绝损坏图片 |
-| `A-SEND-EXISTING` | 已有主session | 不创建；显式Agent即传该Agent；受理输出标识一致，不-f立即结束 |
+| `A-SEND-EXISTING` | 已有主session | 不创建；显式Agent即传该Agent；人类输出“已受理”及一致标识，不写成执行成功或附免责声明；不-f立即结束 |
 | `A-SEND-SUBTASK` | 已有子session | CLI拒绝，发送POST为0，不收紧API本身 |
 | `A-SEND-BUSY` | 预查空闲但发送时409；显式busy | 退出6，不排队、不重试、不重建、不切Agent |
 | `A-SEND-CREATE` | 未传session，创建和发送成功 | 创建1次、发送1次，顺序正确，sessionCreated=true；先完成输入与Agent预检 |
@@ -69,7 +69,7 @@
 | `A-MESSAGES-PAGES` | 超过100/500原始消息，普通消息稀疏，N大于一页 | 按原始游标翻页，普通消息不足继续取；不把单页当全部；不足N返回全部 |
 | `A-MESSAGES-CURSOR` | hasMore但无游标、游标重复、页ID重复/身份错、404 | 退出6，不死循环、不输出虚假complete |
 | `A-MESSAGES-STREAMING` | 非-f读取正在生成的消息；后来变成文本可见 | 明确streaming状态；不把部分正文标成最终回答；可见性按采样时投影 |
-| `A-MESSAGES-LAST` | 稳定完成、失败/取消、最后只有用户消息 | -n1返回最近普通消息，不伪造成功结果；最近消息与Run成功区分 |
+| `A-MESSAGES-LAST` | 稳定完成、失败/取消、最后只有用户消息 | -n1返回最近普通消息及实际状态，正常输出数量而非最终答案免责声明；不伪造成功结果，最近消息与Run成功区分 |
 | `A-MESSAGES-SUBTASK` | 已知子session、Fork继承历史 | 可读；沿当前展示链读取；保留originSessionId/originRunId，不当作本次新产出 |
 | `A-MESSAGES-LONG` | 超过3000字符普通消息 | 完整正文不按工具预览限额截断；非-f分页失败无半个成功列表 |
 
@@ -138,13 +138,13 @@
 
 | 标识 | 场景 | 必须结果 |
 |---|---|---|
-| `A-CONTROL-STATUS` | 主/子session的idle/running | 仅忙闲投影、退出0；不要求lastRun/失败原因，idle不被表述为任务成功 |
+| `A-CONTROL-STATUS` | 主/子session的idle/running | 仅忙闲投影、退出0；不要求lastRun/失败原因，idle不被表述为任务成功，也不反复附加成功免责声明 |
 | `A-CONTROL-CANCEL-TYPE` | 子session取消、跨工作区、404 | 子会话在CLI拒绝且POST0；其余按API失败；不改原API路由限制 |
 | `A-CONTROL-CANCEL-TREE` | 主Run带活动子/孙Run，已完成子Run | 当前树活动后代级联；已完成不变；工作区已写文件不回滚 |
-| `A-CONTROL-CANCEL-RACE` | 预查后旧Run结束、新Run开始；根已idle | 文案承认处理时当前执行；不声称expectedRunId保护；idle不扫描历史孤儿关系 |
+| `A-CONTROL-CANCEL-RACE` | 预查后旧Run结束、新Run开始；根已idle | 帮助说明作用于服务端处理时当前执行及活动后代、不回滚文件；结果报告取消请求已处理及返回状态，不虚构已取消Run；不声称expectedRunId保护；idle不扫描历史孤儿关系 |
 | `A-COMPACT-TYPE-BUSY` | 子session、busy；预查idle但POST409 | CLI/后端双重边界符合现状，不排队、不重试、不变更API |
 | `A-COMPACT-EMPTY` | 空主session | 400/AGENT_COMPACTION_EMPTY明确失败，不假造runId或无必要成功 |
-| `A-COMPACT-ACCEPT` | 默认提交与-f | 默认受理即退出；-f固定Run终结；scheduled不是排队；原历史仍可读、文件不变 |
+| `A-COMPACT-ACCEPT` | 默认提交与-f | 默认输出“压缩请求已受理”及标识后退出，不附改变上下文/排队免责声明；-f固定Run终结；scheduled不是排队；原历史仍可读、文件不变 |
 | `A-COMPACT-SKIP` | not_needed/no_progress/oversized_tail/media_requires_resend | 按completed码清楚说明未改变原因、退出0；不要求请求响应立即给skip |
 | `A-COMPACT-FAIL` | pending_tools/provider_unavailable/failed | 按Run failed退出8；HTTP503仍6；不与完成skip混淆 |
 | `A-COMPACT-DEDUP` | 可证明同请求的dedup响应 | scheduled=false表示旧执行；不是无需压缩；跟随原Run，request ID不与send共用 |

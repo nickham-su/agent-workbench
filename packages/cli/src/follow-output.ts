@@ -27,7 +27,7 @@ export class FollowOutput {
     if (old && old.updatedRevision >= message.updatedRevision) return;
     if (this.json) await this.lifetime.wait(writeEvent(this.io, { type: "message", op: "upsert", source, message }));
     else if (message.status === "streaming") {
-      if (!this.announced.has(message.id)) await this.lifetime.wait(writeText(this.io.stdout, `Message ID：${escapeDisplayText(message.id)}；生成中（尚非最终正文）\n`));
+      if (!this.announced.has(message.id)) await this.lifetime.wait(writeText(this.io.stdout, `Message ID：${escapeDisplayText(message.id)}；生成中\n`));
       this.announced.add(message.id);
     } else if (!this.finished.has(message.id)) {
       await this.lifetime.wait(writeText(this.io.stdout, renderMessage(message)));

@@ -262,3 +262,49 @@ apps/api/src/modules/agent/integration/agent-cli-agent.integration.test.ts
 - [session-query.test.ts](../../../packages/cli/tests/session-query.test.ts)只证明CLI DTO结构、时间/计数/过滤回显的校验；[session-activity-query.test.ts](../../../apps/api/src/modules/agent/read-side/session-activity-query.test.ts)4/4只证明后端纯查询参数契约，不作为SQL集合证据。
 
 原全面审查H1/M1/M2/M3/L1与L2全部Resolved，无新增问题；原全面审查者最终复审通过，可交付。所有未验环境及既有保留风险不变。
+
+
+## 2026-10-29：正常输出与帮助文案精简
+
+本节记录后续经用户批准的展示调整，不改写前述开发、审查或测试的历史事实；当前状态为作者自测及独立代码审查通过；无H/M/L必改项，无业务或协议漂移。
+
+- 正常人类输出只展示结果、状态和必要标识；Agent列表与忙闲查询不再附加可运行/成功免责声明。发送使用“已受理”，压缩使用“压缩请求已受理”，消息快照仅报告实际状态和数量，跟随保留简短“生成中”标识。
+- 帮助正向说明可选Agent、当前忙闲、最近一条普通消息等用途；保留输入规则、主子读写边界、中断监听不取消后台、取消处理时当前执行及活动后代/不回滚文件、下载ZIP/限额/拒绝覆盖。服务端下载安全风险等技术说明继续保留在原技术章节。
+- 取消公开响应包含session与runState，未提供cancelled标志或可证明的已取消目标Run；因此人类输出“取消请求已处理”及返回status，idle与running均如实展示。JSON继续使用原requested/status，不新增请求、判断能力或字段，不把原本空闲误报为已取消执行。
+- 未改变业务逻辑、公开API、JSON/JSONL schema或退出码；未新增健康检查、自动重试或依赖。实际失败、结果未知、已受理身份、发布后失败状态及安全脱敏均保持原规则。
+
+### 本轮对应测试证据
+
+| 范围 | 测试文件与实际断言 |
+|---|---|
+| 分层帮助及必要操作语义 | [help-copy.test.ts](../../../packages/cli/tests/help-copy.test.ts)：`normal help describes usage without speculative availability or result disclaimers`覆盖根/组/动作；`positive help retains input, follow, cancellation and download operation rules`核验正向用途及必要边界。均断言离线、零配置/请求，配合--json仍为人类帮助。补充原A-HELP-LAYERS/JSON证据，不删除原100个验收ID。 |
+| Agent与状态正常输出 | [discovery.test.ts](../../../packages/cli/tests/discovery.test.ts)：原Agent/STATUS用例新增人类输出无免责声明、实际idle/running及安全转义断言；原JSON窄投影断言保留。 |
+| 发送与受理身份 | [send.test.ts](../../../packages/cli/tests/send.test.ts)：`normal send output reports acceptance and identities without a speculative warning`断言仅受理措辞、全部已知标识保留；原一次创建发送/JSON/结果未知测试继续执行。 |
+| 取消及压缩 | [control.test.ts](../../../packages/cli/tests/control.test.ts)：`normal cancel output reports the returned state without inventing a cancelled Run`验证idle/running人类结果与完整原JSON对象；`normal compact output reports acceptance and keeps all Run identities`验证受理及全部标识。原真实API取消树和两种状态转移门禁也复跑。 |
+| 消息快照结果 | [messages.test.ts](../../../packages/cli/tests/messages.test.ts)：`normal messages output reports status and count without a final-answer disclaimer`验证四种实际消息状态及空结果的简短输出，原JSON封套/data字段、complete与状态保持不变，无新增Run查询。 |
+| 跟随输出及离线帮助 | [follow.test.ts](../../../packages/cli/tests/follow.test.ts)保留完整JSONL upsert/metadata/terminal断言，新增简短生成中标识；[follow-options.test.ts](../../../packages/cli/tests/follow-options.test.ts)改为核验取消对象范围与不回滚，不再强制出现实现术语“竞态”。 |
+
+本轮实际执行（仓库根，HOME/TMPDIR及所有fixture位于项目内隔离目录；API使用createApp/testkit、真实Worker与本地受控Provider，不运行main/dev或读取实际部署配置）：
+
+```bash
+npm run typecheck -w packages/cli
+TSX_DISABLE_CACHE=1 npm test -w packages/cli
+npm run build -w packages/cli
+HOME="$PWD/.tmp-tests/cli-copy-api-home" USERPROFILE="$PWD/.tmp-tests/cli-copy-api-home" \
+TMPDIR="$PWD/.tmp-tests/cli-copy-api-home" TSX_DISABLE_CACHE=1 \
+node --import tsx --test --test-concurrency=1 \
+apps/api/src/modules/agent/integration/agent-cli-session-query.integration.test.ts \
+apps/api/src/modules/agent/integration/agent-cli-agent.integration.test.ts
+```
+
+- CLI类型检查、构建通过；最终CLI完整套件169/169、相关API集成9/9通过，失败/取消/跳过均0。先前定向47/47包含于CLI完整套件，不额外累加。
+- 项目内日志：`.tmp-tests/cli-copy-targeted.log`、`.tmp-tests/cli-copy-typecheck.log`、`.tmp-tests/cli-copy-test.log`、`.tmp-tests/cli-copy-build.log`、`.tmp-tests/cli-copy-api-test.log`。上述套件为本轮作者自测，独立审查证据另列，不相加虚构测试总数。
+- 运行环境为Node v24.22.2/Linux；Node22实机、容器和其他平台未补验，原后端Provider/下载安全风险不变。本轮纯展示变更不要求重跑无关全仓测试或读取环境配置的Web构建。
+
+
+### 本轮独立审查通过
+
+- 独立审查会话`sess_00mvtnqbag0000c331a217d1d7`明确通过，无H/M/L必改项，未发现业务、API、JSON/JSONL schema或退出码漂移。
+- 独立定向验证45项，加发送正常输出1项，共46/46通过；CLI类型检查通过。此结果与作者CLI169/169、API9/9分别记录，不相加形成不存在的最终套件数。
+- 独立内存构建为CommonJS、target=node22，共469691 bytes；与当前dist逐字节一致，无非Node builtin外部依赖。分层help子进程16/16通过。
+- 独立核对100个验收ID与194个本地链接有效。Node v24.22.2/Linux为实际执行环境；Node22实机、容器及其他平台未补验，既有未验项和保留风险不变。

@@ -22,7 +22,7 @@ export async function cancelSession(workspaceId: string, sessionId: string, depe
     });
     const data = { workspaceId, sessionId, requested: true, status: result.runState.status };
     await writeSuccess(dependencies.io, Boolean(dependencies.json), "session cancel", data,
-      "已提交主会话取消：作用于服务端处理时的当前执行及活动后代；不回滚文件。\n预查与提交存在竞态，不保证是此前观察到的 Run。\n", { phase: "cancel", effect: "accepted", context });
+      `取消请求已处理。\n状态：${data.status}\n`, { phase: "cancel", effect: "accepted", context });
   } catch (error) { throw withErrorDetails(error, { phase: "cancel", effect: "not_sent", context }); }
 }
 interface CompactAcceptance {
@@ -60,7 +60,7 @@ export async function compactSession(workspaceId: string, sessionId: string, opt
   }, options, dependencies);
   const { data } = await acceptCompact(workspaceId, sessionId, dependencies);
   await writeSuccess(dependencies.io, Boolean(dependencies.json), "session compact", data,
-    "已启动手动压缩 Run（不是排队），不代表已经改变上下文；原消息历史和工作区文件不删除。\n"
+    "压缩请求已受理。\n"
     + Object.entries(data).map(([key, value]) => `${key}：${escapeDisplayText(String(value))}`).join("\n") + "\n", { phase: "compact", effect: "accepted", context: { workspaceId, sessionId, runId: data.runId, agentId: data.agentId, clientRequestId: data.clientRequestId } });
   return 0;
 }

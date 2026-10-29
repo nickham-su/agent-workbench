@@ -13,7 +13,7 @@ test("A-HELP-LAYERS/PRIORITY: all follow/control help remains offline despite mi
     });
     assert.equal(code, 0, capture.diagnostic()); assert.equal(factories, 0); assert.match(capture.output(), new RegExp(`Usage: awb session ${action}`)); forever.destroy();
     if (action !== "cancel") assert.match(capture.output(), /--follow-timeout/);
-    if (action === "cancel") { assert.match(capture.output(), /竞态/); assert.match(capture.output(), /不回滚/); }
+    if (action === "cancel") { assert.match(capture.output(), /服务端处理请求时的当前执行及其活动后代/); assert.match(capture.output(), /不回滚/); }
   }
 });
 

@@ -67,6 +67,6 @@ export async function acceptSend(options: SendOptions, prepared: PreparedSend, d
 }
 export async function sendMessage(options: SendOptions, prepared: PreparedSend, dependencies: ReadCommandDependencies): Promise<void> {
   const { data } = await acceptSend(options, prepared, dependencies);
-  const human = `已受理，不代表后台执行成功。\n` + Object.entries(data).map(([key, value]) => `${key}：${escapeDisplayText(String(value))}`).join("\n") + "\n";
+  const human = `已受理。\n` + Object.entries(data).map(([key, value]) => `${key}：${escapeDisplayText(String(value))}`).join("\n") + "\n";
   await writeSuccess(dependencies.io, Boolean(dependencies.json), "session send", data, human, { phase: "send", effect: "accepted", context: { workspaceId: data.workspaceId, sessionId: data.sessionId, agentId: data.agentId, messageId: data.messageId, runId: data.runId, clientRequestId: data.clientRequestId } });
 }

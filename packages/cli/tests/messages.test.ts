@@ -31,6 +31,30 @@ function pageHandler(messages: RawMessage[], sessionOverrides: Record<string, un
   };
 }
 
+test("normal messages output reports status and count without a final-answer disclaimer", async () => {
+  for (const status of ["streaming", "completed", "failed", "cancelled"]) {
+    const handle = pageHandler([agentMessage(0, { status })]);
+    const human = await execute(["-n", "1"], handle);
+    assert.equal(human.code, 0, human.stderr);
+    assert.match(human.stdout, new RegExp(`Message ID：m0；type=assistant；status=${status}\\n`));
+    assert.ok(human.stdout.endsWith("消息快照结束：已输出 1 条普通消息。\n"));
+    assert.doesNotMatch(human.stdout, /不代表|不保证|未来最终答案/);
+    assert.equal(human.stderr, "");
+    assert.ok(human.requests.every((path) => path.includes("/timeline?")));
+    const json = await execute(["-n", "1"], handle, ["--json"]);
+    assert.equal(json.code, 0, json.stderr);
+    const result = JSON.parse(json.stdout);
+    assert.deepEqual(Object.keys(result).sort(), ["command", "data", "ok", "schemaVersion"]);
+    assert.equal(result.schemaVersion, 1); assert.equal(result.ok, true); assert.equal(result.command, "session messages");
+    assert.deepEqual(Object.keys(result.data).sort(), ["complete", "count", "items", "selection", "sessionId", "workspaceId"]);
+    assert.equal(result.data.complete, true); assert.equal(result.data.count, 1);
+    assert.equal(result.data.items[0].status, status);
+  }
+  const empty = await execute(["-n", "1"], pageHandler([]));
+  assert.equal(empty.code, 0, empty.stderr);
+  assert.equal(empty.stdout, "消息快照结束：已输出 0 条普通消息。\n");
+});
+
 test("A-MESSAGES-EXCLUSIVE: selectors validate strictly before configuration/network", async () => {
   for (const selection of [[], ["--after", "m1", "-n", "1"], ...["0", "01", "-1", "1.5", "1e3", "+1", "9007199254740992", "1\n"].map((value) => ["-n", value]), ["--after", ".."]]) {
     const capture = captureIO(); let factories = 0;
