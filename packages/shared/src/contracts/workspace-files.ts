@@ -2,6 +2,22 @@ import { Type } from "@sinclair/typebox";
 import type { Static } from "@sinclair/typebox";
 import { FileVersionSchema } from "./files.js";
 
+export const WorkspaceFileExtractRequestSchema = Type.Object({
+  path: Type.String({ minLength: 1, maxLength: 4096 })
+}, { additionalProperties: false });
+export type WorkspaceFileExtractRequest = Static<typeof WorkspaceFileExtractRequestSchema>;
+
+export const WorkspaceFileExtractResponseSchema = Type.Object({
+  path: Type.String({ minLength: 1, maxLength: 4096 }),
+  dir: Type.String({ maxLength: 4096 }),
+  format: Type.Union([Type.Literal("zip"), Type.Literal("tar"), Type.Literal("tar-gzip")]),
+  topLevelCount: Type.Integer({ minimum: 0, maximum: 20_000 }),
+  fileCount: Type.Integer({ minimum: 0, maximum: 20_000 }),
+  directoryCount: Type.Integer({ minimum: 0, maximum: 20_000 }),
+  extractedBytes: Type.Integer({ minimum: 0, maximum: 2 * 1024 ** 3 })
+}, { additionalProperties: false });
+export type WorkspaceFileExtractResponse = Static<typeof WorkspaceFileExtractResponseSchema>;
+
 export const WorkspaceFileListRequestSchema = Type.Object({
   dir: Type.String()
 });
@@ -11,6 +27,11 @@ export const WorkspaceFileStatRequestSchema = Type.Object({
   path: Type.String({ minLength: 1 })
 });
 export type WorkspaceFileStatRequest = Static<typeof WorkspaceFileStatRequestSchema>;
+
+export const WorkspaceFileMediaRequestSchema = Type.Object({
+  path: Type.String({ minLength: 1, maxLength: 4096 })
+}, { additionalProperties: false });
+export type WorkspaceFileMediaRequest = Static<typeof WorkspaceFileMediaRequestSchema>;
 
 export const WorkspaceFileReadRequestSchema = Type.Object({
   path: Type.String({ minLength: 1 })

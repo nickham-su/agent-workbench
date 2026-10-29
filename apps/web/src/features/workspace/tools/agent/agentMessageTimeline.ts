@@ -125,6 +125,10 @@ export function buildConversationParts(state: Pick<AgentMessageTimelineState, "m
     }
 
     const imageParts = parts.filter((part): part is AgentImagePart => part.type === "image");
+    // 纯图片用户消息不生成空文本气泡；有正文时仍保留所有文本 Part 及其原文。
+    const hideEmptyUserText = message.type === "user"
+      && imageParts.length > 0
+      && !parts.some((part) => part.type === "text" && part.text.trim().length > 0);
     let imageRowAdded = false;
     let previousPartWasReasoning = false;
     const displayParts: Array<{ part: AgentMessagePart; reasoningText: string }> = [];
@@ -139,6 +143,7 @@ export function buildConversationParts(state: Pick<AgentMessageTimelineState, "m
       }
 
       previousPartWasReasoning = part.type === "reasoning";
+      if (hideEmptyUserText && part.type === "text") continue;
       if (part.type === "image") {
         if (imageRowAdded) continue;
         imageRowAdded = true;

@@ -846,7 +846,7 @@ test("v18 Git Analytics retirement is atomic, preserves other facts and historic
   fixture.close();
   const historicalModelFacts = (db: Database.Database) =>
     (db.prepare("SELECT * FROM analytics_model_call_fact WHERE model_call_id='preserved-model'").all() as Array<Record<string, unknown>>)
-      .map(({ cache_input_tokens: _cacheInput, ...fact }) => fact);
+      .map(({ cache_input_tokens: _cacheInput, request_preparation_ms: _preparation, ...fact }) => fact);
   await fs.writeFile(analyticsConfigSourcePath(dataDir), JSON.stringify({
     sourceVersion: 7, effectiveAt: 10, canonicalContent: sourceContent, canonicalHash: sourceHash,
   }), { mode: 0o600 });
@@ -892,8 +892,10 @@ test("v18 Git Analytics retirement is atomic, preserves other facts and historic
   });
   assert.deepEqual(migrated.prepare("SELECT * FROM analytics_run_fact WHERE run_id='preserved-run'").all(), preserved.facts);
   assert.deepEqual(historicalModelFacts(migrated), preserved.modelFacts);
-  assert.deepEqual(migrated.prepare("SELECT * FROM dashboard_model_1h").all(), preserved.rollups);
-  assert.deepEqual(migrated.prepare("SELECT * FROM dashboard_model_dimension_1h").all(), preserved.dimensions);
+  assert.deepEqual(migrated.prepare("SELECT * FROM dashboard_model_1h").all(),
+    preserved.rollups.map((row) => ({ ...(row as object), preparation_duration_sum_ms: 0, preparation_duration_sample_count: 0 })));
+  assert.deepEqual(migrated.prepare("SELECT * FROM dashboard_model_dimension_1h").all(),
+    preserved.dimensions.map((row) => ({ ...(row as object), preparation_duration_sum_ms: 0, preparation_duration_sample_count: 0 })));
   assert.deepEqual(migrated.prepare("SELECT * FROM analytics_rollup_hour WHERE domain='model'").all(), preserved.markers);
   assert.deepEqual(migrated.prepare("SELECT * FROM analytics_dirty_hour WHERE domain='tool'").all(), preserved.dirty);
   assert.deepEqual(migrated.prepare("SELECT * FROM analytics_signal_coverage_gap WHERE gap_id='old-gap'").all(), preserved.coverage);
@@ -978,7 +980,8 @@ test("v19 cache migration invalidates only old comparability and preserves compa
   const upgraded = await openAnalyticsDb(root, 3);
   t.after(() => closeAnalyticsDb(upgraded));
   assert.equal((upgraded.prepare("SELECT schema_version FROM analytics_schema_meta").get() as { schema_version: number }).schema_version, ANALYTICS_SCHEMA_VERSION);
-  assert.deepEqual(upgraded.prepare("SELECT * FROM dashboard_model_1h ORDER BY bucket_start").all(), modelBefore);
+  assert.deepEqual(upgraded.prepare("SELECT * FROM dashboard_model_1h ORDER BY bucket_start").all(),
+    modelBefore.map((row) => ({ ...(row as object), preparation_duration_sum_ms: 0, preparation_duration_sample_count: 0 })));
   assert.deepEqual(upgraded.prepare("SELECT * FROM analytics_rollup_hour WHERE domain='model'").all(), markerBefore);
   assert.deepEqual(upgraded.prepare("SELECT model_call_id,input_tokens,output_tokens,total_tokens,cache_read_tokens,cache_comparable,cache_input_tokens FROM analytics_model_call_fact").get(),
     { model_call_id: "old-call", input_tokens: 100, output_tokens: 10, total_tokens: 110, cache_read_tokens: 90, cache_comparable: 0, cache_input_tokens: null });
@@ -986,4 +989,25 @@ test("v19 cache migration invalidates only old comparability and preserves compa
   for (const [key, value] of Object.entries(compactedBefore))
     assert.equal(compacted[key], ["cache_comparable_count", "comparable_input_tokens", "comparable_cache_read_tokens"].includes(key) ? 0 : value, key);
   assert.equal((upgraded.prepare("SELECT COUNT(*) AS count FROM analytics_dirty_hour WHERE domain='model'").get() as { count: number }).count, 0);
+});
+
+
+test("v20 preparation migration is additive, atomic and preserves unknown historic samples", async (t) => {
+  const root = await tempDataDir("awb-analytics-preparation-v21-");
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  closeAnalyticsDb(await openAnalyticsDb(root, 1));
+  const old = new Database(analyticsDbPath(root));
+  createHistoricalSchemaForTest(old, 20);
+  old.prepare("INSERT INTO dashboard_model_1h VALUES(0,2,1,1,0,0,100,1,10,20,30)").run();
+  old.close();
+  await assert.rejects(() => openAnalyticsDb(root, 2, { testFaultAt: "v21_after_preparation_columns" }), /analytics database unavailable/);
+  const rolledBack = new Database(analyticsDbPath(root));
+  assert.equal((rolledBack.prepare("SELECT schema_version FROM analytics_schema_meta").get() as { schema_version: number }).schema_version, 20);
+  assert.equal((rolledBack.prepare("PRAGMA table_info(analytics_model_call_fact)").all() as Array<{ name: string }>).some((column) => column.name === "request_preparation_ms"), false);
+  rolledBack.close();
+  const upgraded = await openAnalyticsDb(root, 3);
+  assert.deepEqual(upgraded.prepare("SELECT request_count,preparation_duration_sum_ms,preparation_duration_sample_count FROM dashboard_model_1h").get(),
+    { request_count: 2, preparation_duration_sum_ms: 0, preparation_duration_sample_count: 0 });
+  closeAnalyticsDb(upgraded);
+  closeAnalyticsDb(await openAnalyticsDb(root, 4));
 });

@@ -4,6 +4,7 @@ import type { TerminalRecord, TerminalStatus } from "@agent-workbench/shared";
 type TerminalRow = {
   id: string;
   workspaceId: string;
+  configId: string | null;
   sessionName: string;
   status: TerminalStatus;
   createdAt: number;
@@ -19,6 +20,7 @@ function mapRow(row: any): TerminalRecord {
   return {
     id: row.id,
     workspaceId: row.workspaceId,
+    configId: row.configId,
     sessionName: row.sessionName,
     status: row.status,
     createdAt: row.createdAt,
@@ -29,10 +31,10 @@ function mapRow(row: any): TerminalRecord {
 export function insertTerminal(db: Db, term: TerminalRecord) {
   db.prepare(
     `
-      insert into terminals (id, workspace_id, session_name, status, created_at, updated_at)
-      values (@id, @workspaceId, @sessionName, @status, @createdAt, @updatedAt)
+      insert into terminals (id, workspace_id, config_id, session_name, status, created_at, updated_at)
+      values (@id, @workspaceId, @configId, @sessionName, @status, @createdAt, @updatedAt)
     `
-  ).run(term);
+  ).run({ ...term, configId: term.configId ?? null });
 }
 
 export function listTerminalsByWorkspace(db: Db, workspaceId: string): TerminalRecord[] {
@@ -42,6 +44,7 @@ export function listTerminalsByWorkspace(db: Db, workspaceId: string): TerminalR
         select
           id,
           workspace_id as workspaceId,
+          config_id as configId,
           session_name as sessionName,
           status,
           created_at as createdAt,
@@ -62,6 +65,7 @@ export function listActiveTerminalsByWorkspace(db: Db, workspaceId: string): Ter
         select
           id,
           workspace_id as workspaceId,
+          config_id as configId,
           session_name as sessionName,
           status,
           created_at as createdAt,
@@ -114,6 +118,7 @@ export function getTerminal(db: Db, terminalId: string): TerminalRecord | null {
         select
           id,
           workspace_id as workspaceId,
+          config_id as configId,
           session_name as sessionName,
           status,
           created_at as createdAt,
@@ -136,10 +141,30 @@ export function updateTerminalStatus(db: Db, terminalId: string, status: Termina
   ).run({ terminalId, status, updatedAt });
 }
 
+/** Hide a logically deleted managed terminal without losing its cleanup authority. */
+export function clearTerminalConfigAssociation(db: Db, terminalId: string) {
+  db.prepare(`update terminals set config_id = null where id = ?`).run(terminalId);
+}
+
 export function deleteTerminalRecord(db: Db, terminalId: string) {
   db.prepare(`delete from terminals where id = ?`).run(terminalId);
 }
 
 export function deleteTerminalRecordsByWorkspace(db: Db, workspaceId: string) {
   db.prepare(`delete from terminals where workspace_id = ?`).run(workspaceId);
+}
+
+/** Managed terminals retain their tab after a failed restart; ordinary closed terminals stay hidden. */
+export function listVisibleTerminalsByWorkspace(db: Db, workspaceId: string): TerminalRecord[] {
+  return listTerminalsByWorkspace(db, workspaceId).filter((term) => term.status === "active" || term.configId != null);
+}
+
+export function getTerminalByConfig(db: Db, workspaceId: string, configId: string): TerminalRecord | null {
+  const row = db.prepare(`select id from terminals where workspace_id = ? and config_id = ?`).get(workspaceId, configId) as { id: string } | undefined;
+  return row ? getTerminal(db, row.id) : null;
+}
+
+export function restartTerminalRecord(db: Db, term: TerminalRecord) {
+  db.prepare(`update terminals set session_name = @sessionName, status = 'creating', updated_at = @updatedAt where id = @id`)
+    .run({ id: term.id, sessionName: term.sessionName, updatedAt: term.updatedAt });
 }

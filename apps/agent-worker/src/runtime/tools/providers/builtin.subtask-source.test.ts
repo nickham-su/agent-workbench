@@ -67,7 +67,7 @@ function harness(options: {
     run: { workspaceId: "workspace", sessionId: "caller", runId: "caller-run", workspacePath: process.cwd(), workspaceRepoDirNames: [] },
     pendingTool: { toolExecutionId: "tool", callPartId: "part", assistantMessageId: "message", status: "queued", toolName: "subtask", toolCallId: "call", args: {} },
     signal: controller.signal,
-    promptContext: { headMessageId: null, sessionRevision: 0, system: "", messages: [], tools: [], pendingTools: [], lastResponseTotalTokens: 999_999, uiLocale: null, externalSkills: [] },
+    promptContext: { headMessageId: null, sessionRevision: 0, system: "", messages: [], tools: [], pendingTools: [], lastResponseTotalTokens: 999_999, uiLocale: null, workspaceRepoNames: [], externalSkills: [] },
     async processNestedRun() {
       calls.nested++;
       fail("nested");
@@ -181,6 +181,29 @@ for (const failAt of ["running", "nested", "status", "result"] as const) {
     });
     assert.equal(h.calls.plan, 0);
   });
+}
+
+for (const session of [{ mode: "new" }, { mode: "fork" }, { mode: "existing", sessionId: "existing" }]) {
+  for (const failAt of ["running", "nested", "status", "result"] as const) {
+    test(`${session.mode} post-start ${failAt} failure retains Child identity without inventing source metadata`, async () => {
+      const h = harness({ failAt });
+      await assert.rejects(h.execute(session), (error: unknown) => {
+        assert.equal(error, h.failure);
+        assert.equal((error as { subtaskSessionId: string }).subtaskSessionId, "child");
+        assert.equal(Object.hasOwn(error as object, "sourceSessionId"), false);
+        return true;
+      });
+    });
+  }
+  for (const failure of [Object.freeze(new Error("frozen failure")), "original primitive failure"]) {
+    test(`${session.mode} preserves ${typeof failure === "string" ? "primitive" : "frozen"} post-start failure identity`, async () => {
+      const h = harness({ failAt: "nested", failure });
+      await assert.rejects(h.execute(session), (error: unknown) => {
+        assert.equal(error, failure);
+        return true;
+      });
+    });
+  }
 }
 
 for (const terminal of ["failed", "cancelled"] as const) {

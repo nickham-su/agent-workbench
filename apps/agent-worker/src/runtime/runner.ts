@@ -37,6 +37,7 @@ import {
   type AgentApiFlushAssistantPartsRequest,
   type AgentApiPromptAttachmentRefPart,
   AgentViewImageResultSchema,
+  GitToolResultSchema,
   AgentToolResultOutputSchema,
   viewImagePathPreview,
 } from "@agent-workbench/shared/internal-contracts/agent-api";
@@ -49,6 +50,8 @@ import { McpToolProvider } from "./tools/providers/mcp.js";
 import type { ToolExecutionContext } from "./tools/types.js";
 import { isMcpToolName, isPluginToolName } from "./tools/types.js";
 import { createToolFailureCaptureIfEnabled, extractPartialToolResults, type ToolFailureCapture } from "./toolErrorCapture.js";
+import { diagnosticToolArgs, diagnosticToolRequest } from "./gitDiagnostic.js";
+import { gitSafeErrorCode, gitSafeErrorText } from "./gitErrors.js";
 import type { AgentAttachmentStorage } from "./agentAttachmentStorage.js";
 import { formatToolErrorStoreWarning } from "./toolErrorStore.js";
 import {
@@ -90,6 +93,7 @@ const LOOP_REPEAT_TOOL_CALL_THRESHOLD = parseIntOrDefault(process.env.AWB_AGENT_
 const CONTROL_WRITE_RETRY_DELAY_MS = 100;
 const COMPACTION_NOTICE_TIMEOUT_MS = 1_000;
 const EMPTY_RESPONSE_COMPLETE_THRESHOLD = 6;
+const REQUEST_PREPARATION_SAMPLE_RATE = 0.1;
 const TOOL_OUTPUT_TEXT_MAX_CHARS = Math.max(1_000, parseIntOrDefault(process.env.AWB_TOOL_OUTPUT_TEXT_MAX_CHARS, 8_000));
 const TOOL_OUTPUT_TEXT_PREVIEW_CHARS = Math.max(
   500,
@@ -311,6 +315,7 @@ function buildToolSuccessText(params: {
   status: "completed";
   args: Record<string, unknown>;
   result: unknown;
+  completedAt: number;
 }) {
   const resultObj = toRecordObject(params.result);
 
@@ -321,6 +326,8 @@ function buildToolSuccessText(params: {
     return viewImagePathPreview(params.result.path);
   }
 
+  const completedAtText = new Date(params.completedAt).toISOString();
+
   if (params.toolName === "apply_patch") {
     const summary = toRecordObject(resultObj?.summary);
     const body = typeof resultObj?.text === "string" ? resultObj.text : "apply_patch completed";
@@ -328,6 +335,7 @@ function buildToolSuccessText(params: {
       toolName: params.toolName,
       status: params.status,
       headers: [
+        ["completed_at", completedAtText],
         ["files", summary && typeof summary.fileCount === "number" ? String(summary.fileCount) : undefined],
         ["additions", summary && typeof summary.additions === "number" ? String(summary.additions) : undefined],
         ["deletions", summary && typeof summary.deletions === "number" ? String(summary.deletions) : undefined]
@@ -342,6 +350,7 @@ function buildToolSuccessText(params: {
       toolName: params.toolName,
       status: params.status,
       headers: [
+        ["completed_at", completedAtText],
         ["total", summary && typeof summary.total === "number" ? String(summary.total) : undefined],
         ["pending", summary && typeof summary.pending === "number" ? String(summary.pending) : undefined],
         ["in_progress", summary && typeof summary.inProgress === "number" ? String(summary.inProgress) : undefined],
@@ -360,6 +369,7 @@ function buildToolSuccessText(params: {
       toolName: params.toolName,
       status: params.status,
       headers: [
+        ["completed_at", completedAtText],
         ["subtask_session_id", subtaskSessionId || undefined],
         ["source_session_id", sourceSessionId !== undefined ? JSON.stringify(sourceSessionId) : undefined]
       ],
@@ -373,6 +383,7 @@ function buildToolSuccessText(params: {
     return buildToolText({
       toolName: params.toolName,
       status: params.status,
+      headers: [["completed_at", completedAtText]],
       body
     });
   }
@@ -395,7 +406,10 @@ function buildToolSuccessText(params: {
       : typeof resultObj?.summary === "string"
         ? resultObj.summary
         : stringifyResult(params.result);
-    const headers: Array<[string, string | undefined]> = [["source", source]];
+    const headers: Array<[string, string | undefined]> = [
+      ["completed_at", completedAtText],
+      ["source", source]
+    ];
     if (range) {
       headers.push(["range", range]);
     }
@@ -417,11 +431,34 @@ function buildToolSuccessText(params: {
     const headers = [
       `tool: ${params.toolName}`,
       `status: ${params.status}`,
+      `completed_at: ${completedAtText}`,
       ...(skillId ? [`skill_id: ${skillId}`] : []),
       ...(filePath ? [`file_path: ${filePath}`] : []),
       `truncated: ${truncated ? "true" : "false"}`
     ];
     return content === "" ? headers.join("\n") : `${headers.join("\n")}\n\n${content}`;
+  }
+
+  if (params.toolName === "git") {
+    if (!Value.Check(GitToolResultSchema, params.result)) throw new Error("invalid git result");
+    const result = params.result;
+    return buildToolText({
+      toolName: "git", status: params.status,
+      headers: [
+        ["completed_at", completedAtText], ["repo", result.repo],
+        ["ok", String(result.ok)], ["exit_code", String(result.exitCode)],
+        ["signal", result.signal ?? "null"], ["timed_out", String(result.timedOut)],
+        ["cancelled", String(result.cancelled)], ["output_limit_exceeded", String(result.outputLimitExceeded)],
+        ["process_stop_confirmed", String(result.processStopConfirmed)],
+        ["failure_code", result.failureCode ?? "none"], ["lease_disposition", result.leaseDisposition],
+        ["output_redacted", String(result.outputRedacted)], ["duration_ms", String(result.durationMs)],
+        ["warnings", result.warnings.length ? result.warnings.join(",") : "none"],
+      ],
+      body: [result.stdout ? `stdout:\n${result.stdout}` : "", result.stderr ? `stderr:\n${result.stderr}` : "",
+        !result.processStopConfirmed ? "Managed group stop is unconfirmed; the lease remains protected and may require maintenance." : "",
+        result.leaseDisposition === "release_unconfirmed" ? "Lease cleanup was not confirmed. Do not repeat Git solely to retry cleanup." : "",
+      ].filter(Boolean).join("\n\n") || "(no output)",
+    });
   }
 
   if (params.toolName === "bash") {
@@ -439,6 +476,7 @@ function buildToolSuccessText(params: {
       toolName: params.toolName,
       status: params.status,
       headers: [
+        ["completed_at", completedAtText],
         ["command", command || undefined],
         ["exit_code", exitCode == null ? "null" : String(exitCode)],
         ["timed_out", timedOut ? "true" : undefined],
@@ -458,7 +496,10 @@ function buildToolSuccessText(params: {
     return buildToolText({
       toolName: params.toolName,
       status: params.status,
-      headers: [["target", target]],
+      headers: [
+        ["completed_at", completedAtText],
+        ["target", target]
+      ],
       body
     });
   }
@@ -470,6 +511,7 @@ function buildToolSuccessText(params: {
     return buildToolText({
       toolName: params.toolName,
       status: params.status,
+      headers: [["completed_at", completedAtText]],
       body
     });
   }
@@ -481,7 +523,17 @@ function buildToolSuccessText(params: {
     return buildToolText({
       toolName: params.toolName,
       status: params.status,
+      headers: [["completed_at", completedAtText]],
       body
+    });
+  }
+
+  if (params.toolName === "archive_read" || params.toolName === "archive_search") {
+    return buildToolText({
+      toolName: params.toolName,
+      status: params.status,
+      headers: [["completed_at", completedAtText]],
+      body: stringifyResult(params.result)
     });
   }
 
@@ -772,7 +824,7 @@ type QueuedRun = {
   workspaceRepoDirNames: string[];
 };
 
-const STRUCTURED_RESULT_TOOL_NAMES = new Set(["apply_patch", "todolist", "subtask", "write", "scratchpad", "view_image"]);
+const STRUCTURED_RESULT_TOOL_NAMES = new Set(["apply_patch", "todolist", "subtask", "write", "scratchpad", "view_image", "git"]);
 
 type PendingTool = {
   toolExecutionId: string;
@@ -908,6 +960,7 @@ const EMPTY_PROMPT_CONTEXT: PromptContext = {
   pendingTools: [],
   lastResponseTotalTokens: null,
   uiLocale: null,
+  workspaceRepoNames: [],
   externalSkills: []
 };
 
@@ -1418,12 +1471,13 @@ export function buildToolExecutionBatchesForTest(tools: PendingTool[], parallelL
   return buildToolExecutionBatches(tools, parallelLimit);
 }
 
-export function buildToolSuccessTextForTest(params: { toolName: string; args: Record<string, unknown>; result: unknown }) {
+export function buildToolSuccessTextForTest(params: { toolName: string; args: Record<string, unknown>; result: unknown; completedAt: number }) {
   return buildToolSuccessText({
     toolName: params.toolName,
     status: "completed",
     args: params.args,
-    result: params.result
+    result: params.result,
+    completedAt: params.completedAt
   });
 }
 
@@ -1445,15 +1499,14 @@ export async function materializePromptAttachments(params: {
   providerNpm: string;
 }): Promise<ModelMessage[]> {
   const messages: ModelMessage[] = [];
-  let totalImageBytes = 0;
-  const countImage = (bytes: Uint8Array) => {
+  const validateImageBytes = (bytes: Uint8Array) => {
     if (bytes.byteLength < 1 || bytes.byteLength > WORKSPACE_IMAGE_MAX_BYTES) throw new Error("model image exceeds 10 MiB per-image budget");
-    totalImageBytes += bytes.byteLength;
-    if (totalImageBytes > 2 * WORKSPACE_IMAGE_MAX_BYTES) throw new Error("model images exceed 20 MiB combined budget");
   };
+  // Count every input role, before deferred image user messages are added below.
+  const toolImageWindowStart = Math.max(0, params.messages.length - 10);
   const nativeToolMedia = params.providerNpm === "@ai-sdk/openai" || params.providerNpm === "@ai-sdk/anthropic";
   let precedingAssistantCalls: string[] = [];
-  for (const message of params.messages) {
+  for (const [messageIndex, message] of params.messages.entries()) {
     if (message.role === "assistant") {
       precedingAssistantCalls = Array.isArray(message.content)
         ? message.content.filter((part) => part.type === "tool-call").map((part) => part.toolCallId)
@@ -1493,10 +1546,37 @@ export async function materializePromptAttachments(params: {
             nativeParts.push({ type: "text", text: part.value });
             textParts.push(part.value);
           } else if (part.type === "image_ref") {
-            const image = await readWorkspaceImage({ workspacePath: params.run.workspacePath, path: part.path }).catch(() => {
-              throw new Error("cannot read a valid tool image in this Workspace");
+            if (messageIndex < toolImageWindowStart) {
+              const text = "图片已超出加载范围，如需查看请重新调用 view_image。";
+              nativeParts.push({ type: "text", text });
+              textParts.push(text);
+              continue;
+            }
+            const image = await readWorkspaceImage({ workspacePath: params.run.workspacePath, path: part.path }).catch((error: unknown) => {
+              if (error instanceof WorkspaceImageNotFoundError) return "此前已成功查看该图片，但源文件当前不存在，无法再次加载。";
+              if (error instanceof WorkspaceImageTooLargeError) return "图片超过大小限制，本轮未加载。";
+              if (error instanceof WorkspaceImageReadError) {
+                if (error.reason === "invalid_content") return "图片格式无效，本轮未加载。";
+                if (error.reason === "unsafe_path") return "图片未通过安全校验，本轮未加载。";
+                if (error.reason === "unavailable") return "当前环境无法安全读取图片，本轮未加载。";
+              }
+              // Do not expose filesystem messages, paths, or arbitrary error content.
+              const code = error instanceof Error ? (error as NodeJS.ErrnoException).code : undefined;
+              switch (code) {
+                case "EACCES": case "EPERM": return "图片读取权限不足，本轮未加载。";
+                case "ENOENT": case "ENOTDIR": return "图片路径当前不可用，本轮未加载。";
+                case "ELOOP": return "图片未通过安全校验，本轮未加载。";
+                case "EIO": case "EMFILE": case "ENFILE": case "EBADF": case "EBUSY":
+                  return "图片文件读取失败，本轮未加载。";
+                default: return "图片读取失败，本轮未加载。";
+              }
             });
-            countImage(image.bytes);
+            if (typeof image === "string") {
+              nativeParts.push({ type: "text", text: image });
+              textParts.push(image);
+              continue;
+            }
+            validateImageBytes(image.bytes);
             const label = `Image for toolCallId=${result.toolCallId}, path=${part.path}`;
             if (nativeToolMedia) nativeParts.push({ type: "media", data: Buffer.from(image.bytes).toString("base64"), mediaType: image.mediaType });
             else {
@@ -1538,7 +1618,7 @@ export async function materializePromptAttachments(params: {
       }).catch(() => {
         throw new Error("cannot read a valid user image in this Workspace");
       });
-      countImage(attachment.bytes);
+      validateImageBytes(attachment.bytes);
       content.push({
         type: "file",
         data: attachment.bytes,
@@ -1552,8 +1632,14 @@ export async function materializePromptAttachments(params: {
 }
 
 type AgentRunnerDeps = {
+  /** Trusted shared data directory for the native Git credential lease guard. */
+  dataDir?: string;
   streamText?: RuntimeStreamText;
   nowMs?: () => number;
+  /** Monotonic clock for application-side preparation segments. */
+  preparationNowMs?: () => number;
+  /** Independent random source for the 10% preparation-duration sample. */
+  preparationRandom?: () => number;
   warningNowMs?: () => number;
   attachmentStorage?: AgentAttachmentStorage;
   /** 仅用于测试控制面固定短间隔重试，不影响 Provider 退避。 */
@@ -1585,6 +1671,8 @@ export class AgentRunner {
 
   private readonly streamTextFn: RuntimeStreamText;
   private readonly nowMsFn: () => number;
+  private readonly preparationNowMsFn: () => number;
+  private readonly preparationRandomFn: () => number;
   private readonly warningNowMsFn: () => number;
   private readonly attachmentStorage: AgentAttachmentStorage | undefined;
   private readonly controlWriteSleepFn: (ms: number, signal: AbortSignal) => Promise<boolean>;
@@ -1603,6 +1691,8 @@ export class AgentRunner {
   ) {
     this.streamTextFn = deps.streamText ?? streamText<RuntimeToolSet>;
     this.nowMsFn = deps.nowMs ?? nowMs;
+    this.preparationNowMsFn = deps.preparationNowMs ?? (() => performance.now());
+    this.preparationRandomFn = deps.preparationRandom ?? Math.random;
     this.warningNowMsFn = deps.warningNowMs ?? nowMs;
     this.attachmentStorage = deps.attachmentStorage;
     this.controlWriteSleepFn = deps.controlWriteSleep ?? sleepMsWithAbort;
@@ -1616,7 +1706,7 @@ export class AgentRunner {
     const pluginProvider = REMOTE_PLUGIN_TOOLS_ENABLED
       ? new RemotePluginToolProvider()
       : new LocalPluginToolProvider(this.pluginRuntimeManager);
-    this.toolRegistry = new ToolRegistry([new BuiltinToolProvider(), new McpToolProvider(this.mcpManager), pluginProvider]);
+    this.toolRegistry = new ToolRegistry([new BuiltinToolProvider({ dataDir: deps.dataDir }), new McpToolProvider(this.mcpManager), pluginProvider]);
   }
 
   private async retryControlRead<T>(
@@ -1929,11 +2019,12 @@ export class AgentRunner {
       type: "tool" as const,
       toolName: tool.toolName,
       toolCallId: tool.toolCallId,
-      args: tool.args
+      args: diagnosticToolArgs(tool.toolName, tool.args)
     };
     const writeback = async (role: string, input: {
       status: "running" | "completed" | "failed";
       output: { text?: string; result?: unknown; error?: string; textTruncated?: boolean; textArtifactPath?: string };
+      completedAt?: number;
     }) => {
       capture?.recordWritebackAttempt(role, input.output);
       try {
@@ -1948,7 +2039,7 @@ export class AgentRunner {
           error: input.output.error,
           resultTruncated: input.output.textTruncated,
           resultArtifactPath: input.output.textArtifactPath,
-          ...(input.status === "running" ? { startedAt: nowMs() } : { completedAt: nowMs() }),
+          ...(input.status === "running" ? { startedAt: nowMs() } : { completedAt: input.completedAt ?? nowMs() }),
           updatedAt: nowMs()
         };
         const response = await this.retryControlWrite(`tool execution ${input.status}`, signal, async () =>
@@ -1991,6 +2082,7 @@ export class AgentRunner {
     let phase: "running_writeback" | "provider_execute" | "completed_output_build" | "completed_writeback" = "running_writeback";
     let providerResult: unknown;
     let providerReturned = false;
+    let subtaskStartedMetadata: { subtaskSessionId: string; sourceSessionId?: string } | undefined;
     try {
       await writeback("initial_running", {
         status: "running",
@@ -2024,6 +2116,17 @@ export class AgentRunner {
           if (status !== "running") {
             throw new Error("provider terminal tool writeback is not supported by tool error capture");
           }
+          if (tool.toolName === "subtask") {
+            const result = toRecordObject(structuredResult);
+            if (typeof result?.subtaskSessionId === "string") {
+              // The successful start response is already known locally. Keep it
+              // even when a later error is frozen or running writeback fails.
+              subtaskStartedMetadata = {
+                subtaskSessionId: result.subtaskSessionId,
+                sourceSessionId: readSubtaskSourceSessionId(result)
+              };
+            }
+          }
           await writeback("provider_running_update", { status, output: { text: resultPreview, result: structuredResult } });
         },
         nowMs,
@@ -2037,6 +2140,9 @@ export class AgentRunner {
       };
       capture?.recordProviderStarted();
       providerResult = await this.toolRegistry.execute(tool.toolName, tool.args, toolCtx);
+      if (tool.toolName === "git" && !Value.Check(GitToolResultSchema, providerResult)) {
+        throw new Error("invalid git result");
+      }
       if (tool.toolName === "view_image" && !Value.Check(AgentViewImageResultSchema, providerResult)) {
         throw new Error("invalid view_image result");
       }
@@ -2045,12 +2151,16 @@ export class AgentRunner {
 
       if (signal.aborted) return { paused: false as const };
 
+      // Sample once after the tool returns; result processing and writeback retries
+      // must not change the completion time recorded in the text and database.
+      const completedAt = this.nowMsFn();
       phase = "completed_output_build";
       const rawSuccessText = buildToolSuccessText({
         toolName: tool.toolName,
         status: "completed",
         args: tool.args,
-        result: providerResult
+        result: providerResult,
+        completedAt
       });
       let finalizedText: {
         text: string;
@@ -2088,7 +2198,7 @@ export class AgentRunner {
         result: providerResult
       };
       phase = "completed_writeback";
-      await writeback("completed", { status: "completed", output });
+      await writeback("completed", { status: "completed", output, completedAt });
       await writeItemLog({
         logger: this.logger,
         workspacePath: run.workspacePath,
@@ -2096,7 +2206,7 @@ export class AgentRunner {
         recordId: tool.toolExecutionId,
         payload: {
           meta: { workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId, toolExecutionId: tool.toolExecutionId },
-          request: { toolName: tool.toolName, toolCallId: tool.toolCallId, args: tool.args },
+          request: diagnosticToolRequest(tool.toolName, tool.toolCallId, tool.args),
           status: "completed",
           response: providerResult
         }
@@ -2119,16 +2229,18 @@ export class AgentRunner {
       } else if (phase === "completed_output_build") capture?.recordEvent("completed_output_build_failed", err);
       else capture?.recordEvent("completed_writeback_failed", err);
 
-      const error = tool.toolName === "subtask"
-        ? formatSubtaskStartError(err, tool.args)
-        : toolErrorMessage(err);
+      const error = tool.toolName === "git"
+        ? gitSafeErrorText(err)
+        : tool.toolName === "subtask"
+          ? formatSubtaskStartError(err, tool.args)
+          : toolErrorMessage(err);
       const errorRecord = toErrorRecord(err);
-      const subtaskSessionId = String(errorRecord?.subtaskSessionId || "").trim();
+      const subtaskSessionId = String(subtaskStartedMetadata?.subtaskSessionId || errorRecord?.subtaskSessionId || "").trim();
       const subtaskResultText = typeof errorRecord?.subtaskResultText === "string"
         ? errorRecord.subtaskResultText
         : undefined;
       const sourceSessionId = tool.toolName === "subtask"
-        ? readSubtaskSourceSessionId(errorRecord)
+        ? readSubtaskSourceSessionId(subtaskStartedMetadata ?? errorRecord)
         : undefined;
       const isSubtaskWithResult = tool.toolName === "subtask" && (subtaskSessionId || sourceSessionId !== undefined || typeof subtaskResultText === "string");
       const errorText = isSubtaskWithResult
@@ -2153,9 +2265,9 @@ export class AgentRunner {
         recordId: tool.toolExecutionId,
         payload: {
           meta: { workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId, toolExecutionId: tool.toolExecutionId },
-          request: { toolName: tool.toolName, toolCallId: tool.toolCallId, args: tool.args },
+          request: diagnosticToolRequest(tool.toolName, tool.toolCallId, tool.args),
           status: "failed",
-          error
+          error: tool.toolName === "git" ? gitSafeErrorCode(err) : error
         }
       });
       return { paused: false as const };
@@ -2192,12 +2304,12 @@ export class AgentRunner {
       }
       if (err instanceof FencedWriteIgnoredError || err instanceof FencedWriteMissingError || err instanceof ControlWritePermanentError) throw err;
       capture?.recordEvent("runner_outer_unhandled", err);
-      const error = toolErrorMessage(err);
+      const error = params.tool.toolName === "git" ? gitSafeErrorText(err) : toolErrorMessage(err);
       const output = {
         type: "tool" as const,
         toolName: params.tool.toolName,
         toolCallId: params.tool.toolCallId,
-        args: params.tool.args,
+        args: diagnosticToolArgs(params.tool.toolName, params.tool.args),
         text: buildToolErrorText({ toolName: params.tool.toolName, status: "failed", error }),
         error
       };
@@ -2230,9 +2342,9 @@ export class AgentRunner {
         recordId: params.tool.toolExecutionId,
         payload: {
           meta: { workspaceId: params.run.workspaceId, sessionId: params.run.sessionId, runId: params.run.runId, toolExecutionId: params.tool.toolExecutionId },
-          request: { toolName: params.tool.toolName, toolCallId: params.tool.toolCallId, args: params.tool.args },
+          request: diagnosticToolRequest(params.tool.toolName, params.tool.toolCallId, params.tool.args),
           status: "failed",
-          error
+          error: params.tool.toolName === "git" ? gitSafeErrorCode(err) : error
         }
       });
       return { paused: false as const };
@@ -2317,7 +2429,7 @@ export class AgentRunner {
           type: "tool" as const,
           toolName: item.toolName,
           toolCallId: item.toolCallId,
-          args: item.args,
+          args: diagnosticToolArgs(item.toolName, item.args),
           text: buildToolErrorText({ toolName: item.toolName, status: "failed", error }),
           error
         };
@@ -2464,6 +2576,7 @@ export class AgentRunner {
     let noticeWritesDisabled = false;
     const executor = new CompactionExecutor({
       apiClient: this.apiClient,
+      logger: this.logger,
       nowMs: this.nowMsFn,
       newId: newSortableId,
       onSummaryRetry: async ({ expectedRevision, retryAttempt, maxRetries, delayMs, abortSignal }) => {
@@ -2554,6 +2667,8 @@ export class AgentRunner {
     profile: ExecutionProfile;
     run: QueuedRun;
     context: PromptContext;
+    /** Null means the first attempt was not sampled before reading this context. */
+    contextPreparationMs?: number | null;
     step: number;
     emptyResponseCount?: number;
     signal: AbortSignal;
@@ -2564,6 +2679,7 @@ export class AgentRunner {
     if (context.pendingTools.length > 0) {
       throw new Error("cannot invoke model while ToolExecution remains queued or running");
     }
+    const sharedPreparationStartedAt = params.contextPreparationMs != null ? this.preparationNowMsFn() : null;
     const conversationStateAdapter = this.providerConversationStateAdapterRegistry.resolve(profile);
     const model = createLanguageModel(profile);
     const runtimeOptions = buildModelRuntimeOptions(profile);
@@ -2637,6 +2753,11 @@ export class AgentRunner {
       providerNpm: profile.provider.npm,
     });
     let attemptDebugRequest = projectAssistantDebugRecord({ status: "running", request: { ...requestBase, messages: firstAttemptMessages } }).request;
+
+    // Stop before Assistant control-plane writes; shared work belongs only to attempt one.
+    const sharedPreparationMs = sharedPreparationStartedAt === null
+      ? null
+      : params.contextPreparationMs! + this.preparationNowMsFn() - sharedPreparationStartedAt;
 
     let assistantMessageId: string;
     if (recoveryContinuation.messageId) {
@@ -2987,6 +3108,24 @@ export class AgentRunner {
       if (signal.aborted) {
         return { aborted: true as const, assistantMessageId };
       }
+      // Retry attempts sample independently; never charge them the shared preparation again.
+      const preparationSampled = retryCount === 0 ? sharedPreparationMs !== null : this.preparationRandomFn() < REQUEST_PREPARATION_SAMPLE_RATE;
+      const attemptPreparationStartedAt = preparationSampled ? this.preparationNowMsFn() : null;
+      if (retryCount > 0 && toolSet.subtask) {
+        // Refresh only the dynamic candidate description, preserving this turn's
+        // tool/schema, conversation-state, and availableToolNames snapshots.
+        const refreshedContext = await this.apiClient.getPromptContext({
+          workspaceId: run.workspaceId,
+          sessionId: run.sessionId,
+          runId: run.runId,
+        });
+        const subtask = refreshedContext.tools.find((item) => item.name === "subtask");
+        if (!subtask) throw new Error("subtask tool description is unavailable during model retry");
+        requestBase.tools = {
+          ...toolSet,
+          subtask: { ...toolSet.subtask, description: subtask.description },
+        };
+      }
       // Preparation errors are local failures: never enter the Provider retry catch below.
       // The conversation-state adapter ran exactly once on the original assistant ordinals.
       const materializedMessages = firstAttemptMessages ?? await materializePromptAttachments({
@@ -3051,6 +3190,9 @@ export class AgentRunner {
         messages: materializedMessages
       } satisfies RuntimeStreamRequest;
 
+      const requestPreparationMs = attemptPreparationStartedAt === null ? null : Math.max(0, Math.round(
+        (retryCount === 0 ? sharedPreparationMs! : 0) + this.preparationNowMsFn() - attemptPreparationStartedAt,
+      ));
       const analyticsModelStartedAt = this.nowMsFn();
       const analyticsAttemptNo = retryCount + 1;
       const analyticsModelCallId = newSortableId("model");
@@ -3059,7 +3201,7 @@ export class AgentRunner {
       let finishEvents = 0;
       let analyticsFinishUsage: AnalyticsUsage | null = null;
       try {
-        const analyticsModelPayload = { modelCallId: analyticsModelCallId, runId: run.runId, executionId: run.runId, attemptNo: analyticsAttemptNo, providerId: profile.provider.id ?? "unknown", modelId: profile.model.id ?? "unknown", startedAt: analyticsModelStartedAt, endedAt: null, status: "running" as const, completionQuality: "unknown" as const, timeoutKind: null, inputTokens: null, cacheInputTokens: null, cacheWriteTokens: null, cacheComparable: false, cacheWriteVerified: false, failureKind: null };
+        const analyticsModelPayload = { modelCallId: analyticsModelCallId, runId: run.runId, executionId: run.runId, attemptNo: analyticsAttemptNo, providerId: profile.provider.id ?? "unknown", modelId: profile.model.id ?? "unknown", startedAt: analyticsModelStartedAt, requestPreparationMs, endedAt: null, status: "running" as const, completionQuality: "unknown" as const, timeoutKind: null, inputTokens: null, cacheInputTokens: null, cacheWriteTokens: null, cacheComparable: false, cacheWriteVerified: false, failureKind: null };
         this.analyticsSignals?.emitModel(analyticsModelPayload, "model_invoked", analyticsModelCallId);
         const stream = this.streamTextFn(request);
         attemptStream = stream;
@@ -3350,7 +3492,7 @@ export class AgentRunner {
             finishedSteps > 1)
           : normalizeAnalyticsUsage(null);
         const analyticsAttemptStatus = requestController.signal.aborted ? (idleTimedOut || totalTimedOut ? "timed_out" : "cancelled") : (attemptSucceeded ? "completed" : "failed");
-        this.analyticsSignals?.emitModel({ modelCallId: analyticsModelCallId, runId: run.runId, executionId: run.runId, attemptNo: analyticsAttemptNo, providerId: profile.provider.id ?? "unknown", modelId: profile.model.id ?? "unknown", startedAt: analyticsModelStartedAt, endedAt: this.nowMsFn(), status: analyticsAttemptStatus, completionQuality: "observed", timeoutKind: idleTimedOut ? "idle" : totalTimedOut ? "total" : null, ...analyticsUsage, failureKind: analyticsAttemptStatus === "completed" ? null : analyticsAttemptStatus === "timed_out" ? "timeout" : analyticsAttemptStatus === "cancelled" ? "cancelled" : attemptLocalFailure ? "other" : "provider" }, "model_finished", analyticsModelCallId);
+        this.analyticsSignals?.emitModel({ modelCallId: analyticsModelCallId, runId: run.runId, executionId: run.runId, attemptNo: analyticsAttemptNo, providerId: profile.provider.id ?? "unknown", modelId: profile.model.id ?? "unknown", startedAt: analyticsModelStartedAt, requestPreparationMs, endedAt: this.nowMsFn(), status: analyticsAttemptStatus, completionQuality: "observed", timeoutKind: idleTimedOut ? "idle" : totalTimedOut ? "total" : null, ...analyticsUsage, failureKind: analyticsAttemptStatus === "completed" ? null : analyticsAttemptStatus === "timed_out" ? "timeout" : analyticsAttemptStatus === "cancelled" ? "cancelled" : attemptLocalFailure ? "other" : "provider" }, "model_finished", analyticsModelCallId);
 
         if (idleTimer) clearInterval(idleTimer);
         if (totalTimer) clearTimeout(totalTimer);
@@ -3697,11 +3839,17 @@ export class AgentRunner {
       // pending tools must finish before that step can start.
       let autoCompactionAttemptedForNextModelStep = false;
       while (!signal.aborted) {
+        // Decide before reading context so unselected requests do not call the timing clock.
+        const contextPreparationStartedAt = this.preparationRandomFn() < REQUEST_PREPARATION_SAMPLE_RATE ? this.preparationNowMsFn() : null;
         let context = await this.apiClient.getPromptContext({
           workspaceId: run.workspaceId,
           sessionId: run.sessionId,
           runId: run.runId
         });
+
+        let contextPreparationMs = contextPreparationStartedAt === null
+          ? null
+          : this.preparationNowMsFn() - contextPreparationStartedAt;
 
         // 快照只允许命中“紧接着的一次 pending-tools 检查机会”；若本轮没有 pendingTools，必须立刻丢弃，避免跨 compaction/下一模型 step 泄漏。
         const nextPendingToolNamesSnapshot = pendingToolNamesSnapshot;
@@ -3744,9 +3892,14 @@ export class AgentRunner {
           // the prompt snapshot above. Refresh once before the model step, but
           // do not re-enter auto-compaction until after that step.
           autoCompactionAttemptedForNextModelStep = true;
+          // Discard the old context and its sampling decision after compaction.
+          const refreshedPreparationStartedAt = this.preparationRandomFn() < REQUEST_PREPARATION_SAMPLE_RATE ? this.preparationNowMsFn() : null;
           context = await this.apiClient.getPromptContext({
             workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId,
           });
+          contextPreparationMs = refreshedPreparationStartedAt === null
+            ? null
+            : this.preparationNowMsFn() - refreshedPreparationStartedAt;
           if (context.pendingTools.length > 0) {
             const pendingResult = await this.executePendingTools({ profile, run, context, signal });
             if (pendingResult.paused || signal.aborted) {
@@ -3768,6 +3921,7 @@ export class AgentRunner {
           profile,
           run,
           context,
+          contextPreparationMs,
           step,
           emptyResponseCount,
           signal,
@@ -3977,4 +4131,4 @@ export async function finalizeToolTextForTest(params: {
 }) {
   return finalizeToolText(params);
 }
-import { readWorkspaceImage, WORKSPACE_IMAGE_MAX_BYTES } from "./workspaceImageReader.js";
+import { readWorkspaceImage, WORKSPACE_IMAGE_MAX_BYTES, WorkspaceImageNotFoundError, WorkspaceImageTooLargeError, WorkspaceImageReadError } from "./workspaceImageReader.js";

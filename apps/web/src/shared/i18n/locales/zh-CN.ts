@@ -229,7 +229,71 @@ export default {
       search: "搜索",
       agent: "AI Agent",
       scheduledTasks: "定时任务",
+      environmentVariables: "环境变量",
       editor: "编辑器"
+    },
+    environmentVariables: {
+      "title": "Workspace 环境变量",
+      "add": "新增变量",
+      "edit": "编辑变量",
+      "description": "为 bash 工具和终端配置同一套环境变量，仅作用于当前 Workspace。",
+      "search": "搜索变量名或备注",
+      "filter": "启用状态筛选",
+      "all": "全部状态",
+      "enabledState": "已启用",
+      "disabledState": "已停用",
+      "count": "显示 {shown}/{total} 条 · {enabled} 条已启用",
+      "list": "Workspace 环境变量列表",
+      "enabled": "启用",
+      "name": "变量名",
+      "value": "值",
+      "remark": "备注",
+      "actions": "操作",
+      "toggle": "切换 {name} 的启用状态",
+      "editVariable": "编辑 {name}",
+      "deleteVariable": "删除 {name}",
+      "emptyString": "空字符串",
+      "empty": "还没有环境变量",
+      "noMatches": "没有匹配的变量",
+      "clearFilters": "清除筛选",
+      "rulesLabel": "环境变量生效范围和配置规则",
+      "scope": "生效范围",
+      "tool": "工具",
+      "bashScope": "下一次调用使用新配置，运行中的命令保持原环境。",
+      "terminalScope": "新建会话使用新配置，已有会话重连不会更新。",
+      "rules": "配置规则",
+      "sharedRule": "bash 和新建终端共享当前 Workspace 的配置，不修改服务进程环境。",
+      "priorityRule": "Workspace 配置覆盖系统同名普通变量；名称区分大小写，代理别名不自动同步。",
+      "emptyRule": "空字符串是合法值，与未配置不同。",
+      "inheritRule": "删除或停用仅移除覆盖，回到基础环境继承，不等同于 unset。",
+      "literalRule": "值按字面处理，不展开 $PATH，不执行命令替换。",
+      "reservedRule": "AWB_* 和系统托管的 Git 鉴权变量受保护，不允许覆盖。",
+      "security": "安全提醒",
+      "securityNote": "变量值在此明文显示。命令可以读取并输出变量；请勿将敏感值写入日志，名称与备注也不应包含秘密。",
+      "saveHelp": "点击保存后立即保存到当前 Workspace，仅影响之后的 bash 调用和新建终端。",
+      "nameHelp": "仅允许字母、数字和下划线，不能以数字开头。名称区分大小写，最多 128 个字符。",
+      "valuePlaceholder": "输入字面值；留空表示空字符串",
+      "valueHelp": "保留空格与换行，不自动展开 $PATH。每个值最多 16 KiB（UTF-8）。",
+      "optional": "（可选）",
+      "enableVariable": "启用此变量",
+      "saved": "已保存",
+      "noChanges": "没有更改",
+      "unconfirmed": "保存结果未确认，请刷新后核对当前配置，不要重复提交。",
+      "reloadedUnconfirmed": "保存结果未确认；已重新读取当前配置，请核对服务器上的结果。",
+      "formUnconfirmed": "本次保存结果未确认，不能重复提交。请核对当前配置，关闭表单后重新编辑。",
+      "deleteTitle": "确认删除变量？",
+      "deleteContent": "删除 {name} 后，仅移除 Workspace 覆盖，不影响运行中的命令和已有终端。",
+      "errors": {
+        "duplicate": "当前 Workspace 已存在同名变量。",
+        "reserved": "该名称属于 AWB 或系统托管的 Git 保留字段，不能配置。",
+        "limits": "超出限额：名称 128 个字符、备注 160 个 UTF-16 单元、单值 16 KiB、128 条变量或总环境编码 64 KiB（含停用）。",
+        "invalid": "配置格式不合法，请检查输入。",
+        "deleting": "Workspace 正在删除，不能读取或修改配置。",
+        "notFound": "Workspace 或变量已不存在，请刷新后确认。",
+        "request": "无法完成环境变量请求，请刷新后重试。",
+        "name": "变量名仅允许字母、数字和下划线，且不能以数字开头。",
+        "text": "值或备注包含 NUL 或非法 Unicode 字符，请检查输入。"
+      }
     },
     dock: {
       moveTo: "移动到 {area}",
@@ -340,6 +404,10 @@ export default {
       cancelConfirmContent: "将中断当前执行,并保留当前会话消息。当前正在执行的 AI 或工具会标记为已取消。",
       cancelled: "已取消当前运行",
       welcome: "你好, 我可以协助你完成任务。",
+      fileLinkUnresolved: "链接文件不存在或者位置不确定",
+      fileLinkProbeFailed: "链接文件探测失败，请重试",
+      fileLinkInvalidPath: "文件链接路径无效，请使用不包含 .. 路径段的相对路径",
+      fileLinkInvalidPosition: "文件链接行列位置无效",
       reachedTop: "已到最早",
       contextBoundary: "上下文边界",
       inputPlaceholderIdle: "输入消息或粘贴图片，Enter 发送，Shift+Enter 换行，Tab 切换 Agent",
@@ -374,7 +442,6 @@ export default {
       sessionRestoreUnconfirmed: "会话打开可能已提交，恢复隐藏尚未确认。请稍后核实或手动关闭。",
       retryTitleSync: '重试同步会话标题',
       retrySessionSelection: '重试选择',
-      reloadTabs: "重新核实会话标签",
       refreshSessionList: "刷新列表",
       sessionListExpired: "列表已失效，请重新加载。",
       sessionListFailed: "加载会话列表失败，请重试。",
@@ -483,7 +550,16 @@ export default {
     placeholder: {
       title: "代码审查（占位）",
       desc: "在这里查看当前仓库的变更、暂存与差异。",
-      selectRepo: "请先选择一个仓库"
+      selectRepo: "请先选择一个仓库",
+      noRepos: "当前工作区没有注册仓库"
+    },
+    repositories: {
+      resize: "调整仓库栏宽度",
+      title: "仓库",
+      select: "选择审查仓库",
+      switchBranch: "切换仓库 {repo} 的分支（当前：{branch}）",
+      actions: "仓库 {repo} 的操作",
+      hasChanges: "有未提交变更"
     },
     unstaged: "未暂存",
     staged: "已暂存",
@@ -506,9 +582,13 @@ export default {
       pathCopied: "路径已复制"
     },
     status: {
-      noChanges: "无变更"
+      noChanges: "当前仓库没有未提交变更",
+      noUnstagedChanges: "没有未暂存变更",
+      noStagedChanges: "没有已暂存变更"
     },
     file: {
+      directory: "目录（不支持文本预览）",
+      submodule: "子模块（不支持文本预览）",
       oldPath: "原：{oldPath}"
     },
     discard: {
@@ -548,7 +628,9 @@ export default {
       modalTitle: "提交",
       messageLabel: "提交信息",
       messagePlaceholder: "请输入提交信息",
-      summary: "将提交：{count} 个文件",
+      target: "目标仓库：{repo}",
+      summary: "将提交：{count} 个已暂存文件",
+      scope: "仅提交该仓库的已暂存变更",
       committed: "已提交 {sha}"
     },
     preview: {
@@ -561,6 +643,35 @@ export default {
     }
   },
   terminal: {
+    config: {
+      reorder: "调整顺序",
+      orderDone: "完成",
+      drag: "拖动调整顺序",
+      moveUp: "上移",
+      moveDown: "下移",
+      title: "运行配置",
+      add: "新建配置",
+      collapse: "收起配置",
+      empty: "暂无配置",
+      run: "运行",
+      legacyRun: "旧版终端无法确认服务已停止，请手动停止旧服务并关闭此标签后重新运行。",
+      guardUnavailable: "运行配置需要 Linux、/usr/bin/python3（支持 pidfd）及子进程监督能力。",
+      restartStoppedUnconfirmed: "重启失败：无法确认旧运行环境已停止并完成清理，未启动新的运行。请稍后重试。",
+      more: "更多",
+      edit: "编辑配置",
+      delete: "删除",
+      confirmDelete: "确认删除配置？",
+      name: "名称",
+      nameRequired: "请输入名称",
+      cwd: "工作目录",
+      cwdHint: "选择已有仓库，或输入相对路径；留空使用 Workspace 根目录。",
+      root: "Workspace 根目录",
+      command: "启动命令",
+      commandRequired: "请输入启动命令",
+      cancel: "取消",
+      save: "保存配置",
+      saved: "配置已保存"
+    },
     panel: {
       collapse: "折叠终端面板"
     },
@@ -626,6 +737,7 @@ export default {
       copyPath: "复制仓库内路径",
       copyRepoPath: "复制仓库内路径",
       copyWorkspacePath: "复制工作区路径",
+      extract: "解压",
       download: "下载",
       preview: "预览",
       rename: "重命名",
@@ -646,6 +758,38 @@ export default {
       uploading: "正在上传…",
       success: "上传完成",
       partialFailed: "以下文件上传失败: {names}"
+    },
+    extract: {
+      extracting: "正在解压…",
+      success: "解压完成",
+      empty: "压缩包为空，没有新增文件",
+      refreshFailed: "解压已完成，目录刷新失败，请手动刷新",
+      resultUnknown: "请求结果未知，解压可能已完成，请刷新目录确认；不会自动重试",
+      errors: {
+        invalidPath: "压缩包路径无效，或源文件不是可解压的普通文件",
+        unsupportedFormat: "不支持此压缩包格式",
+        invalidArchive: "压缩包损坏、格式不符或内容校验失败",
+        unsupportedFeature: "暂不支持加密包、分卷包或此压缩方法",
+        unsupportedEntry: "压缩包包含不支持的链接、特殊文件或扩展条目",
+        invalidEntry: "压缩包包含不安全路径、重复文件或冲突条目",
+        permissionDenied: "没有读取压缩包或写入目标目录的权限",
+        sourceNotFound: "压缩包不存在，请刷新目录确认",
+        targetConflict: "目标已有同名文件或目录，未覆盖或合并；请处理冲突后再试",
+        sourceChanged: "压缩包在解压期间发生变化，请刷新目录确认",
+        targetChanged: "目标目录或本次产物在解压期间发生变化，请刷新目录确认",
+        unsupportedFilesystem: "当前文件系统不支持安全解压所需的操作",
+        limitExceeded: "压缩包超过解压大小、文件数量、路径或元数据限制",
+        timeout: "解压处理超时，请刷新目录确认",
+        busy: "服务正在处理其他解压请求，请稍后再试",
+        storageExhausted: "磁盘空间或可用文件节点不足，请检查存储空间",
+        ioFailed: "解压遇到文件读写错误，请刷新目录确认",
+        cleanupIncomplete: "文件可能已解压，存在未清理内容，请刷新目录确认并检查残留",
+        workspaceDeleting: "工作区正在删除，无法解压",
+        workspaceInvalid: "工作区路径异常，无法安全解压",
+        unauthorized: "登录状态已失效，请重新登录",
+        unavailable: "工作区或压缩包不可用，请刷新目录确认",
+        invalidRequest: "解压请求无效，请刷新目录后重试"
+      }
     },
     status: {
       saving: "正在保存…"
@@ -1078,6 +1222,7 @@ export default {
       },
       tools: {
         bash: "Bash",
+        git: "Git",
         read: "Read",
         write: "Write",
         applyPatch: "Apply Patch",
@@ -1330,6 +1475,8 @@ export default {
     }
   },
   dashboard: {
+    averagePreparationDuration: "平均准备耗时",
+    preparationSamplingDescription: "当前按 10% 随机采样 · 有效样本数：{count}",
     title: "数据看板", subtitle: "回看 Agent、模型、工具与 Worker 使用情况 · 所有统计仅保存在本机",
     overview: "概览", agent: "Agent", model: "模型", worker: "Worker", refresh: "刷新",
     range: "时间范围", custom: "自定义范围", preset_24h: "近 24 小时", preset_7d: "近 7 天", preset_30d: "近 30 天", preset_90d: "近 90 天", apply: "应用", from: "开始", to: "结束",
@@ -1347,7 +1494,8 @@ export default {
     sections: "数据看板分区", rangeEnd: "范围结束", monitoringComposition: "最新监控数据构成", domain: "数据域", statusLabel: "状态", lastSucceededAt: "最后成功", runType: "Run 类型", messageType: "消息类型", toolStatus: "工具状态", toolDetails: "工具明细", byModel: "按模型", tokenCoverage: "Token 覆盖", restartRecords: "重启记录", occurredAt: "发生时间", event: "事件", restartStatus: "重启状态", toolName: "工具", calls: "调用", completed: "完成", failed: "失败", provider: "提供商", modelName: "模型", unknown: "未知", requestCount: "请求总数", primaryRunCount: "主任务数", subtaskRunCount: "子任务数", userMessageCount: "用户消息", assistantMessageCount: "助手消息", manualCompactionCount: "手动压缩", autoCompactionCount: "自动压缩", completedAverageDuration: "完成平均时长", cacheReadTokens: "缓存读取 Token", inputReportedCount: "输入已报告", outputReportedCount: "输出已报告", totalReportedCount: "总计已报告", totalDerivedCount: "总计推导", cacheComparableCount: "可比较缓存", timeoutKindBreakdown: "超时类型",
     totalDuration: "总时长", runCount: "Run 数", toolSuccessRate: "工具成功率", inputTokenCoverage: "输入覆盖率", outputTokenCoverage: "输出覆盖率", totalTokenCoverage: "总计覆盖率", inputCacheCoverage: "缓存覆盖率",
     distribution: { primary: "主任务", subtask: "子任务", other: "其他", user: "用户", assistant: "助手", runtime: "运行时", system: "系统", compaction: "压缩", completed: "完成", failed: "失败", cancelled: "取消", unknown: "未知" },
-    healthEvidenceTitle: "已知异常迹象", healthEvidenceDisabled: "该数据域当前已禁用", healthEvidenceGaps: "存在 {count} 个开放覆盖缺口", healthEvidenceMissingGeneration: "有 {count} 个预期槽位缺少活跃 Generation", healthEvidenceStaleCheckpoint: "有 {count} 个槽位的检查点已过期", healthEvidenceMissingCheckpoint: "有 {count} 个活跃 Generation 的检查点缺失", healthEvidenceUnknown: "状态异常，暂无更具体的诊断信息",
+    lastCollectionActivityAt: "最近更新", healthEvidenceNoExpectedSlots: "当前未配置预期采集槽位", healthEvidenceClosing: "有 {count} 个采集槽位正在停止",
+    healthEvidenceTitle: "已知异常迹象", healthEvidenceDisabled: "该数据域当前已禁用", healthEvidenceGaps: "存在 {count} 个开放覆盖缺口", healthEvidenceMissingGeneration: "有 {count} 个预期槽位缺少活跃 Generation", healthEvidenceStaleCheckpoint: "有 {count} 个槽位的检查点已过期", healthEvidenceMissingCheckpoint: "有 {count} 个采集槽位缺少有效检查点", healthEvidenceUnknown: "状态异常，暂无更具体的诊断信息",
     runStatus: { completed: "完成", failed: "失败", cancelled: "取消", interrupted: "中断", unknown: "未知" }, workerEvent: { unexpected_exit: "异常退出", restart_attempted: "尝试重启", restart_succeeded: "重启成功", restart_failed: "重启失败" }, restartStatusValue: { recovered: "已恢复", not_recovered: "未恢复", pending: "等待中", not_applicable: "不适用" },
     status: { available: "完整", partial: "不完整", healthy: "健康", degraded: "降级", stale: "过期", unavailable: "不可用", disabled: "已禁用" },
     error: {CUSTOM_RANGE_REQUIRED: "请选择完整的自定义时间范围。", CUSTOM_RANGE_INVALID: "自定义时间无效。", CUSTOM_RANGE_DST_AMBIGUOUS: "该时间在夏令时切换中出现两次。", CUSTOM_RANGE_DST_NONEXISTENT: "该时间在夏令时切换中不存在。", CUSTOM_RANGE_ORDER: "开始时间必须早于结束时间。", CUSTOM_RANGE_TOO_LARGE: "自定义范围不能超过 366 天。",  ANALYTICS_UNAVAILABLE: "Analytics 暂时不可用。", ANALYTICS_RANGE_TOO_LARGE: "所选时间范围过大。", ANALYTICS_RANGE_INVALID: "所选时间范围无效。", ANALYTICS_TIMEZONE_INVALID: "所选时区无效。", ANALYTICS_RANGE_NOT_READY: "该时间范围尚未就绪。", NETWORK_ERROR: "无法加载看板数据。" },
@@ -1355,6 +1503,45 @@ export default {
     reason: { coverage_gap: "覆盖缺口", range_not_reconciled: "范围尚未对账", collector_degraded: "采集器降级", signal_loss: "信号丢失", dirty_hour: "小时数据刷新中", open_fact: "事实尚未关闭", configuration_changed: "配置已变化", domain_disabled: "域已禁用", domain_unavailable: "域不可用", no_safe_data: "没有安全数据", invalid_metric_state: "无效指标状态" }
   },
   editor: {
+    preview: {
+      toggle: "源码 / 预览",
+      renderFailed: "文档渲染失败，可切换到源码查看",
+      imageFailed: "图片加载失败、超出资源限制或格式不受支持",
+      remoteImageBlocked: "远程图片未自动加载",
+      imageBlocked: "图片路径不受支持",
+      imageLimit: "图片数量超过预览限制",
+      headingMissing: "未找到对应章节",
+      linkBlocked: "链接地址不受支持",
+      linkFailed: "文件不存在、不可访问或无法打开",
+      crossFileHeadingUnsupported: "暂不支持跳转到其他文件的章节，请通过不带章节的文件链接打开"
+    },
+    mermaid: {
+      zoomIn: "放大",
+      zoomOut: "缩小",
+      fit: "适应窗口",
+      navigation: "图表预览：Ctrl/Cmd + 滚轮缩放，空格加左键或中键拖动",
+      loading: "正在渲染图表…",
+      empty: "图表内容为空，可切换到源码编辑",
+      tooLarge: "图表超过预览大小或复杂度限制",
+      unsafe: "不支持图内配置、HTML、数学标签、外部资源或此类自定义样式",
+      unsupported: "暂不支持此图表类型的安全预览，可切换到源码查看",
+      loadFailed: "图表渲染器加载失败，可切换到源码后重试",
+      renderFailed: "图表渲染失败，请检查源码语法或图表复杂度"
+    },
+    image: {
+      loading: "正在加载图片…",
+      tooLarge: "图片超过 20 MiB，暂不支持预览",
+      loadFailed: "图片加载失败或格式不受支持"
+    },
+    media: {
+      loadFailed: "音视频加载失败或浏览器不支持此格式，请检查文件和登录状态，或下载后播放",
+      decodeFailed: "浏览器无法解码此音视频，请下载后使用本地播放器打开",
+      download: "下载文件"
+    },
+    htmlPreview: {
+      open: "在浏览器中预览",
+      saveFirst: "请先完成保存并解决冲突，再打开预览"
+    },
     placeholder: {
       empty: "暂无打开内容",
       fileEditorComingSoon: "文件编辑能力将在后续阶段接入"

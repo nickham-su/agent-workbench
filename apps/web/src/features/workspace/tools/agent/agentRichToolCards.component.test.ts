@@ -494,3 +494,25 @@ test("来源复制回退失败保留错误反馈，不产生导航或成功通�
     }
   }
 });
+
+test("AC-HISTORY-READ: Git history remains a passive native tool row for every execution status", () => {
+  const input = { repo: "fixture-repository", args: ["status", "--short"] };
+  for (const status of ["queued", "running", "completed", "failed", "cancelled", "unknown"] as const) {
+    const wrapper = mount(conversationToolCall.default, { props: {
+      workspaceId: "ws-fixture", toolId: "agent-tool", sessionId: "session-fixture",
+      part: { id: "git-call", messageId: "message-fixture", position: 0, updatedRevision: 1, createdAt: 1, updatedAt: 1,
+        type: "tool_call", toolName: "git", input, providerToolCallId: null },
+      execution: timelineExecution(status), loading: false, now: 4_000,
+    }, global: mountGlobal });
+    try {
+      const row = wrapper.findComponent(toolCallRow.default);
+      assert.equal(row.exists(), true, status);
+      assert.equal(row.props("toolName"), "git");
+      assert.deepEqual(row.props("input"), input);
+      assert.match(wrapper.text(), /fixture-repository/);
+      assert.equal(wrapper.findComponent({ name: "CheckCircleOutlined" }).exists(), false, "completed means delivered, not Git success");
+      assert.equal(wrapper.emitted("request-detail"), undefined, "reading history must not trigger execution or an implicit detail fetch");
+      assert.equal(wrapper.text().includes("推送成功"), false);
+    } finally { wrapper.unmount(); }
+  }
+});

@@ -40,10 +40,58 @@ test("RuntimeTranscriptProjector filters reasoning and projects historical image
     { role: "user", content: "old\n\n[Historical image attachment (not included in this run; Workspace path unavailable).]" },
     { role: "assistant", content: "answer" },
     { role: "user", content: [
-      { type: "text", text: "[The user sent 1 image attachment(s) without accompanying text.]" },
+      { type: "text", text: "[The user sent 1 image attachment(s) without accompanying text.]\n\n[Image attachment 1 included in this run. Workspace-relative path: .awb/agent/attachments/att_new.jpg]" },
       { type: "attachment_ref", workspaceId: "ws", attachmentId: "a-new", mediaType: "image/jpeg", filename: "new.jpg", path: ".awb/agent/attachments/att_new.jpg" }
     ] }
   ]);
+});
+
+for (const text of ["Use these images as local resources.", ""]) {
+  for (const imageCount of [1, 2, 4]) {
+    test(`RuntimeTranscriptProjector pairs ${imageCount} current image path(s) with references ${text ? "with" : "without"} user text`, () => {
+      const images = Array.from({ length: imageCount }, (_, index) => ({
+        id: `image-${index}`, messageId: "trigger", position: index + 1, type: "image" as const,
+        attachmentId: `att-${index}`, mediaType: "image/png" as const, filename: `upload-${index}.png`,
+        updatedRevision: 1, createdAt: 1, updatedAt: 1
+      }));
+      const paths = images.map((image) => `.awb/agent/attachments/${image.attachmentId}.png`);
+      const input = {
+        workspaceId: "ws", triggerMessageId: "trigger", executions: [],
+        attachmentPaths: new Map(images.map((image, index) => [image.id, paths[index]!])),
+        messages: [message({ id: "trigger", type: "user", status: "completed", parts: [
+          ...[...images].reverse(),
+          { id: "text", messageId: "trigger", position: 0, type: "text", text, updatedRevision: 1, createdAt: 1, updatedAt: 1 }
+        ] })]
+      };
+      const original = structuredClone(input);
+      const expected = [{ role: "user", content: [
+        { type: "text", text: [
+          text || `[The user sent ${imageCount} image attachment(s) without accompanying text.]`,
+          ...paths.map((path, index) => `[Image attachment ${index + 1} included in this run. Workspace-relative path: ${path}]`)
+        ].join("\n\n") },
+        ...images.map((image, index) => (
+          { type: "attachment_ref", workspaceId: "ws", attachmentId: image.attachmentId,
+            mediaType: image.mediaType, filename: image.filename, path: paths[index] }
+        ))
+      ] }];
+      assert.deepEqual(projector.project(input), expected);
+      assert.deepEqual(projector.project(input), expected, "rebuilding the context must not duplicate path hints");
+      assert.deepEqual(input, original, "projection must not mutate the stored message graph");
+    });
+  }
+}
+
+test("RuntimeTranscriptProjector still rejects current images without a trusted Workspace path", () => {
+  const input = {
+    workspaceId: "ws", triggerMessageId: "trigger", executions: [], messages: [
+      message({ id: "trigger", type: "user", status: "completed", parts: [
+        { id: "image", messageId: "trigger", position: 0, type: "image", attachmentId: "att", mediaType: "image/png", filename: "upload.png", updatedRevision: 1, createdAt: 1, updatedAt: 1 }
+      ] })
+    ]
+  };
+  for (const attachmentPaths of [undefined, new Map<string, string | null>(), new Map([["image", null]]), new Map([["image", ""]])]) {
+    assert.throws(() => projector.project({ ...input, attachmentPaths }), /current Run image has no trusted Workspace path/);
+  }
 });
 
 test("RuntimeTranscriptProjector preserves interleaved visible Text and ToolCall order while omitting Reasoning", () => {
@@ -90,6 +138,7 @@ test("RuntimeTranscriptProjector creates exactly one ordered envelope for each t
 });
 
 test("RuntimeTranscriptProjector follows terminal result projection rules without structured results or artifacts", () => {
+  const failedPreview = "tool: bash\nstatus: failed\n\ncommand could not start";
   const statuses = ["unknown", "cancelled", "failed", "completed"] as const;
   const calls = statuses.map((status, position) => ({
     id: `call-${status}`, messageId: "assistant", position, type: "tool_call" as const, toolName: "bash" as const,
@@ -101,7 +150,7 @@ test("RuntimeTranscriptProjector follows terminal result projection rules withou
     executions: [
       { callPartId: "call-unknown", status: "unknown", resultPreview: "maybe", error: null },
       { callPartId: "call-cancelled", status: "cancelled", resultPreview: null, error: null },
-      { callPartId: "call-failed", status: "failed", resultPreview: "preview", error: "error first" },
+      { callPartId: "call-failed", status: "failed", resultPreview: failedPreview, error: "command could not start" },
       { callPartId: "call-completed", status: "completed", resultPreview: "success preview", error: "ignored" }
     ]
   });
@@ -109,10 +158,27 @@ test("RuntimeTranscriptProjector follows terminal result projection rules withou
   assert.deepEqual(tools.content.map((entry) => entry.output), [
     { type: "error-text", value: `${UNKNOWN_TOOL_EXECUTION_RESULT}\n\nReliable result preview:\nmaybe` },
     { type: "text", value: CANCELLED_TOOL_EXECUTION_RESULT },
-    { type: "error-text", value: "error first" },
+    { type: "error-text", value: failedPreview },
     { type: "text", value: "success preview" }
   ]);
 });
+
+for (const preview of [null, "", " \t\n"]) {
+  for (const error of ["original safe error", null]) {
+    test(`RuntimeTranscriptProjector failed without a usable preview=${JSON.stringify(preview)} falls back to error=${JSON.stringify(error)}`, () => {
+      const result = projector.project({
+        workspaceId: "ws", triggerMessageId: null,
+        messages: [message({ id: "assistant", type: "assistant", status: "completed", parts: [
+          { id: "call", messageId: "assistant", position: 0, type: "tool_call", toolName: "read", input: {}, providerToolCallId: "provider-call", updatedRevision: 1, createdAt: 1, updatedAt: 1 }
+        ] })],
+        executions: [{ callPartId: "call", status: "failed", resultPreview: preview, error }]
+      });
+      assert.deepEqual(result[1], { role: "tool", content: [
+        { type: "tool-result", toolCallId: "provider-call", toolName: "read", output: { type: "error-text", value: error ?? FAILED_TOOL_EXECUTION_RESULT } }
+      ] });
+    });
+  }
+}
 
 test("RuntimeTranscriptProjector rejects non-terminal or missing executions instead of silently projecting an incomplete turn", () => {
   const assistant = message({ id: "assistant", type: "assistant", status: "completed", parts: [

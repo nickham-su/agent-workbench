@@ -50,6 +50,10 @@
       "types": "./dist/internal-contracts/agent-provider-provenance.d.ts",
       "default": "./dist/internal-contracts/agent-provider-provenance.js"
     },
+    "./internal-contracts/workspace-environment": {
+      "types": "./dist/internal-contracts/workspace-environment.d.ts",
+      "default": "./dist/internal-contracts/workspace-environment.js"
+    },
     "./node/analytics-root": {
       "types": "./dist/node/analytics-root.d.ts",
       "default": "./dist/node/analytics-root.js"

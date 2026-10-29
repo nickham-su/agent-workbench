@@ -727,7 +727,6 @@ export class ModelContextResolver {
     this.onReadSnapshotEstablished();
 
     let run: ResolvedRunSnapshot | null = null;
-    let pendingTools: ResolvedPendingTool[] = [];
     if (input.runId != null) {
       const row = this.db.prepare(`
         select run_id as runId, workspace_id as workspaceId, session_id as sessionId,
@@ -757,14 +756,14 @@ export class ModelContextResolver {
         executionPhase: row.executionPhase,
         uiLocale: row.uiLocale,
       };
-      pendingTools = this.loadPendingTools({
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        runId: input.runId,
-      });
     }
 
     const chain = this.loadPhysicalChain(session, input.workspaceId);
+    const pendingTools = run ? this.loadPendingTools({
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      runId: run.runId,
+    }, chain) : [];
     const selected = this.selectLogicalMessages(session, chain);
     const hydrated = this.hydrate(input.workspaceId, session, selected);
     return {
@@ -778,10 +777,13 @@ export class ModelContextResolver {
     };
   }
 
-  private loadPendingTools(input: { workspaceId: string; sessionId: string; runId: string }): ResolvedPendingTool[] {
+  private loadPendingTools(
+    input: { workspaceId: string; sessionId: string; runId: string },
+    chain: MessageRow[],
+  ): ResolvedPendingTool[] {
     const rows = this.db.prepare(`
       select execution.id as toolExecutionId, execution.call_part_id as callPartId,
-             part.message_id as assistantMessageId, execution.status,
+             part.message_id as assistantMessageId, part.position, execution.status,
              part.tool_name as toolName, part.provider_tool_call_id as toolCallId,
              part.tool_input_json as toolInputJson
       from agent_tool_execution execution
@@ -789,17 +791,26 @@ export class ModelContextResolver {
       where execution.origin_session_id = @sessionId
         and execution.origin_run_id = @runId
         and execution.status in ('queued', 'running')
-      order by execution.created_at asc, execution.id asc
     `).all(input) as Array<{
       toolExecutionId: string;
       callPartId: string;
       assistantMessageId: string;
+      position: number;
       status: "queued" | "running";
       toolName: string | null;
       toolCallId: string | null;
       toolInputJson: string | null;
     }>;
-    return rows.map((row) => {
+    // Same-response executions share a creation time; call order lives in the chain and Part.position.
+    const messageOrder = new Map(chain.map((message, index) => [message.id, index]));
+    const orderedRows = rows.map((row) => {
+      const messagePosition = messageOrder.get(row.assistantMessageId);
+      if (messagePosition === undefined) {
+        throw new ModelContextInvariantError("pending tool call is not on the current session message chain");
+      }
+      return { ...row, messagePosition };
+    }).sort((left, right) => left.messagePosition - right.messagePosition || left.position - right.position);
+    return orderedRows.map((row) => {
       if (!row.toolName) throw new ModelContextInvariantError("pending tool has an invalid call part");
       return {
         toolExecutionId: row.toolExecutionId,

@@ -10,3 +10,4 @@ dist/
 .tmp-tests/
 *.log
 .DS_Store
+.awb/

@@ -128,6 +128,7 @@ test("processRun reuses runModelStep tool snapshot for next pending plugin tool 
       messages: [],
       lastResponseTotalTokens: null,
       uiLocale: null,
+      workspaceRepoNames: [],
       externalSkills: []
     },
     {
@@ -139,6 +140,7 @@ test("processRun reuses runModelStep tool snapshot for next pending plugin tool 
       messages: [],
       lastResponseTotalTokens: null,
       uiLocale: null,
+      workspaceRepoNames: [],
       externalSkills: []
     }
   ];
@@ -171,6 +173,7 @@ test("processRun reuses runModelStep tool snapshot for next pending plugin tool 
         messages: [],
         lastResponseTotalTokens: null,
         uiLocale: null,
+        workspaceRepoNames: [],
         externalSkills: []
       };
     },

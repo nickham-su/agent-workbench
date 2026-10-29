@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import { __analyticsSupervisorInternals, AnalyticsSupervisor } from "./analytics-supervisor.js";
 
 class FakeAnalyticsChild extends EventEmitter {
@@ -51,6 +51,27 @@ class FakeAnalyticsChild extends EventEmitter {
 const request = { rangeKind: "preset_7d", timezone: "UTC" } as const;
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+function captureStartupLogs(t: TestContext) {
+  const lines: string[] = [];
+  t.mock.method(console, "info", (...args: unknown[]) => { lines.push(args.join(" ")); });
+  t.mock.method(console, "warn", (...args: unknown[]) => { lines.push(args.join(" ")); });
+  return lines;
+}
+
+function assertStartupTiming(line: string, startupId: string, timeoutMs: number) {
+  assert.ok(line.includes(`startupId=${startupId}`));
+  const at = /\bat=(\S+)/.exec(line)?.[1];
+  assert.ok(at);
+  assert.equal(new Date(at).toISOString(), at);
+  assert.match(line, /\belapsedMs=\d+\b/);
+  assert.ok(line.includes(`timeoutMs=${timeoutMs}`));
+  assert.ok(!line.includes("private-startup-sentinel"));
+}
+
+function initializationId(child: FakeAnalyticsChild) {
+  return (child.sent.find((message: any) => message.type === "initialize") as { requestId: string }).requestId;
+}
+
 async function waitFor(predicate: () => boolean) {
   const deadline = Date.now() + 1_000;
   while (!predicate() && Date.now() < deadline) await sleep(5);
@@ -63,12 +84,31 @@ async function starts(child: FakeAnalyticsChild, extra: Record<string, unknown> 
   return supervisor;
 }
 
-test("supervisor uses a 5s startup timeout unless explicitly configured", () => {
+test("supervisor schedules a 60s startup timeout unless explicitly configured", async () => {
   const options = { dataDir: "/not-used", workerFactory: () => new FakeAnalyticsChild() as any };
   const defaultSupervisor = new AnalyticsSupervisor(options);
-  const configuredSupervisor = new AnalyticsSupervisor({ ...options, startupTimeoutMs: 100 });
-  assert.equal(defaultSupervisor["startupTimeoutMs"], 5_000);
-  assert.equal(configuredSupervisor["startupTimeoutMs"], 100);
+  const configuredSupervisor = new AnalyticsSupervisor({ ...options, startupTimeoutMs: 100, shutdownTimeoutMs: 10 });
+  const setTimeoutOriginal = globalThis.setTimeout;
+  const delays: Array<number | undefined> = [];
+  // Observe the actual timers, without waiting for the default minute to pass.
+  globalThis.setTimeout = ((callback: (...args: any[]) => void, delay?: number, ...args: any[]) => {
+    delays.push(delay);
+    return setTimeoutOriginal(callback, delay, ...args);
+  }) as typeof setTimeout;
+  try {
+    assert.equal(await defaultSupervisor.start(), true);
+    assert.equal(delays.shift(), 60_000);
+    assert.equal(await configuredSupervisor.start(), true);
+    assert.equal(delays.shift(), 100);
+    // Other operational budgets are intentionally unaffected.
+    assert.equal(defaultSupervisor["queryTimeoutMs"], 2_000);
+    assert.equal(defaultSupervisor["signalTimeoutMs"], 1_000);
+    assert.equal(defaultSupervisor["shutdownTimeoutMs"], 2_000);
+  } finally {
+    globalThis.setTimeout = setTimeoutOriginal;
+    await defaultSupervisor.close();
+    await configuredSupervisor.close();
+  }
 });
 
 test("bootstrap false or timeout keeps queries unavailable, retires the child, and only a replacement accepting the latest source serves", async (t) => {
@@ -482,4 +522,144 @@ test("wall-clock rollback does not extend an already scheduled restart cooldown"
     Date.now = originalDateNow;
     await supervisor.close();
   }
+});
+
+test("startup timing covers bootstrap and only logs success after serving, without duplicate starts", async (t) => {
+  const lines = captureStartupLogs(t);
+  const child = new FakeAnalyticsChild();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const supervisor = new AnalyticsSupervisor({
+    dataDir: "private-startup-sentinel", workerFactory: () => child as any,
+    startupTimeoutMs: 1_000, shutdownTimeoutMs: 10, restartLimit: 0,
+  });
+  supervisor.onReady(() => gate);
+  t.after(() => supervisor.close());
+  const started = supervisor.start();
+  const duplicate = supervisor.start();
+  await waitFor(() => lines.some((line) => line.includes("worker bootstrap started")));
+  assert.equal(supervisor.isReady, false);
+  assert.deepEqual(await supervisor.query(request), { kind: "error", error: { code: "ANALYTICS_UNAVAILABLE" } });
+  assert.equal(lines.some((line) => line.includes("worker startup completed")), false);
+  const dateNow = Date.now;
+  Date.now = () => dateNow() - 3_600_000;
+  try {
+    await sleep(10);
+    release();
+    assert.deepEqual(await Promise.all([started, duplicate]), [true, true]);
+  } finally { Date.now = dateNow; }
+  assert.equal(supervisor.isReady, true);
+  assert.equal(lines.filter((line) => line.includes("worker startup started")).length, 1);
+  assert.equal(lines.filter((line) => line.includes("worker startup completed")).length, 1);
+  const startupId = initializationId(child);
+  for (const line of lines) assertStartupTiming(line, startupId, 1_000);
+  const completed = lines.find((line) => line.includes("worker startup completed"))!;
+  assert.match(completed, /stage=bootstrap/);
+  const bootstrapMs = Number(/bootstrapElapsedMs=(\d+)/.exec(completed)?.[1]);
+  const totalMs = Number(/\belapsedMs=(\d+)/.exec(completed)?.[1]);
+  assert.ok(bootstrapMs >= 5);
+  assert.ok(totalMs >= bootstrapMs);
+});
+
+test("startup initialization failure logs a fixed classification without raw exception data", async (t) => {
+  const lines = captureStartupLogs(t);
+  const child = new FakeAnalyticsChild(); child.respondToInitialize = false;
+  const supervisor = new AnalyticsSupervisor({
+    dataDir: "private-startup-sentinel", workerFactory: () => child as any,
+    startupTimeoutMs: 100, shutdownTimeoutMs: 10, restartLimit: 0,
+  });
+  t.after(() => supervisor.close());
+  const started = supervisor.start();
+  child.emit("message", { type: "initialization_failed", requestId: initializationId(child) });
+  assert.equal(await started, false);
+  await waitFor(() => !child.connected);
+  const failed = lines.filter((line) => line.includes("worker startup failed"));
+  assert.equal(failed.length, 1);
+  assert.match(failed[0]!, /reason=initialization_failed/);
+  assert.match(failed[0]!, /stage=initializing/);
+  for (const line of lines) assertStartupTiming(line, initializationId(child), 100);
+  assert.equal(lines.some((line) => line.includes("worker startup completed")), false);
+});
+
+test("bootstrap failure is logged once and never prints the hook exception", async (t) => {
+  const lines = captureStartupLogs(t);
+  const child = new FakeAnalyticsChild();
+  const supervisor = new AnalyticsSupervisor({
+    dataDir: "private-startup-sentinel", workerFactory: () => child as any,
+    startupTimeoutMs: 100, shutdownTimeoutMs: 10, restartLimit: 0,
+  });
+  supervisor.onReady(() => { throw new Error("private-startup-sentinel"); });
+  t.after(() => supervisor.close());
+  assert.equal(await supervisor.start(), false);
+  await waitFor(() => !child.connected);
+  const failed = lines.filter((line) => line.includes("worker startup failed"));
+  assert.equal(failed.length, 1);
+  assert.match(failed[0]!, /reason=bootstrap_failed/);
+  assert.match(failed[0]!, /stage=bootstrap/);
+  for (const line of lines) assertStartupTiming(line, initializationId(child), 100);
+});
+
+test("explicit startup timeout logs the initializing stage and bounded elapsed time once", async (t) => {
+  const lines = captureStartupLogs(t);
+  const child = new FakeAnalyticsChild(); child.respondToInitialize = false;
+  const supervisor = new AnalyticsSupervisor({
+    dataDir: "private-startup-sentinel", workerFactory: () => child as any,
+    startupTimeoutMs: 15, shutdownTimeoutMs: 10, restartLimit: 0,
+  });
+  t.after(() => supervisor.close());
+  assert.equal(await supervisor.start(), false);
+  await waitFor(() => !child.connected);
+  const failed = lines.filter((line) => line.includes("worker startup timed out; retiring worker"));
+  assert.equal(failed.length, 1);
+  assert.match(failed[0]!, /stage=initializing/);
+  assertStartupTiming(failed[0]!, initializationId(child), 15);
+  assert.equal(lines.some((line) => line.includes("worker startup failed")), false);
+});
+
+test("a timed-out bootstrap and obsolete child cannot report success for the replacement", async (t) => {
+  const lines = captureStartupLogs(t);
+  const oldChild = new FakeAnalyticsChild();
+  const replacement = new FakeAnalyticsChild();
+  const children = [oldChild, replacement];
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const supervisor = new AnalyticsSupervisor({
+    dataDir: "private-startup-sentinel", workerFactory: () => children.shift() as any,
+    startupTimeoutMs: 30, shutdownTimeoutMs: 10, restartLimit: 0,
+  });
+  t.after(() => supervisor.close());
+  const unsubscribe = supervisor.onReady(() => gate);
+  assert.equal(await supervisor.start(), false);
+  await waitFor(() => !oldChild.connected);
+  const timeout = lines.find((line) => line.includes("worker startup timed out"))!;
+  assert.match(timeout, /stage=bootstrap/);
+  assertStartupTiming(timeout, initializationId(oldChild), 30);
+  unsubscribe();
+  assert.equal(await supervisor.start(), true);
+  release();
+  oldChild.emit("message", { type: "ready", requestId: initializationId(oldChild) });
+  await sleep(5);
+  const completed = lines.filter((line) => line.includes("worker startup completed"));
+  assert.equal(completed.length, 1);
+  assertStartupTiming(completed[0]!, initializationId(replacement), 30);
+});
+
+test("closing during bootstrap logs one failure and suppresses late completion", async (t) => {
+  const lines = captureStartupLogs(t);
+  const child = new FakeAnalyticsChild();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const supervisor = new AnalyticsSupervisor({
+    dataDir: "private-startup-sentinel", workerFactory: () => child as any,
+    startupTimeoutMs: 100, shutdownTimeoutMs: 10, restartLimit: 0,
+  });
+  supervisor.onReady(() => gate);
+  const started = supervisor.start();
+  await waitFor(() => lines.some((line) => line.includes("worker bootstrap started")));
+  await supervisor.close();
+  release();
+  assert.equal(await started, false);
+  await sleep(5);
+  assert.equal(lines.filter((line) => line.includes("worker startup failed; reason=closed")).length, 1);
+  assert.equal(lines.some((line) => line.includes("worker startup completed")), false);
 });

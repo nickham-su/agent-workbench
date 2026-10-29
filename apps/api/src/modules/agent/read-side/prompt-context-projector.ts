@@ -18,7 +18,9 @@ export type PromptContextProjectorDependencies<Message> = {
     profile: PromptStaticProfile;
     uiLocale: AgentUiLocale | null;
   }) => Promise<RunPromptStatic>;
+  readWorkspaceRepoNames: (workspaceId: string) => string[];
   buildRuntimeInstruction: (input: { uiLocale: AgentUiLocale | null }) => string;
+  resolveSubtaskDescription: (workspaceId: string) => string;
   appendRuntimeConstraints: (systemStatic: string, runtimeInstruction: string) => string;
   resolveDynamicContext: (input: {
     workspaceId: string;
@@ -53,6 +55,7 @@ export class PromptContextProjector<Message> {
     const dynamic = await this.dependencies.resolveDynamicContext({
       workspaceId: input.workspaceId, sessionId: input.sessionId, runId: input.run.runId,
     });
+    const workspaceRepoNames = this.dependencies.readWorkspaceRepoNames(input.workspaceId);
     const profile = this.dependencies.resolveProfile({
       surface: input.session.kind === "subtask" ? "subtask" : "user",
       workspaceId: input.workspaceId,
@@ -69,6 +72,12 @@ export class PromptContextProjector<Message> {
     if (!this.cache.isCurrent(dynamic.run.runId, cacheGeneration)) {
       throw new Error("prompt static cache was invalidated while assembling context");
     }
+    let tools = staticPrompt.tools;
+    if (tools.some((tool) => tool.name === "subtask")) {
+      // Workspace enablement can change during a Run; never mutate its static snapshot.
+      const description = this.dependencies.resolveSubtaskDescription(input.workspaceId);
+      tools = tools.map((tool) => tool.name === "subtask" ? { ...tool, description } : tool);
+    }
     const system = this.dependencies.appendRuntimeConstraints(
       staticPrompt.systemStatic,
       this.dependencies.buildRuntimeInstruction({ uiLocale: dynamic.uiLocale })
@@ -78,8 +87,9 @@ export class PromptContextProjector<Message> {
       sessionRevision: dynamic.sessionRevision,
       system,
       messages: dynamic.messages,
+      workspaceRepoNames,
       ...(dynamic.providerReplay == null ? {} : { providerReplay: dynamic.providerReplay }),
-      tools: staticPrompt.tools,
+      tools,
       pendingTools: dynamic.pendingTools,
       lastResponseTotalTokens: dynamic.lastResponseTotalTokens,
       uiLocale: dynamic.uiLocale,

@@ -311,6 +311,42 @@ export async function removeRetiredSecureFile(parent: SecureDirectory, retired: 
   }
 }
 
+/** Narrow protocol primitive: remove exactly one authorized EMPTY private directory, never its descendants. */
+export async function removeRetiredEmptySecureDirectory(
+  parent: SecureDirectory,
+  retired: RetiredSecureEntry,
+  expected: { scope: string; ownerUid: number },
+): Promise<boolean> {
+  let pinned: SecureDirectory | undefined;
+  try {
+    await assertSecureDirectoryCurrent(parent, parent.realPath);
+    await assertPrivateDirectory(parent);
+    const parentStat = await parent.handle.stat();
+    const identity = privateSlotIdentityForRetired(retired);
+    if (parentStat.uid !== expected.ownerUid || (parentStat.mode & 0o7777) !== 0o700
+      || retired.kind !== "directory" || !identity || identity.kind !== "directory"
+      || identity.scope !== expected.scope || !sameInode(identity, retired.stat)
+      || !retired.stat.isDirectory() || retired.stat.isSymbolicLink()
+      || retired.stat.uid !== expected.ownerUid || (retired.stat.mode & 0o7777) !== 0o700) return false;
+    await assertRetiredSlotCurrent(parent, retired);
+    pinned = await openPinnedDirectoryAt(parent, retired.privateName, retired.stat);
+    const current = await pinned.handle.stat();
+    if (current.uid !== expected.ownerUid || (current.mode & 0o7777) !== 0o700
+      || (await fs.readdir(pinned.fdPath)).length !== 0) return false;
+    await assertSecureDirectoryCurrent(parent, parent.realPath);
+    await assertRetiredSlotCurrent(parent, retired);
+    const finalStat = await fs.lstat(path.join(parent.fdPath, retired.privateName));
+    if (finalStat.uid !== expected.ownerUid || (finalStat.mode & 0o7777) !== 0o700) return false;
+    // A concurrently added descendant makes rmdir fail; there is no recursive fallback.
+    await fs.rmdir(path.join(parent.fdPath, retired.privateName));
+    return true;
+  } catch {
+    return false;
+  } finally {
+    await pinned?.handle.close().catch(() => undefined);
+  }
+}
+
 function secureReplacementPendingError() {
   return new Error("secure replacement pending");
 }

@@ -1,19 +1,11 @@
 <template>
-  <a-layout class="min-h-screen !bg-[var(--app-bg)]">
-    <WorkspaceHeader
-      :workspace="workspace"
-      :current-repo-dir-name="currentRepoDirName"
-      :current-repo-status="currentRepoStatus"
-      :git-busy="gitBusy"
-      :current-target="currentTarget"
-      :header-action-groups="headerActionGroups"
-      :filter-repo-option="filterRepoOption"
-      :format-repo-display-name="formatRepoDisplayName"
-      @update:current-repo-dir-name="(value) => (currentRepoDirName = value)"
-      @checkout="openCheckout"
-    />
+  <a-layout class="h-screen !bg-[var(--app-bg)]">
+    <WorkspaceHeader v-if="headerActionGroups.length > 0" :workspace="workspace" :header-action-groups="headerActionGroups" />
 
-    <a-layout-content class="p-0 h-[calc(100vh-64px)] border-t border-[var(--border-color-secondary)]">
+    <a-layout-content
+      class="p-0 flex-1 min-h-0"
+      :class="{ 'border-t border-[var(--border-color-secondary)]': headerActionGroups.length > 0 }"
+    >
       <WorkspaceDock
         :left-top-toolbar-tool-ids="leftTopToolbarToolIds"
         :left-bottom-toolbar-tool-ids="leftBottomToolbarToolIds"
@@ -98,7 +90,7 @@
 
   <GitIdentityModal
     v-model:open="pushIdentityOpen"
-    :target="currentTarget"
+    :target="pendingPush?.target ?? null"
     :allowSession="false"
     :defaultScope="'repo'"
     :loading="pushIdentitySubmitting"
@@ -109,14 +101,14 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, provide, reactive, ref, watch, type ComponentPublicInstance } from "vue";
 import { Modal, message } from "ant-design-vue";
-import { ClockCircleOutlined, CodeOutlined, DownOutlined, EditOutlined, FolderOpenOutlined, RobotOutlined, SearchOutlined, UpOutlined } from "@ant-design/icons-vue";
+import { ClockCircleOutlined, CodeOutlined, EditOutlined, FolderOpenOutlined, RobotOutlined, SearchOutlined } from "@ant-design/icons-vue";
 import { useI18n } from "vue-i18n";
-import type { GitBranchesResponse, GitPushRequest, GitStatusResponse, WorkspaceDetail } from "@agent-workbench/shared";
+import type { GitBranchesResponse, GitPushRequest, GitStatusResponse, GitTarget, WorkspaceDetail, WorkspaceGitStatusResponse } from "@agent-workbench/shared";
 import {
   ApiError,
   gitBranches,
   gitCheckout,
-  getGitStatus,
+  getWorkspaceGitStatus,
   getWorkspace,
   getWorkspaceGitIdentity,
   listChanges,
@@ -131,7 +123,9 @@ import type { ToolRuntime, ToolRuntimeContext } from "@/features/workspace/runti
 import WorkspaceHeader from "@/features/workspace/components/WorkspaceHeader.vue";
 import WorkspaceDock from "@/features/workspace/components/WorkspaceDock.vue";
 import type { HeaderAction, ToolId } from "@/features/workspace/types";
+import { allowedToolAreas, DOCK_AREAS, globalToolLayout, moveGlobalTool, moveGlobalToolByStep, TOOL_IDS, toolLayoutArea } from "@/features/workspace/toolLayout";
 import CodeReviewIcon from "../icons/CodeReviewIcon.vue";
+import EnvironmentVariablesIcon from "../icons/EnvironmentVariablesIcon.vue";
 import CodeReviewToolView from "../tools/code-review/CodeReviewToolView.vue";
 import { createSearchRuntime } from "../tools/search/runtime";
 import FileExplorerToolView from "../tools/file-explorer/FileExplorerToolView.vue";
@@ -139,6 +133,7 @@ import SearchToolView from "../tools/search/SearchToolView.vue";
 import TerminalToolView from "../tools/terminal/TerminalToolView.vue";
 import AgentToolView from "../tools/agent/AgentToolView.vue";
 import ScheduledTasksToolView from "../tools/scheduled-tasks/ScheduledTasksToolView.vue";
+import EnvironmentVariablesToolView from "../tools/environment-variables/EnvironmentVariablesToolView.vue";
 import EditorToolView from "../tools/editor/EditorToolView.vue";
 import GitIdentityModal from "@/shared/components/GitIdentityModal.vue";
 import { createCodeReviewRuntime } from "@/features/workspace/tools/code-review/runtime";
@@ -149,15 +144,12 @@ const props = defineProps<{ workspaceId: string; previewEnabled: boolean }>();
 const { t } = useI18n();
 type PushParams = Omit<GitPushRequest, "target">;
 
-const TOOL_IDS: ToolId[] = ["files", "search", "codeReview", "terminal", "agent", "scheduledTasks", "editor"];
-const DOCK_AREAS: DockArea[] = ["leftTop", "leftBottom", "rightTop"];
+const toolOrderByArea = globalToolLayout;
 type ToolDefinition = {
   toolId: ToolId;
   title: () => string;
   icon: any;
   view: any;
-  defaultArea: DockArea;
-  allowedAreas: DockArea[];
   keepAlive?: boolean;
   headerActions?: () => HeaderAction[];
   createRuntime?: (ctx: ToolRuntimeContext) => ToolRuntime;
@@ -168,21 +160,14 @@ const workspace = ref<WorkspaceDetail | null>(null);
 const currentRepoDirName = ref<string>("");
 const repoStatusByDirName = reactive<Record<string, GitStatusResponse | null>>({});
 const repoDefaultBranch = ref<string | null>(null);
+const workspaceGitStatus = ref<WorkspaceGitStatusResponse>({ repos: [] });
 
 const workspaceRepos = computed(() => workspace.value?.repos ?? []);
-const hasRepos = computed(() => workspaceRepos.value.length > 0);
 const currentRepo = computed(() => workspaceRepos.value.find((r) => r.dirName === currentRepoDirName.value) ?? null);
 const currentTarget = computed(() => {
   if (!currentRepo.value) return null;
   return { kind: "workspaceRepo", workspaceId: props.workspaceId, dirName: currentRepo.value.dirName } as const;
 });
-const currentRepoStatus = computed(() => {
-  const repo = currentRepo.value;
-  if (!repo) return null;
-  return repoStatusByDirName[repo.dirName] ?? null;
-});
-
-const editorDiffTabActive = ref(false);
 
 const tools = computed<ToolDefinition[]>(() => [
   {
@@ -190,8 +175,6 @@ const tools = computed<ToolDefinition[]>(() => [
     title: () => t("workspace.tools.files"),
     icon: FolderOpenOutlined,
     view: FileExplorerToolView,
-    defaultArea: "leftTop",
-    allowedAreas: ["leftTop", "leftBottom"],
     keepAlive: true,
     createRuntime: (ctx) => createFileExplorerRuntime(ctx)
   },
@@ -200,8 +183,6 @@ const tools = computed<ToolDefinition[]>(() => [
     title: () => t("workspace.tools.search"),
     icon: SearchOutlined,
     view: SearchToolView,
-    defaultArea: "leftTop",
-    allowedAreas: ["leftTop", "leftBottom"],
     keepAlive: true,
     createRuntime: (ctx) => createSearchRuntime(ctx)
   },
@@ -210,39 +191,14 @@ const tools = computed<ToolDefinition[]>(() => [
     title: () => t("workspace.tools.codeReview"),
     icon: CodeReviewIcon,
     view: CodeReviewToolView,
-    defaultArea: "leftTop",
-    allowedAreas: ["leftTop", "leftBottom"],
     keepAlive: true,
-    createRuntime: (ctx) => createCodeReviewRuntime(ctx),
-    headerActions: () => {
-      if (!hasRepos.value) return [];
-      return [
-        {
-          id: "pull",
-          label: t("workspace.actions.pull"),
-          loading: pullLoading.value,
-          disabled: gitBusy.value || !currentTarget.value,
-          groupKey: "repo.sync",
-          onClick: () => void pullWithUi()
-        },
-        {
-          id: "push",
-          label: t("workspace.actions.push"),
-          loading: pushLoading.value,
-          disabled: gitBusy.value || !currentTarget.value,
-          groupKey: "repo.sync",
-          onClick: () => void pushWithUi()
-        }
-      ];
-    }
+    createRuntime: (ctx) => createCodeReviewRuntime(ctx)
   },
   {
     toolId: "terminal",
     title: () => t("workspace.tools.terminal"),
     icon: CodeOutlined,
     view: TerminalToolView,
-    defaultArea: "leftBottom",
-    allowedAreas: ["leftTop", "leftBottom"],
     keepAlive: true
   },
   {
@@ -250,17 +206,21 @@ const tools = computed<ToolDefinition[]>(() => [
     title: () => t("workspace.tools.scheduledTasks"),
     icon: ClockCircleOutlined,
     view: ScheduledTasksToolView,
-    defaultArea: "leftTop",
-    allowedAreas: ["leftTop", "leftBottom"],
     keepAlive: true
+  },
+  {
+    toolId: "environmentVariables",
+    title: () => t("workspace.tools.environmentVariables"),
+    icon: EnvironmentVariablesIcon,
+    view: EnvironmentVariablesToolView,
+    // Release plaintext and in-flight UI state when leaving this tool.
+    keepAlive: false
   },
   {
     toolId: "agent",
     title: () => t("workspace.tools.agent"),
     icon: RobotOutlined,
     view: AgentToolView,
-    defaultArea: "leftTop",
-    allowedAreas: ["leftTop", "leftBottom"],
     keepAlive: true
   },
   {
@@ -268,45 +228,14 @@ const tools = computed<ToolDefinition[]>(() => [
     title: () => t("workspace.tools.editor"),
     icon: EditOutlined,
     view: EditorToolView,
-    defaultArea: "rightTop",
-    allowedAreas: ["rightTop"],
     createRuntime: (ctx) => createEditorRuntime(ctx),
-    headerActions: () => [
-      ...(editorDiffTabActive.value ? [
-      {
-        id: "editor.prevDiff",
-        tooltip: t("workspace.actions.previousChange"),
-        groupKey: "editor.diffNav",
-        icon: UpOutlined,
-        onClick: () => {
-          void toolCommands.get("editor")?.goToPreviousDiff?.();
-        }
-      },
-      {
-        id: "editor.nextDiff",
-        tooltip: t("workspace.actions.nextChange"),
-        groupKey: "editor.diffNav",
-        icon: DownOutlined,
-        onClick: () => {
-          void toolCommands.get("editor")?.goToNextDiff?.();
-        }
-      }
-      ] : [])
-    ],
     keepAlive: true
   }
 ]);
 
-function isToolEnabled(toolId: ToolId) {
-  // 无 repo 时隐藏 code review 以及其关联的 git header actions.
-  if (toolId === "codeReview") return hasRepos.value;
-  return true;
-}
-
-function pickFirstEnabledToolInArea(area: DockArea): ToolId | null {
-  const list = toolOrderByArea[area] ?? [];
+function pickFirstToolInArea(area: DockArea): ToolId | null {
+  const list = toolOrderByArea.value[area] ?? [];
   for (const id of list) {
-    if (!isToolEnabled(id)) continue;
     if (!toolById.value.has(id)) continue;
     if (toolCurrentArea(id) !== area) continue;
     return id;
@@ -316,8 +245,8 @@ function pickFirstEnabledToolInArea(area: DockArea): ToolId | null {
 
 function ensureActiveToolInArea(area: DockArea) {
   const cur = activeToolIdByArea[area];
-  if (cur && isToolEnabled(cur) && toolById.value.has(cur) && toolCurrentArea(cur) === area) return;
-  const next = pickFirstEnabledToolInArea(area);
+  if (cur && toolById.value.has(cur) && toolCurrentArea(cur) === area) return;
+  const next = pickFirstToolInArea(area);
   activeToolIdByArea[area] = next;
   if (next) toolMinimized[next] = false;
 }
@@ -326,16 +255,6 @@ const toolById = computed(() => {
   const m = new Map<ToolId, ToolDefinition>();
   for (const tool of tools.value) m.set(tool.toolId, tool);
   return m;
-});
-
-const toolArea = reactive<Record<ToolId, DockArea>>({
-  codeReview: "leftTop",
-  terminal: "leftBottom",
-  files: "leftTop",
-  search: "leftTop",
-  agent: "leftTop",
-  scheduledTasks: "leftTop",
-  editor: "rightTop"
 });
 
 const activeToolIdByArea = reactive<Record<DockArea, ToolId | null>>({
@@ -351,6 +270,7 @@ const toolMinimized = reactive<Record<ToolId, boolean>>({
   search: true,
   agent: false,
   scheduledTasks: false,
+  environmentVariables: false,
   editor: true
 });
 const toolDots = reactive<Record<ToolId, boolean>>({
@@ -360,6 +280,7 @@ const toolDots = reactive<Record<ToolId, boolean>>({
   search: false,
   agent: false,
   scheduledTasks: false,
+  environmentVariables: false,
   editor: false
 });
 const toolRuntimes = new Map<ToolId, ToolRuntime>();
@@ -384,17 +305,25 @@ function createToolRuntimes() {
   resetToolDots();
   if (!props.workspaceId) return;
   for (const def of tools.value) {
-    if (!isToolEnabled(def.toolId)) continue;
     if (!def.createRuntime) continue;
     const runtime = def.createRuntime({
       workspaceId: props.workspaceId,
       toolId: def.toolId,
       host: { call: (toToolId, call) => callToolFrom(def.toolId, toToolId, call), setToolDot },
-  getCurrentTarget: () => currentTarget.value,
-  getVisible: () => isToolVisible(def.toolId),
-  refreshView: () => toolCommands.get(def.toolId)?.refresh?.(),
-  api: { getGitStatus }
-});
+      getCurrentTarget: () => currentTarget.value,
+      getVisible: () => isToolVisible(def.toolId),
+      refreshView: () => toolCommands.get(def.toolId)?.refresh?.(),
+      api: { getWorkspaceGitStatus },
+      onWorkspaceGitStatus(status) {
+        workspaceGitStatus.value = status;
+        for (const repo of status.repos) {
+          repoStatusByDirName[repo.dirName] = { ...repoStatusByDirName[repo.dirName], head: repo.head };
+        }
+      },
+      onBackgroundError(error) {
+        message.error(error instanceof Error ? error.message : String(error));
+      }
+    });
     toolRuntimes.set(def.toolId, runtime);
     runtime.start();
     const queued = toolEventQueue.get(def.toolId) ?? [];
@@ -405,19 +334,15 @@ function createToolRuntimes() {
   }
 }
 
-const toolOrderByArea = reactive<Record<DockArea, ToolId[]>>(defaultToolOrderByArea());
-
-const DOCK_LAYOUT_STORAGE_KEY_PREFIX = "agent-workbench.workspace.dockLayout.v3";
+const DOCK_LAYOUT_STORAGE_KEY_PREFIX = "agent-workbench.workspace.dockLayout.v4";
 const CURRENT_REPO_STORAGE_KEY_PREFIX = "agent-workbench.workspace.currentRepo.v1";
 
-type DockLayoutV3 = {
-  version: 3;
+type DockLayoutV4 = {
+  version: 4;
   updatedAt: number;
   ratios: { topBottom: number; topLeft: number };
-  toolArea: Record<ToolId, DockArea>;
   toolMinimized: Record<ToolId, boolean>;
   activeToolIdByArea: Record<DockArea, ToolId | null>;
-  toolOrderByArea: Record<DockArea, ToolId[]>;
 };
 
 function dockLayoutStorageKey(workspaceId: string) {
@@ -432,10 +357,6 @@ function currentRepoStorageKey(workspaceId: string) {
   return `${CURRENT_REPO_STORAGE_KEY_PREFIX}.${id}`;
 }
 
-function isDockArea(v: unknown): v is DockArea {
-  return typeof v === "string" && (DOCK_AREAS as string[]).includes(v);
-}
-
 function isToolId(v: unknown): v is ToolId {
   return typeof v === "string" && (TOOL_IDS as string[]).includes(v);
 }
@@ -445,69 +366,16 @@ function clampRatio(n: number) {
   return clamp(n, 0.1, 0.9);
 }
 
-function defaultToolOrderByArea(): Record<DockArea, ToolId[]> {
-  const res: Record<DockArea, ToolId[]> = { leftTop: [], leftBottom: [], rightTop: [] };
-  for (const tool of tools.value) {
-    res[tool.defaultArea].push(tool.toolId);
-  }
-  return res;
-}
-
-function normalizeToolOrderByArea(
-  toolAreaMap: Record<ToolId, DockArea>,
-  raw: Partial<Record<DockArea, unknown>> | null | undefined
-) {
-  const res: Record<DockArea, ToolId[]> = { leftTop: [], leftBottom: [], rightTop: [] };
-  if (raw) {
-    for (const area of DOCK_AREAS) {
-      const list = (raw as any)[area];
-      if (!Array.isArray(list)) continue;
-      for (const item of list) {
-        if (!isToolId(item)) continue;
-        if (toolAreaMap[item] !== area) continue;
-        if (!res[area].includes(item)) res[area].push(item);
-      }
-    }
-  }
-  for (const tool of tools.value) {
-    const area = toolAreaMap[tool.toolId] ?? tool.defaultArea;
-    if (!res[area].includes(tool.toolId)) res[area].push(tool.toolId);
-  }
-  return res;
-}
-
-function setToolOrderByArea(next: Record<DockArea, ToolId[]>) {
-  for (const area of DOCK_AREAS) {
-    toolOrderByArea[area] = [...next[area]];
-  }
-}
-
-function loadDockLayout(workspaceId: string): DockLayoutV3 | null {
+function loadDockLayout(workspaceId: string): DockLayoutV4 | null {
   try {
     const raw = localStorage.getItem(dockLayoutStorageKey(workspaceId));
     if (!raw) return null;
-    const json = JSON.parse(raw) as Partial<DockLayoutV3> | null;
-    if (!json || json.version !== 3) return null;
+    const json = JSON.parse(raw) as Partial<DockLayoutV4> | null;
+    if (!json || json.version !== 4) return null;
 
     const ratios = (json.ratios ?? {}) as Partial<{ topBottom: unknown; topLeft: unknown }>;
-    const toolAreaRaw = json.toolArea ?? ({} as any);
     const toolMinimizedRaw = json.toolMinimized ?? ({} as any);
     const activeRaw = json.activeToolIdByArea ?? ({} as any);
-    const toolOrderRaw = json.toolOrderByArea ?? ({} as any);
-
-    const toolAreaOut: Record<ToolId, DockArea> = {
-      codeReview: "leftTop",
-      terminal: "leftBottom",
-      files: "leftTop",
-      search: "leftTop",
-      agent: "leftTop",
-      scheduledTasks: "leftTop",
-      editor: "rightTop"
-    };
-    for (const toolId of TOOL_IDS) {
-      const v = (toolAreaRaw as any)[toolId];
-      if (isDockArea(v)) toolAreaOut[toolId] = v;
-    }
 
     const toolMinimizedOut: Record<ToolId, boolean> = {
       codeReview: false,
@@ -516,6 +384,7 @@ function loadDockLayout(workspaceId: string): DockLayoutV3 | null {
       search: true,
       agent: false,
       scheduledTasks: false,
+      environmentVariables: false,
       editor: true
     };
     for (const toolId of TOOL_IDS) {
@@ -534,16 +403,14 @@ function loadDockLayout(workspaceId: string): DockLayoutV3 | null {
     }
 
     return {
-      version: 3,
+      version: 4,
       updatedAt: typeof json.updatedAt === "number" ? json.updatedAt : Date.now(),
       ratios: {
         topBottom: clampRatio(typeof ratios.topBottom === "number" ? ratios.topBottom : 2 / 3),
         topLeft: clampRatio(typeof ratios.topLeft === "number" ? ratios.topLeft : 1 / 3)
       },
-      toolArea: toolAreaOut,
       toolMinimized: { ...toolMinimizedOut, editor: true },
-      activeToolIdByArea: { ...activeOut, rightTop: null },
-      toolOrderByArea: normalizeToolOrderByArea(toolAreaOut, toolOrderRaw)
+      activeToolIdByArea: { ...activeOut, rightTop: null }
     };
   } catch {
     return null;
@@ -577,19 +444,10 @@ function saveDockLayout(workspaceId: string) {
   const id = String(workspaceId || "").trim();
   if (!id) return;
   try {
-    const data: DockLayoutV3 = {
-      version: 3,
+    const data: DockLayoutV4 = {
+      version: 4,
       updatedAt: Date.now(),
       ratios: { topBottom: topBottomRatio.value, topLeft: topLeftRatio.value },
-      toolArea: {
-        codeReview: toolArea.codeReview,
-        terminal: toolArea.terminal,
-        files: toolArea.files,
-        search: toolArea.search,
-        agent: toolArea.agent,
-        scheduledTasks: toolArea.scheduledTasks,
-        editor: toolArea.editor
-      },
       toolMinimized: {
         codeReview: toolMinimized.codeReview,
         terminal: toolMinimized.terminal,
@@ -597,17 +455,13 @@ function saveDockLayout(workspaceId: string) {
         search: toolMinimized.search,
         agent: toolMinimized.agent,
         scheduledTasks: toolMinimized.scheduledTasks,
+        environmentVariables: toolMinimized.environmentVariables,
         editor: toolMinimized.editor
       },
       activeToolIdByArea: {
         leftTop: activeToolIdByArea.leftTop,
         leftBottom: activeToolIdByArea.leftBottom,
         rightTop: activeToolIdByArea.rightTop
-      },
-      toolOrderByArea: {
-        leftTop: [...toolOrderByArea.leftTop],
-        leftBottom: [...toolOrderByArea.leftBottom],
-        rightTop: [...toolOrderByArea.rightTop]
       }
     };
     localStorage.setItem(dockLayoutStorageKey(workspaceId), JSON.stringify(data));
@@ -630,12 +484,6 @@ function scheduleSaveDockLayout() {
 }
 
 function resetDockLayoutDefaults() {
-  toolArea.codeReview = "leftTop";
-  toolArea.terminal = "leftBottom";
-  toolArea.files = "leftTop";
-  toolArea.search = "leftTop";
-  toolArea.agent = "leftTop";
-  toolArea.editor = "rightTop";
   activeToolIdByArea.leftTop = "files";
   activeToolIdByArea.leftBottom = "terminal";
   activeToolIdByArea.rightTop = null;
@@ -644,28 +492,20 @@ function resetDockLayoutDefaults() {
   toolMinimized.files = false;
   toolMinimized.search = true;
   toolMinimized.agent = false;
+  toolMinimized.scheduledTasks = false;
+  toolMinimized.environmentVariables = false;
   toolMinimized.editor = true;
-  setToolOrderByArea(defaultToolOrderByArea());
   topBottomRatio.value = 2 / 3;
   topLeftRatio.value = 1 / 3;
 }
 
-function applyDockLayout(layout: DockLayoutV3) {
+function applyDockLayout(layout: DockLayoutV4) {
   topBottomRatio.value = clampRatio(layout.ratios.topBottom);
   topLeftRatio.value = clampRatio(layout.ratios.topLeft);
 
   for (const toolId of TOOL_IDS) {
-    const def = toolById.value.get(toolId);
-    const nextArea = layout.toolArea[toolId];
-    if (def && def.allowedAreas.includes(nextArea)) {
-      toolArea[toolId] = nextArea;
-    } else if (def) {
-      toolArea[toolId] = def.defaultArea;
-    }
     toolMinimized[toolId] = Boolean(layout.toolMinimized[toolId]);
   }
-
-  setToolOrderByArea(normalizeToolOrderByArea(toolArea, layout.toolOrderByArea));
 
   for (const area of DOCK_AREAS) {
     const next = layout.activeToolIdByArea[area];
@@ -674,10 +514,6 @@ function applyDockLayout(layout: DockLayoutV3) {
       continue;
     }
     if (!toolById.value.has(next)) {
-      activeToolIdByArea[area] = null;
-      continue;
-    }
-    if (!isToolEnabled(next)) {
       activeToolIdByArea[area] = null;
       continue;
     }
@@ -717,6 +553,8 @@ async function restoreDockLayout(workspaceId: string) {
     if (saved) {
       hasSaved = true;
       applyDockLayout(saved);
+    } else {
+      for (const area of DOCK_AREAS) ensureActiveToolInArea(area);
     }
   } finally {
     restoringDockLayout.value = false;
@@ -727,7 +565,7 @@ async function restoreDockLayout(workspaceId: string) {
 }
 
 function toolCurrentArea(toolId: ToolId): DockArea {
-  return toolArea[toolId] ?? toolById.value.get(toolId)?.defaultArea ?? "leftTop";
+  return toolLayoutArea(toolId);
 }
 
 function isToolVisible(toolId: ToolId) {
@@ -840,7 +678,6 @@ provide(workspaceContextKey, {
 });
 
 function onToolIconClick(toolId: ToolId) {
-  if (!isToolEnabled(toolId)) return;
   const area = toolCurrentArea(toolId);
   if (activeToolIdByArea[area] === toolId) {
     if (area === "leftTop") {
@@ -853,21 +690,11 @@ function onToolIconClick(toolId: ToolId) {
   toolMinimized[toolId] = false;
 }
 
-watch(
-  () => hasRepos.value,
-  () => {
-    // repo 变更时,若当前激活工具不可用(例如 codeReview),回退到该区域的第一个可用工具.
-    for (const area of DOCK_AREAS) ensureActiveToolInArea(area);
-  },
-  { immediate: true }
-);
-
 const visibleToolIdByArea = computed(() => {
   const res: Record<DockArea, ToolId | null> = { leftTop: null, leftBottom: null, rightTop: null };
   (Object.keys(res) as DockArea[]).forEach((area) => {
     const id = activeToolIdByArea[area];
     if (!id) return;
-    if (!isToolEnabled(id)) return;
     if (toolCurrentArea(id) !== area) return;
     if (toolMinimized[id]) return;
     res[area] = id;
@@ -881,7 +708,6 @@ const visibleToolIdByArea = computed(() => {
 const keepAliveIncludeByArea = computed(() => {
   const res: Record<DockArea, string[]> = { leftTop: [], leftBottom: [], rightTop: [] };
   for (const id of TOOL_IDS) {
-    if (!isToolEnabled(id)) continue;
     if (!isKeepAlive(id)) continue;
     const area = toolCurrentArea(id);
     res[area].push(id);
@@ -890,87 +716,60 @@ const keepAliveIncludeByArea = computed(() => {
 });
 
 const toolVisibleById = computed(() => {
-  const out: Record<ToolId, boolean> = { codeReview: false, terminal: false, files: false, search: false, agent: false, scheduledTasks: false, editor: false };
-  for (const id of TOOL_IDS) out[id] = isToolEnabled(id) && isToolVisible(id);
+  const out: Record<ToolId, boolean> = { codeReview: false, terminal: false, files: false, search: false, agent: false, scheduledTasks: false, environmentVariables: false, editor: false };
+  for (const id of TOOL_IDS) out[id] = isToolVisible(id);
   return out;
 });
 
-const leftTopToolbarToolIds = computed<ToolId[]>(() => toolOrderByArea.leftTop.filter((id) => isToolEnabled(id) && toolCurrentArea(id) === "leftTop"));
-const leftBottomToolbarToolIds = computed<ToolId[]>(() => toolOrderByArea.leftBottom.filter((id) => isToolEnabled(id) && toolCurrentArea(id) === "leftBottom"));
-
-function removeToolFromOrder(toolId: ToolId) {
-  for (const area of DOCK_AREAS) {
-    const list = toolOrderByArea[area];
-    const index = list.indexOf(toolId);
-    if (index >= 0) list.splice(index, 1);
-  }
-}
-
-function moveToolToOrderEnd(toolId: ToolId, targetArea: DockArea) {
-  removeToolFromOrder(toolId);
-  toolOrderByArea[targetArea].push(toolId);
-}
-
-function moveToolOrderByStep(toolId: ToolId, step: number) {
-  const area = toolCurrentArea(toolId);
-  const list = toolOrderByArea[area];
-  const index = list.indexOf(toolId);
-  if (index < 0) return;
-  const next = index + step;
-  if (next < 0 || next >= list.length) return;
-  list.splice(index, 1);
-  list.splice(next, 0, toolId);
-}
+const leftTopToolbarToolIds = computed<ToolId[]>(() => toolOrderByArea.value.leftTop.filter((id) => toolCurrentArea(id) === "leftTop"));
+const leftBottomToolbarToolIds = computed<ToolId[]>(() => toolOrderByArea.value.leftBottom.filter((id) => toolCurrentArea(id) === "leftBottom"));
 
 function canMoveToolUp(toolId: ToolId) {
   const area = toolCurrentArea(toolId);
-  const list = toolOrderByArea[area];
+  const list = toolOrderByArea.value[area];
   return list.indexOf(toolId) > 0;
 }
 
 function canMoveToolDown(toolId: ToolId) {
   const area = toolCurrentArea(toolId);
-  const list = toolOrderByArea[area];
+  const list = toolOrderByArea.value[area];
   const index = list.indexOf(toolId);
   return index >= 0 && index < list.length - 1;
 }
 
 function moveToolUp(toolId: ToolId) {
   if (!canMoveToolUp(toolId)) return;
-  moveToolOrderByStep(toolId, -1);
+  moveGlobalToolByStep(toolId, -1);
 }
 
 function moveToolDown(toolId: ToolId) {
   if (!canMoveToolDown(toolId)) return;
-  moveToolOrderByStep(toolId, 1);
+  moveGlobalToolByStep(toolId, 1);
 }
 
 function moveTool(toolId: ToolId, targetArea: DockArea) {
-  const def = toolById.value.get(toolId);
-  if (!def) return;
-  if (!def.allowedAreas.includes(targetArea)) return;
-
-  const fromArea = toolCurrentArea(toolId);
-  if (fromArea === targetArea) return;
-
-  const wasVisible = visibleToolIdByArea.value[fromArea] === toolId;
-  const wasActive = activeToolIdByArea[fromArea] === toolId;
-  const targetHasVisible = Boolean(visibleToolIdByArea.value[targetArea]);
-
-  toolArea[toolId] = targetArea;
-  moveToolToOrderEnd(toolId, targetArea);
-  if (wasVisible || wasActive) ensureActiveToolInArea(fromArea);
-
-  if (wasVisible && !targetHasVisible) {
-    activeToolIdByArea[targetArea] = toolId;
-    toolMinimized[toolId] = false;
-    return;
-  }
-
-  if (!wasVisible && wasActive && !targetHasVisible && !activeToolIdByArea[targetArea]) {
-    activeToolIdByArea[targetArea] = toolId;
-  }
+  moveGlobalTool(toolId, targetArea);
 }
+
+// Region changes (including another tab) affect only invalid active selections.
+// Pure reordering must not change visibility or recreate any tool sessions.
+watch(globalToolLayout, (next, previous) => {
+  const departed: { toolId: ToolId; target: DockArea; visible: boolean }[] = [];
+  const sourceAreas: DockArea[] = [];
+  for (const area of DOCK_AREAS) {
+    const toolId = activeToolIdByArea[area];
+    if (!toolId || toolLayoutArea(toolId, previous) !== area || toolLayoutArea(toolId, next) === area) continue;
+    departed.push({ toolId, target: toolLayoutArea(toolId, next), visible: !toolMinimized[toolId] });
+    sourceAreas.push(area);
+    activeToolIdByArea[area] = null;
+  }
+  for (const { toolId, target, visible } of departed) {
+    const active = activeToolIdByArea[target];
+    const targetVisible = active && !toolMinimized[active];
+    if ((visible && !targetVisible) || (!visible && !active)) activeToolIdByArea[target] = toolId;
+  }
+  for (const area of sourceAreas) ensureActiveToolInArea(area);
+}, { flush: "sync" });
 
 function areaLabel(area: DockArea) {
   if (area === "leftTop") return t("workspace.dock.areas.leftTop");
@@ -990,7 +789,7 @@ function moveTargets(toolId: ToolId) {
   const def = toolById.value.get(toolId);
   if (!def) return [] as { area: DockArea; label: string }[];
   const cur = toolCurrentArea(toolId);
-  return def.allowedAreas
+  return allowedToolAreas(toolId)
     .filter((a) => a !== cur)
     .map((area) => ({ area, label: t("workspace.dock.moveTo", { area: areaLabel(area) }) }));
 }
@@ -1018,7 +817,14 @@ function toolViewProps(toolId: ToolId) {
       toolId,
       gitBusy: gitBusy.value,
       beginGitOp,
-      push: (params?: PushParams) => pushWithUi(params)
+      push: pushWithUi,
+      refreshStatus: refreshCodeReviewStatus,
+      repos: workspaceRepos.value,
+      repoStatuses: workspaceGitStatus.value.repos,
+      selectedRepoDirName: currentRepoDirName.value,
+      selectRepo: setCurrentRepo,
+      checkout: openCheckout,
+      pull: pullWithUi
     };
   }
   if (toolId === "files") {
@@ -1041,17 +847,14 @@ function toolViewProps(toolId: ToolId) {
   if (toolId === "editor") {
     return {
       workspaceId: props.workspaceId,
-      toolId
+      toolId,
+      previewEnabled: props.previewEnabled
     };
   }
   return { workspaceId: props.workspaceId, toolId };
 }
 
-function toolViewListeners(toolId: ToolId) {
-  if (toolId === "codeReview") return { changesSummary: onChangesSummary };
-  if (toolId === "editor") {
-    return { diffTabActiveChange: (active: boolean) => { editorDiffTabActive.value = Boolean(active); } };
-  }
+function toolViewListeners() {
   return {};
 }
 
@@ -1067,90 +870,32 @@ function beginGitOp() {
   };
 }
 
-const changesSummary = ref<{ unstaged: number; staged: number }>({ unstaged: 0, staged: 0 });
-function onChangesSummary(summary: { unstaged: number; staged: number }) {
-  changesSummary.value = summary;
-}
 
 const branchesLoading = ref(false);
 const refreshBranchesLoading = ref(false);
 const branches = ref<GitBranchesResponse["branches"]>([]);
 const branchOptions = computed(() => branches.value.map((b) => ({ label: b.name, value: b.name })));
 
-function formatRepoDisplayName(rawUrl: string) {
-  let s = String(rawUrl || "").trim();
-  while (s.endsWith("/")) s = s.slice(0, -1);
-  if (s.toLowerCase().endsWith(".git")) s = s.slice(0, -4);
-
-  let pathPart = "";
-  try {
-    if (s.includes("://")) {
-      const u = new URL(s);
-      pathPart = u.pathname || "";
-    }
-  } catch {
-    // ignore
-  }
-  if (!pathPart) {
-    const colonIdx = s.lastIndexOf(":");
-    if (colonIdx > 0 && s.includes("@") && !s.includes("://")) {
-      pathPart = s.slice(colonIdx + 1);
-    } else {
-      pathPart = s;
-    }
-  }
-
-  pathPart = pathPart.replace(/\\/g, "/").replace(/^\/+/, "");
-  const segs = pathPart.split("/").filter(Boolean);
-  if (segs.length >= 1) return segs[segs.length - 1]!;
-  return s;
-}
-
-const repoDisplayName = computed(() => (currentRepo.value ? formatRepoDisplayName(currentRepo.value.repo.url) : ""));
-
-function filterRepoOption(input: string, option: any) {
-  const hay = String(option?.label ?? option?.children ?? "").toLowerCase();
-  return hay.includes(input.toLowerCase());
-}
-
 function buildPageTitle(ws: WorkspaceDetail | null) {
-  const base = t("app.title");
-  if (!ws) return `${t("workspace.title")} - ${base}`;
-
-  const title = ws.title || t("workspace.title");
-  const repoName = currentRepo.value ? formatRepoDisplayName(currentRepo.value.repo.url) : "";
-  const status = currentRepoStatus.value;
-  const branch = status?.head?.detached ? t("workspace.repoSelector.detached") : (status?.head?.branch ?? "");
-
-  if (repoName && branch) return `${title} · ${repoName}@${branch} - ${base}`;
-  if (repoName) return `${title} · ${repoName} - ${base}`;
-  return `${title} - ${base}`;
+  return `${ws?.title || t("workspace.title")} - ${t("app.title")}`;
 }
 
 function applyPageTitle() {
   document.title = buildPageTitle(workspace.value);
 }
 
-const pushLoading = ref(false);
-const pullLoading = ref(false);
 
 const pushIdentityOpen = ref(false);
-const pendingPushParams = ref<PushParams>({});
+const pendingPush = ref<{ target: GitTarget; params: PushParams } | null>(null);
 const pushIdentitySubmitting = ref(false);
 
 const headerActionGroups = computed(() => {
   const order: DockArea[] = ["leftTop", "leftBottom", "rightTop"];
   const res: { key: string; actions: HeaderAction[] }[] = [];
 
-  const codeReviewActions = toolById.value.get("codeReview")?.headerActions?.() ?? [];
-  if (codeReviewActions.length > 0) {
-    res.push({ key: "always:codeReview", actions: codeReviewActions });
-  }
-
   for (const area of order) {
     const toolId = visibleToolIdByArea.value[area];
     if (!toolId) continue;
-    if (toolId === "codeReview") continue;
     const def = toolById.value.get(toolId);
     const actions = def?.headerActions?.() ?? [];
     if (actions.length === 0) continue;
@@ -1162,12 +907,14 @@ const headerActionGroups = computed(() => {
 const checkoutOpen = ref(false);
 const checkoutLoading = ref(false);
 const checkoutBranch = ref<string>("");
+const checkoutTarget = ref<GitTarget | null>(null);
+let branchesRequestSeq = 0;
 const canCheckout = computed(() => {
-  if (!currentTarget.value) return false;
+  if (!checkoutTarget.value) return false;
   if (gitBusy.value) return false;
   const next = checkoutBranch.value.trim();
   if (!next) return false;
-  const currentBranch = currentRepoStatus.value?.head?.branch ?? "";
+  const currentBranch = repoStatusByDirName[checkoutTarget.value.dirName]?.head?.branch ?? "";
   return next !== currentBranch;
 });
 
@@ -1221,18 +968,8 @@ watch(
   { immediate: true }
 );
 
-watch(
-  () => hasRepos.value,
-  () => {
-    // repo 从有到无(或从无到有)时,重建 runtimes,避免 codeReview runtime 残留或缺失.
-    createToolRuntimes();
-  }
-);
-
-watch(toolArea, scheduleSaveDockLayout, { deep: true });
 watch(toolMinimized, scheduleSaveDockLayout, { deep: true });
 watch(activeToolIdByArea, scheduleSaveDockLayout, { deep: true });
-watch(toolOrderByArea, scheduleSaveDockLayout, { deep: true });
 watch(
   toolVisibleById,
   (next, prev) => {
@@ -1261,10 +998,6 @@ watch(
   async () => {
     const nextTarget = currentTarget.value ?? null;
     for (const id of TOOL_IDS) toolRuntimes.get(id)?.onRepoChange(nextTarget);
-    checkoutBranch.value = "";
-    await refreshCurrentRepoStatus();
-    await refreshBranches();
-    applyPageTitle();
   }
 );
 watch(
@@ -1428,51 +1161,33 @@ async function refreshWorkspace() {
   restoreCurrentRepo(workspace.value);
 }
 
-async function refreshCurrentRepoStatus() {
-  const target = currentTarget.value;
-  if (!target) return;
-  try {
-    const res = await getGitStatus({ target });
-    repoStatusByDirName[target.dirName] = res;
-  } catch {
-    repoStatusByDirName[target.dirName] = null;
-  }
+async function refreshCodeReviewStatus() {
+  await toolRuntimes.get("codeReview")?.refresh?.();
 }
 
-async function refreshChangesSummary() {
-  try {
-    const target = currentTarget.value;
-    if (!target) {
-      changesSummary.value = { unstaged: 0, staged: 0 };
-      return changesSummary.value;
-    }
-    const [unstagedRes, stagedRes] = await Promise.all([
-      listChanges(target, { mode: "unstaged" }),
-      listChanges(target, { mode: "staged" })
-    ]);
-    changesSummary.value = { unstaged: unstagedRes.files.length, staged: stagedRes.files.length };
-  } catch {
-    // ignore
-  }
-  return changesSummary.value;
+async function refreshAfterGitOperation() {
+  await refreshCodeReviewStatus();
+  if (isToolVisible("codeReview")) await toolCommands.get("codeReview")?.refresh?.();
 }
 
-async function refreshBranches() {
-  const target = currentTarget.value;
-  if (!target) {
-    branches.value = [];
-    repoDefaultBranch.value = null;
-    return;
-  }
+async function refreshChangesSummary(target: GitTarget) {
+  const [unstagedRes, stagedRes] = await Promise.all([
+    listChanges(target, { mode: "unstaged" }),
+    listChanges(target, { mode: "staged" })
+  ]);
+  return { unstaged: unstagedRes.files.length, staged: stagedRes.files.length };
+}
+
+async function refreshBranches(target: GitTarget, fetch = false) {
+  const request = ++branchesRequestSeq;
   branchesLoading.value = true;
   try {
-    const res = await gitBranches({ target, fetch: false });
+    const res = await gitBranches({ target, fetch });
+    if (request !== branchesRequestSeq || checkoutTarget.value !== target) return;
     branches.value = res.branches;
     repoDefaultBranch.value = res.defaultBranch ?? null;
-  } catch (err) {
-    message.error(err instanceof Error ? err.message : String(err));
   } finally {
-    branchesLoading.value = false;
+    if (request === branchesRequestSeq) branchesLoading.value = false;
   }
 }
 
@@ -1480,7 +1195,7 @@ function pickCheckoutBranch(params: { branches: GitBranchesResponse["branches"];
   const existing = checkoutBranch.value.trim();
   if (existing && params.branches.some((b) => b.name === existing)) return existing;
 
-  const currentBranch = currentRepoStatus.value?.head?.branch ?? "";
+  const currentBranch = checkoutTarget.value ? repoStatusByDirName[checkoutTarget.value.dirName]?.head?.branch ?? "" : "";
   if (currentBranch && params.branches.some((b) => b.name === currentBranch)) return currentBranch;
 
   if (params.defaultBranch && params.branches.some((b) => b.name === params.defaultBranch)) return params.defaultBranch;
@@ -1488,17 +1203,14 @@ function pickCheckoutBranch(params: { branches: GitBranchesResponse["branches"];
 }
 
 async function refreshBranchesWithSync() {
-  const target = currentTarget.value;
-  if (!target) return;
-  if (gitBusy.value) return;
-  if (refreshBranchesLoading.value) return;
-
+  const target = checkoutTarget.value;
+  if (!target || gitBusy.value || refreshBranchesLoading.value) return;
   refreshBranchesLoading.value = true;
   try {
-    const res = await gitBranches({ target, fetch: true });
-    branches.value = res.branches;
-    repoDefaultBranch.value = res.defaultBranch ?? null;
-    checkoutBranch.value = pickCheckoutBranch({ branches: res.branches, defaultBranch: repoDefaultBranch.value });
+    await refreshBranches(target, true);
+    if (checkoutTarget.value === target) {
+      checkoutBranch.value = pickCheckoutBranch({ branches: branches.value, defaultBranch: repoDefaultBranch.value });
+    }
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err));
   } finally {
@@ -1511,8 +1223,6 @@ async function refresh() {
   loading.value = true;
   try {
     await refreshWorkspace();
-    await refreshBranches();
-    await refreshCurrentRepoStatus();
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err));
   } finally {
@@ -1520,48 +1230,53 @@ async function refresh() {
   }
 }
 
-async function openCheckout() {
-  if (!currentTarget.value) return;
-  if (gitBusy.value) return;
-  await refreshBranches();
-  checkoutBranch.value = pickCheckoutBranch({ branches: branches.value, defaultBranch: repoDefaultBranch.value });
+async function openCheckout(target: GitTarget | null = currentTarget.value) {
+  if (!target || gitBusy.value) return;
+  checkoutTarget.value = { ...target };
+  const frozenTarget = checkoutTarget.value;
+  branches.value = [];
+  repoDefaultBranch.value = null;
+  checkoutBranch.value = "";
   checkoutOpen.value = true;
+  try {
+    await refreshBranches(frozenTarget);
+    if (checkoutTarget.value !== frozenTarget) return;
+    checkoutBranch.value = pickCheckoutBranch({ branches: branches.value, defaultBranch: repoDefaultBranch.value });
+  } catch (err) {
+    message.error(err instanceof Error ? err.message : String(err));
+  }
 }
 
 async function submitCheckout() {
-  if (!currentTarget.value) return;
-  if (!canCheckout.value) return;
+  const target = checkoutTarget.value;
+  if (!target || !canCheckout.value) return;
   const nextBranch = checkoutBranch.value.trim();
-
-  const summary = await refreshChangesSummary();
-  const hasChanges = summary.unstaged + summary.staged > 0;
-  if (hasChanges) {
-    Modal.confirm({
-      title: t("workspace.checkout.confirmTitle"),
-      content: t("workspace.checkout.confirmContent"),
-      okText: t("workspace.checkout.ok"),
-      cancelText: t("workspace.checkout.cancel"),
-      onOk: async () => {
-        await doCheckout(nextBranch);
-      }
-    });
-    return;
+  try {
+    const summary = await refreshChangesSummary(target);
+    if (summary.unstaged + summary.staged > 0) {
+      Modal.confirm({
+        title: t("workspace.checkout.confirmTitle"),
+        content: t("workspace.checkout.confirmContent"),
+        okText: t("workspace.checkout.ok"),
+        cancelText: t("workspace.checkout.cancel"),
+        onOk: () => doCheckout(target, nextBranch)
+      });
+      return;
+    }
+    await doCheckout(target, nextBranch);
+  } catch (err) {
+    message.error(err instanceof Error ? err.message : String(err));
   }
-  await doCheckout(nextBranch);
 }
 
-async function doCheckout(nextBranch: string) {
-  const target = currentTarget.value;
-  if (!target) return;
+async function doCheckout(target: GitTarget, nextBranch: string) {
   const release = beginGitOp();
   checkoutLoading.value = true;
   try {
     await gitCheckout({ target, branch: nextBranch });
-    await refreshCurrentRepoStatus();
-    await refreshBranches();
-    await toolCommands.get("codeReview")?.refresh?.();
+    await refreshAfterGitOperation();
     message.success(t("workspace.checkout.switchedTo", { branch: nextBranch }));
-    checkoutOpen.value = false;
+    if (checkoutTarget.value === target) checkoutOpen.value = false;
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err));
   } finally {
@@ -1570,143 +1285,117 @@ async function doCheckout(nextBranch: string) {
   }
 }
 
-async function pullWithUi() {
-  const target = currentTarget.value;
-  if (!target) return;
-  if (gitBusy.value) return;
-
-  const summary = await refreshChangesSummary();
-  const hasChanges = summary.unstaged + summary.staged > 0;
-  if (hasChanges) {
-    Modal.confirm({
-      title: t("workspace.pull.confirmTitle"),
-      content: t("workspace.pull.confirmContent"),
-      okText: t("workspace.pull.okContinue"),
-      cancelText: t("workspace.pull.cancel"),
-      onOk: async () => {
-        await doPull();
-      }
-    });
-    return;
-  }
-  await doPull();
-}
-
-async function doPull() {
-  const target = currentTarget.value;
-  if (!target) return;
-  const release = beginGitOp();
-  pullLoading.value = true;
+async function pullWithUi(target: GitTarget | null = currentTarget.value) {
+  if (!target || gitBusy.value) return;
+  const frozenTarget = { ...target };
   try {
-    const res = await pullWorkspace({ target });
-    if (res.updated) message.success(t("workspace.pull.updated"));
-    else message.success(t("workspace.pull.upToDate"));
-    await toolCommands.get("codeReview")?.refresh?.();
-    await refreshCurrentRepoStatus();
-  } catch (err) {
-    const e = err instanceof ApiError ? err : new ApiError({ message: err instanceof Error ? err.message : String(err) });
-    message.error(e.message);
-  } finally {
-    release();
-    pullLoading.value = false;
-  }
-}
-
-async function pushWithUi(params: PushParams = {}) {
-  const target = currentTarget.value;
-  if (!target) return;
-  if (gitBusy.value) return;
-
-  // push 本身不依赖 user.name/email，但这里提前确保身份已配置，避免用户在“提交并推送/终端提交”时再次踩坑
-  try {
-    const st = await getWorkspaceGitIdentity({ target });
-    if (st.effective.source === "none") {
-      pendingPushParams.value = params;
-      pushIdentityOpen.value = true;
+    const summary = await refreshChangesSummary(frozenTarget);
+    if (summary.unstaged + summary.staged > 0) {
+      Modal.confirm({
+        title: t("workspace.pull.confirmTitle"),
+        content: t("workspace.pull.confirmContent"),
+        okText: t("workspace.pull.okContinue"),
+        cancelText: t("workspace.pull.cancel"),
+        onOk: () => doPull(frozenTarget)
+      });
       return;
     }
-  } catch {
-    // ignore
+    await doPull(frozenTarget);
+  } catch (err) {
+    message.error(err instanceof Error ? err.message : String(err));
   }
+}
 
+async function doPull(target: GitTarget) {
   const release = beginGitOp();
-  pushLoading.value = true;
   try {
-    const res = await pushWorkspace({ target, ...params });
+    const res = await pullWorkspace({ target });
+    message.success(t(res.updated ? "workspace.pull.updated" : "workspace.pull.upToDate"));
+    await refreshAfterGitOperation();
+  } catch (err) {
+    message.error(err instanceof Error ? err.message : String(err));
+  } finally {
+    release();
+  }
+}
+
+async function pushWithUi(target: GitTarget | null = currentTarget.value, params: PushParams = {}) {
+  if (!target || gitBusy.value) return;
+  const frozenTarget = { ...target };
+  const frozenParams = { ...params };
+  const release = beginGitOp();
+  try {
+    // 提前补配身份的既有流程保留，弹窗与后续重试均绑定本次目标。
+    try {
+      const status = await getWorkspaceGitIdentity({ target: frozenTarget });
+      if (status.effective.source === "none") {
+        pendingPush.value = { target: frozenTarget, params: frozenParams };
+        pushIdentitySubmitting.value = false;
+        pushIdentityOpen.value = true;
+        return;
+      }
+    } catch {
+      // 身份预检查失败仍交由实际 push 给出权威错误。
+    }
+    const res = await pushWorkspace({ target: frozenTarget, ...frozenParams });
     message.success(t("workspace.push.pushedTo", { remote: res.remote, branch: res.branch }));
+    await refreshCodeReviewStatus();
   } catch (err) {
     const e = err instanceof ApiError ? err : new ApiError({ message: err instanceof Error ? err.message : String(err) });
-    if (e.code === "GIT_NO_UPSTREAM" && !params.setUpstream) {
+    if (e.code === "GIT_NO_UPSTREAM" && !frozenParams.setUpstream) {
       Modal.confirm({
         title: t("workspace.push.noUpstreamTitle"),
         content: t("workspace.push.noUpstreamContent"),
         okText: t("workspace.push.okSetUpstreamAndPush"),
         cancelText: t("workspace.push.cancel"),
-        onOk: async () => {
-          await pushWithUi({ ...params, setUpstream: true });
-        }
+        onOk: () => pushWithUi(frozenTarget, { ...frozenParams, setUpstream: true })
       });
-      return;
-    }
-    if (e.code === "GIT_NON_FAST_FORWARD" && !params.forceWithLease) {
+    } else if (e.code === "GIT_NON_FAST_FORWARD" && !frozenParams.forceWithLease) {
       Modal.confirm({
         title: t("workspace.push.nonFastForwardTitle"),
         content: t("workspace.push.nonFastForwardContent"),
         okText: t("workspace.push.okForceWithLease"),
         cancelText: t("workspace.push.cancel"),
-        onOk: async () => {
-          await pushWithUi({ ...params, forceWithLease: true });
-        }
+        onOk: () => pushWithUi(frozenTarget, { ...frozenParams, forceWithLease: true })
       });
-      return;
+    } else {
+      message.error(e.message);
     }
-    message.error(e.message);
   } finally {
     release();
-    pushLoading.value = false;
   }
 }
 
 async function onPushIdentitySubmit(identity: any) {
-  const target = currentTarget.value;
-  if (!target) return;
-  if (gitBusy.value) return;
-
+  const pending = pendingPush.value;
+  if (!pending || gitBusy.value) return;
   const release = beginGitOp();
-  pushLoading.value = true;
+  let continuePush = false;
   pushIdentitySubmitting.value = true;
   try {
     if (identity?.scope === "repo") {
-      await setWorkspaceGitIdentity({ target, name: identity.name, email: identity.email });
+      await setWorkspaceGitIdentity({ target: pending.target, name: identity.name, email: identity.email });
     } else if (identity?.scope === "global") {
       await updateGitGlobalIdentity({ name: identity.name, email: identity.email });
     } else {
       return;
     }
+    // 保存本身已经作用于冻结目标；弹窗关闭或被另一操作替换后不再续接旧 push。
+    if (pendingPush.value !== pending || !pushIdentityOpen.value) return;
     pushIdentityOpen.value = false;
+    pendingPush.value = null;
+    continuePush = true;
   } catch (err) {
-    const e = err instanceof ApiError ? err : new ApiError({ message: err instanceof Error ? err.message : String(err) });
-    message.error(e.message);
+    if (pendingPush.value === pending && pushIdentityOpen.value) {
+      message.error(err instanceof Error ? err.message : String(err));
+    }
     return;
   } finally {
     release();
-    pushLoading.value = false;
-    pushIdentitySubmitting.value = false;
+    if (pendingPush.value === pending || continuePush) pushIdentitySubmitting.value = false;
   }
-
-  const params = pendingPushParams.value ?? {};
-  pendingPushParams.value = {};
-  await pushWithUi(params);
+  if (continuePush) await pushWithUi(pending.target, pending.params);
 }
-
-watch(
-  () => currentRepo.value?.repo.id ?? "",
-  async () => {
-    branches.value = [];
-    repoDefaultBranch.value = null;
-    if (currentRepo.value) await refreshBranches();
-  }
-);
 
 onMounted(() => {
   applyPageTitle();

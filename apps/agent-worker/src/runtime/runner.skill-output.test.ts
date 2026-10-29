@@ -4,6 +4,7 @@ import { buildToolSuccessTextForTest } from "./runner.js";
 
 test("runner skill tool-result text uses V2 headers only", () => {
   const text = buildToolSuccessTextForTest({
+    completedAt: Date.parse("2026-05-20T08:30:12.345Z"),
     toolName: "skill",
     args: { skillId: "builtin/tooling" },
     result: {
@@ -30,6 +31,7 @@ test("runner skill tool-result text uses V2 headers only", () => {
 
 test("runner preserves empty V2 skill content without a placeholder", () => {
   const text = buildToolSuccessTextForTest({
+    completedAt: Date.parse("2026-05-20T08:30:12.345Z"),
     toolName: "skill",
     args: { skillId: "builtin/tooling", filePath: "empty.txt" },
     result: { skillId: "builtin/tooling", filePath: "empty.txt", content: "", truncated: false }
@@ -44,10 +46,11 @@ test("runner preserves empty V2 skill content without a placeholder", () => {
 test("runner preserves V2 root content exactly", () => {
   const content = "line one\r\nline two\r";
   const text = buildToolSuccessTextForTest({
+    completedAt: Date.parse("2026-05-20T08:30:12.345Z"),
     toolName: "skill",
     args: { skillId: "builtin/tooling" },
     result: { skillId: "builtin/tooling", filePath: "SKILL.md", content, truncated: false }
   });
 
-  assert.equal(text, `tool: skill\nstatus: completed\nskill_id: builtin/tooling\nfile_path: SKILL.md\ntruncated: false\n\n${content}`);
+  assert.equal(text, `tool: skill\nstatus: completed\ncompleted_at: 2026-05-20T08:30:12.345Z\nskill_id: builtin/tooling\nfile_path: SKILL.md\ntruncated: false\n\n${content}`);
 });

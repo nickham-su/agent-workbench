@@ -67,3 +67,17 @@ test("expected slot configuration is an atomic closed replacement document", () 
   assert.equal(Value.Check(AnalyticsControlSignalSchema, { ...config, enabledFactDomains: [...config.enabledFactDomains, "git"] }), false);
   assert.equal(Value.Check(AnalyticsControlSignalSchema, { ...config, slots: [...config.slots, { domain: "worker", producerNamespace: "worker_observer", producerId: "process_manager" }] }), false);
 });
+
+
+test("request preparation remains optional for durable legacy events and validates measured milliseconds", () => {
+  const model = { ...executionStarted, domain: "model", eventType: "model_invoked", subjectIdentity: "model:preparation",
+    payload: { modelCallId: "model:preparation", executionId: "execution:r1", runId: "r1", attemptNo: 1,
+      providerId: "provider", modelId: "model", startedAt: 1, endedAt: null, status: "running", completionQuality: "unknown", timeoutKind: null,
+      inputTokens: null, outputTokens: null, totalTokens: null, totalSource: "unavailable", cacheReadTokens: null, cacheWriteTokens: null,
+      cacheComparable: false, cacheWriteVerified: false, failureKind: null } };
+  assert.equal(isCanonicalAnalyticsSignal(model), true);
+  for (const requestPreparationMs of [null, 0, 1, Number.MAX_SAFE_INTEGER])
+    assert.equal(isCanonicalAnalyticsSignal({ ...model, payload: { ...model.payload, requestPreparationMs } }), true);
+  for (const requestPreparationMs of [-1, 0.5, "1", Infinity, Number.MAX_SAFE_INTEGER + 1])
+    assert.equal(isCanonicalAnalyticsSignal({ ...model, payload: { ...model.payload, requestPreparationMs } }), false);
+});

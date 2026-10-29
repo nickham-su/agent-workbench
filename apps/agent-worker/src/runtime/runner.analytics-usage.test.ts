@@ -107,7 +107,7 @@ for (const providerNpm of ["@ai-sdk/openai-compatible", "@ai-sdk/moonshotai", "@
         run: { workspaceId: "ws", sessionId: "session", runId: "run", workspacePath: process.cwd(),
           workspaceRepoDirNames: [], inputText: "hello" },
         context: { pendingTools: [], tools: [], headMessageId: null, sessionRevision: 0, system: "",
-          messages: [{ role: "user", content: "hello" }], providerReplay: [], lastResponseTotalTokens: null, uiLocale: null, externalSkills: [] },
+          messages: [{ role: "user", content: "hello" }], providerReplay: [], lastResponseTotalTokens: null, uiLocale: null, workspaceRepoNames: [], externalSkills: [] },
         step: 1, signal: new AbortController().signal, recoveryContinuation: { messageId: null }, repeatedToolCallCounter: new Map(),
       });
       assert.equal(result.hasVisibleText, true);
@@ -182,7 +182,7 @@ test("runner completes a terminal provider attempt when fullStream usage never s
         runtime: { modelIdleTimeoutMs: 0, modelTotalTimeoutMs: 0, modelRequestMaxRetries: 1, modelRequestRetryBackoffMaxMs: 1 },
       },
       run: { workspaceId: "ws", sessionId: "session", runId: "run", workspacePath: process.cwd(), workspaceRepoDirNames: [], inputText: "hello" },
-      context: { pendingTools: [], tools: [], headMessageId: null, sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, externalSkills: [] },
+      context: { pendingTools: [], tools: [], headMessageId: null, sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, workspaceRepoNames: [], externalSkills: [] },
       step: 1,
       signal: new AbortController().signal,
       recoveryContinuation: { messageId: null },
@@ -248,7 +248,7 @@ async function finishedModelUsage(options: {
       runtime: { modelIdleTimeoutMs: 0, modelTotalTimeoutMs: 0, modelRequestMaxRetries: 1, modelRequestRetryBackoffMaxMs: 1 },
     },
     run: { workspaceId: "ws", sessionId: "session", runId: "run", workspacePath: process.cwd(), workspaceRepoDirNames: [], inputText: "hello" },
-    context: { pendingTools: [], tools: [], headMessageId: null, sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, externalSkills: [] },
+    context: { pendingTools: [], tools: [], headMessageId: null, sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, workspaceRepoNames: [], externalSkills: [] },
     step: 1,
     signal: new AbortController().signal,
     recoveryContinuation: { messageId: null },

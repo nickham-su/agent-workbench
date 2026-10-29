@@ -234,6 +234,8 @@ test("AgentToolView：一致性snapshot完成前保持loading，后台决定可�
     respondSessions(request!, [session("primary-a", "ws-a"), session("subtask-a", "ws-a", "subtask")], { closedSessionIds: ["primary-a"], openedSubtaskSessionIds: ["subtask-a"] });
     await settle();
     assert.equal(wrapper.find("[data-testid='agent-tab-state-loading']").exists(), false);
+    assert.equal(wrapper.find("[data-testid='agent-tabs']").exists(), true);
+    assert.equal(wrapper.find("[data-testid='agent-tabs-reload']").exists(), false);
     assert.equal((wrapper.vm as any).visibleSessions.map((item: Session) => item.id).join(","), "subtask-a");
     assert.equal(FakeXMLHttpRequest.requests.filter((value) => value.method === "GET" && value.url.includes("/agent-tab-state")).length, 0);
   } finally { wrapper.unmount(); }
@@ -440,6 +442,32 @@ test("AgentToolView：打开子任务仅查询目标，再乐观 PUT 持久化",
   } finally {
     wrapper.unmount();
   }
+});
+
+test("AgentToolView：打开子任务等待GET和可见性确认时不显示底部加载提示", async () => {
+  const { gets, puts } = zeroVisibleTargetHarness({ origin: true });
+  const wrapper = mountView();
+  try {
+    await settle();
+    const vm = wrapper.vm as any;
+    const opening = vm.onOpenSubtask("target");
+    await settle();
+    assert.equal(gets.length, 1);
+    assert.equal(vm.targetOpeningSessionId, "target");
+    assert.equal(wrapper.find("[data-testid='agent-target-loading']").exists(), false);
+
+    gets[0]!.respond(200, session("target", "ws-a", "subtask"));
+    await settle();
+    assert.equal(puts.length, 1);
+    assert.equal(vm.targetOpeningSessionId, "target");
+    assert.equal(wrapper.find("[data-testid='agent-target-loading']").exists(), false);
+
+    confirmTarget(puts[0]!);
+    await opening;
+    await settle();
+    assert.equal(vm.targetOpeningSessionId, "");
+    assert.equal(vm.effectiveActiveKey, "target");
+  } finally { wrapper.unmount(); }
 });
 
 test("AgentToolView：关闭创建中的草稿会将关闭意图转交给真实 Session，且不抢回活动 Tab", async () => {
@@ -1613,10 +1641,10 @@ for (const visible of [true, false]) {
       await settle(); const vm = wrapper.vm as any;
       if (visible) vm.upsertSession(metadataRecord("target"));
       vm.requestSessionVisibility("target", visible);
-      const reload = vm.reloadTabsSnapshot();
+      const initializing = vm.initializeWorkspace();
       puts[0]!.respond(200, { workspaceId: "ws-a", sessionId: "target", visible }); await settle();
       respondSessions(snapshots[1]!, [metadataRecord("target")], { closedSessionIds: visible ? ["target"] : [] });
-      await reload; await settle();
+      await initializing; await settle();
       assert.equal(vm.tabVisibilityController.getState("target").confirmed, visible);
       assert.equal(vm.visibleSessions.some((item: Session) => item.id === "target"), visible);
       assert.equal(vm.serverSessions.some((item: Session) => item.id === "target"), true);
@@ -1624,7 +1652,7 @@ for (const visible of [true, false]) {
   });
 }
 
-test("partial snapshot不删除hidden缓存和覆盖；显式reload失败不切初始化或自动重试", async () => {
+test("partial snapshot不删除hidden缓存和覆盖；初始化失败进入错误态且不自动重试", async () => {
   const snapshots: FakeXMLHttpRequest[] = [];
   FakeXMLHttpRequest.requests = [];
   FakeXMLHttpRequest.responder = (request) => {
@@ -1636,13 +1664,13 @@ test("partial snapshot不删除hidden缓存和覆盖；显式reload失败不切�
     await settle(); const vm = wrapper.vm as any;
     vm.upsertSession(metadataRecord("hidden")); await settle();
     assert.equal(vm.visibleSessions.some((item: Session) => item.id === "hidden"), false);
-    const reload = vm.reloadTabsSnapshot();
-    respondSessions(snapshots[1]!, []); await reload; await settle();
+    const initializing = vm.initializeWorkspace();
+    respondSessions(snapshots[1]!, []); await initializing; await settle();
     assert.equal(vm.serverSessions.some((item: Session) => item.id === "hidden"), true);
     assert.equal(vm.tabVisibilityController.getState("hidden").confirmed, false, "snapshot absence cannot reset a cached hidden confirmation");
     assert.equal(vm.visibleSessions.some((item: Session) => item.id === "hidden"), false);
-    const failed = vm.reloadTabsSnapshot(); snapshots[2]!.respond(500, { message: "failure" }); await failed; await settle();
-    assert.equal(vm.initializationState, "ready"); assert.equal(vm.draftSessions.length, 1);
+    const failed = vm.initializeWorkspace(); snapshots[2]!.respond(500, { message: "failure" }); await failed; await settle();
+    assert.equal(vm.initializationState, "error"); assert.equal(vm.draftSessions.length, 1);
     assert.equal(snapshots.length, 3);
   } finally { wrapper.unmount(); }
 });
@@ -1889,13 +1917,13 @@ for (const result of ["success", "failure"] as const) {
 }
 
 for (const result of ["success", "failure"] as const) {
-  test(`M1回退：reload空snapshot时targetGET仍在途不造草稿，target ${result}终态收敛`, async () => {
+  test(`M1回退：初始化空snapshot时targetGET仍在途不造草稿，target ${result}终态收敛`, async () => {
     const { snapshots, gets, puts } = zeroVisibleTargetHarness({ origin: true });
     const wrapper = mountView();
     try {
       await settle(); const vm = wrapper.vm as any;
       await wrapper.setProps({ openSessionRequest: { sessionId: "target", sequence: 1 } }); await settle();
-      const reload = vm.reloadTabsSnapshot(); respondSessions(snapshots[1]!, []); await reload; await settle();
+      const initializing = vm.initializeWorkspace(); respondSessions(snapshots[1]!, []); await initializing; await settle();
       assert.equal(vm.initializationState, "ready");
       assert.equal(vm.visibleSessions.length, 0);
       assert.equal(vm.draftSessions.length, 0);
@@ -2144,7 +2172,7 @@ for (const cause of ["snapshot", "notFound", "close"] as const) {
       if (cause === "snapshot") {
         FakeXMLHttpRequest.responder = (request) => isListRead(request)
           ? respondSessions(request, [session("a", "ws-a")], { closedSessionIds: ["b"] }) : respondDefaults(request);
-        await vm.reloadTabsSnapshot();
+        await vm.initializeWorkspace();
       } else if (cause === "notFound") await vm.openTargetSession("b");
       else vm.closeSessionTab("b");
       await settle();

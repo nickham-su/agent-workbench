@@ -43,6 +43,18 @@ git clone https://github.com/nickham-su/agent-workbench.git
 docker compose up -d --build
 ```
 
+**Build cache and diagnostics**
+
+BuildKit reuses npm downloads and prebuilt binaries across builds while the same builder's cache is retained. This does not cache native compilation outputs or guarantee a faster first build. Both dependency steps print installation scripts and npm timings; the install step also records Node/npm versions.
+
+To inspect detailed build logs without starting or restarting services:
+
+```bash
+docker compose --progress plain build
+```
+
+Compare individual step timings and total build wall time separately: BuildKit can run stages concurrently, so adding the two dependency-step times does not give the total build time. Build-time dependency auditing is disabled; run `npm audit` separately during development or CI.
+
 **Agent startup recovery**
 
 Startup recovery has no mode switch. Before the API listener starts, it only cleans temporary/orphan data. After `onListen`, it uses fenced recovery enqueue: only a Run that is still the Session's current active Run is enqueued again.
@@ -64,6 +76,28 @@ Default port is 4310. If you change `AWB_PORT` in `.env`, replace the port in th
 | `http://127.0.0.1:4310/api/health` | Health check |
 | `http://127.0.0.1:4310/api/docs` | API docs |
 
+**Terminal run configurations**
+
+Reliable restart/close of configured services requires Linux (kernel 5.3+),
+`/usr/bin/python3` (Python 3.9+ with `pidfd_open`/`pidfd_send_signal`), and Linux
+child-subreaper support with procfs mounted. The Docker image already provides these prerequisites.
+Missing capabilities fail explicitly instead of starting an untracked service.
+Runs created before managed run controls were introduced must be stopped manually
+and their terminal tab closed once before creating a new managed run. Already-orphaned services are not
+guessed or killed by port. External service managers such as PM2/Docker retain
+responsibility for services started through them.
+
+After a full container or machine restart, existing terminal APIs clean stale runs
+whose tmux sessions are absent, without waiting for the previous launcher. Runs
+are identified by the kernel boot ID and PID 1 starttime. **The first upgrade to
+this recovery behavior requires a full container or machine restart, not just an
+API restart:** old terminal sessions without this identity will be treated as
+stale; terminal configurations and workspace files are preserved. Use one API
+instance per data directory and a private PID namespace (the default Compose
+setup); do not share its data with another running container or machine.
+Terminal listing deletes stopped session records only after all cleanup succeeds,
+removing their tabs while preserving configurations; a later run gets a new session ID.
+
 **Workspace Dev Ports**
 
 To avoid reconfiguring `docker-compose.yml` for every new project, the default Compose setup also publishes a reserved local port range for services started inside workspaces (HTTP servers, RPC, etc.):
@@ -82,6 +116,40 @@ Two named volumes are used by default:
 | `agent-workbench-home` | `/home/dev` | User config, SSH, toolchains, etc. |
 
 > Note: `docker compose down -v` will delete volumes and all data.
+
+**Optional Personal Startup Script**
+
+To install tools needed only by you, create `~/awb-startup.sh` **inside the container** (`/home/dev/awb-startup.sh`), without changing the Dockerfile or Compose configuration. For example, open an editor:
+
+```bash
+docker compose exec agent-workbench nano /home/dev/awb-startup.sh
+```
+
+Example script to install the PostgreSQL client only when missing:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+if ! command -v psql >/dev/null 2>&1; then
+  sudo -n apt-get update
+  sudo -n env DEBIAN_FRONTEND=noninteractive \
+    apt-get install -y --no-install-recommends postgresql-client
+fi
+```
+
+The entrypoint runs this optional script with Bash as `dev`, after preparing the home/data directories and before starting the application. No executable permission is required. If the script is absent, startup proceeds normally; if it exits with a nonzero status, the application does not start and the container exits. With the default restart policy, Docker will retry startup. Only use scripts you trust: `dev` has passwordless `sudo` inside the container.
+
+The script runs on **every container start**, including restarts and recreations during upgrades, so keep it safe to run repeatedly. The home volume preserves the script across `git pull` + `docker compose up -d --build`, but system packages installed with `apt-get` are lost when the container is recreated. Check for the actual tool rather than storing an “installed” marker in the persistent home directory. Network or package installation failures can prevent startup.
+
+After saving the script, restart the container to run it, then inspect its output:
+
+```bash
+docker compose restart agent-workbench
+docker compose logs -f agent-workbench
+```
+
+A script in the **host's** home directory is not automatically available inside the container. This hook runs at container startup, not on each terminal session or application-only restart.
 
 **Security**
 
@@ -193,7 +261,7 @@ Use the mouse wheel to scroll through history. In fullscreen programs like `vim`
 
 **Prerequisites**
 
-- Node.js LTS (20.x or 22.x)
+- Node.js 24 LTS (the repository includes `.nvmrc`; run `nvm use` if using nvm)
 - `git`, `tmux`
 - Build toolchain (macOS requires Xcode Command Line Tools for compiling `better-sqlite3` and `node-pty`)
 
@@ -203,6 +271,14 @@ Use the mouse wheel to scroll through history. In fullscreen programs like `vim`
 npm install
 npm run dev
 ```
+
+After switching Node.js major versions, stop the development services and rebuild native dependencies under Node.js 24 before restarting:
+
+```bash
+npm rebuild better-sqlite3 node-pty
+```
+
+Do not reuse native binaries built under another Node.js major version. Rebuilding dependencies does not require deleting application databases or `package-lock.json`.
 
 **Local env**
 

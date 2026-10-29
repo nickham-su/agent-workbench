@@ -110,13 +110,15 @@ export class RuntimeTranscriptProjector {
           messages.push({ role: "user", content: safeUserText(text, located) });
           continue;
         }
-        const content: Array<RuntimePromptTextPart | RuntimePromptAttachmentRefPart> = [{
+        const promptText: RuntimePromptTextPart = {
           type: "text",
           text: text || imageOnlyTriggerText(images.length)
-        }];
-        for (const image of images) {
+        };
+        const content: Array<RuntimePromptTextPart | RuntimePromptAttachmentRefPart> = [promptText];
+        for (const [index, image] of images.entries()) {
           const attachmentPath = input.attachmentPaths?.get(image.id);
           if (!attachmentPath) throw new Error("current Run image has no trusted Workspace path");
+          promptText.text += `\n\n[Image attachment ${index + 1} included in this run. Workspace-relative path: ${attachmentPath}]`;
           content.push({
             type: "attachment_ref",
             workspaceId: input.workspaceId,
@@ -212,7 +214,7 @@ export function projectToolExecutionResult(execution: RuntimeTranscriptExecution
     case "cancelled":
       return { type: error ? "error-text" : "text", value: error ?? preview ?? CANCELLED_TOOL_EXECUTION_RESULT };
     case "failed":
-      return { type: "error-text", value: error ?? preview ?? FAILED_TOOL_EXECUTION_RESULT };
+      return { type: "error-text", value: preview ?? error ?? FAILED_TOOL_EXECUTION_RESULT };
     case "completed":
       return { type: "text", value: preview ?? EMPTY_COMPLETED_TOOL_EXECUTION_RESULT };
     case "queued":

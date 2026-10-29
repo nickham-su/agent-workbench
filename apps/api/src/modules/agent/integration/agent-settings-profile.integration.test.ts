@@ -6,6 +6,7 @@ import { AI_SDK_REDACTED_HEADER_VALUE } from "@agent-workbench/shared/llm-ai-sdk
 import { createMessageRunRecord, getRunRecord } from "../agent-message.store.js";
 import { appendMessage, createMessageSession, getMessageSessionHead } from "../agent-message.store.js";
 import { newSortableId } from "../../../utils/ids.js";
+import { createTestWorkspace } from "../testkit/agent-testkit.js";
 import {
   createAgentIntegrationFixture,
   createPrimarySession,
@@ -1368,4 +1369,73 @@ test("openai-compatible provider 支持按 OpenAI 风格拉取远程模型列表
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+test("subtask 描述在同 Run 动态遵循 Workspace 启用名单和 scope，且不同 Workspace 隔离", async (t: TestContext) => {
+  const fixture = await createIntegrationFixtureForTest(t, { agentWorkerConcurrency: 0 });
+  const settings = await fixture.app.inject({
+    method: "PUT", url: "/api/settings/agent/agents",
+    payload: {
+      agents: [
+        { id: "default", name: "Primary", scope: "user" },
+        { id: "candidate-a", name: "Candidate A", scope: "subtask" },
+        { id: "candidate-b", name: "Candidate B", scope: "both" },
+      ].map((agent, order) => ({
+        ...agent, summary: `${agent.id} summary`, prompt: "", tools: ["subtask"],
+        pluginTools: [], mcpServers: [], defaultModel: { providerId: "ppchat", modelId: "gpt-5.2" }, order,
+      })),
+    },
+  });
+  assert.equal(settings.statusCode, 200, settings.body);
+  const secondWorkspace = await createTestWorkspace(fixture);
+  async function setEnabled(workspaceId: string, enabledAgentIds: string[]) {
+    const response = await fixture.app.inject({
+      method: "PUT", url: `/api/workspaces/${workspaceId}/agent-enablement/settings`,
+      payload: { mode: "subset", enabledAgentIds: ["default", ...enabledAgentIds] },
+    });
+    assert.equal(response.statusCode, 200, response.body);
+  }
+  await setEnabled(fixture.workspaceId, ["candidate-a", "candidate-b"]);
+  await setEnabled(secondWorkspace.id, ["candidate-b"]);
+  async function startRun(workspaceId: string) {
+    const target = { app: fixture.app, workspaceId };
+    const session = await createPrimarySession(target);
+    const sent = await sendAgentMessage(target, {
+      sessionId: session.id, text: "Delegate a task", clientRequestId: newSortableId("req"),
+    });
+    return { workspaceId, sessionId: session.id, runId: sent.runId };
+  }
+  const firstRun = await startRun(fixture.workspaceId);
+  const secondRun = await startRun(secondWorkspace.id);
+  async function readContext(run: typeof firstRun) {
+    const response = await fixture.app.inject({
+      method: "POST", url: "/api/internal/agent/prompt-context",
+      headers: { "x-awb-agent-internal-token": fixture.internalToken }, payload: run,
+    });
+    assert.equal(response.statusCode, 200, response.body);
+    return response.json() as { system: string; tools: Array<{ name: string; description: string; inputSchema: unknown }> };
+  }
+  function assertCandidates(context: Awaited<ReturnType<typeof readContext>>, ids: string[]) {
+    const tool = context.tools.find((item) => item.name === "subtask");
+    assert.ok(tool, "empty candidates must not hide an otherwise configured subtask tool");
+    const available = tool.description.split("Available agents:\n")[1];
+    assert.ok(available);
+    assert.equal(available.includes("- default:"), false, "user-only Agent must be excluded");
+    for (const id of ["candidate-a", "candidate-b"]) {
+      assert.equal(available.includes(`- ${id}:`), ids.includes(id), `${id} availability`);
+    }
+    if (ids.length === 0) assert.equal(available, "- No agents are currently available");
+  }
+  const first = await readContext(firstRun);
+  assertCandidates(first, ["candidate-a", "candidate-b"]);
+  assertCandidates(await readContext(secondRun), ["candidate-b"]);
+  for (const enabled of [["candidate-a"], [], ["candidate-b"]]) {
+    await setEnabled(fixture.workspaceId, enabled);
+    const updated = await readContext(firstRun);
+    assertCandidates(updated, enabled);
+    assert.equal(updated.system, first.system, "static system prompt must remain unchanged");
+    assert.deepEqual(updated.tools.map(({ name, inputSchema }) => ({ name, inputSchema })),
+      first.tools.map(({ name, inputSchema }) => ({ name, inputSchema })));
+    assertCandidates(await readContext(secondRun), ["candidate-b"]);
+  }
+  assertCandidates(first, ["candidate-a", "candidate-b"]);
 });

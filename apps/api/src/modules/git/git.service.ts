@@ -15,6 +15,8 @@ import type {
   GitIdentityScope,
   GitIdentityStatus,
   GitStatusResponse,
+  WorkspaceGitStatusRequest,
+  WorkspaceGitStatusResponse,
   GitTarget,
   GitPullResponse,
   GitPushResponse,
@@ -23,14 +25,27 @@ import type {
 } from "@agent-workbench/shared";
 import type { AppContext } from "../../app/context.js";
 import { HttpError } from "../../app/errors.js";
-import { getWorkspace, getWorkspaceRepoByDirName } from "../workspaces/workspace.store.js";
+import { getWorkspace, getWorkspaceRepoByDirName, listWorkspaceRepos } from "../workspaces/workspace.store.js";
 import { getRepo } from "../repos/repo.store.js";
-import { runGit, runGitBuffer } from "../../infra/git/gitExec.js";
+import { runGit as execGit, runGitBuffer as execGitBuffer } from "../../infra/git/gitExec.js";
+import { assertWorkspaceRepoSafe } from "./git-target.js";
+import { readRepositoryStatus, readUpstreamStatus, statusChanges, worktreeGitArgs, STATUS_TIMEOUT_MS } from "./git-status.js";
 import { buildGitEnv } from "../../infra/git/gitEnv.js";
 import { gitConfigGet, gitConfigSet, validateAndNormalizeGitIdentity } from "../../infra/git/gitIdentity.js";
 import { getOriginDefaultBranchFromRepo, listOriginBranchesFromRepo } from "../../infra/git/refs.js";
 import { withWorkspaceRepoLock } from "../../infra/locks/workspaceRepoLock.js";
 import { workspaceLifecycleCoordinator } from "../../infra/locks/workspace-lifecycle-coordinator.js";
+
+// All worktree commands are pinned even when core.worktree is set in repository config.
+function pinnedWorktreeArgs(args: string[]) {
+  return args[0] === "-C" && args[1] ? worktreeGitArgs(args[1], args.slice(2)) : args;
+}
+function runGit(args: string[], opts: Parameters<typeof execGit>[1]) {
+  return execGit(pinnedWorktreeArgs(args), opts);
+}
+function runGitBuffer(args: string[], opts: Parameters<typeof execGitBuffer>[1]) {
+  return execGitBuffer(pinnedWorktreeArgs(args), opts);
+}
 
 function parseMode(modeRaw: unknown): ChangeMode {
   if (modeRaw === "staged" || modeRaw === "unstaged") return modeRaw;
@@ -50,48 +65,11 @@ function parseBool(raw: unknown) {
   return raw === "1" || raw === "true" || raw === "yes";
 }
 
-function parseNameStatusZ(output: string) {
-  const parts = output.split("\0").filter((p) => p.length > 0);
-  const files: { path: string; status: string; oldPath?: string }[] = [];
-
-  let i = 0;
-  while (i < parts.length) {
-    const status = parts[i++]!;
-    const code = status[0] ?? "";
-    if (code === "R" || code === "C") {
-      const oldPath = parts[i++]!;
-      const newPath = parts[i++]!;
-      files.push({ path: newPath, status: code, oldPath });
-      continue;
-    }
-    const p = parts[i++]!;
-    files.push({ path: p, status: code || status });
-  }
-
-  return files;
-}
-
-function parseUntrackedFromStatusZ(output: string) {
-  const parts = output.split("\0").filter(Boolean);
-  const files: { path: string; status: string }[] = [];
-  for (const part of parts) {
-    if (!part.startsWith("?? ")) continue;
-    const p = part.slice(3);
-    if (!p || p.includes("\0")) continue;
-    if (p.endsWith("/")) continue;
-    files.push({ path: p, status: "??" });
-  }
-  return files;
-}
-
 function isValidRelativePath(filePath: string) {
   if (!filePath) return false;
-  if (filePath.startsWith("-")) return false;
-  if (filePath.startsWith(":")) return false;
   if (path.isAbsolute(filePath)) return false;
   if (filePath.includes("\0")) return false;
-  if (filePath.includes("\n") || filePath.includes("\r")) return false;
-  const parts = filePath.split(/[\\/]+/g);
+  const parts = process.platform === "win32" ? filePath.split(/[\\/]+/g) : filePath.split(/\/+/g);
   if (parts.some((p) => p === "..")) return false;
   return true;
 }
@@ -251,48 +229,79 @@ async function readWorktreeText(params: { wsRoot: string; absPath: string; maxBy
     return readBufferAsText(buf, params.maxBytes);
   } catch (err: any) {
     if (err && (err.code === "ENOENT" || err.code === "ENOTDIR")) return { kind: "missing", bytes: 0, content: "" };
-    return { kind: "missing", bytes: 0, content: "" };
+    throw new HttpError(500, "Failed to read working tree file", "GIT_COMPARE_FAILED");
   }
 }
 
-async function gitCatFileSizeOrMissing(params: { cwd: string; object: string }): Promise<{ kind: "missing" } | { kind: "ok"; bytes: number }> {
-  const res = await runGit(["-C", params.cwd, "cat-file", "-s", params.object], { cwd: params.cwd });
-  if (!res.ok) return { kind: "missing" };
-  const bytes = Number.parseInt(res.stdout.trim(), 10);
-  if (!Number.isFinite(bytes) || bytes < 0) return { kind: "missing" };
-  return { kind: "ok", bytes };
+function compareReadFailed(): never {
+  throw new HttpError(500, "Failed to read repository file comparison", "GIT_COMPARE_FAILED");
 }
 
 async function gitCatFileText(params: { cwd: string; object: string; maxBytes: number }): Promise<ReadTextResult> {
-  const sizeRes = await gitCatFileSizeOrMissing({ cwd: params.cwd, object: params.object });
-  if (sizeRes.kind === "missing") return { kind: "missing", bytes: 0, content: "" };
-  if (sizeRes.bytes > params.maxBytes) return { kind: "not_previewable", reason: "too_large", bytes: sizeRes.bytes };
-  const res = await runGitBuffer(["-C", params.cwd, "cat-file", "-p", params.object], { cwd: params.cwd });
-  if (!res.ok) return { kind: "missing", bytes: 0, content: "" };
+  // Entry lookup has already proved the object exists. Any subsequent Git failure is not a missing file.
+  const options = { cwd: params.cwd, timeoutMs: STATUS_TIMEOUT_MS, maxOutputBytes: 8192 };
+  const type = await runGit(["-C", params.cwd, "cat-file", "-t", params.object], options);
+  if (!type.ok) compareReadFailed();
+  if (["tree", "commit", "tag"].includes(type.stdout.trim())) return { kind: "not_previewable", reason: "unsafe_path", bytes: 0 };
+  if (type.stdout.trim() !== "blob") compareReadFailed();
+  const size = await runGit(["-C", params.cwd, "cat-file", "-s", params.object], options);
+  const bytes = Number(size.stdout.trim());
+  if (!size.ok || !/^\d+$/.test(size.stdout.trim()) || !Number.isSafeInteger(bytes)) compareReadFailed();
+  if (bytes > params.maxBytes) return { kind: "not_previewable", reason: "too_large", bytes };
+  const res = await runGitBuffer(["-C", params.cwd, "cat-file", "-p", params.object], { ...options, maxOutputBytes: params.maxBytes + 8192 });
+  if (!res.ok) compareReadFailed();
   return readBufferAsText(res.stdout, params.maxBytes);
 }
 
-async function gitIndexBlobSha(params: { cwd: string; filePath: string }): Promise<{ kind: "missing" } | { kind: "ok"; sha: string }> {
-  const res = await runGit(["-C", params.cwd, "ls-files", "-s", "--", params.filePath], { cwd: params.cwd });
-  if (!res.ok) return { kind: "missing" };
-  const lines = res.stdout
-    .split("\n")
-    .map((l) => l.trim())
-    .filter((l) => l.length > 0);
+/** Normal HEAD resolves in one command; only a verified absent symbolic ref is unborn. */
+async function resolveHeadCommit(params: { wsPath: string; dataDir: string }): Promise<string | null> {
+  const options = { cwd: params.dataDir, timeoutMs: STATUS_TIMEOUT_MS, maxOutputBytes: 8192 };
+  const head = await runGit(["-C", params.wsPath, "rev-parse", "--verify", "--quiet", "HEAD^{commit}"], options);
+  if (head.ok && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(head.stdout.trim())) return head.stdout.trim();
+  if (head.ok || head.failure || head.code !== 1) compareReadFailed();
+  const symbolic = await runGit(["-C", params.wsPath, "symbolic-ref", "--quiet", "HEAD"], options);
+  const ref = symbolic.stdout.trim();
+  if (!symbolic.ok || !ref.startsWith("refs/") || /[\0\r\n]/.test(ref)) compareReadFailed();
+  const exists = await runGit(["-C", params.wsPath, "show-ref", "--verify", "--quiet", ref], options);
+  if (!exists.ok && exists.code === 1 && !exists.failure) return null;
+  // An existing but unreadable/non-commit HEAD is corrupt, not an empty repository.
+  compareReadFailed();
+}
 
-  let firstSha = "";
-  for (const line of lines) {
-    const m = line.match(/^(\d+)\s+([0-9a-f]{40})\s+(\d+)\t(.+)$/);
-    if (!m) continue;
-    const sha = m[2] || "";
-    const stage = Number(m[3] || "0");
-    if (!sha) continue;
-    if (!firstSha) firstSha = sha;
-    if (stage === 0) return { kind: "ok", sha };
+type GitEntry = { kind: "missing" } | { kind: "ok"; sha: string; blob: boolean };
+
+async function gitIndexEntry(params: { cwd: string; filePath: string }): Promise<GitEntry> {
+  const res = await runGit(["-C", params.cwd, "--literal-pathspecs", "ls-files", "-s", "-z", "--", params.filePath], {
+    cwd: params.cwd, timeoutMs: STATUS_TIMEOUT_MS, maxOutputBytes: 65536
+  });
+  if (!res.ok || (res.stdout && !res.stdout.endsWith("\0"))) compareReadFailed();
+  let first: GitEntry = { kind: "missing" };
+  for (const record of res.stdout.split("\0")) {
+    const entry = record.match(/^(\d{6}) ([0-9a-f]{40}|[0-9a-f]{64}) ([0-3])\t([\s\S]+)$/);
+    if (!record) continue;
+    if (!entry) compareReadFailed();
+    if (entry[4] !== params.filePath) continue;
+    const value = { kind: "ok" as const, sha: entry[2]!, blob: entry[1] === "100644" || entry[1] === "100755" || entry[1] === "120000" };
+    if (entry[3] === "0") return value;
+    if (first.kind === "missing") first = value;
   }
+  return first;
+}
 
-  if (!firstSha) return { kind: "missing" };
-  return { kind: "ok", sha: firstSha };
+async function gitHeadEntry(params: { cwd: string; filePath: string }): Promise<GitEntry> {
+  const head = await resolveHeadCommit({ wsPath: params.cwd, dataDir: params.cwd });
+  if (!head) return { kind: "missing" };
+  const res = await runGit(["-C", params.cwd, "--literal-pathspecs", "ls-tree", "--full-name", "-z", head, "--", params.filePath], {
+    cwd: params.cwd, timeoutMs: STATUS_TIMEOUT_MS, maxOutputBytes: 65536
+  });
+  if (!res.ok || (res.stdout && !res.stdout.endsWith("\0"))) compareReadFailed();
+  for (const record of res.stdout.split("\0")) {
+    const entry = record.match(/^(\d{6}) ([a-z]+) ([0-9a-f]{40}|[0-9a-f]{64})\t([\s\S]+)$/);
+    if (!record) continue;
+    if (!entry) compareReadFailed();
+    if (entry[4] === params.filePath) return { kind: "ok", sha: entry[3]!, blob: entry[2] === "blob" };
+  }
+  return { kind: "missing" };
 }
 
 async function gitIndexBlobShaBatch(params: { cwd: string; filePaths: string[] }) {
@@ -300,12 +309,12 @@ async function gitIndexBlobShaBatch(params: { cwd: string; filePaths: string[] }
   const filePaths = params.filePaths.filter(isValidRelativePath);
   if (filePaths.length === 0) return out;
 
-  const res = await runGit(["-C", params.cwd, "ls-files", "-s", "-z", "--", ...filePaths], { cwd: params.cwd });
-  if (!res.ok) return out;
+  const res = await runGit(["-C", params.cwd, "--literal-pathspecs", "ls-files", "-s", "-z", "--", ...filePaths], { cwd: params.cwd });
+  if (!res.ok) throw new HttpError(500, "Failed to inspect repository index", "GIT_CHANGES_FAILED");
 
   const entries = res.stdout.split("\0").filter((e) => e.length > 0);
   for (const entry of entries) {
-    const m = entry.match(/^(\d+)\s+([0-9a-f]{40})\s+(\d+)\t(.+)$/);
+    const m = entry.match(/^(\d{6}) ([0-9a-f]{40}|[0-9a-f]{64}) ([0-3])\t([\s\S]+)$/);
     if (!m) continue;
     const sha = m[2]!;
     const stage = Number(m[3] || "0");
@@ -330,31 +339,15 @@ function toSide(params: {
 export async function listChanges(ctx: AppContext, bodyRaw: unknown): Promise<ChangesResponse> {
   const body = (bodyRaw ?? {}) as GitChangesRequest;
   const mode = parseMode((body as any).mode);
-  const { wsRepo } = getTargetInfoOrThrow(ctx, (body as any).target);
+  const { wsRepo } = await getTargetInfoOrThrow(ctx, (body as any).target);
   const repoPath = wsRepo.path;
 
-  const args =
-    mode === "staged"
-      ? ["-C", repoPath, "diff", "--cached", "--name-status", "-z"]
-      : ["-C", repoPath, "diff", "--name-status", "-z"];
-  const res = await runGit(args, { cwd: ctx.dataDir });
-  if (!res.ok) throw new HttpError(500, `Failed to read changes: ${truncateGitOutput(res.stderr || res.stdout)}`);
-
-  const files = parseNameStatusZ(res.stdout);
-
-  if (mode === "unstaged") {
-    const statusRes = await runGit(["-C", repoPath, "status", "--porcelain=v1", "-z", "--untracked-files=all"], {
-      cwd: ctx.dataDir
-    });
-    if (statusRes.ok) {
-      const untracked = parseUntrackedFromStatusZ(statusRes.stdout);
-      const seen = new Set(files.map((f) => f.path));
-      for (const u of untracked) {
-        if (seen.has(u.path)) continue;
-        files.push({ path: u.path, status: u.status });
-      }
-    }
-  }
+  const status = await readRepositoryStatus({ repoPath, cwd: ctx.dataDir, untrackedFiles: "all" }).catch(() => {
+    throw new HttpError(500, "Failed to read repository changes", "GIT_CHANGES_FAILED");
+  });
+  // Use the same authoritative status records as the summary, including submodule dirtiness
+  // and nested repositories. Directory entries remain explicitly non-text items.
+  const files = statusChanges(status, mode);
 
   const shaPaths = Array.from(
     new Set(
@@ -401,7 +394,7 @@ export async function fileCompare(ctx: AppContext, bodyRaw: unknown): Promise<Fi
   const mode = parseMode(body.mode);
   const filePath = typeof body.path === "string" ? body.path : "";
   const oldPath = typeof body.oldPath === "string" ? body.oldPath : "";
-  const { wsRepo } = getTargetInfoOrThrow(ctx, body.target);
+  const { wsRepo } = await getTargetInfoOrThrow(ctx, body.target);
   const repoPath = wsRepo.path;
 
   if (!isSafePathInRepo({ repoPath, rel: filePath })) {
@@ -411,15 +404,23 @@ export async function fileCompare(ctx: AppContext, bodyRaw: unknown): Promise<Fi
     throw new HttpError(400, "Invalid oldPath");
   }
 
+  const nonTextCompare = (): FileCompareResponse => {
+    const side = { label: "NON_TEXT", path: filePath, previewable: false, reason: "unsafe_path" as const, bytes: 0 };
+    return { mode, path: filePath, base: side, current: side };
+  };
+  const basePath = oldPath || filePath;
   if (mode === "staged") {
-    const basePath = oldPath || filePath;
-    const baseRead = await gitCatFileText({ cwd: repoPath, object: `HEAD:${basePath}`, maxBytes: ctx.fileMaxBytes });
-    const indexSha = await gitIndexBlobSha({ cwd: repoPath, filePath });
-    const currentRead =
-      indexSha.kind === "missing"
-        ? ({ kind: "missing", bytes: 0, content: "" } as const)
-        : await gitCatFileText({ cwd: repoPath, object: indexSha.sha, maxBytes: ctx.fileMaxBytes });
-
+    const [head, index] = await Promise.all([
+      gitHeadEntry({ cwd: repoPath, filePath: basePath }),
+      gitIndexEntry({ cwd: repoPath, filePath })
+    ]);
+    if ((head.kind === "ok" && !head.blob) || (index.kind === "ok" && !index.blob)) return nonTextCompare();
+    const baseRead = head.kind === "missing"
+      ? ({ kind: "missing", bytes: 0, content: "" } as const)
+      : await gitCatFileText({ cwd: repoPath, object: head.sha, maxBytes: ctx.fileMaxBytes });
+    const currentRead = index.kind === "missing"
+      ? ({ kind: "missing", bytes: 0, content: "" } as const)
+      : await gitCatFileText({ cwd: repoPath, object: index.sha, maxBytes: ctx.fileMaxBytes });
     return {
       mode,
       path: filePath,
@@ -429,12 +430,21 @@ export async function fileCompare(ctx: AppContext, bodyRaw: unknown): Promise<Fi
     };
   }
 
-  const basePath = oldPath || filePath;
-  const baseSha = await gitIndexBlobSha({ cwd: repoPath, filePath: basePath });
-  const baseRead =
-    baseSha.kind === "missing"
-      ? ({ kind: "missing", bytes: 0, content: "" } as const)
-      : await gitCatFileText({ cwd: repoPath, object: baseSha.sha, maxBytes: ctx.fileMaxBytes });
+  const fs = await import("node:fs/promises");
+  const stat = await fs.lstat(path.join(repoPath, filePath)).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
+    compareReadFailed();
+  });
+  if (stat?.isDirectory()) return nonTextCompare();
+  const base = await gitIndexEntry({ cwd: repoPath, filePath: basePath });
+  if (base.kind === "ok" && !base.blob) return nonTextCompare();
+  if (base.kind === "missing" && !stat) {
+    const head = await gitHeadEntry({ cwd: repoPath, filePath: basePath });
+    if (head.kind === "ok" && !head.blob) return nonTextCompare();
+  }
+  const baseRead = base.kind === "missing"
+    ? ({ kind: "missing", bytes: 0, content: "" } as const)
+    : await gitCatFileText({ cwd: repoPath, object: base.sha, maxBytes: ctx.fileMaxBytes });
 
   const absPath = safeResolveUnderRoot({ root: repoPath, rel: filePath });
   if (!absPath) throw new HttpError(400, "Invalid path");
@@ -456,7 +466,7 @@ export async function gitCheckout(ctx: AppContext, bodyRaw: unknown): Promise<Gi
   if (!branch) throw new HttpError(400, "branch is required");
   return workspaceLifecycleCoordinator.withMutation(target.workspaceId, () =>
     withWorkspaceRepoLock({ workspaceId: target.workspaceId, dirName: target.dirName }, async () => {
-    const { wsRepo, repo } = getTargetInfoOrThrow(ctx, target);
+    const { wsRepo, repo } = await getTargetInfoOrThrow(ctx, target);
 
     const res = await runGit(["-C", wsRepo.path, "switch", branch], { cwd: ctx.dataDir });
     if (res.ok) return { branch };
@@ -500,7 +510,7 @@ export async function gitBranches(ctx: AppContext, bodyRaw: unknown): Promise<Gi
   const target = parseTarget((body as any).target);
   const fetch = Boolean((body as any).fetch);
   return withWorkspaceRepoLock({ workspaceId: target.workspaceId, dirName: target.dirName }, async () => {
-    const { wsRepo, repo } = getTargetInfoOrThrow(ctx, target);
+    const { wsRepo, repo } = await getTargetInfoOrThrow(ctx, target);
 
     if (fetch) {
       const gitEnv = await buildGitEnv({ ctx, repoUrl: repo.url, credentialId: repo.credentialId });
@@ -538,56 +548,59 @@ export async function gitBranches(ctx: AppContext, bodyRaw: unknown): Promise<Gi
 
 export async function gitStatus(ctx: AppContext, bodyRaw: unknown): Promise<GitStatusResponse> {
   const body = (bodyRaw ?? {}) as any;
-  const { wsRepo } = getTargetInfoOrThrow(ctx, body.target);
-
-  const branchRes = await runGit(["-C", wsRepo.path, "rev-parse", "--abbrev-ref", "HEAD"], { cwd: ctx.dataDir });
-  const rawBranch = branchRes.ok ? branchRes.stdout.trim() : "";
-  const detached = !rawBranch || rawBranch === "HEAD";
-  const branch = detached ? null : rawBranch;
-
-  const shaRes = await runGit(["-C", wsRepo.path, "rev-parse", "HEAD"], { cwd: ctx.dataDir });
-  const sha = shaRes.ok ? shaRes.stdout.trim() : "";
-
-  let upstream: GitStatusResponse["upstream"];
-  const upstreamRes = await runGit(["-C", wsRepo.path, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], {
-    cwd: ctx.dataDir
+  const { wsRepo } = await getTargetInfoOrThrow(ctx, body.target);
+  const status = await readRepositoryStatus({ repoPath: wsRepo.path, cwd: ctx.dataDir, untrackedFiles: "all" }).catch(() => {
+    throw new HttpError(500, "Failed to read repository status", "GIT_STATUS_FAILED");
   });
-  if (upstreamRes.ok) {
-    const upstreamName = upstreamRes.stdout.trim();
-    const aheadBehindRes = await runGit(["-C", wsRepo.path, "rev-list", "--left-right", "--count", "@{u}...HEAD"], {
-      cwd: ctx.dataDir
-    });
-    if (aheadBehindRes.ok) {
-      const parts = aheadBehindRes.stdout.trim().split(/\s+/g);
-      const behind = Number.parseInt(parts[0] || "0", 10);
-      const ahead = Number.parseInt(parts[1] || "0", 10);
-      upstream = {
-        name: upstreamName || null,
-        ahead: Number.isFinite(ahead) ? ahead : 0,
-        behind: Number.isFinite(behind) ? behind : 0
-      };
-    } else {
-      upstream = { name: upstreamName || null, ahead: 0, behind: 0 };
-    }
-  }
-
-  const stagedRes = await runGit(["-C", wsRepo.path, "diff", "--cached", "--name-only", "-z"], { cwd: ctx.dataDir });
-  const staged = stagedRes.ok ? stagedRes.stdout.split("\0").filter(Boolean).length : 0;
-  const unstagedRes = await runGit(["-C", wsRepo.path, "diff", "--name-only", "-z"], { cwd: ctx.dataDir });
-  const unstaged = unstagedRes.ok ? unstagedRes.stdout.split("\0").filter(Boolean).length : 0;
-  const untrackedRes = await runGit(["-C", wsRepo.path, "status", "--porcelain=v1", "-z", "--untracked-files=all"], {
-    cwd: ctx.dataDir
+  const upstream = await readUpstreamStatus({ repoPath: wsRepo.path, cwd: ctx.dataDir, status }).catch(() => {
+    throw new HttpError(500, "Failed to read upstream status", "GIT_STATUS_FAILED");
   });
-  const untracked = untrackedRes.ok ? parseUntrackedFromStatusZ(untrackedRes.stdout).length : 0;
-
-  return {
-    head: { branch, detached, sha },
-    upstream,
-    dirty: { staged, unstaged, untracked }
-  };
+  return { head: status.head, upstream, dirty: status.dirty };
 }
 
-function getTargetInfoOrThrow(ctx: AppContext, targetRaw: unknown) {
+/** One bounded batch, no cache or per-repository partial success state. */
+export async function gitWorkspaceStatus(
+  ctx: AppContext,
+  bodyRaw: unknown,
+  readStatus: typeof readRepositoryStatus = readRepositoryStatus
+): Promise<WorkspaceGitStatusResponse> {
+  const body = (bodyRaw ?? {}) as WorkspaceGitStatusRequest;
+  const workspaceId = typeof body.workspaceId === "string" ? body.workspaceId.trim() : "";
+  if (!workspaceId) throw new HttpError(400, "workspaceId is required");
+  const ws = getWorkspace(ctx.db, workspaceId);
+  if (!ws) throw new HttpError(404, "Workspace not found");
+  const registered = listWorkspaceRepos(ctx.db, ws.id);
+  const repos: WorkspaceGitStatusResponse["repos"] = new Array(registered.length);
+  let next = 0;
+  let failure: HttpError | undefined;
+  const worker = async () => {
+    while (!failure) {
+      const index = next++;
+      const item = registered[index];
+      if (!item) return;
+      try {
+        const { wsRepo } = await getTargetInfoOrThrow(ctx, { kind: "workspaceRepo", workspaceId, dirName: item.dirName });
+        const status = await readStatus({ repoPath: wsRepo.path, cwd: ctx.dataDir });
+        repos[index] = { repoId: item.repoId, dirName: item.dirName, head: status.head, hasChanges: status.hasChanges };
+      } catch (error) {
+        const knownReasons = ["Git status timed out", "Git status output is too large", "Invalid Git status output"];
+        const reason = error instanceof HttpError && error.code === "GIT_TARGET_INVALID"
+          ? "repository location or Git metadata is invalid"
+          : error instanceof Error && knownReasons.includes(error.message) ? error.message : "Git status failed";
+        // Use only a registered display name and a fixed reason; never forward raw Git/filesystem errors.
+        const name = item.dirName.replace(/[\x00-\x1f\x7f]/g, "").slice(0, 200);
+        failure ??= new HttpError(500, `Failed to read status for repository "${name}": ${reason}`, "GIT_WORKSPACE_STATUS_FAILED");
+      }
+    }
+  };
+  // Four local workers keep an eight-repository Workspace responsive without spawning unbounded Git processes.
+  // Await active workers even after failure, so the next poll cannot overlap this batch's remaining work.
+  await Promise.all(Array.from({ length: Math.min(4, registered.length) }, () => worker()));
+  if (failure) throw failure;
+  return { repos };
+}
+
+async function getTargetInfoOrThrow(ctx: AppContext, targetRaw: unknown) {
   const target = parseTarget(targetRaw);
   const ws = getWorkspace(ctx.db, target.workspaceId);
   if (!ws) throw new HttpError(404, "Workspace not found");
@@ -601,17 +614,17 @@ function getTargetInfoOrThrow(ctx: AppContext, targetRaw: unknown) {
   const repoPath = path.resolve(wsRepo.path);
   if (safePath !== repoPath) throw new HttpError(400, "Invalid target");
 
+  await assertWorkspaceRepoSafe(ctx, ws, wsRepo);
   return { target, ws, wsRepo, repo };
 }
 
 async function hasHeadCommit(params: { wsPath: string; dataDir: string }) {
-  const res = await runGit(["-C", params.wsPath, "rev-parse", "--verify", "HEAD"], { cwd: params.dataDir });
-  return res.ok;
+  return (await resolveHeadCommit(params)) !== null;
 }
 
 async function listStagedPaths(params: { wsPath: string; dataDir: string }) {
   const res = await runGit(["-C", params.wsPath, "diff", "--cached", "--name-only", "-z"], { cwd: params.dataDir });
-  if (!res.ok) return new Set<string>();
+  if (!res.ok) throw new HttpError(500, "Failed to inspect repository changes", "GIT_CHANGES_FAILED");
   const parts = res.stdout.split("\0").filter(Boolean);
   return new Set(parts);
 }
@@ -619,8 +632,8 @@ async function listStagedPaths(params: { wsPath: string; dataDir: string }) {
 async function listIndexTrackedPaths(params: { repoPath: string; dataDir: string; paths: string[] }) {
   const safePaths = params.paths.filter((p) => isSafePathInRepo({ repoPath: params.repoPath, rel: p }));
   if (safePaths.length === 0) return new Set<string>();
-  const res = await runGit(["-C", params.repoPath, "ls-files", "-z", "--", ...safePaths], { cwd: params.dataDir });
-  if (!res.ok) return new Set<string>();
+  const res = await runGit(["-C", params.repoPath, "--literal-pathspecs", "ls-files", "-z", "--", ...safePaths], { cwd: params.dataDir });
+  if (!res.ok) throw new HttpError(500, "Failed to inspect repository changes", "GIT_CHANGES_FAILED");
   const parts = res.stdout.split("\0").filter(Boolean);
   return new Set(parts);
 }
@@ -649,7 +662,7 @@ export async function stageWorkspace(ctx: AppContext, bodyRaw: unknown): Promise
   const target = parseTarget((body as any).target);
   return workspaceLifecycleCoordinator.withMutation(target.workspaceId, () =>
     withWorkspaceRepoLock({ workspaceId: target.workspaceId, dirName: target.dirName }, async () => {
-    const { wsRepo } = getTargetInfoOrThrow(ctx, target);
+    const { wsRepo } = await getTargetInfoOrThrow(ctx, target);
 
     const all = parseGitBool((body as any).all);
     const items = Array.isArray((body as any).items) ? ((body as any).items as any[]) : [];
@@ -663,7 +676,7 @@ export async function stageWorkspace(ctx: AppContext, bodyRaw: unknown): Promise
     if (items.length > 0) {
       const paths = collectPathspecs({ repoPath: wsRepo.path, items });
       if (paths.length === 0) return;
-      const res = await runGit(["-C", wsRepo.path, "add", "-A", "--", ...paths], { cwd: ctx.dataDir });
+      const res = await runGit(["-C", wsRepo.path, "--literal-pathspecs", "add", "-A", "--", ...paths], { cwd: ctx.dataDir });
       if (!res.ok) throw new HttpError(409, `Failed to stage changes: ${truncateGitOutput(res.stderr || res.stdout)}`);
       return;
     }
@@ -678,7 +691,7 @@ export async function unstageWorkspace(ctx: AppContext, bodyRaw: unknown): Promi
   const target = parseTarget((body as any).target);
   return workspaceLifecycleCoordinator.withMutation(target.workspaceId, () =>
     withWorkspaceRepoLock({ workspaceId: target.workspaceId, dirName: target.dirName }, async () => {
-    const { wsRepo } = getTargetInfoOrThrow(ctx, target);
+    const { wsRepo } = await getTargetInfoOrThrow(ctx, target);
 
     const all = parseGitBool((body as any).all);
     const items = Array.isArray((body as any).items) ? ((body as any).items as any[]) : [];
@@ -705,12 +718,12 @@ export async function unstageWorkspace(ctx: AppContext, bodyRaw: unknown): Promi
       if (toUnstage.length === 0) return;
 
       if (headExists) {
-        const res = await runGit(["-C", wsRepo.path, "reset", "-q", "HEAD", "--", ...toUnstage], { cwd: ctx.dataDir });
+        const res = await runGit(["-C", wsRepo.path, "--literal-pathspecs", "reset", "-q", "HEAD", "--", ...toUnstage], { cwd: ctx.dataDir });
         if (!res.ok) throw new HttpError(409, `Failed to unstage changes: ${truncateGitOutput(res.stderr || res.stdout)}`);
         return;
       }
 
-      const res = await runGit(["-C", wsRepo.path, "rm", "-r", "--cached", "--ignore-unmatch", "--", ...toUnstage], {
+      const res = await runGit(["-C", wsRepo.path, "--literal-pathspecs", "rm", "-r", "--cached", "--ignore-unmatch", "--", ...toUnstage], {
         cwd: ctx.dataDir
       });
       if (!res.ok) throw new HttpError(409, `Failed to unstage changes: ${truncateGitOutput(res.stderr || res.stdout)}`);
@@ -727,7 +740,7 @@ export async function discardWorkspace(ctx: AppContext, bodyRaw: unknown): Promi
   const target = parseTarget((body as any).target);
   return workspaceLifecycleCoordinator.withMutation(target.workspaceId, () =>
     withWorkspaceRepoLock({ workspaceId: target.workspaceId, dirName: target.dirName }, async () => {
-    const { wsRepo } = getTargetInfoOrThrow(ctx, target);
+    const { wsRepo } = await getTargetInfoOrThrow(ctx, target);
 
     const all = parseGitBool((body as any).all);
     const items = Array.isArray((body as any).items) ? ((body as any).items as any[]) : [];
@@ -759,12 +772,12 @@ export async function discardWorkspace(ctx: AppContext, bodyRaw: unknown): Promi
       const toClean = paths.filter((p) => !trackedSet.has(p));
 
       if (toClean.length > 0) {
-        const cleanRes = await runGit(["-C", wsRepo.path, "clean", "-f", "-d", "--", ...toClean], { cwd: ctx.dataDir });
+        const cleanRes = await runGit(["-C", wsRepo.path, "--literal-pathspecs", "clean", "-f", "-d", "--", ...toClean], { cwd: ctx.dataDir });
         if (!cleanRes.ok) throw new HttpError(409, `Failed to delete untracked files: ${truncateGitOutput(cleanRes.stderr || cleanRes.stdout)}`);
       }
 
       if (toRestore.length > 0) {
-        const res = await runGit(["-C", wsRepo.path, "checkout", "--", ...toRestore], { cwd: ctx.dataDir });
+        const res = await runGit(["-C", wsRepo.path, "--literal-pathspecs", "checkout", "--", ...toRestore], { cwd: ctx.dataDir });
         if (!res.ok) throw new HttpError(409, `Failed to discard changes: ${truncateGitOutput(res.stderr || res.stdout)}`);
       }
 
@@ -804,7 +817,7 @@ async function setGlobalGitIdentity(ctx: AppContext, identity: { name: string; e
 
 export async function getWorkspaceGitIdentity(ctx: AppContext, bodyRaw: unknown): Promise<GitIdentityStatus> {
   const body = (bodyRaw ?? {}) as any;
-  const { wsRepo } = getTargetInfoOrThrow(ctx, body.target);
+  const { wsRepo } = await getTargetInfoOrThrow(ctx, body.target);
 
   const [repoName, repoEmail, globalName, globalEmail] = await Promise.all([
     gitConfigGet({ cwd: ctx.dataDir, repoPath: wsRepo.path, key: "user.name" }),
@@ -831,7 +844,7 @@ export async function setWorkspaceGitIdentity(ctx: AppContext, bodyRaw: unknown)
   const target = parseTarget(body.target);
   return workspaceLifecycleCoordinator.withMutation(target.workspaceId, () =>
     withWorkspaceRepoLock({ workspaceId: target.workspaceId, dirName: target.dirName }, async () => {
-    const { wsRepo } = getTargetInfoOrThrow(ctx, target);
+    const { wsRepo } = await getTargetInfoOrThrow(ctx, target);
     const v = validateAndNormalizeGitIdentity(bodyRaw);
     if (!v) throw new HttpError(400, "Invalid identity. Expected {name,email}.", "GIT_IDENTITY_INVALID");
 
@@ -846,7 +859,7 @@ export async function commitWorkspace(ctx: AppContext, bodyRaw: unknown): Promis
   const target = parseTarget(body.target);
   return workspaceLifecycleCoordinator.withMutation(target.workspaceId, () =>
     withWorkspaceRepoLock({ workspaceId: target.workspaceId, dirName: target.dirName }, async () => {
-    const { wsRepo } = getTargetInfoOrThrow(ctx, target);
+    const { wsRepo } = await getTargetInfoOrThrow(ctx, target);
 
     const message = normalizeGitMessage(body.message);
     if (!message) throw new HttpError(400, "message is required");
@@ -908,7 +921,7 @@ export async function pushWorkspace(ctx: AppContext, bodyRaw: unknown): Promise<
   const target = parseTarget(body.target);
   return workspaceLifecycleCoordinator.withMutation(target.workspaceId, () =>
     withWorkspaceRepoLock({ workspaceId: target.workspaceId, dirName: target.dirName }, async () => {
-    const { wsRepo, repo } = getTargetInfoOrThrow(ctx, target);
+    const { wsRepo, repo } = await getTargetInfoOrThrow(ctx, target);
 
     const gitEnv = await buildGitEnv({ ctx, repoUrl: repo.url, credentialId: repo.credentialId });
     const remote = normalizeGitRefLike(body.remote) || "origin";
@@ -973,7 +986,7 @@ export async function pullWorkspace(ctx: AppContext, bodyRaw: unknown): Promise<
   const target = parseTarget(body.target);
   return workspaceLifecycleCoordinator.withMutation(target.workspaceId, () =>
     withWorkspaceRepoLock({ workspaceId: target.workspaceId, dirName: target.dirName }, async () => {
-    const { wsRepo, repo } = getTargetInfoOrThrow(ctx, target);
+    const { wsRepo, repo } = await getTargetInfoOrThrow(ctx, target);
 
     const gitEnv = await buildGitEnv({ ctx, repoUrl: repo.url, credentialId: repo.credentialId });
     try {

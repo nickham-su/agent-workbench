@@ -63,6 +63,15 @@ export async function createApp(ctx: AppContext) {
   });
 
   app.setErrorHandler((err, _req, reply) => {
+    // A failed stream may have prepared download headers without sending a body.
+    // Reset them before sending JSON so Fastify does not treat the object as bytes.
+    if (!reply.raw.headersSent) {
+      reply.removeHeader("Content-Disposition");
+      reply.removeHeader("Content-Length");
+      reply.raw.removeHeader("Content-Disposition");
+      reply.raw.removeHeader("Content-Length");
+      reply.type("application/json; charset=utf-8");
+    }
     if (isHttpError(err)) {
       return reply.code(err.statusCode).send({ message: err.message, code: err.code });
     }
@@ -89,9 +98,16 @@ export async function createApp(ctx: AppContext) {
   await registerPluginsModule(app, ctx);
   await registerGitModule(app, ctx);
   await registerFilesModule(app, ctx);
-  await registerAgentModule(app, ctx);
-  await registerGitEnvModule(app, ctx);
-  await registerWebUi(app, ctx);
+  try {
+    // Lease routes/cleanup are present before Agent startup can resume deletion.
+    await registerGitEnvModule(app, ctx);
+    await registerAgentModule(app, ctx);
+    await registerWebUi(app, ctx);
+  } catch (error) {
+    // Agent startup can fail after Analytics and other owned resources started.
+    await app.close().catch(() => undefined);
+    throw error;
+  }
 
   return app;
 }

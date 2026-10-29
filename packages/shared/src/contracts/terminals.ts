@@ -10,6 +10,7 @@ export const TerminalRecordSchema = Type.Object(
   {
     id: Type.String(),
     workspaceId: Type.String(),
+    configId: Type.Optional(Type.Union([Type.String(), Type.Null()])),
     sessionName: Type.String(),
     status: TerminalStatusSchema,
     createdAt: Type.Number(),

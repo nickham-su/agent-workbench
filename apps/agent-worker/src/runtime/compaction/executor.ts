@@ -4,6 +4,7 @@ import { ApiConflictError, InternalRpcHttpError, InternalRpcInvalidResponseError
 import { computeRetryBackoffMs, normalizeModelRequestMaxRetries } from "../retry-backoff.js";
 import { estimateCompactionSummaryText } from "./estimator-v1.js";
 import { computeCompactionProfileFingerprint, planCompaction } from "./planner.js";
+import { CompactionSourceInvariantError } from "./source-block-invariants.js";
 import { summaryInputToModelMessages } from "./summary-input-to-model-messages.js";
 import {
   CompactionPlanningError,
@@ -45,6 +46,7 @@ export class CompactionNoticeFenceLostError extends Error {
 
 export type CompactionExecutorDependencies = {
   apiClient: Pick<AgentApiClient, "getExecutionProfile" | "getCompactionSource" | "commitCompactionWithTerminalIntent" | "confirmCompactionCommit">;
+  logger?: Pick<Console, "warn">;
   nowMs?: () => number;
   /** Test seam only; overrides the mode-resolved compaction deadline. */
   workDeadlineMsByMode?: Partial<Record<CompactionMode, number>>;
@@ -185,7 +187,7 @@ export class CompactionExecutor {
           if (error instanceof CompactionWorkDeadlineExceededError) return { kind: "unavailable", reason: "deadline" };
           if (deadlineController.signal.aborted || (deadline != null && this.nowMs() >= deadline)) return { kind: "unavailable", reason: "deadline" };
           if (error instanceof CompactionNoticeFenceLostError) throw error;
-          if (error instanceof CompactionPlanningError) return { kind: "failed", reason: "data_invariant" };
+          if (error instanceof CompactionPlanningError) return this.dataInvariantFailure(error, params);
           if (error instanceof CompactionRetryNoticeWriteError) return { kind: "failed", reason: "control" };
           return { kind: "failed", reason: "provider" };
         }
@@ -251,7 +253,7 @@ export class CompactionExecutor {
             if (!commitAttempted && error instanceof CompactionWorkDeadlineExceededError) {
               return { kind: "unavailable", reason: "deadline" };
             }
-            return { kind: "failed", reason: this.isControlError(error) ? "control" : "data_invariant" };
+            return this.isControlError(error) ? { kind: "failed", reason: "control" } : this.dataInvariantFailure(error, params);
           }
           const stop = stopAfterNonCommit();
           if (stop) return stop;
@@ -265,13 +267,31 @@ export class CompactionExecutor {
         return { kind: "unavailable", reason: "deadline" };
       }
       if (error instanceof CompactionNoticeFenceLostError) throw error;
-      if (error instanceof CompactionPlanningError) return { kind: "failed", reason: "data_invariant" };
+      if (error instanceof CompactionPlanningError) return this.dataInvariantFailure(error, params);
       if (this.isTransientControlError(error)) return { kind: "unavailable", reason: "transient" };
-      return { kind: "failed", reason: this.isControlError(error) ? "control" : "data_invariant" };
+      return this.isControlError(error) ? { kind: "failed", reason: "control" } : this.dataInvariantFailure(error, params);
     } finally {
       if (deadlineTimer) clearTimeout(deadlineTimer);
       params.abortSignal.removeEventListener("abort", abortForCallerCancellation);
     }
+  }
+
+  private dataInvariantFailure(error: unknown, context: { sessionId: string; runId: string }): CompactionExecutionResult {
+    // Only controlled reason codes are logged. Error messages and source metadata
+    // may contain user content, replay state or provider credentials.
+    let invariant = "unknown_invariant";
+    if (error instanceof CompactionSourceInvariantError) {
+      invariant = error.diagnosticCode === "replay_protocol_invalid" || error.diagnosticCode === "replay_part_mismatch"
+        ? error.diagnosticCode : "source_invariant";
+    } else if (error instanceof CompactionPlanningError) {
+      invariant = "planning_invariant";
+    }
+    try {
+      this.dependencies.logger?.warn(`[agent-worker] compaction failed: reason=data_invariant invariant=${invariant} session=${JSON.stringify(context.sessionId)} run=${JSON.stringify(context.runId)}`);
+    } catch {
+      // Diagnostic failures must not change compaction's terminal classification.
+    }
+    return { kind: "failed", reason: "data_invariant" };
   }
 
   private workDeadlineMs(mode: CompactionMode, profile: ExecutionProfile) {

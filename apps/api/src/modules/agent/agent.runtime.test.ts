@@ -142,6 +142,7 @@ function promptContext() {
     pendingTools: [],
     lastResponseTotalTokens: null,
     uiLocale: null,
+    workspaceRepoNames: [],
     externalSkills: [],
   };
 }

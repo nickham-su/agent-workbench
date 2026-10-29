@@ -1,4 +1,12 @@
+import type { ReorderTerminalConfigsRequest, TerminalConfigInput, TerminalConfigRecord, UpdateTerminalConfigRequest } from "@agent-workbench/shared";
 import axios from "axios";
+import { Value } from "@sinclair/typebox/value";
+import {
+  WorkspaceEnvironmentVariableSchema, WorkspaceEnvironmentVariablesSchema,
+  validateWorkspaceEnvironmentCollection,
+  type WorkspaceEnvironmentVariable, type CreateWorkspaceEnvironmentVariableRequest,
+  type UpdateWorkspaceEnvironmentVariableRequest
+} from "@agent-workbench/shared";
 import type {
   AuthLoginRequest,
   AuthLoginResponse,
@@ -23,6 +31,8 @@ import type {
   FileWriteResponse,
   WorkspaceFileCreateRequest,
   WorkspaceFileDeleteRequest,
+  WorkspaceFileExtractRequest,
+  WorkspaceFileExtractResponse,
   WorkspaceFileListRequest,
   WorkspaceFileMkdirRequest,
   WorkspaceFileReadRequest,
@@ -64,6 +74,8 @@ import type {
   GitStageRequest,
   GitStatusRequest,
   GitStatusResponse,
+  WorkspaceGitStatusRequest,
+  WorkspaceGitStatusResponse,
   GitTarget,
   GitUnstageRequest,
   NetworkSettings,
@@ -425,6 +437,81 @@ export async function deleteWorkspace(workspaceId: string) {
   }
 }
 
+/** Sensitive responses stay in caller memory; errors never retain axios config/body. */
+const WORKSPACE_ENV_ERROR_CODES = new Set([
+  "WORKSPACE_ENV_INVALID_INPUT", "WORKSPACE_ENV_RESERVED_NAME", "WORKSPACE_ENV_LIMIT_EXCEEDED",
+  "WORKSPACE_NOT_FOUND", "WORKSPACE_ENV_VARIABLE_NOT_FOUND", "WORKSPACE_ENV_NAME_CONFLICT",
+  "WORKSPACE_DELETING", "WORKSPACE_ENV_INVALID_CONFIG", "WORKSPACE_ENV_DECRYPT_FAILED",
+  "WORKSPACE_ENV_PERSIST_FAILED", "WORKSPACE_ENV_UNAVAILABLE", "WORKSPACE_ENV_RESPONSE_INVALID"
+]);
+
+function workspaceEnvironmentError(error: unknown): ApiError {
+  const status = error instanceof ApiError ? error.status : axios.isAxiosError(error) ? error.response?.status : undefined;
+  const code = error instanceof ApiError ? error.code : axios.isAxiosError(error) ? error.response?.data?.code : undefined;
+  return new ApiError({
+    message: "Workspace environment request failed.", status,
+    code: typeof code === "string" && WORKSPACE_ENV_ERROR_CODES.has(code) ? code : "WORKSPACE_ENV_REQUEST_FAILED"
+  });
+}
+
+function checkWorkspaceEnvironmentRows(data: unknown, workspaceId: string): WorkspaceEnvironmentVariable[] {
+  if (!Value.Check(WorkspaceEnvironmentVariablesSchema, data) ||
+      data.some((row) => row.workspaceId !== workspaceId) ||
+      new Set(data.map((row) => row.id)).size !== data.length ||
+      new Set(data.map((row) => row.name)).size !== data.length ||
+      validateWorkspaceEnvironmentCollection(data)) {
+    throw new ApiError({ message: "Workspace environment response is invalid.", code: "WORKSPACE_ENV_RESPONSE_INVALID" });
+  }
+  return data;
+}
+
+function checkWorkspaceEnvironmentRow(data: unknown, workspaceId: string, variableId?: string): WorkspaceEnvironmentVariable {
+  if (!Value.Check(WorkspaceEnvironmentVariableSchema, data) || (variableId !== undefined && data.id !== variableId)) {
+    throw new ApiError({ message: "Workspace environment response is invalid.", code: "WORKSPACE_ENV_RESPONSE_INVALID" });
+  }
+  return checkWorkspaceEnvironmentRows([data], workspaceId)[0]!;
+}
+
+const environmentPath = (workspaceId: string) => `/workspaces/${encodeURIComponent(workspaceId)}/environment-variables`;
+const environmentVariablePath = (workspaceId: string, variableId: string) => `${environmentPath(workspaceId)}/${encodeURIComponent(variableId)}`;
+type WorkspaceEnvironmentRequestOptions = { signal?: AbortSignal };
+const environmentRequestConfig = (options: WorkspaceEnvironmentRequestOptions) => ({ signal: options.signal, timeout: 15_000 });
+
+export async function listWorkspaceEnvironmentVariables(workspaceId: string, options: WorkspaceEnvironmentRequestOptions = {}) {
+  try {
+    const response = await client.get(environmentPath(workspaceId), environmentRequestConfig(options));
+    return checkWorkspaceEnvironmentRows(response.data, workspaceId);
+  } catch (error) { throw workspaceEnvironmentError(error); }
+}
+
+export async function createWorkspaceEnvironmentVariable(workspaceId: string, body: CreateWorkspaceEnvironmentVariableRequest, options: WorkspaceEnvironmentRequestOptions = {}) {
+  try {
+    const response = await client.post(environmentPath(workspaceId), body, environmentRequestConfig(options));
+    return checkWorkspaceEnvironmentRow(response.data, workspaceId);
+  } catch (error) { throw workspaceEnvironmentError(error); }
+}
+
+export async function updateWorkspaceEnvironmentVariable(workspaceId: string, variableId: string, body: UpdateWorkspaceEnvironmentVariableRequest, options: WorkspaceEnvironmentRequestOptions = {}) {
+  try {
+    const response = await client.patch(environmentVariablePath(workspaceId, variableId), body, environmentRequestConfig(options));
+    return checkWorkspaceEnvironmentRow(response.data, workspaceId, variableId);
+  } catch (error) { throw workspaceEnvironmentError(error); }
+}
+
+export async function setWorkspaceEnvironmentVariableEnabled(workspaceId: string, variableId: string, enabled: boolean, options: WorkspaceEnvironmentRequestOptions = {}) {
+  try {
+    const response = await client.put(`${environmentVariablePath(workspaceId, variableId)}/enabled`, { enabled }, environmentRequestConfig(options));
+    return checkWorkspaceEnvironmentRow(response.data, workspaceId, variableId);
+  } catch (error) { throw workspaceEnvironmentError(error); }
+}
+
+export async function deleteWorkspaceEnvironmentVariable(workspaceId: string, variableId: string, options: WorkspaceEnvironmentRequestOptions = {}) {
+  try {
+    const response = await client.delete(environmentVariablePath(workspaceId, variableId), environmentRequestConfig(options));
+    if (response.status !== 204) throw new ApiError({ message: "Workspace environment response is invalid.", code: "WORKSPACE_ENV_RESPONSE_INVALID" });
+  } catch (error) { throw workspaceEnvironmentError(error); }
+}
+
 export async function attachWorkspaceRepo(workspaceId: string, body: AttachWorkspaceRepoRequest) {
   try {
     const res = await client.post<WorkspaceDetail>(`/workspaces/${workspaceId}/repos`, body);
@@ -638,6 +725,15 @@ export async function getGitStatus(body: GitStatusRequest) {
   }
 }
 
+export async function getWorkspaceGitStatus(body: WorkspaceGitStatusRequest) {
+  try {
+    const res = await client.post<WorkspaceGitStatusResponse>("/git/workspace-status", body);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
 export async function getWorkspaceGitIdentity(body: GitIdentityStatusRequest) {
   try {
     const res = await client.post<GitIdentityStatus>("/git/identity/status", body);
@@ -836,6 +932,16 @@ export async function deleteWorkspacePath(params: { workspaceId: string } & Work
   }
 }
 
+export async function extractWorkspaceArchive(params: { workspaceId: string } & WorkspaceFileExtractRequest) {
+  try {
+    const { workspaceId, ...body } = params;
+    const res = await client.post<WorkspaceFileExtractResponse>(`/workspaces/${encodeURIComponent(workspaceId)}/files/extract`, body);
+    return res.data;
+  } catch (err) {
+    throw toApiError(err);
+  }
+}
+
 export async function uploadWorkspaceFiles(params: { workspaceId: string; dir: string; files: File[] }) {
   try {
     const { workspaceId, dir, files } = params;
@@ -850,6 +956,16 @@ export async function uploadWorkspaceFiles(params: { workspaceId: string; dir: s
   } catch (err) {
     throw toApiError(err);
   }
+}
+
+/** Native media elements use same-origin session cookies and HTTP Range, not Axios/Blob. */
+export function getWorkspaceMediaUrl(params: { workspaceId: string; path: string }) {
+  return client.getUri({ url: `/workspaces/${encodeURIComponent(params.workspaceId)}/files/media`, params: { path: params.path } });
+}
+
+/** Let the browser stream downloads directly rather than retaining a large Blob in memory. */
+export function getWorkspaceDownloadUrl(params: { workspaceId: string; path: string }) {
+  return client.getUri({ url: `/workspaces/${encodeURIComponent(params.workspaceId)}/files/download`, params: { path: params.path } });
 }
 
 export async function downloadWorkspacePath(params: { workspaceId: string; path: string }) {
@@ -1292,4 +1408,30 @@ export async function revertAgentSession(sessionId: string, body: AgentRevertSes
   } catch (err) {
     throw toApiError(err);
   }
+}
+
+
+export async function listTerminalConfigs(workspaceId: string) {
+  try { return (await client.get<TerminalConfigRecord[]>(`/workspaces/${workspaceId}/terminal-configs`)).data; }
+  catch (err) { throw toApiError(err); }
+}
+export async function reorderTerminalConfigs(workspaceId: string, body: ReorderTerminalConfigsRequest) {
+  try { await client.put(`/workspaces/${workspaceId}/terminal-configs/order`, body); }
+  catch (err) { throw toApiError(err); }
+}
+export async function createTerminalConfig(workspaceId: string, body: TerminalConfigInput) {
+  try { return (await client.post<TerminalConfigRecord>(`/workspaces/${workspaceId}/terminal-configs`, body)).data; }
+  catch (err) { throw toApiError(err); }
+}
+export async function updateTerminalConfig(workspaceId: string, configId: string, body: UpdateTerminalConfigRequest) {
+  try { return (await client.patch<TerminalConfigRecord>(`/workspaces/${workspaceId}/terminal-configs/${configId}`, body)).data; }
+  catch (err) { throw toApiError(err); }
+}
+export async function deleteTerminalConfig(workspaceId: string, configId: string) {
+  try { await client.delete(`/workspaces/${workspaceId}/terminal-configs/${configId}`); }
+  catch (err) { throw toApiError(err); }
+}
+export async function runTerminalConfig(workspaceId: string, configId: string) {
+  try { return (await client.post<TerminalRecord>(`/workspaces/${workspaceId}/terminal-configs/${configId}/run`)).data; }
+  catch (err) { throw toApiError(err); }
 }

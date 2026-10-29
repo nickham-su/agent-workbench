@@ -1,6 +1,14 @@
 import type { AnalyticsComparisonResult, AnalyticsPartialReason, AnalyticsUnavailableReason } from "@agent-workbench/shared";
 
 export function formatCount(value: number | null | undefined, locale = "zh-CN") { return value == null ? "—" : new Intl.NumberFormat(locale).format(value); }
+
+/** Keep Token card values compact without changing stored counts or detail views. */
+export function formatTokenCount(value: number | null | undefined, locale = "zh-CN") {
+  if (value == null || value < 1_000) return formatCount(value, locale);
+  const magnitude = value >= 1e9 ? 1e9 : value >= 1e6 ? 1e6 : 1e3;
+  const suffix = magnitude === 1e9 ? "B" : magnitude === 1e6 ? "M" : "K";
+  return `${new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(value / magnitude)}${suffix}`;
+}
 export function formatRatio(value: number | null | undefined, locale = "zh-CN") { return value == null ? "—" : new Intl.NumberFormat(locale, { style: "percent", maximumFractionDigits: 1 }).format(value); }
 export function formatDuration(value: number | null | undefined) { if (value == null) return "—"; if (value < 60_000) return formatChartDuration(value); const minutes = Math.floor(value / 60_000); return minutes >= 60 ? `${Math.floor(minutes / 60)}h ${minutes % 60}m` : `${minutes}m`; }
 

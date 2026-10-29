@@ -11,6 +11,8 @@
         :selected-node="selectedNode"
         :can-rename-delete="canRenameDelete"
         :can-open-preview="canPreviewSelectedNode"
+        :can-extract="canExtractSelectedNode"
+        :extracting="extracting"
         :show-repo-path-action="showRepoPathAction"
         :show-workspace-path-action="showWorkspacePathAction"
         :refresh-root="refreshAll"
@@ -66,10 +68,12 @@ import type { FileEntry } from "@agent-workbench/shared";
 import FileExplorerTree from "./components/FileExplorerTree.vue";
 import type { TreeNode } from "./types";
 import { canOpenWorkspacePreview, getWorkspacePreviewTarget, openWorkspacePreview, type PreviewDocument } from "./preview";
+import { canExtractWorkspaceArchive, createArchiveExtractionController } from "./extraction";
 import {
   createWorkspaceFile,
   deleteWorkspacePath,
   downloadWorkspacePath,
+  extractWorkspaceArchive,
   listWorkspaceFiles,
   mkdirWorkspacePath,
   renameWorkspacePath,
@@ -133,6 +137,20 @@ type SimpleInputRef = { focus?: () => void; select?: () => void };
 const createNameInputRef = ref<SimpleInputRef | null>(null);
 const renameNameInputRef = ref<SimpleInputRef | null>(null);
 const selectedNode = ref<TreeNode | null>(null);
+const extracting = ref(false);
+const canExtractSelectedNode = computed(() => canExtractWorkspaceArchive(selectedNode.value));
+const extraction = createArchiveExtractionController({
+  getScope: () => ({ workspaceId: props.workspaceId, scope: scopeSeq }),
+  request: extractWorkspaceArchive,
+  refresh: (target) => loadDir(target.dir),
+  setBusy: (busy) => { extracting.value = busy; },
+  loading: (key) => { message.loading({ content: t("files.extract.extracting"), key, duration: 0 }); },
+  destroyLoading: (key) => { message.destroy(key); },
+  notify: ({ kind, key }) => { message[kind](t(key)); }
+});
+
+// Invalidate synchronously, even if an old response resolves before the tree's async scope watcher runs.
+watch(() => props.workspaceId, () => extraction.invalidate(), { flush: "sync" });
 
 const canRenameDelete = computed(() => {
   const rel = selectedNode.value?.data.path ?? "";
@@ -624,6 +642,7 @@ function onContextMenuClick(info: { key: string }) {
     host.emitToolEvent("search", { type: "search.prefillPath", payload: { path }, sourceToolId: props.toolId });
     return;
   }
+  if (key === "extract") return void extraction.extract(selectedNode.value);
   if (key === "download") return void downloadSelected();
   if (key === "preview") return openSelectedPreview();
   if (key === "newFile") return openCreateModal("file");
@@ -860,6 +879,8 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  extraction.dispose();
+  scopeSeq += 1;
   unregisterRefresh?.();
   unregisterRefresh = null;
 });

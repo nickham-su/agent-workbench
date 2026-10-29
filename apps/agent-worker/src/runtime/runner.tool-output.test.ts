@@ -8,6 +8,8 @@ import { promisify } from "node:util";
 import test, { after } from "node:test";
 import {
   AgentRunner,
+  ControlWritePermanentError,
+  FencedWriteIgnoredError,
   buildProviderOptionsWithPromptCacheKeyForTest,
   buildToolExecutionBatchesForTest,
   executeToolForTest,
@@ -120,6 +122,7 @@ function testPromptContext() {
     messages: [],
     lastResponseTotalTokens: null,
     uiLocale: null,
+    workspaceRepoNames: [],
     externalSkills: [],
   };
 }
@@ -501,7 +504,7 @@ test("pending 预检禁用 writeback 期间取消时不发布 artifact", async (
         profile: { agent: { tools: ["bash"], pluginTools: [] } },
         run: { workspaceId: "ws", sessionId: "session", runId: "run", workspacePath: ${JSON.stringify(workspacePath)}, workspaceRepoDirNames: [] },
         context: { pendingTools: [{ toolExecutionId: "execution-15", callPartId: "part-15", assistantMessageId: "message-15", status: "queued", toolName: "bash", toolCallId: "call_policy_abort", args: {} }], tools: [], headMessageId: null,
-    sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, externalSkills: [] },
+    sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, workspaceRepoNames: [], externalSkills: [] },
         availableToolNames: new Set(["bash"]), signal: controller.signal
       });
     `;
@@ -534,7 +537,7 @@ test("running recovery writeback 期间取消时不发布 artifact", async () =>
         profile: { agent: { tools: ["bash"], pluginTools: [] } },
         run: { workspaceId: "ws", sessionId: "session", runId: "run", workspacePath: ${JSON.stringify(workspacePath)}, workspaceRepoDirNames: [] },
         context: { pendingTools: [{ toolExecutionId: "execution-16", callPartId: "part-16", assistantMessageId: "message-16", status: "running", toolName: "bash", toolCallId: "call_recovery_abort", args: {} }], tools: [], headMessageId: null,
-    sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, externalSkills: [] },
+    sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, workspaceRepoNames: [], externalSkills: [] },
         availableToolNames: new Set(["bash"]), signal: controller.signal
       });
     `;
@@ -567,7 +570,7 @@ test("pending 预检禁用 failed writeback 失败时额外发布 runtime artifa
           profile: { agent: { tools: ["bash"], pluginTools: [] } },
           run: { workspaceId: "ws", sessionId: "session", runId: "run", workspacePath: ${JSON.stringify(workspacePath)}, workspaceRepoDirNames: [] },
           context: { pendingTools: [{ toolExecutionId: "execution-17", callPartId: "part-17", assistantMessageId: "message-17", status: "queued", toolName: "bash", toolCallId: "call_policy_writeback", args: {} }], tools: [], headMessageId: null,
-    sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, externalSkills: [] },
+    sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, workspaceRepoNames: [], externalSkills: [] },
           availableToolNames: new Set(["bash"]), signal: new AbortController().signal
         });
       } catch {}
@@ -635,7 +638,7 @@ test("running ToolExecution 不由 Worker 恢复执行、写回或发布 artifac
         profile: { agent: { tools: ["bash"], pluginTools: [] } },
         run: { workspaceId: "ws", sessionId: "session", runId: "run", workspacePath: ${JSON.stringify(workspacePath)}, workspaceRepoDirNames: [] },
         context: { pendingTools: [{ toolExecutionId: "execution-18", callPartId: "part-18", assistantMessageId: "message-18", status: "running", toolName: "bash", toolCallId: "call_recovery_writeback", args: {} }], tools: [], headMessageId: null,
-    sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, externalSkills: [] },
+    sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, workspaceRepoNames: [], externalSkills: [] },
         availableToolNames: new Set(["bash"]), signal: new AbortController().signal
       });
       if (writes !== 0) throw new Error(\`unexpected writes: \${writes}\`);
@@ -861,6 +864,57 @@ test("executePendingTools 忽略遗留 running 工具，不重放也不伪造失
   });
 });
 
+test("成功结果时间与 completedAt 一致，写回重试不重新执行或采集时间", async () => {
+  await withTempWorkspace(async (workspacePath) => {
+    const completedAt = Date.parse("2026-05-20T08:30:12.345Z");
+    const updates: Array<{ status: string; resultPreview?: string; completedAt?: number }> = [];
+    let clockCalls = 0;
+    let providerCalls = 0;
+    let retrySleeps = 0;
+    let completedAttempts = 0;
+    const runner = new AgentRunner({
+      async updateToolExecution(input: { status: string; resultPreview?: string; completedAt?: number }) {
+        updates.push(input);
+        if (input.status === "completed" && ++completedAttempts === 1) {
+          throw new InternalRpcHttpError({ status: 503, method: "POST", endpoint: "/fixture/writeback" });
+        }
+        return { result: "updated" };
+      },
+    } as any, {} as any, { info() {}, warn() {}, error() {} }, 1, {
+      nowMs: () => {
+        assert.equal(providerCalls, 1, "sample only after the provider returns");
+        return completedAt + clockCalls++;
+      },
+      controlWriteSleep: async () => { retrySleeps++; return true; },
+    });
+    (runner as any).toolRegistry = {
+      async isToolEnabled() { return true; },
+      async execute() { providerCalls++; return { content: "fixture output", actualStart: 1, actualEnd: 1 }; },
+    };
+
+    await executeToolForTest(runner, {
+      profile: testProfile("read"), run: testRun(workspacePath),
+      tool: pendingTool({ executionId: "execution-time", toolName: "read", args: { filePath: "fixture.txt" } }),
+      parentSessionId: "sess_baseline", signal: new AbortController().signal,
+      promptContext: testPromptContext(),
+    });
+
+    assert.equal(providerCalls, 1);
+    assert.equal(clockCalls, 1);
+    assert.equal(retrySleeps, 1);
+    const completedUpdates = updates.filter((update) => update.status === "completed");
+    assert.equal(completedUpdates.length, 2);
+    assert.strictEqual(completedUpdates[0], completedUpdates[1], "retry reuses the same request");
+    assert.equal(completedUpdates[0].completedAt, completedAt);
+    assert.equal(completedUpdates[0].resultPreview,
+      "tool: read\nstatus: completed\ncompleted_at: 2026-05-20T08:30:12.345Z\nsource: fixture.txt\nrange: 1-1\n\nfixture output");
+    for (const update of updates.filter((update) => update.status !== "completed")) {
+      assert.equal(update.completedAt, undefined);
+      assert.equal(Boolean(update.resultPreview?.includes("completed_at:")), false);
+    }
+  });
+});
+
 for (const toolName of ["read", "bash", "plugin_fixture"] as const) test(`普通工具 ${toolName} completed writeback 不保留 structuredResult`, async () => {
   await withTempWorkspace(async (workspacePath) => {
     const updates: Array<{
@@ -1014,7 +1068,7 @@ test("启用既有 Debug Dump 时失败仍只写 .debug，不生成未实现的 
         parentSessionId: "sess_debug",
         signal: new AbortController().signal,
         promptContext: { pendingTools: [], tools: [], headMessageId: null,
-    sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, externalSkills: [] }
+    sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, workspaceRepoNames: [], externalSkills: [] }
       });
     `;
     await execFileAsync(
@@ -1359,6 +1413,7 @@ test("subtask executeTool 成功时 completed output 保留完整长文本且无
       resultArtifactPath?: string;
     }> = [];
     const longText = "R".repeat(9_500);
+    const completedAt = Date.parse("2026-05-20T08:30:12.345Z");
     const apiClient = {
       async updateToolExecution(input: {
         status?: string;
@@ -1403,6 +1458,7 @@ test("subtask executeTool 成功时 completed output 保留完整长文本且无
       {} as any,
       { info() {}, warn() {}, error() {} },
       1,
+      { nowMs: () => completedAt },
     );
     (runner as any).processRun = async () => {};
 
@@ -1461,7 +1517,7 @@ test("subtask executeTool 成功时 completed output 保留完整长文本且无
     } as Record<string, unknown>;
     assert.equal(
       output.text,
-      `tool: subtask\nstatus: completed\nsubtask_session_id: sub_succ\n\n${longText}`,
+      `tool: subtask\nstatus: completed\ncompleted_at: 2026-05-20T08:30:12.345Z\nsubtask_session_id: sub_succ\n\n${longText}`,
     );
     assert.equal(output.textTruncated, undefined);
     assert.equal(output.textArtifactPath, undefined);
@@ -1600,6 +1656,154 @@ test("subtask executeTool 失败时 failed output 保留错误状态与完整结
     });
   });
 });
+
+for (const session of [
+  { mode: "new" },
+  { mode: "fork" },
+  { mode: "existing", sessionId: "existing-child" },
+  { mode: "fork", sourceSessionId: "source" },
+]) {
+  for (const failAt of ["start", "nested", "status", "result", "frozen", "timeout"] as const) {
+    test(`subtask ${JSON.stringify(session)} ${failAt} failure writes the known Child identity without changing execution semantics`, async () => {
+      await withTempWorkspace(async (workspacePath) => {
+        const updates: Array<{ status?: string; resultPreview?: string; structuredResult?: unknown; error?: string }> = [];
+        const failure = new Error(`failure at ${failAt}`);
+        if (failAt === "frozen") Object.freeze(failure);
+        let nestedCalls = 0;
+        let resultCalls = 0;
+        const runner = new AgentRunner({
+          async updateToolExecution(input: (typeof updates)[number]) {
+            updates.push(input);
+            return { result: "updated" };
+          },
+          async getSubtaskPreforkPlan() { return { shouldPrefork: false }; },
+          async startSubtaskRun() {
+            if (failAt === "start") throw failure;
+            return { sessionId: "known-child", runId: "child-run", workspacePath, agentName: "Child",
+              reused: failAt === "timeout", sourceSessionId: "source" };
+          },
+          async getSubtaskStatus() {
+            if (failAt === "status") throw failure;
+            return { status: failAt === "timeout" ? "running" : "completed" };
+          },
+          async getSubtaskResult() {
+            resultCalls++;
+            if (failAt === "result") throw failure;
+            return { resultText: "unused result" };
+          },
+        } as any, {} as any, { info() {}, warn() {}, error() {} }, 1);
+        (runner as any).processRun = async () => {
+          nestedCalls++;
+          if (failAt === "nested" || failAt === "frozen") throw failure;
+        };
+        const previousTimeout = process.env.AWB_SUBTASK_REUSED_WAIT_TIMEOUT_MS;
+        const previousPoll = process.env.AWB_SUBTASK_REUSED_POLL_INTERVAL_MS;
+        if (failAt === "timeout") {
+          process.env.AWB_SUBTASK_REUSED_WAIT_TIMEOUT_MS = "1";
+          process.env.AWB_SUBTASK_REUSED_POLL_INTERVAL_MS = "1";
+        }
+        try {
+          await executeToolForTest(runner, {
+            profile: testProfile("subtask"), run: testRun(workspacePath),
+            tool: pendingTool({ executionId: "subtask-failure", toolName: "subtask", args: {
+              description: "child", prompt: "do work", agentId: "child-agent", session,
+            } }),
+            parentSessionId: "sess_baseline", signal: new AbortController().signal, promptContext: testPromptContext(),
+          });
+        } finally {
+          if (previousTimeout === undefined) delete process.env.AWB_SUBTASK_REUSED_WAIT_TIMEOUT_MS;
+          else process.env.AWB_SUBTASK_REUSED_WAIT_TIMEOUT_MS = previousTimeout;
+          if (previousPoll === undefined) delete process.env.AWB_SUBTASK_REUSED_POLL_INTERVAL_MS;
+          else process.env.AWB_SUBTASK_REUSED_POLL_INTERVAL_MS = previousPoll;
+        }
+        const failed = latestUpdate(updates, "failed");
+        assert.ok(failed);
+        assert.match(failed.resultPreview ?? "", /^tool: subtask\nstatus: failed\n/);
+        assert.ok(failed.resultPreview?.includes(failed.error!));
+        if (failAt === "start") {
+          assert.doesNotMatch(failed.resultPreview ?? "", /subtask_session_id|source_session_id/);
+          assert.equal(failed.structuredResult, undefined);
+        } else {
+          const sourceMetadata = "sourceSessionId" in session ? { sourceSessionId: "source" } : {};
+          assert.deepEqual(failed.structuredResult, { subtaskSessionId: "known-child", ...sourceMetadata });
+          assert.match(failed.resultPreview ?? "", /subtask_session_id: known-child/);
+          if ("sourceSessionId" in session) assert.match(failed.resultPreview ?? "", /source_session_id: "source"/);
+          else assert.doesNotMatch(failed.resultPreview ?? "", /source_session_id/);
+        }
+        if (failAt === "timeout") {
+          assert.match(failed.error ?? "", /reused-child wait timed out.*child may still be running and was not modified/);
+          assert.equal(nestedCalls, 0);
+          assert.equal(resultCalls, 0);
+        } else {
+          assert.equal(failed.error, failure.message);
+        }
+        if (failAt === "frozen") {
+          assert.equal(Object.isFrozen(failure), true);
+          assert.equal(Object.hasOwn(failure, "subtaskSessionId"), false);
+        }
+      });
+    });
+  }
+}
+
+for (const rejection of ["fence", "permanent"] as const) {
+  test(`subtask started: provider running ${rejection} rejection propagates without failed writeback or Child execution`, async () => {
+    await withTempWorkspace(async (workspacePath) => {
+      const updates: Array<{ status?: string; structuredResult?: unknown }> = [];
+      const rpcError = new InternalRpcHttpError({ status: 403, method: "POST", endpoint: "/fixture/provider-running" });
+      let startCalls = 0;
+      let nestedCalls = 0;
+      let queryCalls = 0;
+      let retrySleeps = 0;
+      const runner = new AgentRunner({
+        async updateToolExecution(input: (typeof updates)[number]) {
+          updates.push(input);
+          if (updates.length === 2) {
+            assert.equal(startCalls, 1);
+            assert.equal(input.status, "running");
+            assert.equal((input.structuredResult as { subtaskSessionId: string }).subtaskSessionId, "known-child");
+            if (rejection === "fence") return { result: "ignored" };
+            throw rpcError;
+          }
+          return { result: "updated" };
+        },
+        async startSubtaskRun() {
+          startCalls++;
+          return { sessionId: "known-child", runId: "child-run", workspacePath, agentName: "Child", reused: false };
+        },
+        async getSubtaskStatus() { queryCalls++; return { status: "completed" }; },
+        async getSubtaskResult() { queryCalls++; return { resultText: "unexpected result" }; },
+      } as any, {} as any, { info() {}, warn() {}, error() {} }, 1, {
+        controlWriteSleep: async () => { retrySleeps++; return false; },
+      });
+      (runner as any).processRun = async () => { nestedCalls++; };
+
+      await assert.rejects(executeToolSafelyForTest(runner, {
+        profile: testProfile("subtask"), run: testRun(workspacePath),
+        tool: pendingTool({ executionId: "subtask-running-rejected", toolName: "subtask", args: {
+          description: "child", prompt: "do work", agentId: "child-agent", session: { mode: "new" },
+        } }),
+        parentSessionId: "sess_baseline", signal: new AbortController().signal, promptContext: testPromptContext(),
+      }), (error: unknown) => {
+        if (rejection === "fence") {
+          assert.ok(error instanceof FencedWriteIgnoredError);
+          assert.equal(error.message, "fenced write ignored: tool execution running");
+        } else {
+          assert.ok(error instanceof ControlWritePermanentError);
+          assert.equal(error.operation, "tool execution running");
+          assert.equal(error.cause, rpcError);
+        }
+        assert.equal((error as Error & { subtaskSessionId?: string }).subtaskSessionId, "known-child");
+        return true;
+      });
+      assert.equal(startCalls, 1);
+      assert.deepEqual(updates.map((input) => input.status), ["running", "running"]);
+      assert.equal(nestedCalls, 0);
+      assert.equal(queryCalls, 0);
+      assert.equal(retrySleeps, 0);
+    });
+  });
+}
 
 test("bash 后接 subtask 时拆成两个并发段", () => {
   const batches = buildToolExecutionBatchesForTest([
@@ -2000,6 +2204,63 @@ test("中间工具仍会打断并发段", async () => {
     "updateRunNotice",
   ]);
 });
+
+for (const names of [["todolist", "subtask"], ["subtask", "todolist"]]) {
+  test(`todolist 与长 subtask 保持输入顺序：${names.join(" → ")}`, async () => {
+    const events: string[] = [];
+    let releaseSubtask!: () => void;
+    const subtaskGate = new Promise<void>((resolve) => { releaseSubtask = resolve; });
+    let markSubtaskStarted!: () => void;
+    const subtaskStarted = new Promise<void>((resolve) => { markSubtaskStarted = resolve; });
+    const runner = new AgentRunner(
+      { async updateRunNotice() {} } as any,
+      {} as any,
+      { info() {}, warn() {}, error() {} },
+      1,
+    );
+    stubListedTools(runner, names);
+    (runner as any).executeTool = async ({ tool }: { tool: { toolName: string } }) => {
+      events.push(`start:${tool.toolName}`);
+      if (tool.toolName === "subtask") {
+        markSubtaskStarted();
+        await subtaskGate;
+      }
+      events.push(`done:${tool.toolName}`);
+      return { paused: false as const };
+    };
+
+    const completion = (runner as any).executePendingTools({
+      profile: { agent: { tools: names } },
+      run: {
+        workspaceId: "ws_test",
+        sessionId: "ses_test",
+        runId: "run_test",
+        workspacePath: isolatedExecutionWorkspacePath,
+        workspaceRepoDirNames: [],
+      },
+      context: {
+        pendingTools: names.map((toolName, index) => pendingTool({
+          executionId: `execution-${index}`,
+          toolName,
+        })),
+      },
+      signal: new AbortController().signal,
+    });
+    try {
+      await Promise.race([
+        subtaskStarted,
+        completion.then(() => { throw new Error("subtask did not wait at its gate"); }),
+      ]);
+      assert.deepEqual(events, names[0] === "todolist"
+        ? ["start:todolist", "done:todolist", "start:subtask"]
+        : ["start:subtask"]);
+    } finally {
+      releaseSubtask();
+      await completion;
+    }
+    assert.deepEqual(events, names.flatMap((name) => [`start:${name}`, `done:${name}`]));
+  });
+}
 
 test("纯非并发多工具保持原有串行语义", async () => {
   const executionOrder: string[] = [];
@@ -3102,7 +3363,7 @@ test("启用错误落盘后 Provider reject 记录 tool artifact 的 args 和 er
       runner.toolRegistry.isToolEnabled = async () => true;
       runner.toolRegistry.execute = async () => { throw Object.assign(new Error("provider fixture failure"), { diagnostic: { raw: "preserved" } }); };
       await executeToolSafelyForTest(runner, { profile: { agent: { tools: ["bash"], pluginTools: [] } }, run: { workspaceId: "ws", sessionId: "session", runId: "run", workspacePath: ${JSON.stringify(workspacePath)}, workspaceRepoDirNames: [] }, tool: { toolExecutionId: "execution-7", callPartId: "part-7", assistantMessageId: "message-7", status: "queued", toolName: "bash", toolCallId: "call_provider", args: { command: "fixture command", sensitiveNamedButModelVisible: "preserved" } }, parentSessionId: "session", signal: new AbortController().signal, promptContext: { pendingTools: [], tools: [], headMessageId: null,
-    sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, externalSkills: [] } });
+    sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, workspaceRepoNames: [], externalSkills: [] } });
       console.log(JSON.stringify(updates));
     `;
     const { stdout } = await execFileAsync(
@@ -3173,7 +3434,7 @@ test("启用错误落盘后 completed writeback 失败保留 provider result 和
       runner.toolRegistry.isToolEnabled = async () => true;
       runner.toolRegistry.execute = async () => ({ stdout: "complete provider result", nested: { value: 42 } });
       try { await executeToolSafelyForTest(runner, { profile: { agent: { tools: ["bash"], pluginTools: [] } }, run: { workspaceId: "ws", sessionId: "session", runId: "run", workspacePath: ${JSON.stringify(workspacePath)}, workspaceRepoDirNames: [] }, tool: { toolExecutionId: "execution-8", callPartId: "part-8", assistantMessageId: "message-8", status: "queued", toolName: "bash", toolCallId: "call_completed", args: { command: "complete fixture" } }, parentSessionId: "session", signal: new AbortController().signal, promptContext: { pendingTools: [], tools: [], headMessageId: null,
-    sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, externalSkills: [] } }); } catch (error) { if (!String(error?.message ?? error).includes("control write permanently failed")) throw error; }
+    sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, workspaceRepoNames: [], externalSkills: [] } }); } catch (error) { if (!String(error?.message ?? error).includes("control write permanently failed")) throw error; }
       console.log(count);
     `;
     await execFileAsync(
@@ -3242,7 +3503,7 @@ test("启用错误落盘后 subtask 失败会记录 partial result", async () =>
       runner.toolRegistry.isToolEnabled = async () => true;
       runner.toolRegistry.execute = async () => { const error = new Error("subtask fixture failure"); error.subtaskSessionId = "child-1"; error.subtaskResultText = "partial child text"; throw error; };
       await executeToolSafelyForTest(runner, { profile: { agent: { tools: ["subtask"], pluginTools: [] } }, run: { workspaceId: "ws", sessionId: "session", runId: "run", workspacePath: ${JSON.stringify(workspacePath)}, workspaceRepoDirNames: [] }, tool: { toolExecutionId: "execution-9", callPartId: "part-9", assistantMessageId: "message-9", status: "queued", toolName: "subtask", toolCallId: "call_subtask", args: { prompt: "fixture" } }, parentSessionId: "session", signal: new AbortController().signal, promptContext: { pendingTools: [], tools: [], headMessageId: null,
-    sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, externalSkills: [] } });
+    sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, workspaceRepoNames: [], externalSkills: [] } });
     `;
     await execFileAsync(
       process.execPath,
@@ -3313,7 +3574,7 @@ test("启用错误落盘时 store 失败只 warning，不改变失败状态机",
       runner.toolRegistry.isToolEnabled = async () => true;
       runner.toolRegistry.execute = async () => { throw new Error("provider failure with blocked store"); };
       await executeToolSafelyForTest(runner, { profile: { agent: { tools: ["bash"], pluginTools: [] } }, run: { workspaceId: "ws", sessionId: "session", runId: "run", workspacePath: ${JSON.stringify(workspacePath)}, workspaceRepoDirNames: [] }, tool: { toolExecutionId: "execution-10", callPartId: "part-10", assistantMessageId: "message-10", status: "queued", toolName: "bash", toolCallId: "call_store_fail", args: {} }, parentSessionId: "session", signal: new AbortController().signal, promptContext: { pendingTools: [], tools: [], headMessageId: null,
-    sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, externalSkills: [] } });
+    sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, workspaceRepoNames: [], externalSkills: [] } });
       console.log(JSON.stringify(updates));
     `;
     const { stdout, stderr } = await execFileAsync(
@@ -3343,7 +3604,7 @@ test("启用错误落盘后 pending 快照预检禁用记录 policy artifact", a
         profile: { agent: { tools: ["bash"], pluginTools: [] } },
         run: { workspaceId: "ws", sessionId: "session", runId: "run", workspacePath: ${JSON.stringify(workspacePath)}, workspaceRepoDirNames: [] },
         context: { pendingTools: [{ toolExecutionId: "execution-11", callPartId: "part-11", assistantMessageId: "message-11", status: "queued", toolName: "bash", toolCallId: "call_pending_policy", args: { command: "policy fixture" } }], tools: [], headMessageId: null,
-    sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, externalSkills: [] },
+    sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, workspaceRepoNames: [], externalSkills: [] },
         availableToolNames: new Set(["bash"]),
         signal: new AbortController().signal
       });
@@ -3400,7 +3661,7 @@ test("启用错误落盘后 executeTool 二次禁用检查记录独立 policy st
       runner.toolRegistry.isToolEnabled = async () => false;
       runner.toolRegistry.execute = async () => { throw new Error("must not execute"); };
       await executeToolSafelyForTest(runner, { profile: { agent: { tools: ["bash"], pluginTools: [] } }, run: { workspaceId: "ws", sessionId: "session", runId: "run", workspacePath: ${JSON.stringify(workspacePath)}, workspaceRepoDirNames: [] }, tool: { toolExecutionId: "execution-12", callPartId: "part-12", assistantMessageId: "message-12", status: "queued", toolName: "bash", toolCallId: "call_execute_policy", args: { command: "second policy fixture" } }, parentSessionId: "session", signal: new AbortController().signal, promptContext: { pendingTools: [], tools: [], headMessageId: null,
-    sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, externalSkills: [] } });
+    sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, workspaceRepoNames: [], externalSkills: [] } });
     `;
     await execFileAsync(
       process.execPath,
@@ -3457,7 +3718,7 @@ test("启用错误落盘后遗留 running 工具保持静默且不重放", async
         profile: { agent: { tools: ["bash"], pluginTools: [] } },
         run: { workspaceId: "ws", sessionId: "session", runId: "run", workspacePath: ${JSON.stringify(workspacePath)}, workspaceRepoDirNames: [] },
         context: { pendingTools: [{ toolExecutionId: "execution-13", callPartId: "part-13", assistantMessageId: "message-13", status: "running", toolName: "bash", toolCallId: "call_recovery", args: { command: "recovery fixture" } }], tools: [], headMessageId: null,
-    sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, externalSkills: [] },
+    sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, workspaceRepoNames: [], externalSkills: [] },
         availableToolNames: new Set(["bash"]),
         signal: new AbortController().signal
       });
@@ -3489,7 +3750,7 @@ for (const cancelled of [false, true]) test(`启用错误落盘时 AbortError ${
         throw new DOMException("cancelled", "AbortError");
       };
       await executeToolSafelyForTest(runner, { profile: { agent: { tools: ["bash"], pluginTools: [] } }, run: { workspaceId: "ws", sessionId: "session", runId: "run", workspacePath: ${JSON.stringify(workspacePath)}, workspaceRepoDirNames: [] }, tool: { toolExecutionId: "execution-14", callPartId: "part-14", assistantMessageId: "message-14", status: "queued", toolName: "bash", toolCallId: "call_abort", args: { command: "abort fixture" } }, parentSessionId: "session", signal: controller.signal, promptContext: { pendingTools: [], tools: [], headMessageId: null,
-    sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, externalSkills: [] } });
+    sessionRevision: 0, system: "", messages: [], lastResponseTotalTokens: null, uiLocale: null, workspaceRepoNames: [], externalSkills: [] } });
       const expected = ${JSON.stringify(cancelled ? ["running"] : ["running", "failed"])};
       if (JSON.stringify(statuses) !== JSON.stringify(expected)) throw new Error("unexpected tool statuses: " + JSON.stringify(statuses));
     `;

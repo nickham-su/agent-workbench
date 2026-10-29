@@ -16,7 +16,8 @@ function sleep(ms: number) {
 
 async function createPluginHostFixture() {
   const repoRoot = path.resolve(process.cwd(), "../..");
-  const dataDir = await fs.mkdtemp(path.join(repoRoot, ".tmp-tests", "agent-plugin-host-integration-"));
+  // Keep the fixture prefix short enough for Unix-domain socket path limits.
+  const dataDir = await fs.mkdtemp(path.join(repoRoot, ".tmp-tests", "plugin-host-it-"));
   const db = await openDb(dataDir);
   const internalToken = "test-internal-token";
   try {

@@ -562,6 +562,7 @@ export async function registerAgentPublicRoutes(
           201: AgentSessionRecordSchema,
           400: ErrorResponseSchema,
           404: ErrorResponseSchema,
+          409: ErrorResponseSchema,
           500: ErrorResponseSchema,
         },
       },

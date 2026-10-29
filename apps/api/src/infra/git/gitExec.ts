@@ -5,98 +5,129 @@ export type ExecResult = {
   code: number | null;
   stdout: string;
   stderr: string;
+  failure?: "timeout" | "output-limit" | "spawn";
 };
 
-export type ExecBufferResult = {
-  ok: boolean;
-  code: number | null;
-  stdout: Buffer;
-  stderr: string;
+export type ExecBufferResult = Omit<ExecResult, "stdout"> & { stdout: Buffer };
+
+type GitExecOptions = {
+  cwd: string;
+  timeoutMs?: number;
+  maxOutputBytes?: number;
+  env?: NodeJS.ProcessEnv;
 };
 
-export async function runGit(
-  args: string[],
-  opts: { cwd: string; timeoutMs?: number; env?: NodeJS.ProcessEnv } = { cwd: process.cwd() }
-): Promise<ExecResult> {
-  const timeoutMs = opts.timeoutMs ?? 5 * 60_000;
-  return new Promise<ExecResult>((resolve) => {
-    const child = spawn("git", args, {
-      cwd: opts.cwd,
-      stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, ...(opts.env ?? {}) }
-    });
+const repositoryEnvironmentKeys = new Set([
+  "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_PREFIX", "GIT_IMPLICIT_WORK_TREE",
+  "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_CONFIG", "GIT_CONFIG_PARAMETERS",
+  "GIT_CONFIG_COUNT", "GIT_GRAFT_FILE", "GIT_SHALLOW_FILE", "GIT_REPLACE_REF_BASE"
+]);
 
-    let stdout = "";
-    let stderr = "";
-    const timer = setTimeout(() => {
-      child.kill("SIGKILL");
-    }, timeoutMs);
-
-    let settled = false;
-    const settle = (res: ExecResult) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve(res);
-    };
-
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString("utf-8");
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString("utf-8");
-    });
-    child.on("error", (err) => {
-      settle({ ok: false, code: null, stdout, stderr: (stderr || "") + String(err instanceof Error ? err.message : err) });
-    });
-    child.on("close", (code) => {
-      settle({ ok: code === 0, code, stdout, stderr });
-    });
-  });
+/** A parent Git process must not redirect this service's explicitly selected repository. */
+export function buildGitProcessEnv(overrides: NodeJS.ProcessEnv = {}, inherited: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const env = { ...inherited };
+  for (const key of Object.keys(env)) {
+    if (repositoryEnvironmentKeys.has(key) || key.startsWith("GIT_CONFIG_KEY_") || key.startsWith("GIT_CONFIG_VALUE_")) delete env[key];
+  }
+  return { ...env, ...overrides };
 }
 
-export async function runGitBuffer(
-  args: string[],
-  opts: { cwd: string; timeoutMs?: number; env?: NodeJS.ProcessEnv } = { cwd: process.cwd() }
-): Promise<ExecBufferResult> {
+export async function runGit(args: string[], opts: GitExecOptions = { cwd: process.cwd() }): Promise<ExecResult> {
+  const result = await runGitBuffer(args, opts);
+  return { ...result, stdout: result.stdout.toString("utf8") };
+}
+
+// SIGKILL is sent to the owned POSIX group before pipes are closed. Do not wait forever
+// for `close`: a helper can retain the inherited pipes after the Git parent has exited.
+const TERMINATION_GRACE_MS = 100;
+
+export async function runGitBuffer(args: string[], opts: GitExecOptions = { cwd: process.cwd() }): Promise<ExecBufferResult> {
   const timeoutMs = opts.timeoutMs ?? 5 * 60_000;
+  const maxBytes = opts.maxOutputBytes ?? Infinity;
+  const ownProcessGroup = process.platform !== "win32";
   return new Promise<ExecBufferResult>((resolve) => {
     const child = spawn("git", args, {
       cwd: opts.cwd,
       stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, ...(opts.env ?? {}) }
+      detached: ownProcessGroup,
+      env: buildGitProcessEnv(opts.env)
     });
-
     const stdoutChunks: Buffer[] = [];
-    let stderr = "";
-    const timer = setTimeout(() => {
-      child.kill("SIGKILL");
-    }, timeoutMs);
-
+    const stderrChunks: Buffer[] = [];
+    let bytes = 0;
+    let failure: ExecBufferResult["failure"];
     let settled = false;
-    const settle = (res: ExecBufferResult) => {
+    let exitCode: number | null = null;
+    let pendingError: Error | undefined;
+    let cleanupTimer: ReturnType<typeof setTimeout> | undefined;
+    let taskKiller: ReturnType<typeof spawn> | undefined;
+    const deadline = setTimeout(() => terminate("timeout"), timeoutMs);
+    const closePipes = () => {
+      child.stdout.destroy();
+      child.stderr.destroy();
+    };
+    const settle = (code: number | null) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
-      resolve(res);
-    };
-
-    child.stdout.on("data", (chunk) => {
-      stdoutChunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString("utf-8");
-    });
-    child.on("error", (err) => {
-      settle({
-        ok: false,
-        code: null,
+      clearTimeout(deadline);
+      if (cleanupTimer) clearTimeout(cleanupTimer);
+      resolve({
+        ok: code === 0 && !failure,
+        code,
         stdout: Buffer.concat(stdoutChunks),
-        stderr: (stderr || "") + String(err instanceof Error ? err.message : err)
+        stderr: Buffer.concat(stderrChunks).toString("utf8") + (pendingError ? String(pendingError.message) : ""),
+        ...(failure ? { failure } : {})
       });
+    };
+    const terminate = (reason: NonNullable<ExecBufferResult["failure"]>, error?: Error) => {
+      if (settled || failure) return;
+      failure = reason;
+      pendingError = error;
+      clearTimeout(deadline);
+      const killDirect = () => { try { child.kill("SIGKILL"); } catch { /* already exited */ } };
+      if (ownProcessGroup && child.pid && child.pid > 0) {
+        try { process.kill(-child.pid, "SIGKILL"); }
+        catch { killDirect(); }
+      } else if (process.platform === "win32" && child.pid && child.pid > 0) {
+        // Native tree-kill fallback; no shell interpolation and only our child's PID is accepted.
+        try {
+          taskKiller = spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
+          taskKiller.on("error", killDirect);
+          taskKiller.on("close", killDirect);
+        } catch { killDirect(); }
+      } else {
+        killDirect();
+      }
+      cleanupTimer = setTimeout(() => {
+        // Bound the native termination helper as well; it must not retain this request.
+        if (taskKiller) { try { taskKiller.kill("SIGKILL"); } catch { /* already exited */ } }
+        closePipes();
+        settle(exitCode);
+      }, process.platform === "win32" ? 1000 : TERMINATION_GRACE_MS);
+    };
+    const append = (chunks: Buffer[], chunk: Buffer) => {
+      if (settled || failure) return;
+      bytes += chunk.byteLength;
+      if (bytes > maxBytes) { terminate("output-limit"); return; }
+      chunks.push(chunk);
+    };
+    child.stdout.on("data", (chunk: Buffer) => append(stdoutChunks, chunk));
+    child.stderr.on("data", (chunk: Buffer) => append(stderrChunks, chunk));
+    child.stdout.on("error", (error) => terminate("spawn", error));
+    child.stderr.on("error", (error) => terminate("spawn", error));
+    child.on("exit", (code) => { exitCode = code; });
+    child.on("error", (error) => {
+      if (!child.pid) {
+        failure = "spawn";
+        pendingError = error;
+        closePipes();
+        settle(null);
+      } else terminate("spawn", error);
     });
     child.on("close", (code) => {
-      settle({ ok: code === 0, code, stdout: Buffer.concat(stdoutChunks), stderr });
+      exitCode = code;
+      if (!failure) settle(code);
     });
   });
 }

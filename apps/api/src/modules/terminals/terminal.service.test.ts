@@ -11,7 +11,7 @@ import { workspaceDeletingFence } from "../agent/lifecycle/workspace-deleting-fe
 import { encryptUtf8 } from "../../infra/crypto/secretBox.js";
 import { insertCredential } from "../credentials/credentials.store.js";
 import { insertWorkspace, updateWorkspaceTerminalCredentialId } from "../workspaces/workspace.store.js";
-import { createTerminal, deleteTerminal, reconcilePendingTerminals, reconcileWorkspaceActiveTerminals, settleTerminalAfterSessionStopped, type TerminalRuntimeOperations } from "./terminal.service.js";
+import { createTerminal, deleteTerminal, reconcilePendingTerminals, reconcileWorkspaceTerminals, settleTerminalAfterSessionStopped, type TerminalRuntimeOperations } from "./terminal.service.js";
 import { getTerminal, insertTerminal, listActiveTerminalsByWorkspace, listTerminalsByWorkspace, updateTerminalStatus } from "./terminal.store.js";
 import {
   assertTerminalGitAuthTerminalId,
@@ -57,12 +57,17 @@ async function createFixture() {
 }
 
 function operations(overrides: Partial<TerminalRuntimeOperations> = {}): TerminalRuntimeOperations {
+  const sessions = new Set<string>();
   return {
-    hasSession: async () => "not_found",
-    killSession: async () => {},
-    newSession: async () => {},
-    cleanupAuthArtifacts: async () => {},
-    ...overrides,
+    hasSession: overrides.hasSession ?? (async ({ sessionName }) => sessions.has(sessionName) ? "exists" : "not_found"),
+    killSession: async (request) => { await overrides.killSession?.(request); sessions.delete(request.sessionName); },
+    newSession: async (request) => { await overrides.newSession?.(request); sessions.add(request.sessionName); },
+    cleanupAuthArtifacts: overrides.cleanupAuthArtifacts ?? (async () => {}),
+    prepareEnvironmentLaunch: overrides.prepareEnvironmentLaunch,
+    cleanupEnvironmentLaunch: overrides.cleanupEnvironmentLaunch,
+    // These existing lifecycle fixtures explicitly provide a trusted spawn handshake.
+    // Empty newSession alone no longer implies activation.
+    waitEnvironmentLaunch: overrides.waitEnvironmentLaunch ?? (async ({ attempt }) => ({ version: 1, attemptId: attempt.id, state: "spawned" })),
   };
 }
 
@@ -112,7 +117,7 @@ test("artifact arm INSERT IGNORE 时不进入 writer，creating record 保留但
       secretEnc: encryptUtf8({ key: fixture.ctx.credentialMasterKey, plaintext: "key" }), isDefault: false, createdAt: now, updatedAt: now });
     updateWorkspaceTerminalCredentialId(fixture.ctx.db, fixture.workspaceId, "cred_arm_ignore", now);
     fixture.ctx.db.exec(`create trigger ignore_auth_latch_arm before insert on terminal_auth_cleanup_intents begin select raise(ignore); end;`);
-    await assert.rejects(() => createTerminal(fixture.ctx, createLogger(), { workspaceId: fixture.workspaceId, writeAuthArtifactForTest: async () => { writeCalled = true; } }), /latch arm was not persisted/);
+    await assert.rejects(() => createTerminal(fixture.ctx, createLogger(), { workspaceId: fixture.workspaceId, writeAuthArtifactForTest: async () => { writeCalled = true; } }), /preparation failed/);
     assert.equal(writeCalled, false);
     assert.equal(listTerminalAuthCleanupIntents(fixture.ctx.db, listTerminalsByWorkspace(fixture.ctx.db, fixture.workspaceId)[0]!.id).length, 0);
   } finally { fixture.ctx.db.close(); }
@@ -125,7 +130,7 @@ test("SSH root live artifact 后 tmux 失败时安全清理并 closed", async ()
     insertCredential(fixture.ctx.db, { id: "cred_tmux_fail", host: "example.test", kind: "ssh", label: null, username: null,
       secretEnc: encryptUtf8({ key: fixture.ctx.credentialMasterKey, plaintext: "key" }), isDefault: false, createdAt: now, updatedAt: now });
     updateWorkspaceTerminalCredentialId(fixture.ctx.db, fixture.workspaceId, "cred_tmux_fail", now);
-    await assert.rejects(() => createTerminal(fixture.ctx, createLogger(), { workspaceId: fixture.workspaceId, shell: "sh", runtimeOperations: operations({ newSession: async () => { throw new Error("tmux failed"); }, cleanupAuthArtifacts: cleanupTerminalGitAuthArtifacts }) }), /tmux session was not created/);
+    await assert.rejects(() => createTerminal(fixture.ctx, createLogger(), { workspaceId: fixture.workspaceId, shell: "sh", runtimeOperations: operations({ newSession: async () => { throw new Error("tmux failed"); }, cleanupAuthArtifacts: cleanupTerminalGitAuthArtifacts }) }), /could not be started/);
     const term = listTerminalsByWorkspace(fixture.ctx.db, fixture.workspaceId)[0]!;
     assert.equal(term.status, "closed");
     assert.deepEqual(listTerminalAuthCleanupIntents(fixture.ctx.db, term.id), []);
@@ -147,7 +152,7 @@ test("tmp 移动不影响 root live artifact 的 cleanup", async () => {
       workspaceId: fixture.workspaceId, shell: "sh",
       writeAuthArtifactForTest: async (input) => writeTerminalGitAuthArtifact({ ...input, afterArtifactCreatedForTest: async () => { await fs.rename(tmp, moved); await fs.mkdir(tmp); } }),
       runtimeOperations: operations({ newSession: async () => { throw new Error("tmux failed"); }, cleanupAuthArtifacts: cleanupTerminalGitAuthArtifacts }),
-    }), /tmux session was not created|cleanup pending/);
+    }), /could not be started|cleanup pending/);
     const term = listTerminalsByWorkspace(fixture.ctx.db, fixture.workspaceId)[0]!;
     assert.equal(term.status, "closed");
     await assert.rejects(() => fs.access(terminalSshKeyPath(fixture.ctx.dataDir, term.id)));
@@ -214,7 +219,7 @@ test("active terminal 的 tmux 已不存在且 cleanup pending 时转为 errored
     const term = await createTerminal(fixture.ctx, createLogger(), { workspaceId: fixture.workspaceId, shell: "sh", runtimeOperations: operations() });
     const intents = listTerminalAuthCleanupIntents(fixture.ctx.db, term.id);
 
-    await reconcileWorkspaceActiveTerminals(fixture.ctx, createLogger(), fixture.workspaceId, {
+    await reconcileWorkspaceTerminals(fixture.ctx, createLogger(), fixture.workspaceId, {
       hasSession: async () => "not_found",
       cleanupAuthArtifacts: async () => { throw new TerminalGitAuthCleanupPendingError("injected cleanup pending"); },
     });
@@ -222,6 +227,12 @@ test("active terminal 的 tmux 已不存在且 cleanup pending 时转为 errored
     assert.equal(getTerminal(fixture.ctx.db, term.id)?.status, "errored");
     assert.deepEqual(listActiveTerminalsByWorkspace(fixture.ctx.db, fixture.workspaceId), []);
     assert.deepEqual(listTerminalAuthCleanupIntents(fixture.ctx.db, term.id), intents);
+    await reconcileWorkspaceTerminals(fixture.ctx, createLogger(), fixture.workspaceId, {
+      hasSession: async () => "not_found", cleanupAuthArtifacts: cleanupTerminalGitAuthArtifacts,
+    });
+    assert.equal(getTerminal(fixture.ctx.db, term.id), null);
+    assert.deepEqual(listTerminalAuthCleanupIntents(fixture.ctx.db, term.id), []);
+    await assert.rejects(fs.access(terminalSshKeyPath(fixture.ctx.dataDir, term.id)), /ENOENT/);
   } finally { fixture.ctx.db.close(); }
 });
 
@@ -230,6 +241,7 @@ test("已确认 tmux 停止后的 cleanup pending 可供 WS 映射为 session no
   try {
     const term = await createTerminal(fixture.ctx, createLogger(), { workspaceId: fixture.workspaceId, shell: "sh", runtimeOperations: operations() });
     const settlement = await settleTerminalAfterSessionStopped(fixture.ctx, createLogger(), term.id, {
+      hasSession: async () => "not_found",
       cleanupAuthArtifacts: async () => { throw new TerminalGitAuthCleanupPendingError("injected cleanup pending"); },
     });
 
@@ -249,9 +261,10 @@ test("用户删除在 tmux kill 成功但 cleanup pending 时逻辑成功并保�
     const term = await createTerminal(fixture.ctx, createLogger(), { workspaceId: fixture.workspaceId, shell: "sh", runtimeOperations: operations() });
     const intents = listTerminalAuthCleanupIntents(fixture.ctx.db, term.id);
 
+    let present = true;
     await assert.doesNotReject(() => deleteTerminal(fixture.ctx, createLogger(), term.id, operations({
-      hasSession: async () => "exists",
-      killSession: async ({ sessionName }) => { killed.push(sessionName); },
+      hasSession: async () => present ? "exists" : "not_found",
+      killSession: async ({ sessionName }) => { killed.push(sessionName); present = false; },
       cleanupAuthArtifacts: async () => { throw new TerminalGitAuthCleanupPendingError("injected cleanup pending"); },
     })));
 
@@ -270,7 +283,7 @@ test("tmux probe 或 kill 失败时删除不谎称终端已关闭", async () => 
       operations({ hasSession: async () => "exists", killSession: async () => { throw new Error("tmux kill failed"); } }),
     ]) {
       const term = await createTerminal(fixture.ctx, createLogger(), { workspaceId: fixture.workspaceId, shell: "sh", runtimeOperations: operations() });
-      await assert.rejects(() => deleteTerminal(fixture.ctx, createLogger(), term.id, runtimeOperations), /tmux (probe indeterminate|kill failed)/);
+      await assert.rejects(() => deleteTerminal(fixture.ctx, createLogger(), term.id, runtimeOperations), /confirmed stopped/);
       assert.equal(getTerminal(fixture.ctx.db, term.id)?.status, "active");
     }
   } finally { fixture.ctx.db.close(); }
@@ -290,7 +303,7 @@ test("root live unlink EIO 保留 intent，restart reconcile 后收敛", async (
         newSession: async () => { throw new Error("tmux failed"); },
         cleanupAuthArtifacts: (dataDir, terminalId, intents) => cleanupTerminalGitAuthArtifacts(dataDir, terminalId, intents, { removeRetiredForTest: () => false }),
       }),
-    }), /tmux session was not created|cleanup pending/);
+    }), /could not be started|cleanup pending/);
     const term = listTerminalsByWorkspace(fixture.ctx.db, fixture.workspaceId)[0]!;
     assert.equal(term.status, "errored");
     assert.equal(listTerminalAuthCleanupIntents(fixture.ctx.db, term.id)[0]?.phase, "recoverable");
@@ -401,23 +414,23 @@ test("Terminal Git auth terminal ID 必须为非空 term_ 安全段", () => {
   assert.equal(assertTerminalGitAuthTerminalId("term_safe-1"), "term_safe-1");
 });
 
-test("Terminal 默认 shell 仅在首次 probe 明确 not-found 后 fallback", async () => {
+test("Terminal 默认 shell 仅在明确 SHELL_NOT_FOUND 且旧会话停止后 fallback", async () => {
   const fixture = await createFixture();
   const commands: string[][] = [];
+  let waits = 0;
   try {
     const terminal = await createTerminal(fixture.ctx, createLogger(), {
       workspaceId: fixture.workspaceId,
       runtimeOperations: operations({
-        newSession: async ({ command }) => {
-          commands.push(command);
-          if (commands.length === 1) throw new Error("bash unavailable");
-        },
-        hasSession: async () => "not_found",
+        newSession: async ({ command }) => { commands.push(command); },
+        waitEnvironmentLaunch: async ({ attempt }) => ++waits === 1
+          ? { version: 1, attemptId: attempt.id, state: "spawn-error", code: "SHELL_NOT_FOUND" }
+          : { version: 1, attemptId: attempt.id, state: "spawned" },
       }),
     });
     assert.equal(terminal.status, "active");
     assert.equal(commands.length, 2);
-    assert.equal(commands[1]?.at(-1), "sh");
+    assert.notEqual(commands[0]?.at(-1), commands[1]?.at(-1), "fallback has a fresh locator and attempt");
   } finally {
     workspaceDeletingFence.end(fixture.workspaceId);
     fixture.ctx.db.close();
@@ -466,9 +479,10 @@ test("Terminal new-session response-loss 发现已存在 session 时不把 orpha
     assert.ok(terminalId);
     assert.equal(getTerminal(fixture.ctx.db, terminalId)?.status, "errored");
 
+    let present = true;
     await reconcilePendingTerminals(fixture.ctx, createLogger(), operations({
-      hasSession: async () => "exists",
-      killSession: async ({ sessionName }) => { killed.push(sessionName); },
+      hasSession: async () => present ? "exists" : "not_found",
+      killSession: async ({ sessionName }) => { killed.push(sessionName); present = false; },
     }));
     assert.deepEqual(killed, [`term_${terminalId}`]);
     assert.equal(getTerminal(fixture.ctx.db, terminalId)?.status, "closed");
@@ -503,9 +517,10 @@ test("Terminal active 收尾失败且补偿 kill 失败时保留 errored intent�
     assert.ok(terminalId, "tmux session must have a durable terminal id before activation");
     assert.equal(getTerminal(fixture.ctx.db, terminalId)?.status, "errored");
 
+    let present = true;
     await reconcilePendingTerminals(fixture.ctx, createLogger(), operations({
-      hasSession: async () => "exists",
-      killSession: async ({ sessionName }) => { killed.push(sessionName); },
+      hasSession: async () => present ? "exists" : "not_found",
+      killSession: async ({ sessionName }) => { killed.push(sessionName); present = false; },
     }));
     assert.deepEqual(killed, [`term_${terminalId}`]);
     assert.equal(getTerminal(fixture.ctx.db, terminalId)?.status, "closed");

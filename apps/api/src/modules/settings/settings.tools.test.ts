@@ -269,7 +269,7 @@ test("model refresh fallback never logs configured URL or an untrusted fetch err
   }
 });
 
-test("agent settings persist archive tools while filtering hidden baseline tools", async () => {
+test("agent settings accept legacy archive tool selections but only persist configurable tools", async () => {
   const { ctx, db } = await createFixture();
 
   const updated = updateAgentSettings(ctx, createLogger(), {
@@ -297,12 +297,35 @@ test("agent settings persist archive tools while filtering hidden baseline tools
     }]
   });
 
-  assert.deepEqual(updated.agents[0]?.tools, ["bash", "todolist", "view_image", "archive_read", "archive_search"]);
-  assert.deepEqual(getAgentSettings(ctx).agents[0]?.tools, ["bash", "todolist", "view_image", "archive_read", "archive_search"]);
+  assert.deepEqual(updated.agents[0]?.tools, ["bash", "todolist", "view_image"]);
+  assert.deepEqual(getAgentSettings(ctx).agents[0]?.tools, ["bash", "todolist", "view_image"]);
   assert.deepEqual(
     (getSettingJson(db, AGENT_SETTINGS_KEY)?.value as { agents: Array<{ tools: string[] }> }).agents[0]?.tools,
-    ["bash", "todolist", "view_image", "archive_read", "archive_search"]
+    ["bash", "todolist", "view_image"]
   );
+  db.close();
+});
+
+test("agent settings filter archive tools when reading historical profiles", async () => {
+  const { ctx, db } = await createFixture();
+  try {
+    setSettingJson(db, AGENT_SETTINGS_KEY, { agents: [{
+      id: "agent_1", name: "Agent", summary: "", prompt: "", globalPromptIds: [],
+      tools: ["bash", "archive_read", "archive_search", "todolist", "archive_read"],
+      mcpServers: [], pluginTools: [], scope: "both", order: 0,
+      defaultModel: { providerId: "provider_1", modelId: "model_1" },
+    }] }, 1);
+
+    assert.deepEqual(getAgentSettings(ctx).agents[0]?.tools, ["bash", "todolist"]);
+    const updated = updateAgentSettings(ctx, createLogger(), getAgentSettings(ctx));
+    assert.deepEqual(updated.agents[0]?.tools, ["bash", "todolist"]);
+    assert.deepEqual(
+      (getSettingJson(db, AGENT_SETTINGS_KEY)?.value as { agents: Array<{ tools: string[] }> }).agents[0]?.tools,
+      ["bash", "todolist"]
+    );
+  } finally {
+    db.close();
+  }
 });
 test("old tool and vision settings remain readable without enabling the retired model or tool", async () => {
   const { ctx, db } = await createFixture();
@@ -335,4 +358,27 @@ test("saving new Provider models strips reserved options without dropping legal 
   const options = getAgentProvidersSettingsInternal(ctx).providers.find((provider) => provider.id === "kimi")
     ?.models[0]?.options?.providerOptionsByKey?.moonshotai;
   assert.deepEqual(options, { parallelToolCalls: true, custom: { thinking: "ordinary" } });
+});
+
+test("AC-ENABLEMENT-DEFAULT/EXPLICIT: Git survives explicit settings round-trip, but never migrates defaults or existing agents", async () => {
+  const { ctx, db } = await createFixture();
+  try {
+    const existing = { id: "agent_1", name: "Agent", summary: "", prompt: "", globalPromptIds: [],
+      mcpServers: [], pluginTools: [], defaultModel: { providerId: "provider_1", modelId: "model_1" }, scope: "both" as const, order: 0 };
+    const defaultProfile = { ...existing };
+    setSettingJson(db, AGENT_SETTINGS_KEY, { agents: [defaultProfile] }, 1);
+    assert.deepEqual(getAgentSettings(ctx).agents[0]?.tools, ["bash", "write", "apply_patch", "subtask"]);
+    assert.deepEqual(getSettingJson(db, AGENT_SETTINGS_KEY)?.value, { agents: [defaultProfile] }, "reading old settings must not grant or rewrite Git");
+    const oldProfile = { ...existing, tools: ["bash"] };
+    setSettingJson(db, AGENT_SETTINGS_KEY, { agents: [oldProfile] }, 2);
+    assert.deepEqual(getAgentSettings(ctx).agents[0]?.tools, ["bash"]);
+    assert.deepEqual(getSettingJson(db, AGENT_SETTINGS_KEY)?.value, { agents: [oldProfile] });
+    for (const tools of [["bash", "git", "git"], ["bash"], []] as const) {
+      const expected = [...new Set(tools)];
+      const updated = updateAgentSettings(ctx, createLogger(), { agents: [{ ...existing, tools: [...tools] }] });
+      assert.deepEqual(updated.agents[0]?.tools, expected);
+      assert.deepEqual(getAgentSettings(ctx).agents[0]?.tools, expected);
+      assert.deepEqual((getSettingJson(db, AGENT_SETTINGS_KEY)?.value as { agents: Array<{ tools: string[] }> }).agents[0]?.tools, expected);
+    }
+  } finally { db.close(); }
 });

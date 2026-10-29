@@ -16,6 +16,8 @@ import {
   FileSearchResponseSchema,
   FileStatResponseSchema,
   FileWriteResponseSchema,
+  WorkspaceFileExtractRequestSchema,
+  WorkspaceFileExtractResponseSchema,
   WorkspaceFileDownloadRequestSchema,
   WorkspaceFileCreateRequestSchema,
   WorkspaceFileDeleteRequestSchema,
@@ -35,6 +37,8 @@ import {
   WorkspaceFileConflictError,
   createWorkspaceFile,
   deleteWorkspacePath,
+  extractWorkspaceArchive,
+  type WorkspaceArchiveExtractOptions,
   listWorkspaceFiles,
   mkdirWorkspacePath,
   readWorkspaceFileText,
@@ -49,6 +53,7 @@ import {
   writeWorkspaceFileText
 } from "./workspace-files.service.js";
 import { workspaceLifecycleCoordinator } from "../../infra/locks/workspace-lifecycle-coordinator.js";
+import { registerWorkspaceMediaRoutes } from "./workspace-media.routes.js";
 
 type MultipartFilePart = {
   type: "file";
@@ -72,15 +77,41 @@ type MultipartRequest = FastifyRequest & {
 
 export type WorkspaceFilesRouteTestHooks = {
   afterUploadMutationAdmitted?: (params: { workspaceId: string }) => Promise<void> | void;
+  archiveExtract?: WorkspaceArchiveExtractOptions;
 };
 
 function attachmentHeader(filename: string) {
-  const safeName = filename.replace(/"/g, '\\"');
-  const encoded = encodeURIComponent(filename);
+  // Keep the legacy parameter ASCII-only; Unicode belongs in RFC 8187 filename*.
+  const safeName = filename.replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "\\$&");
+  const encoded = encodeURIComponent(filename)
+    .replace(/['()*]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
   return `attachment; filename="${safeName}"; filename*=UTF-8''${encoded}`;
 }
 
 export async function registerWorkspaceFilesRoutes(app: FastifyInstance, ctx: AppContext, hooks: WorkspaceFilesRouteTestHooks = {}) {
+  await registerWorkspaceMediaRoutes(app, ctx);
+  app.post(
+    "/api/workspaces/:workspaceId/files/extract",
+    {
+      schema: {
+        tags: ["workspaces"],
+        body: WorkspaceFileExtractRequestSchema,
+        response: {
+          200: WorkspaceFileExtractResponseSchema, 400: ErrorResponseSchema, 401: ErrorResponseSchema,
+          403: ErrorResponseSchema, 404: ErrorResponseSchema, 408: ErrorResponseSchema, 409: ErrorResponseSchema,
+          413: ErrorResponseSchema, 429: ErrorResponseSchema, 500: ErrorResponseSchema, 507: ErrorResponseSchema
+        }
+      }
+    },
+    async (req) => {
+      const { workspaceId } = req.params as { workspaceId: string };
+      return extractWorkspaceArchive(ctx, workspaceId, req.body, {
+        ...hooks.archiveExtract,
+        onFailure: (summary) => { req.log.warn(summary, "Workspace archive extraction failed"); }
+      });
+    }
+  );
+
   app.post(
     "/api/workspaces/:workspaceId/files/list",
     {
@@ -309,10 +340,8 @@ export async function registerWorkspaceFilesRoutes(app: FastifyInstance, ctx: Ap
         archive.file(entry.absPath, { name: rel });
       }
 
-      reply.hijack();
-      archive.pipe(reply.raw);
       void archive.finalize();
-      return reply;
+      return reply.send(archive);
     }
   );
 }

@@ -66,3 +66,12 @@ test("worker internal RPC timeout configuration rejects non-positive and non-num
     assert.throws(() => loadWorkerEnv({ ...baseEnv, [name]: value }), new RegExp(`invalid ${name}:`));
   }
 });
+
+test("worker Analytics generation is optional and accepts only parent UUID v4", () => {
+  assert.equal(loadWorkerEnv(baseEnv).analyticsProducerGeneration, undefined);
+  const generation = "90c4f9bd-4df6-4eb0-b11d-866e780dd4da";
+  assert.equal(loadWorkerEnv({ ...baseEnv, AWB_AGENT_ANALYTICS_GENERATION: generation }).analyticsProducerGeneration, generation);
+  for (const invalid of ["", " ", "../outside", "generation", "90c4f9bd-4df6-1eb0-b11d-866e780dd4da"]) {
+    assert.throws(() => loadWorkerEnv({ ...baseEnv, AWB_AGENT_ANALYTICS_GENERATION: invalid }), /Invalid AWB_AGENT_ANALYTICS_GENERATION/);
+  }
+});

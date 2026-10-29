@@ -153,6 +153,14 @@ for (const mode of ["caller", "other", "new", "existing", "implicit", "implicit-
       assert.ok(getMessageSession(fixture.db, fixture.workspaceId, started[0]!.sessionId), "activated Child is not compensated");
       assert.equal((execution.structuredResult as { sourceSessionId: string }).sourceSessionId, sourceSessionId);
       assert.match(execution.resultPreview ?? "", /source_session_id/);
+      const resolved = new ModelContextResolver(fixture.db).resolve({ workspaceId: fixture.workspaceId, sessionId: caller.id });
+      const transcript = new RuntimeTranscriptProjector().project({ workspaceId: fixture.workspaceId, triggerMessageId: null,
+        messages: resolved.messages, executions: resolved.executions });
+      const tool = transcript.find((message) => message.role === "tool") as { content: Array<{ output: { type: string; value: string } }> };
+      assert.deepEqual(tool.content[0]!.output, { type: "error-text", value: execution.resultPreview });
+      assert.ok(tool.content[0]!.output.value.includes(`subtask_session_id: ${started[0]!.sessionId}`));
+      assert.ok(tool.content[0]!.output.value.includes(`source_session_id: ${JSON.stringify(sourceSessionId)}`));
+      assert.match(tool.content[0]!.output.value, /subtask failed/);
       assert.deepEqual(getMessageSession(fixture.db, fixture.workspaceId, sourceSessionId!), sourceBefore);
       return;
     }
@@ -235,7 +243,7 @@ for (const value of [undefined, null, 7, {}, " ", "different-from-input-source"]
     const response = await fixture.app.inject({ method: "POST", url: "/api/internal/agent/tool-executions/update",
       headers: { "x-awb-agent-internal-token": fixture.internalToken }, payload: {
         workspaceId: fixture.workspaceId, sessionId: parent.id, runId: run.runId, toolExecutionId: anchor.toolExecutionId,
-        status: "failed", resultPreview: "preview that must not override the error", error: "original child failure",
+        status: "failed", resultPreview: "tool: subtask\nstatus: failed\n\noriginal child failure", error: "original child failure",
         structuredResult: { subtaskSessionId: "missing-Child", ...(value !== undefined ? { sourceSessionId: value } : {}) },
         completedAt: Date.now(), updatedAt: Date.now(),
       } });
@@ -243,8 +251,9 @@ for (const value of [undefined, null, 7, {}, " ", "different-from-input-source"]
     const resolved = new ModelContextResolver(fixture.db).resolve({ workspaceId: fixture.workspaceId, sessionId: parent.id });
     const transcript = new RuntimeTranscriptProjector().project({ workspaceId: fixture.workspaceId, triggerMessageId: null, messages: resolved.messages, executions: resolved.executions });
     const tool = transcript.find((message) => message.role === "tool")!;
+    assert.match(JSON.stringify(tool), /tool: subtask\\nstatus: failed/);
     assert.match(JSON.stringify(tool), /original child failure/);
-    assert.doesNotMatch(JSON.stringify(tool), /preview that|source_session_id|different-from-input-source/);
+    assert.doesNotMatch(JSON.stringify(tool), /source_session_id|different-from-input-source/);
     assert.equal((fixture.db.prepare("select count(*) as count from agent_run where parent_tool_execution_id=?").get(anchor.toolExecutionId) as { count: number }).count, 0);
   });
 }

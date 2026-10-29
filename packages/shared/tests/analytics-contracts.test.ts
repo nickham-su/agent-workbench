@@ -129,6 +129,16 @@ test("domain health preserves controlled, non-sensitive diagnostics", () => {
     }], completeness: "complete", dataIncomplete: false, requiredDomains: ["model"], comparison, diagnosedAt: 2, asOf: 2
   };
   assert.equal(Value.Check(DomainHealthSchema, health), true);
+  const collection = { lastActivityAt: 2, freshSlotCount: 1, staleSlotCount: 0,
+    missingGenerationSlotCount: 0, missingCheckpointSlotCount: 0, closingSlotCount: 0 };
+  const withCollection = (value: unknown) => ({ ...health, data: [{ ...health.data[0], collection: value }] });
+  assert.equal(Value.Check(DomainHealthSchema, withCollection(collection)), true);
+  assert.equal(Value.Check(DomainHealthSchema, withCollection({ ...collection, lastActivityAt: null })), true);
+  assert.equal(Value.Check(DomainHealthSchema, withCollection({ ...collection, freshSlotCount: -1 })), false);
+  assert.equal(Value.Check(DomainHealthSchema, withCollection({ ...collection, staleSlotCount: 0.5 })), false);
+  assert.equal(Value.Check(DomainHealthSchema, withCollection({ ...collection, lastActivityAt: 2.5 })), false);
+  assert.equal(Value.Check(DomainHealthSchema, withCollection({ ...collection, unexpected: true })), false);
+  assert.equal(Value.Check(DomainHealthSchema, withCollection({ lastActivityAt: null })), false);
   assert.equal(Value.Check(DomainHealthSchema, { ...health, data: [{ ...health.data[0], slots: [{ ...health.data[0].slots[0], error: "/secret/path" }] }] }), false);
   assert.equal(Value.Check(DomainHealthSchema, { ...health, data: [{ ...health.data[0], activeGenerationCount: 0, slots: [{ slotStatus: "missing_generation", producerNamespace: "agent", producerId: "worker", producerGeneration: null, lifecycle: null, checkpoint: { freshness: "missing", observedAt: null }, coverageGaps: { openCount: 0, historicalCount: 0, earliestGapFrom: null, hasOpenGap: false } }] }] }), true);
   assert.equal(Value.Check(DomainHealthSchema, { ...health, data: [{ ...health.data[0], activeGenerationCount: 0, slots: [{ slotStatus: "missing_generation", producerNamespace: "agent", producerId: "worker", producerGeneration: "g-1", lifecycle: null, checkpoint: { freshness: "missing", observedAt: null }, coverageGaps: { openCount: 0, historicalCount: 0, earliestGapFrom: null, hasOpenGap: false } }] }] }), false);
@@ -144,9 +154,14 @@ test("Dashboard data exposes independent results for all cards, trends, distribu
   assert.ok(properties.agent.properties.toolDetails);
   assert.ok(properties.agent.properties.toolStatusDistribution);
   assert.deepEqual(Object.keys(properties.agent.properties.trends.properties).sort(), ["assistantMessageCount", "autoCompactionCount", "manualCompactionCount", "primaryRunCount", "runCount", "subtaskRunCount", "toolCallCount", "toolSuccessRate", "totalDuration", "userMessageCount"]);
-  assert.deepEqual(Object.keys(properties.model.properties.trends.properties).sort(), ["cacheHitRate", "completedAverageDuration", "requests", "successRate", "timeoutRate", "tokens"]);
+  assert.deepEqual(Object.keys(properties.model.properties.trends.properties).sort(), ["averagePreparationDuration", "cacheHitRate", "completedAverageDuration", "requests", "successRate", "timeoutRate", "tokens"]);
   assert.ok(properties.model.properties.metrics.properties.timeoutKindBreakdown);
   assert.ok(properties.model.properties.metrics.properties.completedAverageDuration);
+  const preparation = properties.model.properties.metrics.properties.averagePreparationDuration;
+  assert.ok(preparation);
+  for (const [durationMs, reliableSampleCount] of [[null, 0], [0, 1], [25, 3]]) {
+    assert.equal(Value.Check(preparation, { status: "available", value: { durationMs, reliableSampleCount }, completeness: "complete", dataIncomplete: false, requiredDomains: ["model"], comparison }), true);
+  }
   assert.equal(Value.Check(properties.model.properties.metrics.properties.inputTokens, {
     status: "available", value: { count: null }, completeness: "complete", dataIncomplete: false, requiredDomains: ["model"], comparison
   }), true);

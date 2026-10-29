@@ -408,6 +408,8 @@ test("agent-api endpoint registry exposes Message/Run and read-side operations",
       "getExecutionProfile",
       "getMessagesContext",
       "getPromptContext",
+      "prepareRepoGitEnvLease",
+      "releaseRepoGitEnvLease",
       "getSubtaskPreforkPlan",
       "getSubtaskResult",
       "getSubtaskStatus",
@@ -549,6 +551,7 @@ test("agent-api aggregate export exposes read-side schemas with stable shells an
     ],
     lastResponseTotalTokens: null,
     uiLocale: "zh-CN" as const,
+    workspaceRepoNames: [],
     externalSkills: [
       {
         skillId: ".skills/review",
@@ -745,6 +748,7 @@ test("agent-api read-side schemas reject invalid stable fields without constrain
       pendingTools: [],
       lastResponseTotalTokens: null,
       uiLocale: null,
+      workspaceRepoNames: [],
       externalSkills: [],
     }),
     false,
@@ -769,6 +773,7 @@ test("agent-api prompt schemas permit only role-compatible content parts", () =>
     pendingTools: [],
     lastResponseTotalTokens: null,
     uiLocale: null,
+    workspaceRepoNames: [],
     externalSkills: [],
   };
   const attachmentRef = {

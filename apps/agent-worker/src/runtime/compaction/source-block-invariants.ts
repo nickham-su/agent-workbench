@@ -1,3 +1,5 @@
+import { Value } from "@sinclair/typebox/value";
+import { AgentProviderReplayEnvelopeSchema } from "@agent-workbench/shared/internal-contracts/agent-api";
 import type { CompactionSourceBlock } from "./types.js";
 
 const TERMINAL_TOOL_STATUSES = new Set(["completed", "failed", "cancelled", "unknown"]);
@@ -8,24 +10,24 @@ type ReplayEntry = CompactionSourceBlock["providerReplay"][number];
 type Attachment = CompactionSourceBlock["attachments"][number];
 
 export class CompactionSourceInvariantError extends Error {
-  constructor(message: string) {
+  constructor(message: string, readonly diagnosticCode: "source_invariant" | "replay_protocol_invalid" | "replay_part_mismatch" = "source_invariant") {
     super(message);
     this.name = "CompactionSourceInvariantError";
   }
 }
 
-function fail(block: CompactionSourceBlock, message: string): never {
-  throw new CompactionSourceInvariantError(`compaction source ${block.sourceMessageId} ${message}`);
+function fail(block: CompactionSourceBlock, message: string, diagnosticCode?: CompactionSourceInvariantError["diagnosticCode"]): never {
+  throw new CompactionSourceInvariantError(`compaction source ${block.sourceMessageId} ${message}`, diagnosticCode);
 }
 
 function sortedParts(block: CompactionSourceBlock) {
   return [...block.message.parts].sort((left, right) => left.position - right.position);
 }
 
-function replayPartType(part: SourcePart): "reasoning" | "text" | "function_call" | null {
+function replayPartType(part: SourcePart, envelope: ReplayEntry["envelope"]): ReplayEntry["envelope"]["item"]["type"] | null {
   if (part.type === "reasoning") return "reasoning";
   if (part.type === "text") return "text";
-  if (part.type === "tool_call") return "function_call";
+  if (part.type === "tool_call") return envelope.provider.api === "responses" ? "function_call" : "tool_call";
   return null;
 }
 
@@ -93,9 +95,15 @@ export function validateCompactionSourceBlock(block: CompactionSourceBlock): Val
   for (const replay of block.providerReplay) {
     if (replayByPartId.has(replay.partId)) fail(block, "contains duplicate provider replay entries");
     if (block.message.type !== "assistant") fail(block, "contains provider replay outside an assistant message");
+    // Validate against the protocol's closed contract, not the currently selected model.
+    if (!Value.Check(AgentProviderReplayEnvelopeSchema, replay.envelope)) {
+      fail(block, "contains invalid provider replay protocol metadata", "replay_protocol_invalid");
+    }
     const part = partsById.get(replay.partId);
-    const expected = part == null ? null : replayPartType(part);
-    if (!part || !expected || replay.envelope.item.type !== expected) fail(block, "contains provider replay without a matching assistant part");
+    const expected = part == null ? null : replayPartType(part, replay.envelope);
+    if (!part || !expected || replay.envelope.item.type !== expected) {
+      fail(block, "contains provider replay without a matching assistant part", "replay_part_mismatch");
+    }
     replayByPartId.set(replay.partId, replay.envelope);
   }
 

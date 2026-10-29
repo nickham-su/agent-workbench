@@ -187,7 +187,7 @@ test("模型六卡、趋势与覆盖双栏及模型对比表按原型组织", as
   assert.match(wrapper.get("[data-testid='model-metric-tokens']").text(), /5/);
   assert.deepEqual(wrapper.findAll(".token-comparison").map((item) => item.text()), ["+10%", "+10%"]);
   assert.deepEqual(wrapper.findAll(".coverage-comparison").map((item) => item.text()), ["+10%", "+10%", "+10%", "+10%"]);
-  for (const key of ["requestCount", "successRate", "timeoutRate", "completedAverageDuration", "tokens", "cacheHitRate"]) {
+  for (const key of ["requestCount", "successRate", "averagePreparationDuration", "completedAverageDuration", "tokens", "cacheHitRate"]) {
     await wrapper.get(`[data-testid='model-metric-${key}'] button`).trigger("click");
     assert.equal(wrapper.get(`[data-testid='model-metric-${key}'] button`).attributes("aria-pressed"), "true");
     assert.ok(wrapper.find(`[data-testid='model-trend-${key === "requestCount" ? "requests" : key}']`).exists());
@@ -202,6 +202,25 @@ test("模型六卡、趋势与覆盖双栏及模型对比表按原型组织", as
   assert.match(cells[4]!, /^0/);
   wrapper.unmount();
 });
+test("模型输入输出 Token 卡片缩写为一位小数且不添加悬停提示", () => {
+  const source = dashboardSuccessFixture.data.model;
+  const model = { ...source, metrics: {
+    ...source.metrics,
+    inputTokens: { ...source.metrics.inputTokens, value: { count: 788_108_165 } },
+    outputTokens: { ...source.metrics.outputTokens, value: { count: 3_677_857 } },
+  } };
+  const wrapper = mount(ModelSection, { ...options, props: {
+    model, cacheHitRate: dashboardSuccessFixture.data.overview.cacheHitRate, timezone: "UTC",
+  } });
+  const card = wrapper.get("[data-testid='model-metric-tokens']");
+  assert.deepEqual(card.findAll(".token-values strong").map((value) => value.text()), ["788.1M", "3.7M"]);
+  assert.equal(card.find("[title], [role='tooltip']").exists(), false);
+  assert.deepEqual(card.findAll(".token-comparison").map((value) => value.text()), ["+10%", "+10%"]);
+  assert.equal(model.metrics.inputTokens.value.count, 788_108_165);
+  assert.equal(model.metrics.outputTokens.value.count, 3_677_857);
+  wrapper.unmount();
+});
+
 test("模型覆盖率未知不画零，安全零显示零；双 Token 值互不冒充且 partial 不展示采集文案", async () => {
   const source = dashboardSuccessFixture.data.model;
   const metrics = source.metrics;
@@ -655,7 +674,7 @@ test("概览工具调用趋势从 Agent 数据读取，部分采集仍保留真�
   assert.match(chart.get(".chart-details").text(), /0/);
   assert.match(chart.get(".chart-details").text(), /7/);
   assert.equal(chart.find(".metric-hint").exists(), false);
-  await wrapper.get('.metric-grid.six button').trigger("click");
+  await wrapper.findAll('.metric-grid.six button')[5]!.trigger("click");
   assert.ok(wrapper.find('[data-testid="overview-trend-monitoringVolume"]').exists(), "切回其他卡片时趋势同步更新");
   wrapper.unmount();
 });
@@ -798,16 +817,16 @@ test("概览用六卡 + 双栏主趋势/健康表，卡片切换保留真实 DTO
   const overview = wrapper.get('[data-testid="dashboard-section-overview"]');
   const cards = overview.findAll(".metric-grid.six .metric-card");
   assert.equal(cards.length, 6);
-  const cardKeys = ["monitoringVolume", "agentDuration", "toolCallCount", "modelRequests", "modelSuccessRate", "cacheHitRate"];
+  const cardKeys = ["agentDuration", "toolCallCount", "modelRequests", "modelSuccessRate", "cacheHitRate", "monitoringVolume"];
   assert.deepEqual(cards.map((card) => card.get(".metric-title").text()), cardKeys.map((key) => i18n.global.t(`dashboard.${key}`)));
   assert.equal(overview.find('[data-testid="overview-metric-totalTokens"]').exists(), false);
-  assert.ok(overview.find('[data-testid="overview-trend-monitoringVolume"]').exists());
-  for (const [index, trend] of [
-    "monitoringVolume", "agentDuration", "toolCallCount", "modelRequests", "modelSuccessRate", "cacheHitRate",
-  ].entries()) {
+  assert.ok(overview.find('[data-testid="overview-trend-agentDuration"]').exists());
+  assert.deepEqual(cards.map((card) => card.get("button").attributes("aria-pressed")), ["true", "false", "false", "false", "false", "false"]);
+  for (const [index, trend] of cardKeys.entries()) {
     await cards[index]!.get("button").trigger("click");
     const chart = overview.get(`[data-testid="overview-trend-${trend}"]`);
     assert.match(chart.get("h3").text(), new RegExp(cards[index]!.get(".metric-title").text()));
+    assert.deepEqual(cards.map((card) => card.get("button").attributes("aria-pressed")), cardKeys.map((_, cardIndex) => String(cardIndex === index)));
   }
   assert.equal(overview.findAll(".overview-main > *").length, 2);
   assert.ok(overview.find('[data-testid="overview-domain-health"]').exists());
@@ -815,7 +834,7 @@ test("概览用六卡 + 双栏主趋势/健康表，卡片切换保留真实 DTO
   assert.equal(overview.findAll('[data-testid="overview-domain-health"] .dashboard-panel-actions').length, 0);
   assert.equal(overview.findAll(".overview-diagnostics, .configuration-diagnostics").length, 0);
   assert.doesNotMatch(overview.text(), /配置诊断|Configuration diagnostic/);
-  await overview.findAll(".metric-grid.six button")[1].trigger("click");
+  await overview.findAll(".metric-grid.six button")[0].trigger("click");
   assert.ok(overview.find('[data-testid="overview-trend-agentDuration"]').exists());
   await wrapper.findAll("nav.dashboard-section-tabs button")[3]!.trigger("click");
   assert.ok(wrapper.find('[data-testid="dashboard-section-worker"] .worker-main').exists());
@@ -893,7 +912,7 @@ test("概览监控趋势只使用服务端 total，密集桶分类轴不显示�
  wrapper.unmount();
 });
 
-test("健康侧栏仅在表格逐行展示真实域状态和最后成功时间", () => {
+test("健康侧栏兼容旧响应，并逐行展示当前状态和最近更新时间", () => {
   const available = dashboardSuccessFixture.data.exceptions.domainHealth;
   const result = { ...available, data: [
     available.data[0],
@@ -908,42 +927,97 @@ test("健康侧栏仅在表格逐行展示真实域状态和最后成功时间",
   assert.match(wrapper.get(".health-table tbody tr:last-child").text(), /降级|Degraded/);
 });
 
-test("域状态摘要仅为异常域提供可操作的已知迹象，不猜测根因", async () => {
+test("域状态摘要只展示当前采集诊断，忽略历史缺口和旧实例", async () => {
   const source = dashboardSuccessFixture.data.exceptions.domainHealth;
   const base = source.data[0]!;
+  const collection = { lastActivityAt: 2, freshSlotCount: 0, staleSlotCount: 0,
+    missingGenerationSlotCount: 0, missingCheckpointSlotCount: 0, closingSlotCount: 0 };
   const worker = { ...base, domain: "worker" as const, status: "degraded" as const,
     coverageGaps: { ...base.coverageGaps, openCount: 3, hasOpenGap: true },
-    slots: [{ ...base.slots[0]!, producerId: "secret-producer-id" }] };
+    slots: [{ ...base.slots[0]!, producerId: "secret-producer-id", checkpoint: { freshness: "stale" as const, observedAt: 1 } }],
+    collection: { ...collection, closingSlotCount: 1 } };
   const disabled = { ...base, domain: "model" as const, status: "disabled" as const,
     expectedSlotCount: 0, activeGenerationCount: 0, slots: [] };
-  const stale = { ...base, domain: "session" as const, status: "stale" as const,
-    slots: [{ ...base.slots[0]!, checkpoint: { freshness: "stale" as const, observedAt: 2 } }] };
+  const stale = { ...base, domain: "model" as const, status: "stale" as const,
+    collection: { ...collection, staleSlotCount: 1 } };
   const missing = { ...base, domain: "execution" as const, status: "degraded" as const,
     expectedSlotCount: 2, activeGenerationCount: 1,
-    slots: [{ ...base.slots[0]!, checkpoint: { freshness: "missing" as const, observedAt: null } }] };
+    slots: [{ ...base.slots[0]!, checkpoint: { freshness: "missing" as const, observedAt: null } }],
+    collection: { ...collection, missingGenerationSlotCount: 1, missingCheckpointSlotCount: 1 } };
+  const zero = { ...base, domain: "agent_duration" as const, status: "degraded" as const,
+    expectedSlotCount: 0, activeGenerationCount: 0, slots: [], collection };
   const wrapper = mount(DomainSummary, { ...options, attachTo: document.body,
-    props: { result: { ...source, data: [base, worker, disabled, stale, missing] } } });
+    props: { result: { ...source, data: [base, worker, disabled, stale, missing, zero] } } });
   try {
     const rows = wrapper.findAll(".health-table tbody tr");
-    assert.equal(rows.length, 5);
+    assert.equal(rows.length, 6);
     assert.equal(rows[0]!.findAll(".health-evidence-trigger").length, 0);
     const triggers = rows.slice(1).map((row) => row.get("button.health-evidence-trigger"));
     for (const trigger of triggers) {
       assert.equal(trigger.attributes("type"), "button");
       assert.match(trigger.attributes("aria-label") ?? "", /已知异常迹象|Known indicators/);
     }
-    assert.match(triggers[0]!.attributes("aria-label")!, /3 个开放覆盖缺口|3 open coverage gaps/);
-    assert.doesNotMatch(triggers[0]!.attributes("aria-label")!, /根因|root cause|secret-producer-id/);
+    assert.match(triggers[0]!.attributes("aria-label")!, /正在停止|are stopping/);
+    assert.doesNotMatch(triggers[0]!.attributes("aria-label")!, /根因|root cause|secret-producer-id|开放覆盖缺口|open coverage gaps|检查点已过期|stale checkpoints/);
     assert.match(triggers[1]!.attributes("aria-label")!, /当前已禁用|currently disabled/);
     assert.match(triggers[2]!.attributes("aria-label")!, /检查点已过期|stale checkpoints/);
     assert.match(triggers[3]!.attributes("aria-label")!, /缺少活跃 Generation|no active generation/);
-    assert.match(triggers[3]!.attributes("aria-label")!, /检查点缺失|no checkpoint/);
+    assert.match(triggers[3]!.attributes("aria-label")!, /缺少有效检查点|no usable checkpoint/);
+    assert.match(triggers[4]!.attributes("aria-label")!, /未配置预期采集槽位|No expected collection slots/);
     await triggers[0]!.trigger("click");
     await new Promise((resolve) => setTimeout(resolve, 50));
-    assert.match(document.body.querySelector(".ant-popover-inner")?.textContent ?? "", /3 个开放覆盖缺口|3 open coverage gaps/);
+    assert.match(document.body.querySelector(".ant-popover-inner")?.textContent ?? "", /正在停止|are stopping/);
+    assert.doesNotMatch(document.body.querySelector(".ant-popover-inner")?.textContent ?? "", /开放覆盖缺口|open coverage gaps/);
   } finally {
     wrapper.unmount();
   }
+});
+
+test("当前采集健康使用活动时间，不显示旧实例诊断或历史认证时间", () => {
+  const source = dashboardSuccessFixture.data.exceptions.domainHealth;
+  const base = source.data[0]!;
+  const row = { ...base, domain: "execution" as const, status: "healthy" as const,
+    lastSucceededAt: 1, coverageGaps: { ...base.coverageGaps, openCount: 8, hasOpenGap: true },
+    collection: { lastActivityAt: Date.UTC(2026, 5, 9), freshSlotCount: 1, staleSlotCount: 0,
+      missingGenerationSlotCount: 0, missingCheckpointSlotCount: 0, closingSlotCount: 0 } };
+  const wrapper = mount(DomainSummary, { ...options, props: { result: { ...source, data: [row] }, timezone: "UTC" } });
+  try {
+    assert.match(wrapper.get(".health-table thead").text(), /最近更新|Last activity/);
+    assert.match(wrapper.get(".health-table tbody tr").text(), /健康|Healthy/);
+    assert.match(wrapper.get(".health-table tbody tr td:last-child").text(), /2026/);
+    assert.doesNotMatch(wrapper.get(".health-table tbody tr td:last-child").text(), /1970/);
+    assert.equal(wrapper.findAll(".health-evidence-trigger").length, 0);
+    assert.equal(wrapper.find(".health-scope").exists(), false);
+    assert.doesNotMatch(wrapper.text(), /状态反映当前采集活动|Status reflects current collection activity/);
+    assert.doesNotMatch(wrapper.text(), /开放覆盖缺口|open coverage gaps/);
+  } finally { wrapper.unmount(); }
+});
+
+test("缺少采集活动不回退历史认证时间，镜像域只使用服务端当前诊断", () => {
+  const source = dashboardSuccessFixture.data.exceptions.domainHealth;
+  const base = source.data[0]!;
+  const row = { ...base, domain: "agent_duration" as const, status: "degraded" as const,
+    expectedSlotCount: 0, activeGenerationCount: 0, slots: [], lastSucceededAt: Date.UTC(2020, 0, 1),
+    collection: { lastActivityAt: null, freshSlotCount: 0, staleSlotCount: 0,
+      missingGenerationSlotCount: 0, missingCheckpointSlotCount: 1, closingSlotCount: 0 } };
+  const wrapper = mount(DomainSummary, { ...options, props: { result: { ...source, data: [row] }, timezone: "UTC" } });
+  try {
+    assert.equal(wrapper.get(".health-table tbody tr td:last-child").text(), "—");
+    const diagnostic = wrapper.get(".health-evidence-trigger").attributes("aria-label")!;
+    assert.match(diagnostic, /缺少有效检查点|no usable checkpoint/);
+    assert.doesNotMatch(diagnostic, /未配置预期采集槽位|No expected collection slots/);
+  } finally { wrapper.unmount(); }
+});
+
+test("旧响应的异常摘要不重新猜测历史槽位与缺口", () => {
+  const source = dashboardSuccessFixture.data.exceptions.domainHealth;
+  const row = { ...source.data[0]!, status: "stale" as const,
+    coverageGaps: { ...source.data[0]!.coverageGaps, openCount: 9, hasOpenGap: true } };
+  const wrapper = mount(DomainSummary, { ...options, props: { result: { ...source, data: [row] } } });
+  try {
+    assert.match(wrapper.get(".health-evidence-trigger").attributes("aria-label")!, /暂无更具体|no more specific/);
+    assert.doesNotMatch(wrapper.text(), /开放覆盖缺口|open coverage gaps/);
+  } finally { wrapper.unmount(); }
 });
 
 test("概览窄屏布局有双栏堆叠与六卡重排断点", () => {
@@ -1077,5 +1151,52 @@ test("Agent 分布全零时环图及条图键盘读数不把未知占比说成�
       assert.doesNotMatch(host.attributes('aria-label') ?? '', /0%/);
       wrapper.unmount();
     }
+  }
+});
+
+
+test("平均准备耗时替换第三卡并切换时长趋势，未知与真实零不混淆", async () => {
+  const source = dashboardSuccessFixture.data.model;
+  const wrapper = mount(ModelSection, { ...options, props: { model: source, cacheHitRate: dashboardSuccessFixture.data.overview.cacheHitRate, timezone: "UTC" } });
+  const cards = wrapper.findAll(".model-primary-metrics > *");
+  assert.equal(cards[2]!.attributes("data-testid"), "model-metric-averagePreparationDuration");
+  assert.match(cards[2]!.text(), /平均准备耗时|Average preparation time/);
+  assert.match(cards[2]!.get('.metric-description').text(), /10%.*(?:随机采样|random)/);
+  assert.equal(wrapper.findAll('.metric-description').length, 1, '仅准备耗时卡展示采样说明');
+  assert.equal(wrapper.find("[data-testid='model-metric-timeoutRate']").exists(), false);
+  await cards[2]!.get("button").trigger("click");
+  const trend = wrapper.get("[data-testid='model-trend-averagePreparationDuration']");
+  assert.match(trend.text(), /平均准备耗时|Average preparation time/);
+  const chart = wrapper.findComponent(TrendChart);
+  assert.equal(chart.props("kind"), "duration");
+  assert.deepEqual(chart.props("panel"), source.trends.averagePreparationDuration);
+  for (const durationMs of [null, 0]) {
+    const metric = source.metrics.averagePreparationDuration;
+    assert.notEqual(metric.status, "unavailable");
+    await wrapper.setProps({ model: { ...source, metrics: { ...source.metrics, averagePreparationDuration: { ...metric, value: { durationMs, reliableSampleCount: durationMs === null ? 0 : 1 } } } } });
+    const text = wrapper.get("[data-testid='model-metric-averagePreparationDuration'] .metric-value").text();
+    assert.equal(text, durationMs === null ? "—" : "0ms");
+    assert.match(wrapper.get('[data-testid="model-metric-averagePreparationDuration"] .metric-description').text(), new RegExp(`(?:有效样本数：|Valid samples: )${durationMs === null ? 0 : 1}$`));
+  }
+  wrapper.unmount();
+});
+
+test("准备耗时卡展示当前采样规则和可靠样本数，中英文及不可用状态不伪造零", async () => {
+  for (const locale of ['zh-CN', 'en-US']) {
+    const source = structuredClone(dashboardSuccessFixture.data.model);
+    const metric = source.metrics.averagePreparationDuration;
+    assert.notEqual(metric.status, 'unavailable');
+    metric.value.reliableSampleCount = 1234;
+    const localI18n = createI18n({ legacy: false, locale, messages: { 'zh-CN': i18n.global.getLocaleMessage('zh-CN'), 'en-US': enUS } });
+    const wrapper = mount(ModelSection, { global: { plugins: [localI18n] }, props: { model: source, cacheHitRate: dashboardSuccessFixture.data.overview.cacheHitRate, timezone: 'UTC' } });
+    const description = () => wrapper.get('[data-testid="model-metric-averagePreparationDuration"] .metric-description').text();
+    assert.match(description(), locale === 'zh-CN' ? /当前按 10% 随机采样 · 有效样本数：1,234/ : /Current sampling: 10% random · Valid samples: 1,234/);
+    await wrapper.setProps({ model: { ...source, metrics: { ...source.metrics, averagePreparationDuration: {
+      status: 'unavailable', value: null, dataIncomplete: true, unavailableReason: 'no_safe_data', requiredDomains: ['model'],
+      comparison: { status: 'not_applicable', kind: null, delta: null },
+    } } } });
+    assert.match(description(), /—$/);
+    assert.equal(wrapper.get('[data-testid="model-metric-averagePreparationDuration"] .metric-value').text(), '—');
+    wrapper.unmount();
   }
 });

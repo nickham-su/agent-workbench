@@ -231,7 +231,71 @@ export default {
       search: "Search",
       agent: "AI Agent",
       scheduledTasks: "Scheduled tasks",
+      environmentVariables: "Environment variables",
       editor: "Editor"
+    },
+    environmentVariables: {
+      "title": "Workspace environment variables",
+      "add": "Add variable",
+      "edit": "Edit variable",
+      "description": "Configure one set of environment variables for bash and terminals in this Workspace.",
+      "search": "Search names or remarks",
+      "filter": "Filter by enabled state",
+      "all": "All states",
+      "enabledState": "Enabled",
+      "disabledState": "Disabled",
+      "count": "Showing {shown}/{total} · {enabled} enabled",
+      "list": "Workspace environment variables",
+      "enabled": "Enabled",
+      "name": "Name",
+      "value": "Value",
+      "remark": "Remark",
+      "actions": "Actions",
+      "toggle": "Toggle {name}",
+      "editVariable": "Edit {name}",
+      "deleteVariable": "Delete {name}",
+      "emptyString": "Empty string",
+      "empty": "No environment variables yet",
+      "noMatches": "No matching variables",
+      "clearFilters": "Clear filters",
+      "rulesLabel": "Environment variable scope and rules",
+      "scope": "Scope",
+      "tool": "tool",
+      "bashScope": "The next call uses the new configuration. Running commands keep their environment.",
+      "terminalScope": "New sessions use the new configuration. Reconnecting existing sessions does not update them.",
+      "rules": "Configuration rules",
+      "sharedRule": "bash and new terminals share this Workspace configuration without changing the service environment.",
+      "priorityRule": "Workspace values override ordinary system variables with exactly matching names. Names are case-sensitive; proxy aliases are not synchronized.",
+      "emptyRule": "An empty string is a valid value, not an absent setting.",
+      "inheritRule": "Disabling or deleting removes the override and resumes base environment inheritance; it is not unset.",
+      "literalRule": "Values are literal: $PATH and command substitutions are not expanded.",
+      "reservedRule": "AWB_* and system-managed Git authentication variables are protected and cannot be configured.",
+      "security": "Security reminder",
+      "securityNote": "Values are displayed in plaintext. Commands can read and print them; avoid logging sensitive values. Names and remarks must not contain secrets.",
+      "saveHelp": "Save writes directly to this Workspace and only affects subsequent bash calls and newly created terminals.",
+      "nameHelp": "Use letters, digits and underscores, without a leading digit. Names are case-sensitive, up to 128 characters.",
+      "valuePlaceholder": "Enter a literal value; leave blank for an empty string",
+      "valueHelp": "Whitespace and line breaks are preserved; $PATH is not expanded. Each value supports up to 16 KiB of UTF-8.",
+      "optional": "(optional)",
+      "enableVariable": "Enable this variable",
+      "saved": "Saved",
+      "noChanges": "No changes",
+      "unconfirmed": "The save result is unconfirmed. Refresh and verify the current configuration; do not submit again.",
+      "reloadedUnconfirmed": "The save result is unconfirmed. Current server configuration has been reloaded for you to verify.",
+      "formUnconfirmed": "This save result is unconfirmed and cannot be submitted again. Verify the current configuration, then close and reopen the editor.",
+      "deleteTitle": "Delete this variable?",
+      "deleteContent": "Deleting {name} only removes its Workspace override. Running commands and existing terminals are unchanged.",
+      "errors": {
+        "duplicate": "A variable with this exact name already exists in this Workspace.",
+        "reserved": "This name is reserved for AWB or system-managed Git configuration.",
+        "limits": "Limit exceeded: 128-character names, 160 UTF-16 units per remark, 16 KiB per value, 128 variables, or 64 KiB total environment encoding (including disabled entries).",
+        "invalid": "The configuration is invalid. Check the inputs.",
+        "deleting": "This Workspace is being deleted; configuration cannot be read or changed.",
+        "notFound": "The Workspace or variable no longer exists. Refresh to verify.",
+        "request": "The environment variable request could not be completed. Refresh and try again.",
+        "name": "Use letters, digits and underscores without a leading digit.",
+        "text": "The value or remark contains NUL or invalid Unicode. Check the input."
+      }
     },
     dock: {
       moveTo: "Move to {area}",
@@ -342,6 +406,10 @@ export default {
       cancelConfirmContent: "This stops the current execution and keeps all messages. The currently running AI/tool item will be marked as cancelled.",
       cancelled: "Current run cancelled",
       welcome: "Hi, I can help you get tasks done.",
+      fileLinkUnresolved: "The linked file does not exist or its location is ambiguous",
+      fileLinkProbeFailed: "Failed to locate the linked file. Please try again",
+      fileLinkInvalidPath: "Invalid file link path. Use a relative path without .. segments",
+      fileLinkInvalidPosition: "Invalid file link line or column",
       reachedTop: "Reached the beginning",
       contextBoundary: "Context boundary",
       inputPlaceholderIdle: "Type a message or paste an image, Enter to send, Shift+Enter for newline, Tab to switch agent",
@@ -376,7 +444,6 @@ export default {
       sessionRestoreUnconfirmed: "Opening may have been saved; restoring the hidden state is unconfirmed. Check again or close the tab manually.",
       retryTitleSync: 'Retry session title sync',
       retrySessionSelection: 'Retry selection',
-      reloadTabs: "Reload tabs",
       refreshSessionList: "Refresh list",
       sessionListExpired: "The list has expired. Reload from the beginning.",
       sessionListFailed: "Could not load sessions. Please retry.",
@@ -485,7 +552,16 @@ export default {
     placeholder: {
       title: "Code review (placeholder)",
       desc: "Review changes, staging, and diffs for the current repo here.",
-      selectRepo: "Select a repo to continue."
+      selectRepo: "Select a repo to continue.",
+      noRepos: "This workspace has no registered repositories"
+    },
+    repositories: {
+      resize: "Resize repository column",
+      title: "Repositories",
+      select: "Select a repository to review",
+      switchBranch: "Switch branch for repository {repo} (current: {branch})",
+      actions: "Actions for repository {repo}",
+      hasChanges: "Uncommitted changes"
     },
     unstaged: "Unstaged",
     staged: "Staged",
@@ -508,9 +584,13 @@ export default {
       pathCopied: "Path copied"
     },
     status: {
-      noChanges: "No changes"
+      noChanges: "The current repository has no uncommitted changes",
+      noUnstagedChanges: "No unstaged changes",
+      noStagedChanges: "No staged changes"
     },
     file: {
+      directory: "Directory (text preview unavailable)",
+      submodule: "Submodule (text preview unavailable)",
       oldPath: "From: {oldPath}"
     },
     discard: {
@@ -550,7 +630,9 @@ export default {
       modalTitle: "Commit",
       messageLabel: "Commit message",
       messagePlaceholder: "Enter commit message",
-      summary: "Will commit {count} file(s)",
+      target: "Target repository: {repo}",
+      summary: "Will commit {count} staged file(s)",
+      scope: "Only staged changes in this repository will be committed",
       committed: "Committed {sha}"
     },
     preview: {
@@ -563,6 +645,35 @@ export default {
     }
   },
   terminal: {
+    config: {
+      reorder: "Reorder",
+      orderDone: "Done",
+      drag: "Drag to reorder",
+      moveUp: "Move up",
+      moveDown: "Move down",
+      title: "Run configurations",
+      add: "New configuration",
+      collapse: "Collapse configurations",
+      empty: "No configurations",
+      run: "Run",
+      legacyRun: "This older terminal cannot confirm service shutdown. Stop its service manually, close this tab, then run again.",
+      guardUnavailable: "Run configurations require Linux, /usr/bin/python3 with pidfd support, and child-subreaper capability.",
+      restartStoppedUnconfirmed: "Restart failed: the previous environment could not be confirmed stopped and cleaned up. No new run was started. Please try again later.",
+      more: "More",
+      edit: "Edit configuration",
+      delete: "Delete",
+      confirmDelete: "Delete configuration?",
+      name: "Name",
+      nameRequired: "Enter a name",
+      cwd: "Working directory",
+      cwdHint: "Select a repository or enter a relative path. Leave blank for the Workspace root.",
+      root: "Workspace root",
+      command: "Startup command",
+      commandRequired: "Enter a startup command",
+      cancel: "Cancel",
+      save: "Save configuration",
+      saved: "Configuration saved"
+    },
     panel: {
       collapse: "Collapse terminal panel"
     },
@@ -628,6 +739,7 @@ export default {
       copyPath: "Copy repo path",
       copyRepoPath: "Copy repo path",
       copyWorkspacePath: "Copy workspace path",
+      extract: "Extract",
       download: "Download",
       preview: "Preview",
       rename: "Rename",
@@ -648,6 +760,38 @@ export default {
       uploading: "Uploading…",
       success: "Upload complete",
       partialFailed: "Upload failed: {names}"
+    },
+    extract: {
+      extracting: "Extracting…",
+      success: "Extraction complete",
+      empty: "The archive is empty; no files were added",
+      refreshFailed: "Extraction completed, but the folder could not be refreshed. Please refresh manually",
+      resultUnknown: "The result is unknown; extraction may have completed. Refresh the folder to check. No automatic retry will be made",
+      errors: {
+        invalidPath: "The archive path is invalid, or the source is not a regular file",
+        unsupportedFormat: "This archive format is not supported",
+        invalidArchive: "The archive is damaged, has the wrong format, or failed integrity checks",
+        unsupportedFeature: "Encrypted, multi-volume archives or this compression method are not supported",
+        unsupportedEntry: "The archive contains unsupported links, special files or extended entries",
+        invalidEntry: "The archive contains unsafe paths, duplicate files or conflicting entries",
+        permissionDenied: "Permission denied when reading the archive or writing to the destination",
+        sourceNotFound: "The archive no longer exists. Refresh the folder to check",
+        targetConflict: "A destination name already exists. Nothing was overwritten or merged; resolve the conflict before retrying",
+        sourceChanged: "The archive changed during extraction. Refresh the folder to check",
+        targetChanged: "The destination or extracted files changed during extraction. Refresh the folder to check",
+        unsupportedFilesystem: "This filesystem does not support the operations required for safe extraction",
+        limitExceeded: "The archive exceeds extraction size, entry count, path or metadata limits",
+        timeout: "Extraction timed out. Refresh the folder to check",
+        busy: "The server is processing another extraction. Please try again later",
+        storageExhausted: "Disk space or available file nodes are exhausted. Please check storage",
+        ioFailed: "A file read or write error occurred. Refresh the folder to check",
+        cleanupIncomplete: "Files may have been extracted and some content could not be cleaned up. Refresh the folder and inspect remaining content",
+        workspaceDeleting: "The workspace is being deleted and cannot extract files",
+        workspaceInvalid: "The workspace path is invalid; safe extraction is not possible",
+        unauthorized: "Your session has expired. Please sign in again",
+        unavailable: "The workspace or archive is unavailable. Refresh the folder to check",
+        invalidRequest: "The extraction request is invalid. Refresh the folder before retrying"
+      }
     },
     status: {
       saving: "Saving…"
@@ -1080,6 +1224,7 @@ export default {
       },
       tools: {
         bash: "Bash",
+        git: "Git",
         read: "Read",
         write: "Write",
         applyPatch: "Apply Patch",
@@ -1332,6 +1477,8 @@ export default {
     }
   },
   dashboard: {
+    averagePreparationDuration: "Average preparation time",
+    preparationSamplingDescription: "Current sampling: 10% random · Valid samples: {count}",
     title: "Analytics dashboard", subtitle: "Review Agent, model, tool, and Worker activity. All analytics stay local.",
     overview: "Overview", agent: "Agent", model: "Models", worker: "Worker", refresh: "Refresh",
     range: "Range", custom: "Custom range", preset_24h: "24 hours", preset_7d: "7 days", preset_30d: "30 days", preset_90d: "90 days", apply: "Apply", from: "From", to: "To",
@@ -1349,7 +1496,8 @@ export default {
     sections: "Dashboard sections", rangeEnd: "Range end", monitoringComposition: "Latest monitoring composition", domain: "Domain", statusLabel: "Status", lastSucceededAt: "Last succeeded", runType: "Run type", messageType: "Message type", toolStatus: "Tool status", toolDetails: "Tool details", byModel: "By model", tokenCoverage: "Token coverage", restartRecords: "Restart records", occurredAt: "Occurred at", event: "Event", restartStatus: "Restart status", toolName: "Tool", calls: "Calls", completed: "Completed", failed: "Failed", provider: "Provider", modelName: "Model", unknown: "Unknown", requestCount: "Request count", primaryRunCount: "Primary runs", subtaskRunCount: "Subtask runs", userMessageCount: "User messages", assistantMessageCount: "Assistant messages", manualCompactionCount: "Manual compactions", autoCompactionCount: "Auto compactions", completedAverageDuration: "Average completed duration", cacheReadTokens: "Cache read tokens", inputReportedCount: "Input reported", outputReportedCount: "Output reported", totalReportedCount: "Total reported", totalDerivedCount: "Total derived", cacheComparableCount: "Cache comparable", timeoutKindBreakdown: "Timeout kinds",
     totalDuration: "Total duration", runCount: "Run count", toolSuccessRate: "Tool success rate", inputTokenCoverage: "Input coverage", outputTokenCoverage: "Output coverage", totalTokenCoverage: "Total coverage", inputCacheCoverage: "Cache coverage",
     distribution: { primary: "Primary", subtask: "Subtask", other: "Other", user: "User", assistant: "Assistant", runtime: "Runtime", system: "System", compaction: "Compaction", completed: "Completed", failed: "Failed", cancelled: "Cancelled", unknown: "Unknown" },
-    healthEvidenceTitle: "Known indicators", healthEvidenceDisabled: "This domain is currently disabled", healthEvidenceGaps: "{count} open coverage gaps", healthEvidenceMissingGeneration: "{count} expected slots have no active generation", healthEvidenceStaleCheckpoint: "{count} slots have stale checkpoints", healthEvidenceMissingCheckpoint: "{count} active generations have no checkpoint", healthEvidenceUnknown: "Status is abnormal; no more specific diagnostic information is available",
+    lastCollectionActivityAt: "Last activity", healthEvidenceNoExpectedSlots: "No expected collection slots are currently configured", healthEvidenceClosing: "{count} collection slots are stopping",
+    healthEvidenceTitle: "Known indicators", healthEvidenceDisabled: "This domain is currently disabled", healthEvidenceGaps: "{count} open coverage gaps", healthEvidenceMissingGeneration: "{count} expected slots have no active generation", healthEvidenceStaleCheckpoint: "{count} slots have stale checkpoints", healthEvidenceMissingCheckpoint: "{count} collection slots have no usable checkpoint", healthEvidenceUnknown: "Status is abnormal; no more specific diagnostic information is available",
     runStatus: { completed: "Completed", failed: "Failed", cancelled: "Cancelled", interrupted: "Interrupted", unknown: "Unknown" }, workerEvent: { unexpected_exit: "Unexpected exit", restart_attempted: "Restart attempted", restart_succeeded: "Restart succeeded", restart_failed: "Restart failed" }, restartStatusValue: { recovered: "Recovered", not_recovered: "Not recovered", pending: "Pending", not_applicable: "Not applicable" },
     status: { available: "Complete", partial: "Incomplete", healthy: "Healthy", degraded: "Degraded", stale: "Stale", unavailable: "Unavailable", disabled: "Disabled" },
     error: {CUSTOM_RANGE_REQUIRED: "Choose both custom dates.", CUSTOM_RANGE_INVALID: "The custom date is invalid.", CUSTOM_RANGE_DST_AMBIGUOUS: "This time occurs twice because of daylight saving time.", CUSTOM_RANGE_DST_NONEXISTENT: "This time does not exist because of daylight saving time.", CUSTOM_RANGE_ORDER: "The start must be before the end.", CUSTOM_RANGE_TOO_LARGE: "Custom range cannot exceed 366 days.",  ANALYTICS_UNAVAILABLE: "Analytics is temporarily unavailable.", ANALYTICS_RANGE_TOO_LARGE: "The selected range is too large.", ANALYTICS_RANGE_INVALID: "The selected range is invalid.", ANALYTICS_TIMEZONE_INVALID: "The selected timezone is invalid.", ANALYTICS_RANGE_NOT_READY: "This range is not ready yet.", NETWORK_ERROR: "Unable to load dashboard data." },
@@ -1357,6 +1505,45 @@ export default {
     reason: { coverage_gap: "Coverage gap", range_not_reconciled: "Range not reconciled", collector_degraded: "Collector degraded", signal_loss: "Signal loss", dirty_hour: "Hour is being refreshed", open_fact: "Open fact", configuration_changed: "Configuration changed", domain_disabled: "Domain disabled", domain_unavailable: "Domain unavailable", no_safe_data: "No safe data", invalid_metric_state: "Invalid metric state" }
   },
   editor: {
+    preview: {
+      toggle: "Source / Preview",
+      renderFailed: "Unable to render the document. Switch to source to inspect it.",
+      imageFailed: "Image failed to load, exceeded resource limits, or is unsupported",
+      remoteImageBlocked: "Remote images are not loaded automatically",
+      imageBlocked: "Unsupported image path",
+      imageLimit: "Preview image count limit exceeded",
+      headingMissing: "Heading not found",
+      linkBlocked: "Unsupported link address",
+      linkFailed: "File is missing, inaccessible, or could not be opened",
+      crossFileHeadingUnsupported: "Cross-file heading navigation is not supported. Open a file link without a heading."
+    },
+    mermaid: {
+      zoomIn: "Zoom in",
+      zoomOut: "Zoom out",
+      fit: "Fit to window",
+      navigation: "Diagram preview: Ctrl/Cmd + wheel to zoom, Space + left drag or middle drag to pan",
+      loading: "Loading diagram…",
+      empty: "The diagram is empty. Switch to source to edit it.",
+      tooLarge: "The diagram exceeds preview size or complexity limits.",
+      unsafe: "Diagram configuration, HTML, math labels, external resources, or unsupported custom styles are disabled.",
+      unsupported: "Safe preview is not yet supported for this diagram type. Switch to source to view it.",
+      loadFailed: "Unable to load the diagram renderer. Switch to source and retry.",
+      renderFailed: "Unable to render the diagram. Check the source syntax or complexity."
+    },
+    image: {
+      loading: "Loading image…",
+      tooLarge: "Image exceeds 20 MiB and cannot be previewed",
+      loadFailed: "Image failed to load or its format is unsupported"
+    },
+    media: {
+      loadFailed: "Media failed to load or its format is unsupported. Check the file and your sign-in status, or download it to play locally.",
+      decodeFailed: "Your browser cannot decode this media. Download it to play with a local player.",
+      download: "Download file"
+    },
+    htmlPreview: {
+      open: "Preview in browser",
+      saveFirst: "Finish saving and resolve conflicts before opening the preview"
+    },
     placeholder: {
       empty: "No content opened",
       fileEditorComingSoon: "File editing will be connected in a later stage"

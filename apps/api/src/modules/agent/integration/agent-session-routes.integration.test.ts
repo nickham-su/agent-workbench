@@ -6,10 +6,11 @@ import { Type } from "@sinclair/typebox";
 import { HttpError } from "../../../app/errors.js";
 import { createApp } from "../../../app/createApp.js";
 import { getRunRecord } from "../agent-message.store.js";
-import { commitCompactionMessageForTest, getMessageRunState, getMessageSession } from "../agent-message.store.js";
+import { commitCompactionMessageForTest, getMessageRunState, getMessageSession, updateToolExecution } from "../agent-message.store.js";
 import { newSortableId } from "../../../utils/ids.js";
 import {
   appendMessageFixture,
+  createAssistantFixture,
   createMessageRunFixture,
   createIntegrationFixture,
   createSession,
@@ -141,6 +142,51 @@ test("public 和 generic internal create 固定创建 primary，并拒绝未知�
   const invalid = await fixture.app.inject({ method: "POST", url: "/api/agent/sessions", payload: { workspaceId: fixture.workspaceId, title: "bad", kind: "subtask" } });
   assert.equal(invalid.statusCode, 400);
 });
+
+for (const tail of ["streaming", "queued", "running"] as const) {
+  test(`public Fork accepts stable history during ${tail} work without changing the source; Revert stays blocked`, async (t: TestContext) => {
+    const fixture = await createIntegrationFixture(t, { agentWorkerConcurrency: 0 });
+    const source = await createSession(fixture.app, fixture.workspaceId);
+    const run = createMessageRunFixture({ fixture, sessionId: source.id });
+    const stable = createAssistantFixture({ fixture, sessionId: source.id, runId: run.runId, executions: [] });
+    const messageId = newSortableId("msg");
+    const executionId = newSortableId("exec");
+    const callPartId = newSortableId("part");
+    createAssistantFixture({
+      fixture, sessionId: source.id, runId: run.runId, messageId,
+      ...(tail === "streaming" ? {} : {
+        parts: [{ id: callPartId, position: 0, type: "tool_call", toolName: "bash", input: {} }],
+        executions: [{ id: executionId, callPartId, originSessionId: source.id, originRunId: run.runId, status: "queued" }],
+      }),
+    });
+    if (tail === "running") updateToolExecution(fixture.db, { workspaceId: fixture.workspaceId, sessionId: source.id, runId: run.runId, executionId, status: "running", updatedAt: Date.now() });
+    const before = getMessageSession(fixture.db, fixture.workspaceId, source.id);
+    const stateBefore = getMessageRunState(fixture.db, fixture.workspaceId, source.id);
+    const runBefore = getRunRecord(fixture.db, run.runId);
+    for (const target of [run.triggerMessageId, stable.assistantMessageId]) {
+      const fork = await fixture.app.inject({ method: "POST", url: "/api/agent/sessions/fork", payload: { fromSessionId: source.id, fromMessageId: target } });
+      assert.equal(fork.statusCode, 201, fork.body);
+      const child = fork.json() as { id: string; headMessageId: string | null };
+      assert.equal(child.headMessageId, target);
+      assert.equal(getMessageRunState(fixture.db, fixture.workspaceId, child.id)?.status, "idle");
+      const started = await sendMessage(fixture.app, { workspaceId: fixture.workspaceId, sessionId: child.id, text: "independent branch", clientRequestId: `fork-${tail}-${target}` });
+      assert.equal(getRunRecord(fixture.db, started.runId)?.sessionId, child.id);
+      assert.equal(getRunRecord(fixture.db, started.runId)?.triggerMessageId, started.messageId);
+    }
+    const countBefore = (fixture.db.prepare("select count(*) as count from agent_session").get() as { count: number }).count;
+    const rejected = await fixture.app.inject({ method: "POST", url: "/api/agent/sessions/fork", payload: { fromSessionId: source.id, fromMessageId: messageId } });
+    assert.equal(rejected.statusCode, 409, rejected.body);
+    assert.equal(rejected.json().code, "AGENT_FORK_HISTORY_NOT_STABLE");
+    assert.match(rejected.json().message, /selected fork history/);
+    assert.equal((fixture.db.prepare("select count(*) as count from agent_session").get() as { count: number }).count, countBefore);
+    const revert = await fixture.app.inject({ method: "POST", url: `/api/agent/sessions/${source.id}/revert`, payload: { workspaceId: fixture.workspaceId, messageId: run.triggerMessageId } });
+    assert.equal(revert.statusCode, 409, revert.body);
+    assert.equal(revert.json().code, "AGENT_REVERT_NOT_IDLE");
+    assert.deepEqual(getMessageSession(fixture.db, fixture.workspaceId, source.id), before);
+    assert.deepEqual(getMessageRunState(fixture.db, fixture.workspaceId, source.id), stateBefore);
+    assert.deepEqual(getRunRecord(fixture.db, run.runId), runBefore);
+  });
+}
 
 test("public Fork accepts a pre-compaction message and starts a child Run", async (t: TestContext) => {
   const fixture = await createIntegrationFixture(t, { agentWorkerConcurrency: 0 });

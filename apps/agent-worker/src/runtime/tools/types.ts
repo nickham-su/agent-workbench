@@ -81,6 +81,7 @@ export interface ToolProvider {
 
 export const BUILTIN_TOOL_NAMES = [
   "bash",
+  "git",
   "read",
   "write",
   "apply_patch",

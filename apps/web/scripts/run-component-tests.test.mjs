@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { createRequire } from "node:module";
 import { resolve } from "node:path";
@@ -89,9 +90,92 @@ test("bootstrap file URL safely handles spaces and preserves inherited Node opti
   assert.equal(env.NODE_OPTIONS, "--trace-warnings");
 });
 
-test("default component list contains thirteen unique files", () => {
-  assert.equal(componentTests.length, 13);
-  assert.equal(new Set(componentTests).size, 13);
+function runBootstrapAssertion(source) {
+  const { executable, options } = componentCommand("unused.component.test.ts");
+  execFileSync(executable, ["--input-type=module", "--eval", source], {
+    ...options,
+    timeout: 10_000,
+  });
+}
+
+test("bootstrap initializes Vue without late DevTools replay or duplicate emitted events", () => {
+  runBootstrapAssertion(`
+    import assert from "node:assert/strict";
+    import { h } from "vue";
+    import { mount } from "@vue/test-utils";
+    assert.equal(globalThis.__VUE__, true);
+    assert.equal(globalThis.__VUE_DEVTOOLS_GLOBAL_HOOK__, undefined);
+    assert.equal(globalThis.__VUE_DEVTOOLS_HOOK_REPLAY__, undefined);
+    const wrappers = [];
+    try {
+      for (let i = 0; i < 3; i++) {
+        const wrapper = mount({ emits: ["example"], render: () => h("div") });
+        wrappers.push(wrapper);
+        for (const mounted of wrappers) {
+          mounted.vm.$emit("example", i);
+          assert.equal(mounted.emitted("example").length, i - wrappers.indexOf(mounted) + 1);
+        }
+      }
+      assert.equal(globalThis.__VUE_DEVTOOLS_HOOK_REPLAY__, undefined);
+    } finally {
+      for (const wrapper of wrappers) wrapper.unmount();
+    }
+  `);
+});
+
+test("bootstrap disables real navigation while preserving link and cancellation semantics", () => {
+  runBootstrapAssertion(`
+    import assert from "node:assert/strict";
+    const navigation = window.happyDOM.settings.navigation;
+    assert.equal(navigation.disableMainFrameNavigation, true);
+    assert.equal(navigation.disableChildFrameNavigation, true);
+    assert.equal(navigation.disableChildPageNavigation, true);
+    assert.equal(navigation.disableFallbackToSetURL, true);
+    const originalUrl = window.location.href;
+    for (const target of ["_self", "_blank", "test-frame"]) {
+      const link = document.createElement("a");
+      link.href = "https://example.invalid/navigation-test";
+      link.target = target;
+      document.body.append(link);
+      let clicked = false;
+      link.addEventListener("click", () => { clicked = true; });
+      const event = new MouseEvent("click", { bubbles: true, cancelable: true });
+      assert.equal(link.dispatchEvent(event), true);
+      assert.equal(clicked, true);
+      assert.equal(event.defaultPrevented, false);
+      assert.equal(link.href, "https://example.invalid/navigation-test");
+      assert.equal(link.target, target);
+      link.addEventListener("click", (event) => event.preventDefault());
+      const cancelled = new MouseEvent("click", { bubbles: true, cancelable: true });
+      assert.equal(link.dispatchEvent(cancelled), false);
+      assert.equal(cancelled.defaultPrevented, true);
+      link.remove();
+    }
+    await window.happyDOM.waitUntilComplete();
+    assert.equal(window.location.href, originalUrl);
+  `);
+});
+
+test("default component list contains thirty unique files including view_image preview", () => {
+  assert.equal(componentTests.length, 30);
+  assert.equal(new Set(componentTests).size, 30);
+  assert.ok(componentTests.includes("src/features/workspace/WorkspaceLayout.component.test.ts"));
+  assert.ok(componentTests.includes("src/features/workspace/tools/code-review/CodeReviewState.component.test.ts"));
+  assert.ok(componentTests.includes("src/features/workspace/tools/code-review/CodeReviewToolView.component.test.ts"));
+  assert.ok(componentTests.includes("src/shared/components/GitIdentityModal.component.test.ts"));
+  assert.ok(componentTests.includes("src/features/workspace/tools/file-explorer/FileExplorerToolView.component.test.ts"));
+  assert.ok(componentTests.includes("src/features/workspace/tools/search/SearchToolView.component.test.ts"));
+  assert.ok(componentTests.includes("src/features/settings/components/AgentProfilesSettingsPanel.component.test.ts"));
+  assert.ok(componentTests.includes("src/features/workspace/tools/terminal/TerminalTabs.component.test.ts"));
+  assert.ok(componentTests.includes("src/features/workspace/tools/terminal/TerminalView.component.test.ts"));
+  assert.ok(componentTests.includes("src/features/workspace/tools/terminal/TerminalConfigPanel.component.test.ts"));
+  assert.ok(componentTests.includes("src/features/workspace/tools/terminal/TerminalToolView.component.test.ts"));
+  assert.ok(componentTests.includes("src/features/workspace/tools/agent/agentMarkdownFileLinks.component.test.ts"));
+  assert.ok(componentTests.includes("src/features/workspace/tools/agent/agentViewImage.component.test.ts"));
+  assert.ok(componentTests.includes("src/features/workspace/tools/editor/EditorToolView.component.test.ts"));
+  assert.ok(componentTests.includes("src/features/workspace/tools/editor/EditorMarkdownPreview.component.test.ts"));
+  assert.ok(componentTests.includes("src/features/workspace/tools/editor/EditorMermaidPreview.component.test.ts"));
+  assert.ok(componentTests.includes("src/features/workspace/tools/environment-variables/EnvironmentVariablesToolView.component.test.ts"));
   assert.ok(componentTests.every((file) => file.endsWith(".component.test.ts")));
 });
 

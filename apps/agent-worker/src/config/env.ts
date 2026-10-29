@@ -1,4 +1,5 @@
 import path from "node:path";
+import { parseAnalyticsProducerGeneration } from "./analytics-generation.js";
 
 export type WorkerEnv = {
   dataDir: string;
@@ -11,6 +12,7 @@ export type WorkerEnv = {
   concurrency: number;
   internalRpcTimeoutMs: number;
   pidFilePath: string | null;
+  analyticsProducerGeneration?: string;
 };
 
 function parsePositiveInt(raw: string, name: string) {
@@ -64,6 +66,7 @@ export function loadWorkerEnv(processEnv: NodeJS.ProcessEnv): WorkerEnv {
     responseValidation,
     concurrency,
     internalRpcTimeoutMs,
+    analyticsProducerGeneration: parseAnalyticsProducerGeneration(processEnv.AWB_AGENT_ANALYTICS_GENERATION),
     pidFilePath: pidFileRaw || null
   };
 }

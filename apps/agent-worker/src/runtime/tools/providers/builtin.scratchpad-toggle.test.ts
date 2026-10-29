@@ -66,6 +66,7 @@ function createPromptContext(tools: PromptContext["tools"]): PromptContext {
     messages: [],
     lastResponseTotalTokens: null,
     uiLocale: null,
+    workspaceRepoNames: [],
     externalSkills: [],
   };
 }
@@ -117,6 +118,8 @@ test("builtin provider 保持隐藏默认工具始终启用", () => {
 
   assert.equal(provider.isToolEnabled("read", ctx), true);
   assert.equal(provider.isToolEnabled("skill", ctx), true);
+  assert.equal(provider.isToolEnabled("archive_read", ctx), true);
+  assert.equal(provider.isToolEnabled("archive_search", ctx), true);
 });
 
 test("builtin provider listTools 仅暴露 promptContext 中的 scratchpad", async () => {

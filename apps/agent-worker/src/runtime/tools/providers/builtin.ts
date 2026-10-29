@@ -2,11 +2,12 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { ModelMessage } from "ai";
 import { Value } from "@sinclair/typebox/value";
-import { AgentWorkspaceImagePathSchema, normalizeAgentSubtaskSource } from "@agent-workbench/shared/internal-contracts/agent-api";
+import { AgentWorkspaceImagePathSchema, GitRepoNameSchema, normalizeAgentSubtaskSource } from "@agent-workbench/shared/internal-contracts/agent-api";
 import { readSubtaskSourceSessionId } from "../../subtaskSource.js";
 import { generateSingleCallText } from "@agent-workbench/shared/llm-single-call";
 import { renderPromptTemplateFile } from "@agent-workbench/shared/prompts";
 import { runBashCommand } from "../../bash.js";
+import { executeGitTool } from "../../git.js";
 import {
   applyPreparedPatch,
   classifyApplyPatchFailureMessage,
@@ -117,106 +118,6 @@ function parseOptionalPositiveIntegerArg(raw: unknown, fieldName: string) {
   return parsed;
 }
 
-function tokenizeShellCommand(input: string): string[] {
-  const s = String(input || "");
-  const tokens: string[] = [];
-  let cur = "";
-  let i = 0;
-  let mode: "none" | "single" | "double" = "none";
-  const push = () => {
-    if (cur) tokens.push(cur);
-    cur = "";
-  };
-  while (i < s.length) {
-    const ch = s[i] ?? "";
-    if (mode === "none") {
-      if (ch === "\"" || ch === "'") {
-        mode = ch === "'" ? "single" : "double";
-        i += 1;
-        continue;
-      }
-      if (ch === "\\") {
-        const next = s[i + 1];
-        if (next) cur += next;
-        i += 2;
-        continue;
-      }
-      if (ch === " " || ch === "\t" || ch === "\n" || ch === "\r") {
-        push();
-        i += 1;
-        while (i < s.length && /\s/.test(s[i] ?? "")) i += 1;
-        continue;
-      }
-      cur += ch;
-      i += 1;
-      continue;
-    }
-    if (mode === "single") {
-      if (ch === "'") {
-        mode = "none";
-        i += 1;
-        continue;
-      }
-      cur += ch;
-      i += 1;
-      continue;
-    }
-    // double
-    if (ch === "\"") {
-      mode = "none";
-      i += 1;
-      continue;
-    }
-    if (ch === "\\") {
-      const next = s[i + 1];
-      if (next) cur += next;
-      i += 2;
-      continue;
-    }
-    cur += ch;
-    i += 1;
-  }
-  push();
-  return tokens;
-}
-
-function shouldPrepareGitEnvForCommand(command: string) {
-  const tokens = tokenizeShellCommand(command.trim());
-  if (!tokens.length) return false;
-  const whitelist = new Set(["clone", "fetch", "pull", "push", "ls-remote", "submodule"]);
-
-  // Scan the entire token sequence for a `git <subcommand>` occurrence.
-  // This is intentionally heuristic (V1): it does not attempt to parse shell operators.
-  for (let start = 0; start < tokens.length; start += 1) {
-    if (tokens[start] !== "git") continue;
-
-    // Skip global git options right after `git`.
-    // NOTE: This is intentionally minimal for V1.
-    let i = start + 1;
-    while (i < tokens.length) {
-      const t = tokens[i] ?? "";
-      if (!t.startsWith("-")) break;
-      if (t === "-C" || t === "-c" || t === "--git-dir" || t === "--work-tree" || t === "--namespace" || t === "--config-env") {
-        i += 2;
-        continue;
-      }
-      if (t.startsWith("-C") && t.length > 2) {
-        i += 1;
-        continue;
-      }
-      if (t.startsWith("-c") && t.length > 2) {
-        i += 1;
-        continue;
-      }
-      // unknown option: skip it
-      i += 1;
-    }
-    const sub = tokens[i] ?? "";
-    if (whitelist.has(sub)) return true;
-  }
-  return false;
-}
-
 function parseSubtaskArgs(raw: Record<string, unknown>): ParsedSubtaskArgs {
   const source = normalizeAgentSubtaskSource(raw);
   if (!source.ok) {
@@ -315,6 +216,8 @@ async function executeApplyPatchWithSingleRepairAttempt(params: {
 }
 
 export class BuiltinToolProvider implements ToolProvider {
+  constructor(private readonly gitOptions: { dataDir?: string } = {}) {}
+
   canHandle(toolName: string) {
     return isBuiltinToolName(toolName);
   }
@@ -330,6 +233,17 @@ export class BuiltinToolProvider implements ToolProvider {
             description = `${description}\n\n${appendix}`;
           }
         }
+        if (item.name === "git") {
+          const names = [...new Set(ctx.promptContext.workspaceRepoNames.filter((name) => Value.Check(GitRepoNameSchema, name)))];
+          const appendix = names.length === 0
+            ? "Current available repo names: none. Git cannot execute until a repository is registered."
+            : `Current available repo names:\n${names.map((name) => `- ${JSON.stringify(name)}`).join("\n")}`;
+          description = [
+            description,
+            appendix,
+            "repo must exactly match a registered name above; URLs, paths and IDs are not accepted.",
+          ].join("\n\n");
+        }
         return {
           name: item.name,
           description,
@@ -341,7 +255,7 @@ export class BuiltinToolProvider implements ToolProvider {
 
   isToolEnabled(toolName: string, ctx: AvailableToolContext | ToolExecutionContext) {
     if (!isBuiltinToolName(toolName)) return false;
-    if (toolName === "read" || toolName === "skill") {
+    if (toolName === "read" || toolName === "skill" || toolName === "archive_read" || toolName === "archive_search") {
       return true;
     }
     return ctx.profile.agent.tools.includes(toolName as BuiltinToolName);
@@ -381,6 +295,8 @@ export class BuiltinToolProvider implements ToolProvider {
 
   async execute(toolName: string, args: Record<string, unknown>, ctx: ToolExecutionContext): Promise<unknown> {
     switch (toolName) {
+      case "git":
+        return executeGitTool(args, ctx, this.gitOptions);
       case "view_image": {
         if (Object.keys(args).length !== 1 || !Value.Check(AgentWorkspaceImagePathSchema, args.path)) {
           throw new Error("view_image requires one Workspace-relative path");
@@ -429,64 +345,33 @@ export class BuiltinToolProvider implements ToolProvider {
           throw err;
         }
 
-        const timeoutMs = Math.min(ENV_TIMEOUT_MS_MAX, (timeoutSeconds ?? 120) * 1000);
-        const needsGitEnv = shouldPrepareGitEnvForCommand(command);
-
-        let extraEnv: Record<string, string> | undefined;
-        let leaseId: string | null = null;
-        let leaseKind: string | null = null;
-
-        if (needsGitEnv) {
-          const prepared = await ctx.apiClient.prepareGitEnvForBash({
-            workspaceId: ctx.run.workspaceId,
-            cwd,
-            purpose: "bash",
-            timeoutMs
-          });
-          if (!prepared.ok) {
-            if (prepared.errorCode === "CWD_OUTSIDE_WORKSPACE") {
-              // Degrade gracefully: run bash without injected env.
-              console.warn(`[agent-worker] git-env prepare skipped: cwd outside workspace (${prepared.errorCode})`);
-            } else {
-              throw new Error(`git-env prepare failed: ${prepared.error}${prepared.errorCode ? ` (${prepared.errorCode})` : ""}`);
-            }
-          } else {
-            extraEnv = prepared.env;
-            leaseId = prepared.leaseId;
-            leaseKind = prepared.kind;
-          }
-        }
-
-        let bash: Awaited<ReturnType<typeof runBashCommand>> | null = null;
+        if (ctx.signal.aborted) throw new Error("aborted");
+        let environment;
         try {
-          bash = await runBashCommand({
-            command,
-            cwd,
-            timeoutMs,
-            maxOutputBytes: 512 * 1024,
-            signal: ctx.signal,
-            extraEnv
-          });
-        } finally {
-          if (leaseId) {
-            try {
-              await ctx.apiClient.cleanupGitEnvLease({ leaseId });
-            } catch (err) {
-              // best-effort: do not override bash result
-              const msg = err instanceof Error ? err.message : String(err);
-              // Avoid printing env; only log lease id / kind.
-              console.warn(`[agent-worker] git-env cleanup failed (leaseId=${leaseId}, kind=${leaseKind ?? ""}): ${msg}`);
-            }
-          }
+          environment = await ctx.apiClient.getWorkspaceEnvironment(ctx.run.workspaceId, { abortSignal: ctx.signal });
+        } catch {
+          if (ctx.signal.aborted) throw new Error("aborted");
+          throw Object.assign(new Error("Workspace environment configuration is unavailable."), { code: "WORKSPACE_ENV_UNAVAILABLE" });
         }
+        if (ctx.signal.aborted) throw new Error("aborted");
+
+        const timeoutMs = Math.min(ENV_TIMEOUT_MS_MAX, (timeoutSeconds ?? 120) * 1000);
+        const bash = await runBashCommand({
+          command,
+          cwd,
+          timeoutMs,
+          maxOutputBytes: 512 * 1024,
+          signal: ctx.signal,
+          extraEnv: environment.env
+        });
 
         return {
           command,
-          exitCode: bash?.code ?? null,
-          timedOut: bash?.timedOut ?? false,
-          outputLimitExceeded: bash?.outputLimitExceeded ?? false,
-          stdout: bash?.stdout ?? "",
-          stderr: bash?.stderr ?? ""
+          exitCode: bash.code,
+          timedOut: bash.timedOut,
+          outputLimitExceeded: bash.outputLimitExceeded,
+          stdout: bash.stdout,
+          stderr: bash.stderr
         };
       }
       case "read": {
@@ -756,14 +641,14 @@ export class BuiltinToolProvider implements ToolProvider {
           }
           return result;
         } catch (error) {
-          if (sourceSessionId !== undefined) {
+          if ((error !== null && typeof error === "object") || sourceSessionId !== undefined) {
             // Keep error identity/name (including RPC fences and AbortError).
             // Optional metadata must never replace a read-only original error.
             const carrier = error !== null && typeof error === "object"
               ? error
               : new Error(typeof error === "string" ? error : "subtask failed after start", { cause: error });
             try {
-              Object.assign(carrier, { subtaskSessionId: started.sessionId, sourceSessionId });
+              Object.assign(carrier, { subtaskSessionId: started.sessionId, ...sourceMetadata });
             } catch {
               // Frozen error objects still follow their original failure path.
             }

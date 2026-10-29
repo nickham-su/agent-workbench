@@ -1,6 +1,6 @@
 <template>
   <div class="w-full h-full flex flex-col">
-    <div class="flex items-center justify-between px-2 py-1.5 border-b border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)]">
+    <div class="flex items-center justify-between pl-3 pr-2 py-1.5 border-b border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)]">
       <div class="text-xs font-semibold">{{ t("files.title") }}</div>
       <div class="flex items-center gap-1">
         <a-tooltip :title="t('files.actions.refresh')" :mouseEnterDelay="0" :mouseLeaveDelay="0">
@@ -53,6 +53,9 @@
                 <a-menu-item v-if="selectedNode" key="download">
                   {{ t("files.actions.download") }}
                 </a-menu-item>
+                <a-menu-item v-if="canExtract" key="extract" :disabled="extracting">
+                  {{ t("files.actions.extract") }}
+                </a-menu-item>
                 <a-menu-item v-if="canOpenPreview" key="preview">
                   {{ t("files.actions.preview") }}
                 </a-menu-item>
@@ -96,6 +99,8 @@ const props = defineProps<{
   selectedNode: TreeNode | null;
   canRenameDelete: boolean;
   canOpenPreview: boolean;
+  canExtract: boolean;
+  extracting: boolean;
   showRepoPathAction: boolean;
   showWorkspacePathAction: boolean;
   refreshRoot: () => void;

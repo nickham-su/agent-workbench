@@ -78,6 +78,67 @@ function stateMap(db: AnalyticsDb): StateMap {
   return new Map(rows.map((row) => [row.domain as AnalyticsDomain, row]));
 }
 
+type DomainHealthRow = NonNullable<DashboardData["exceptions"]["domainHealth"]["data"]>[number];
+type HealthSlot = {
+  domain: AnalyticsDomain;
+  producerNamespace: string;
+  producerId: string;
+  producerGeneration: string | null;
+  lifecycle: string | null;
+  checkpointAt: number | null;
+};
+const COLLECTION_CHECKPOINT_MAX_AGE_MS = 60_000;
+
+/** A slot is collecting if any running generation has a recent checkpoint.
+ * This projection must never change certification, coverage, or stored state. */
+function currentCollection(slots: HealthSlot[], now: number) {
+  const grouped = new Map<string, HealthSlot[]>();
+  for (const slot of slots) {
+    const key = JSON.stringify([slot.producerNamespace, slot.producerId]);
+    const group = grouped.get(key);
+    if (group) group.push(slot);
+    else grouped.set(key, [slot]);
+  }
+  const collection: NonNullable<DomainHealthRow["collection"]> = {
+    lastActivityAt: null,
+    freshSlotCount: 0,
+    staleSlotCount: 0,
+    missingGenerationSlotCount: 0,
+    missingCheckpointSlotCount: 0,
+    closingSlotCount: 0,
+  };
+  for (const group of grouped.values()) {
+    const running = group.filter((slot) => slot.producerGeneration !== null &&
+      (slot.lifecycle === "registered" || slot.lifecycle === "stale"));
+    // Future timestamps cannot prove activity now. Treat an all-invalid history
+    // like a missing usable checkpoint, without inventing clock-skew tolerance.
+    const checkpoints = running.flatMap((slot) => slot.checkpointAt !== null &&
+      Number.isSafeInteger(slot.checkpointAt) && slot.checkpointAt >= 0 && slot.checkpointAt <= now
+      ? [slot.checkpointAt] : []);
+    for (const at of checkpoints) {
+      collection.lastActivityAt = Math.max(collection.lastActivityAt ?? at, at);
+    }
+    if (checkpoints.some((at) => at >= now - COLLECTION_CHECKPOINT_MAX_AGE_MS)) {
+      collection.freshSlotCount += 1;
+    } else if (checkpoints.length > 0) {
+      collection.staleSlotCount += 1;
+    } else if (running.length > 0) {
+      collection.missingCheckpointSlotCount += 1;
+    } else if (group.some((slot) => slot.producerGeneration !== null && slot.lifecycle === "closing")) {
+      collection.closingSlotCount += 1;
+    } else {
+      collection.missingGenerationSlotCount += 1;
+    }
+  }
+  const expectedSlotCount = grouped.size;
+  const status: DomainHealthRow["status"] = expectedSlotCount === 0 ||
+    collection.missingGenerationSlotCount > 0 || collection.missingCheckpointSlotCount > 0 ||
+    collection.closingSlotCount > 0
+    ? "degraded"
+    : collection.staleSlotCount > 0 ? "stale" : "healthy";
+  return { collection, status };
+}
+
 type DomainConfig = {
   collection_config_version: string;
   effective_at: number;
@@ -502,6 +563,8 @@ type ModelHourRow = {
   request_count: number;
   duration_sum: number;
   duration_samples: number;
+  preparation_sum: number;
+  preparation_samples: number;
   input_tokens: number;
   input_reported_count: number;
   output_tokens: number;
@@ -524,6 +587,7 @@ function modelRowsForRange(
   const fact =
     db.prepare(`SELECT provider_id, model_id, status, timeout_kind, COUNT(*) AS request_count,
     COALESCE(SUM(CASE WHEN status='completed' AND ended_at IS NOT NULL THEN ended_at-started_at ELSE 0 END),0) AS duration_sum, SUM(status='completed' AND ended_at IS NOT NULL) AS duration_samples,
+    COALESCE(SUM(request_preparation_ms),0) AS preparation_sum, COUNT(request_preparation_ms) AS preparation_samples,
     COALESCE(SUM(input_tokens),0) AS input_tokens, SUM(input_tokens IS NOT NULL) AS input_reported_count, COALESCE(SUM(output_tokens),0) AS output_tokens, SUM(output_tokens IS NOT NULL) AS output_reported_count,
     COALESCE(SUM(total_tokens),0) AS total_tokens, SUM(total_source='reported') AS total_reported_count, SUM(total_source='derived') AS total_derived_count,
     COALESCE(SUM(CASE WHEN cache_comparable=1 THEN cache_read_tokens ELSE 0 END),0) AS cache_read_tokens, SUM(cache_comparable=1) AS cache_comparable_count,
@@ -531,6 +595,7 @@ function modelRowsForRange(
     FROM analytics_model_call_fact WHERE started_at>=? AND started_at<? GROUP BY provider_id,model_id,status,timeout_kind`);
   const rollup =
     db.prepare(`SELECT provider_id, model_id, status, timeout_kind, request_count, completed_duration_sum_ms AS duration_sum, completed_duration_sample_count AS duration_samples,
+    preparation_duration_sum_ms AS preparation_sum, preparation_duration_sample_count AS preparation_samples,
     input_tokens,input_reported_count,output_tokens,output_reported_count,total_tokens,total_reported_count,total_derived_count,cache_read_tokens,cache_comparable_count,comparable_input_tokens,comparable_cache_read_tokens
     FROM dashboard_model_dimension_1h WHERE bucket_start=?`);
   const rows: ModelHourRow[] = [];
@@ -1059,6 +1124,8 @@ function queryDashboardSnapshot(
     other: number;
     durationSum: number;
     durationSamples: number;
+    preparationSum: number;
+    preparationSamples: number;
     inputTokens: number;
     outputTokens: number;
     totalTokens: number;
@@ -1077,6 +1144,8 @@ function queryDashboardSnapshot(
     other: 0,
     durationSum: 0,
     durationSamples: 0,
+    preparationSum: 0,
+    preparationSamples: 0,
     inputTokens: 0,
     outputTokens: 0,
     totalTokens: 0,
@@ -1103,6 +1172,8 @@ function queryDashboardSnapshot(
       else row.other += fact.request_count;
       row.durationSum += fact.duration_sum;
       row.durationSamples += fact.duration_samples;
+      row.preparationSum += fact.preparation_sum;
+      row.preparationSamples += fact.preparation_samples;
       row.inputTokens += fact.input_tokens;
       row.inputCount += fact.input_reported_count;
       row.outputTokens += fact.output_tokens;
@@ -1145,6 +1216,8 @@ function queryDashboardSnapshot(
         (row.timeout_kind === "total" ? row.request_count : 0),
       durationSum: total.durationSum + row.duration_sum,
       durationSamples: total.durationSamples + row.duration_samples,
+      preparationSum: total.preparationSum + row.preparation_sum,
+      preparationSamples: total.preparationSamples + row.preparation_samples,
       inputTokens: total.inputTokens + row.input_tokens,
       outputTokens: total.outputTokens + row.output_tokens,
       totalTokens: total.totalTokens + row.total_tokens,
@@ -1169,6 +1242,8 @@ function queryDashboardSnapshot(
       totalTimeouts: 0,
       durationSum: 0,
       durationSamples: 0,
+      preparationSum: 0,
+      preparationSamples: 0,
       inputTokens: 0,
       outputTokens: 0,
       totalTokens: 0,
@@ -1228,6 +1303,11 @@ function queryDashboardSnapshot(
       sum: modelAggregate.durationSum ?? 0,
       samples: durationSamples,
     },
+  );
+  const preparationSamples = modelAggregate.preparationSamples ?? 0;
+  data.model.metrics.averagePreparationDuration = modelMetric(
+    { durationMs: preparationSamples ? Math.floor((modelAggregate.preparationSum ?? 0) / preparationSamples) : null, reliableSampleCount: preparationSamples },
+    { kind: "average", sum: modelAggregate.preparationSum ?? 0, samples: preparationSamples },
   );
   data.model.metrics.inputTokens = modelMetric({
     count: sumOrNull(modelAggregate.inputTokens, inputCount),
@@ -1313,6 +1393,16 @@ function queryDashboardSnapshot(
     modelRatioTrend("timedOut"),
     modelKnown,
     { kind: "ratio", numerator: timedOut, denominator: terminal },
+  );
+  data.model.trends.averagePreparationDuration = panel(
+    model,
+    ["model"],
+    buckets.map((bucket, index) => {
+      const row = modelBucketStats[index]!;
+      return { ...bucket, durationMs: row.preparationSamples ? Math.floor(row.preparationSum / row.preparationSamples) : null, reliableSampleCount: row.preparationSamples };
+    }),
+    modelKnown,
+    { kind: "average", sum: modelAggregate.preparationSum ?? 0, samples: preparationSamples },
   );
   data.model.trends.completedAverageDuration = panel(
     model,
@@ -1831,16 +1921,9 @@ function queryDashboardSnapshot(
       LEFT JOIN analytics_producer_checkpoint c ON c.rowid=(SELECT checkpoint.rowid FROM analytics_producer_checkpoint checkpoint
         WHERE checkpoint.domain=g.domain AND checkpoint.producer_namespace=g.producer_namespace AND checkpoint.producer_id=g.producer_id AND checkpoint.producer_generation=g.producer_generation
         ORDER BY checkpoint.received_at DESC LIMIT 1)
-      WHERE s.expected_enabled=1`,
+       WHERE s.expected_enabled=1`,
     )
-    .all() as Array<{
-    domain: AnalyticsDomain;
-    producerNamespace: string;
-    producerId: string;
-    producerGeneration: string | null;
-    lifecycle: string | null;
-    checkpointAt: number | null;
-  }>;
+    .all() as HealthSlot[];
   const allGapSummaries = db
     .prepare(
       `SELECT domain, SUM(gap_to IS NULL) AS openCount, SUM(gap_to IS NOT NULL) AS historicalCount, MIN(gap_from) AS earliestGapFrom
@@ -1855,11 +1938,13 @@ function queryDashboardSnapshot(
   const gapsByDomain = new Map(
     allGapSummaries.map((summary) => [summary.domain, summary]),
   );
-  const healthRows = [...states.values()].map((state) => {
+  const healthRows: DomainHealthRow[] = [...states.values()].map((state) => {
     const slots = allHealthSlots.filter((slot) => slot.domain === state.domain);
+    const activity = state.domain === "model" || state.domain === "execution" || state.domain === "worker"
+      ? currentCollection(slots, now) : undefined;
     const activeLifecycles = new Set(["registered", "closing", "stale"]);
     const expectedSlotCount = new Set(
-      slots.map((slot) => `${slot.producerNamespace}:${slot.producerId}`),
+      slots.map((slot) => JSON.stringify([slot.producerNamespace, slot.producerId])),
     ).size;
     const gapSummary = gapsByDomain.get(state.domain);
     const coverageGaps = {
@@ -1870,7 +1955,8 @@ function queryDashboardSnapshot(
     };
     return {
       domain: state.domain,
-      status: state.status,
+      status: state.status === "disabled" ? "disabled" : activity?.status ?? state.status,
+      ...(activity ? { collection: activity.collection } : {}),
       collectionStartedAt: state.collectionStartedAt,
       reconciledThrough: state.reconciledThrough,
       rollupReadyThrough: state.rollupReadyThrough,
@@ -1882,11 +1968,8 @@ function queryDashboardSnapshot(
           slot.producerGeneration !== null &&
           activeLifecycles.has(slot.lifecycle ?? ""),
       ).length,
-      slots: slots.map((slot) => {
-        const active =
-          slot.producerGeneration !== null &&
-          activeLifecycles.has(slot.lifecycle ?? "");
-        return !active
+      slots: slots.map((slot): DomainHealthRow["slots"][number] => {
+        return slot.producerGeneration === null || !activeLifecycles.has(slot.lifecycle ?? "")
           ? {
               slotStatus: "missing_generation",
               producerNamespace: slot.producerNamespace,
@@ -1916,6 +1999,12 @@ function queryDashboardSnapshot(
       coverageGaps,
     };
   });
+  const executionHealth = healthRows.find((row) => row.domain === "execution");
+  const durationHealth = healthRows.find((row) => row.domain === "agent_duration");
+  if (executionHealth && durationHealth) {
+    if (durationHealth.status !== "disabled") durationHealth.status = executionHealth.status;
+    durationHealth.collection = executionHealth.collection;
+  }
   data.exceptions.domainHealth = {
     status: "available",
     data: healthRows,

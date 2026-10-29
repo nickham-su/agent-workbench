@@ -6,10 +6,17 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const webRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const require = createRequire(import.meta.url);
 export const componentTests = [
+  "src/features/workspace/WorkspaceLayout.component.test.ts",
+  "src/features/workspace/tools/code-review/CodeReviewState.component.test.ts",
+  "src/features/workspace/tools/code-review/CodeReviewToolView.component.test.ts",
+  "src/shared/components/GitIdentityModal.component.test.ts",
   "src/features/dashboard/Dashboard.component.test.ts",
   "src/features/settings/components/AgentProvidersSettingsPanel.component.test.ts",
+  "src/features/settings/components/AgentProfilesSettingsPanel.component.test.ts",
   "src/features/workspace/tools/agent/agentArtifactCards.component.test.ts",
+  "src/features/workspace/tools/agent/agentMarkdownFileLinks.component.test.ts",
   "src/features/workspace/tools/agent/agentRichToolCards.component.test.ts",
+  "src/features/workspace/tools/agent/agentViewImage.component.test.ts",
   "src/features/workspace/tools/agent/agentSystemMessage.component.test.ts",
   "src/features/workspace/tools/agent/AgentAttachmentPreviewModal.component.test.ts",
   "src/features/workspace/tools/agent/AgentClientPane.component.test.ts",
@@ -17,8 +24,18 @@ export const componentTests = [
   "src/features/workspace/tools/agent/AgentMessageActions.component.test.ts",
   "src/features/workspace/tools/agent/AgentToolView.component.test.ts",
   "src/features/workspace/tools/agent/useAgentSessionStatusStore.component.test.ts",
+  "src/features/workspace/tools/file-explorer/FileExplorerToolView.component.test.ts",
+  "src/features/workspace/tools/search/SearchToolView.component.test.ts",
+  "src/features/workspace/tools/editor/EditorToolView.component.test.ts",
+  "src/features/workspace/tools/editor/EditorMarkdownPreview.component.test.ts",
+  "src/features/workspace/tools/editor/EditorMermaidPreview.component.test.ts",
+  "src/features/workspace/tools/environment-variables/EnvironmentVariablesToolView.component.test.ts",
   "src/features/workspace/tools/scheduled-tasks/ScheduledTaskDrawer.component.test.ts",
   "src/features/workspace/tools/scheduled-tasks/ScheduledTasksToolView.component.test.ts",
+  "src/features/workspace/tools/terminal/TerminalTabs.component.test.ts",
+  "src/features/workspace/tools/terminal/TerminalView.component.test.ts",
+  "src/features/workspace/tools/terminal/TerminalConfigPanel.component.test.ts",
+  "src/features/workspace/tools/terminal/TerminalToolView.component.test.ts",
 ];
 
 export function parseConcurrency(args) {

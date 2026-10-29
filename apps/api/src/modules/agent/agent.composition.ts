@@ -21,7 +21,7 @@ import type {
   AgentRecentSessionsResponse,
   AgentRecentWorkspacesResponse,
 } from "@agent-workbench/shared/internal-contracts/agent-api-session";
-import { AgentViewImageResultSchema, viewImagePathPreview } from "@agent-workbench/shared/internal-contracts/agent-api";
+import { AgentViewImageResultSchema, GitToolInputSchema, GitToolResultSchema, viewImagePathPreview } from "@agent-workbench/shared/internal-contracts/agent-api";
 import type { AgentApiPromptContextResponse } from "@agent-workbench/shared/internal-contracts/agent-api";
 import { isValidSkillPathSegment } from "@agent-workbench/shared/internal-contracts/agent-api-session";
 import { getPromptText } from "@agent-workbench/shared/prompts";
@@ -91,7 +91,7 @@ import {
   scanReadableTopLevelSkills,
 } from "./top-level-skill.js";
 import type { AgentRunCompletedEventHub } from "./run-completed-events.js";
-import { getAgentWorkspaceRunContext } from "./agent-run-context.js";
+import { getAgentWorkspaceRunContext, listAgentWorkspaceRepoNames } from "./agent-run-context.js";
 import { RunLifecycleApplication } from "./lifecycle/run-lifecycle-application.js";
 import { SqliteRunLifecyclePersistence } from "./lifecycle/sqlite-run-lifecycle-persistence.js";
 import { SessionRuntimeHandoffCoordinator } from "./lifecycle/session-runtime-handoff-coordinator.js";
@@ -179,6 +179,7 @@ function conflictToHttpError(err: AgentMessageConflictError): HttpError {
 }
 
 function toolArgsSchema(toolName: AgentContextToolName) {
+  if (toolName === "git") return GitToolInputSchema;
   if (toolName === "bash") {
     return {
       type: "object",
@@ -474,10 +475,16 @@ function buildSubtaskToolDescription(
   return `${header.join("\n")}\n\nAvailable agents:\n${lines.join("\n")}`;
 }
 
-function toolDescription(
-  toolName: AgentContextToolName,
-  options?: { subtaskDescription?: string },
-) {
+function toolDescription(toolName: AgentContextToolName) {
+  if (toolName === "git") {
+    return [
+      "Run native Git in an explicitly selected registered Workspace repository. The system prepares the initial directory and project Git credentials; args are passed unchanged without a shell.",
+      "args are the string arguments after git, excluding the executable name. No command rewriting, implicit staging, identity configuration or automatic retries are performed.",
+      "timeout is in seconds: default 120, range 1..3600. Cancellation or timeout does not roll back Git effects.",
+      "This tool is not a sandbox: native arguments, configuration, aliases and hooks may change targets or execute programs. Enabling it does not authorize commits, force pushes, deletion or overwrites.",
+      "Linux/POSIX managed-group settlement is required, including after normal parent exit. Unconfirmed settlement retains deletion protection and may need a verified maintenance window; TTL is not a stop guarantee.",
+    ].join("\n");
+  }
   if (toolName === "bash") {
     return [
       "Run a bash command and return stdout/stderr.",
@@ -658,9 +665,7 @@ function toolDescription(
     ].join("\n");
   }
   if (toolName === "subtask")
-    return (
-      options?.subtaskDescription || "Execute a task in a subtask session."
-    );
+    return "Execute a task in a subtask session.";
   if (toolName === "write") {
     return [
       "Write and fully overwrite a workspace-relative file.",
@@ -738,6 +743,7 @@ const WORKSPACE_AGENTS_MAX_BYTES = 32 * 1024;
 const COMPACTION_SNIPPET_CACHE_MAX_BYTES = 256 * 1024;
 const SUBTASK_PREFORK_SUMMARY_MAX_CHARS = 20_000;
 const STRUCTURED_RESULT_TOOL_NAMES = new Set([
+  "git",
   "apply_patch",
   "todolist",
   "subtask",
@@ -1711,21 +1717,11 @@ function createReadQueryWritebackAssembly(assembly: {
       }),
     getMaxSubtaskDepth: () =>
       assembly.environment.getAgentRuntimeSettings().maxSubtaskDepth,
-    listSubtaskAgents: () =>
-      assembly.environment
-        .listAvailableAgentsForSurface("subtask")
-        .map((item) => ({
-          id: item.id,
-          name: item.name,
-          summary: item.summary,
-        })),
     buildSystem: (input) => buildSystemPrompt(input),
     buildOutputFormatInstruction: (input) =>
       buildOutputFormatInstruction(input),
     buildSkillsInstruction: (input) => buildSkillsInstructionSection(input),
-    buildSubtaskDescription: (agents) => buildSubtaskToolDescription(agents),
-    describeTool: (name, options) =>
-      toolDescription(name as AgentContextToolName, options),
+    describeTool: (name) => toolDescription(name as AgentContextToolName),
     getToolInputSchema: (name) => toolArgsSchema(name as AgentContextToolName),
   });
   const promptContextProjector = new PromptContextProjector<any>(
@@ -1735,6 +1731,20 @@ function createReadQueryWritebackAssembly(assembly: {
         assembly.resolveExecutionProfileForReadSide(input),
       assembleStatic: (input) => promptStaticAssembler.assemble(input),
       buildRuntimeInstruction: (input) => buildRuntimeInstruction(input),
+      resolveSubtaskDescription: (workspaceId) =>
+        buildSubtaskToolDescription(
+          assembly.environment.listAvailableAgentsForSurface("subtask", {
+            workspaceEnablement:
+              assembly.environment.getWorkspaceEnabledAgentIds(workspaceId),
+          }),
+        ),
+      readWorkspaceRepoNames: (workspaceId) =>
+        listAgentWorkspaceRepoNames(assembly.environment.db, workspaceId, (count) => {
+          assembly.logger.warn(
+            { code: "GIT_REPO_NAMES_INVALID", count },
+            "unsafe registered Git repository names ignored",
+          );
+        }),
       appendRuntimeConstraints: (systemStatic, runtimeInstruction) =>
         appendRuntimeConstraintsSection(systemStatic, runtimeInstruction),
       resolveDynamicContext: (input) => assembly.buildPromptContextMessagesForSession(input),
@@ -2441,6 +2451,11 @@ function createAgentApplications(
       let structuredResult = tool && STRUCTURED_RESULT_TOOL_NAMES.has(tool.toolName ?? "")
         ? params.structuredResult
         : undefined;
+
+      if (tool?.toolName === "git" && params.status === "completed"
+        && !Value.Check(GitToolResultSchema, params.structuredResult)) {
+        throw Object.assign(new Error("invalid git completion result"), { statusCode: 400 });
+      }
 
       if (tool?.toolName === "view_image") {
         if (params.status === "completed") {

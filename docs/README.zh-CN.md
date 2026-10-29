@@ -14,6 +14,23 @@
 
 Agent Workbench 提供: 多工作区隔离, 终端会话持久化, Git 变更集中审查, 支持本地一键启动, 也适合部署到远程主机运行.
 
+## Agent 的 Git 工具与认证
+
+- 在 Agent 设置的工具列表中**显式开启 Git**，保存后启动新的运行。新 Agent 默认不启用 Git，升级也不会给已有 Agent 自动授予该工具。
+- `repo` 必须填写当前 Workspace 已登记的完整仓库目录名（大小写敏感），不能填 URL、路径或仓库 ID，即使只有一个仓库也不能省略。
+- `args` 是 `git` 后面的原生字符串参数数组，不包含程序名 `git`，不支持 Shell 命令链；工具不自动暂存、配置作者、选择 `origin` 或补参数。`timeout` 单位为秒，默认 120，范围为 1–3600。
+
+```json
+{"repo":"agent-workbench","args":["status","--short"],"timeout":120}
+```
+
+- 需要项目 Git 认证时使用 Git 工具，项目认证按**登记仓库**的凭证和网络配置准备，不使用 Workspace 的终端凭证。系统 credential helper、SSH agent 或宿主配置仍可能参与实际认证。
+- **Bash 不再识别 Git 命令或自动注入项目凭证**，旧 Bash 认证 RPC 已移除，没有 fallback。Bash 仍可运行 Git，也可能通过系统认证成功；系统认证成功不代表项目注入仍然存在。
+- 交互式终端的凭证开关与 `terminalCredentialId` 仍只控制交互式终端；界面 Git API 的认证保持独立，不受 Bash 退场影响。
+- Git 工具不是沙箱。原生参数、配置、hooks 和 alias 可能改变后续执行行为；开启工具不等于授权提交、强推、删除或覆盖，仍须遵守已有授权。
+- 当前 Git 工具只在已验证进程组收尾能力的 Linux 上可执行。超时或取消不代表 Git 副作用已回滚，不会自动重执行。父进程退出 0 但受管组停止未确认时，整体失败且保留租约与删除保护；未确认租约不会因 TTL 自动解锁。
+- 升级应协同更新 API/Worker，停止并确认在途执行已结束，不把历史 queued Bash 自动改写为 Git。详细边界与迁移步骤见 [Git 工具设计](design/0032-Git专用工具与Bash凭证注入退场/README.md)。
+
 ---
 
 ## 快速启动（Docker Compose）
@@ -215,3 +232,12 @@ npm run dev
 
 - `docs/design/feishu-plugin-ts-rewrite-and-sse-broadcast.md`
   - 飞书插件 TS 重写与平台级 SSE 广播方案（最终版）
+
+### 运行配置的进程停止边界
+
+运行配置可靠重跑/关闭需要 Linux 5.3+、固定路径 `/usr/bin/python3`
+（Python 3.9+，提供 `pidfd_open`、`pidfd_send_signal`）及子进程监督能力、可读取自身进程元数据的 procfs。
+Docker 镜像已包含这些前提；能力缺失会明确报错，不退回仅结束 tmux 的旧行为。
+升级前已创建的配置终端需先手动停止旧服务、关闭标签，再运行一次建立受管环境。
+已残留的孤儿服务不会按端口猜测并自动结束。通过 PM2、Docker 等外部服务管理器
+启动的独立服务仍由对应管理器负责停止。

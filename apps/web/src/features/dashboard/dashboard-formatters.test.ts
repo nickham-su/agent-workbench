@@ -1,6 +1,24 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { formatChartAxisCount, formatChartDuration, formatComparison, formatDuration, resultReason } from "./dashboard-formatters";
+import { formatChartAxisCount, formatChartDuration, formatComparison, formatCount, formatDuration, formatTokenCount, resultReason } from "./dashboard-formatters";
+
+test("Token 卡片使用 K/M/B 缩写，最多一位小数，零与未知保持原样", () => {
+  assert.equal(formatTokenCount(null), "—");
+  assert.equal(formatTokenCount(undefined), "—");
+  assert.equal(formatTokenCount(0), "0");
+  assert.equal(formatTokenCount(999), "999");
+  for (const locale of ["zh-CN", "en-US"]) {
+    assert.equal(formatTokenCount(1_000, locale), "1K");
+    assert.equal(formatTokenCount(1_250, locale), "1.3K");
+    assert.equal(formatTokenCount(1_000_000, locale), "1M");
+    assert.equal(formatTokenCount(788_108_165, locale), "788.1M");
+    assert.equal(formatTokenCount(3_677_857, locale), "3.7M");
+    assert.equal(formatTokenCount(1_000_000_000, locale), "1B");
+    assert.equal(formatTokenCount(1_280_000_000, locale), "1.3B");
+    assert.equal(formatCount(788_108_165, locale), "788,108,165");
+  }
+  assert.equal(formatTokenCount(1_250, "de-DE"), "1,3K");
+});
 
 test("比较值严格使用服务端 status、delta 和 kind", () => {
   assert.equal(formatComparison({ status: "previous_zero", kind: null, delta: null }), "previous_zero");

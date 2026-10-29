@@ -1,11 +1,12 @@
 <template>
-  <div ref="containerEl" class="h-full min-h-0 grid gap-0" :style="containerStyle">
-    <div class="min-h-0 min-w-0 flex flex-col">
-      <div class="flex-1 min-h-0 flex flex-col">
+  <div class="code-review-changes">
+    <div v-if="noChanges" class="review-clean-state">{{ t("codeReview.status.noChanges") }}</div>
+    <div v-else class="review-change-groups">
+      <div class="flex-1 min-h-0 min-w-0 flex flex-col">
         <div
-            class="flex items-center justify-between pl-3 pr-1 py-1.5 border-b border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)]">
-          <div class="text-xs font-semibold">{{ t("codeReview.unstaged") }}</div>
-          <div class="flex items-center gap-1">
+            class="review-change-heading flex items-center justify-between pl-3 pr-1 py-1.5 border-b border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)]">
+          <div class="min-w-0 truncate text-xs font-semibold" :title="t('codeReview.unstaged')">{{ t("codeReview.unstaged") }}</div>
+          <div class="shrink-0 flex items-center gap-1">
             <a-tooltip :title="t('codeReview.actions.refresh')" :mouseEnterDelay="0" :mouseLeaveDelay="0"
                        placement="top">
               <span class="inline-flex">
@@ -45,37 +46,37 @@
             </a-tooltip>
           </div>
         </div>
-        <div class="flex-1 min-h-0 overflow-auto">
+        <div class="review-file-list">
           <div v-if="unstagedLoaded && unstagedFiles.length === 0"
                class="p-3 text-xs text-[color:var(--text-tertiary)]">
-            {{ t("codeReview.status.noChanges") }}
+            {{ t("codeReview.status.noUnstagedChanges") }}
           </div>
           <a-dropdown v-for="f in unstagedFiles" :key="`u:${f.path}`" :trigger="['contextmenu']" class="block">
             <div
-                class="group w-full text-left pl-3 pr-1 py-1.5 hover:bg-[var(--hover-bg)] cursor-pointer"
-                :class="isSelected('unstaged', f.path) ? 'bg-[var(--fill-secondary)] border-l-2 border-l-[var(--info-color)]' : 'border-l-2 border-l-transparent'"
+                class="group w-full text-left pl-3 pr-1 py-1.5 cursor-pointer"
+                :class="isSelected('unstaged', f.path) ? 'bg-[color-mix(in_srgb,var(--info-color)_20%,var(--panel-bg))] border-l-2 border-l-[var(--info-color)]' : 'hover:bg-[var(--hover-bg)] border-l-2 border-l-transparent'"
                 @click="selectFile('unstaged', f.path, f.oldPath)"
                 @contextmenu.prevent="selectFile('unstaged', f.path, f.oldPath, false)"
             >
               <div class="flex items-center gap-2 min-w-0">
-                <a-tooltip :title="f.status" :mouseEnterDelay="0" :mouseLeaveDelay="0" placement="top">
+                <a-tooltip :title="fileKindLabel(f) || f.status" :mouseEnterDelay="0" :mouseLeaveDelay="0" placement="top">
                   <div
                       class="text-xs text-[color:var(--text-secondary)] shrink-0 text-center flex items-center justify-center"
                       :class="statusBadgeClass(f.status)"
                   >
-                    <component :is="statusIconComponent(f.status)"/>
+                    <component :is="f.kind === 'directory' ? FolderOpenOutlined : f.kind === 'submodule' ? BranchesOutlined : statusIconComponent(f.status)"/>
                   </div>
                 </a-tooltip>
                 <div class="min-w-0 flex-1">
-                  <div class="text-xs font-mono min-w-0 flex items-center">
+                  <div class="text-xs font-mono min-w-0 flex items-center" :title="f.path">
                     <span class="text-[color:var(--text-secondary)] min-w-0 flex-initial truncate block">{{ fileDir(f.path) }}</span>
-                    <span class="text-[color:var(--text-color)] shrink-0 whitespace-nowrap">{{ fileBase(f.path) }}</span>
+                    <span class="text-[color:var(--text-color)] shrink-0 max-w-full truncate" :title="fileKindLabel(f) || undefined">{{ fileBase(f.path) }}</span>
                   </div>
-                  <div v-if="f.oldPath" class="mt-0.5 text-[11px] font-mono truncate text-[color:var(--text-tertiary)]">
+                  <div v-if="f.oldPath" class="mt-0.5 text-[11px] font-mono truncate text-[color:var(--text-tertiary)]" :title="f.oldPath">
                     {{ t("codeReview.file.oldPath", {oldPath: f.oldPath}) }}
                   </div>
                 </div>
-                <div class="ml-auto flex items-center gap-1 opacity-0 group-hover:opacity-100">
+                <div class="ml-auto shrink-0 flex items-center gap-1 opacity-0 group-hover:opacity-100">
                   <a-tooltip :title="t('codeReview.actions.stage')" :mouseEnterDelay="0" :mouseLeaveDelay="0" placement="top">
                     <span class="inline-flex">
                       <a-button size="small" type="text" :disabled="gitBusy" @click.stop="stageOne(f)" :aria-label="t('codeReview.actions.stage')">
@@ -108,11 +109,11 @@
         </div>
       </div>
 
-      <div class="flex-1 min-h-0 flex flex-col border-t border-[var(--border-color-secondary)]">
+      <div class="flex-1 min-h-0 min-w-0 flex flex-col border-t border-[var(--border-color-secondary)]">
         <div
-            class="flex items-center justify-between pl-3 pr-1 py-1.5 border-b border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)]">
-          <div class="text-xs font-semibold">{{ t("codeReview.staged") }}</div>
-          <div class="flex items-center gap-1">
+            class="review-change-heading flex items-center justify-between pl-3 pr-1 py-1.5 border-b border-[var(--border-color-secondary)] bg-[var(--panel-bg-elevated)]">
+          <div class="min-w-0 truncate text-xs font-semibold" :title="t('codeReview.staged')">{{ t("codeReview.staged") }}</div>
+          <div class="shrink-0 flex items-center gap-1">
             <a-button
                 size="small"
                 type="text"
@@ -139,36 +140,36 @@
             </a-tooltip>
           </div>
         </div>
-        <div class="flex-1 min-h-0 overflow-auto">
+        <div class="review-file-list">
           <div v-if="stagedLoaded && stagedFiles.length === 0" class="p-3 text-xs text-[color:var(--text-tertiary)]">
-            {{ t("codeReview.status.noChanges") }}
+            {{ t("codeReview.status.noStagedChanges") }}
           </div>
           <a-dropdown v-for="f in stagedFiles" :key="`s:${f.path}`" :trigger="['contextmenu']" class="block">
             <div
-                class="group w-full text-left pl-3 pr-1 py-1.5 hover:bg-[var(--hover-bg)] cursor-pointer"
-                :class="isSelected('staged', f.path) ? 'bg-[var(--fill-secondary)] border-l-2 border-l-[var(--info-color)]' : 'border-l-2 border-l-transparent'"
+                class="group w-full text-left pl-3 pr-1 py-1.5 cursor-pointer"
+                :class="isSelected('staged', f.path) ? 'bg-[color-mix(in_srgb,var(--info-color)_20%,var(--panel-bg))] border-l-2 border-l-[var(--info-color)]' : 'hover:bg-[var(--hover-bg)] border-l-2 border-l-transparent'"
                 @click="selectFile('staged', f.path, f.oldPath)"
                 @contextmenu.prevent="selectFile('staged', f.path, f.oldPath, false)"
             >
               <div class="flex items-center gap-2 min-w-0">
-                <a-tooltip :title="f.status" :mouseEnterDelay="0" :mouseLeaveDelay="0" placement="top">
+                <a-tooltip :title="fileKindLabel(f) || f.status" :mouseEnterDelay="0" :mouseLeaveDelay="0" placement="top">
                   <div
                       class="text-xs text-[color:var(--text-secondary)] shrink-0 text-center flex items-center justify-center"
                       :class="statusBadgeClass(f.status)"
                   >
-                    <component :is="statusIconComponent(f.status)"/>
+                    <component :is="f.kind === 'directory' ? FolderOpenOutlined : f.kind === 'submodule' ? BranchesOutlined : statusIconComponent(f.status)"/>
                   </div>
                 </a-tooltip>
                 <div class="min-w-0 flex-1">
-                  <div class="text-xs font-mono min-w-0 flex items-center">
+                  <div class="text-xs font-mono min-w-0 flex items-center" :title="f.path">
                     <span class="text-[color:var(--text-secondary)] min-w-0 flex-initial truncate block">{{ fileDir(f.path) }}</span>
-                    <span class="text-[color:var(--text-color)] shrink-0 whitespace-nowrap">{{ fileBase(f.path) }}</span>
+                    <span class="text-[color:var(--text-color)] shrink-0 max-w-full truncate" :title="fileKindLabel(f) || undefined">{{ fileBase(f.path) }}</span>
                   </div>
-                  <div v-if="f.oldPath" class="mt-0.5 text-[11px] font-mono truncate text-[color:var(--text-tertiary)]">
+                  <div v-if="f.oldPath" class="mt-0.5 text-[11px] font-mono truncate text-[color:var(--text-tertiary)]" :title="f.oldPath">
                     {{ t("codeReview.file.oldPath", {oldPath: f.oldPath}) }}
                   </div>
                 </div>
-                <div class="ml-auto flex items-center gap-1 opacity-0 group-hover:opacity-100">
+                <div class="ml-auto shrink-0 flex items-center gap-1 opacity-0 group-hover:opacity-100">
                   <a-tooltip :title="t('codeReview.actions.unstage')" :mouseEnterDelay="0" :mouseLeaveDelay="0" placement="top">
                     <span class="inline-flex">
                       <a-button size="small" type="text" :disabled="gitBusy" @click.stop="unstageOne(f)" :aria-label="t('codeReview.actions.unstage')">
@@ -197,6 +198,7 @@
 
   <a-modal v-model:open="commitOpen" :title="t('codeReview.commit.modalTitle')" :maskClosable="false">
     <a-form layout="vertical">
+      <div class="mb-3 text-xs font-mono break-all" data-commit-target>{{ t("codeReview.commit.target", { repo: commitDialog?.target.dirName ?? "" }) }}</div>
       <a-form-item :label="t('codeReview.commit.messageLabel')" required>
         <a-textarea
             ref="commitMessageInputRef"
@@ -207,8 +209,9 @@
         />
       </a-form-item>
       <div class="text-xs text-[color:var(--text-tertiary)]">
-        {{ t("codeReview.commit.summary", {count: stagedFiles.length}) }}
+        {{ t("codeReview.commit.summary", {count: commitDialog?.stagedCount ?? 0}) }}
       </div>
+      <div class="mt-1 text-xs text-[color:var(--text-tertiary)]">{{ t("codeReview.commit.scope") }}</div>
     </a-form>
     <template #footer>
       <a-space>
@@ -226,7 +229,7 @@
 
   <GitIdentityModal
       v-model:open="identityOpen"
-      :target="target"
+      :target="pendingCommitRequest?.target ?? null"
       :defaultScope="'repo'"
       :loading="identitySubmitting"
       @submit="onIdentitySubmit"
@@ -234,10 +237,12 @@
 </template>
 
 <script setup lang="ts">
-import {computed, nextTick, onMounted, onUnmounted, ref, watch} from "vue";
+import {computed, nextTick, onUnmounted, ref, shallowRef, watch} from "vue";
 import {Modal, message} from "ant-design-vue";
 import {
+  BranchesOutlined,
   CopyOutlined,
+  FolderOpenOutlined,
   DeleteOutlined,
   ExclamationCircleOutlined,
   EyeInvisibleOutlined,
@@ -275,16 +280,12 @@ const props = defineProps<{
   target: GitTarget | null;
   gitBusy: boolean;
   beginGitOp: () => () => void;
-  push?: (params?: PushParams) => Promise<void>;
-  pollingEnabled?: boolean;
+  push?: (target: GitTarget, params?: PushParams) => Promise<void>;
+  refreshStatus?: () => Promise<void>;
 }>();
 
 const {t} = useI18n();
 const host = useWorkspaceHost(props.toolId);
-
-const containerEl = ref<HTMLElement | null>(null);
-
-const containerStyle = computed(() => ({ minHeight: 0, height: "100%" } as const));
 
 const emit = defineEmits<{
   changesSummary: [summary: { unstaged: number; staged: number }];
@@ -313,6 +314,9 @@ const compareLanguage = computed(() => {
   return inferLanguageFromPath(current.path);
 });
 let compareReqSeq = 0;
+let listReqSeq = 0;
+let disposed = false;
+const targetKey = (target: GitTarget | null) => target ? `${target.workspaceId}/${target.dirName}` : "";
 
 function comparePathText(a: string, b: string) {
   // 使用纯字符串比较,避免受 locale 影响导致不同环境下排序不一致
@@ -339,15 +343,22 @@ function compareChangeItemForList(a: ChangeItem, b: ChangeItem) {
 // UI 层按 path 做稳定排序,避免轮询时列表顺序抖动影响“按索引回退选中”
 const unstagedFiles = computed(() => stableSort(unstaged.value, compareChangeItemForList));
 const stagedFiles = computed(() => stableSort(staged.value, compareChangeItemForList));
+const noChanges = computed(() => unstagedLoaded.value && stagedLoaded.value && unstagedFiles.value.length === 0 && stagedFiles.value.length === 0);
 
 const commitOpen = ref(false);
 const commitMessage = ref("");
 const commitMessageInputRef = ref<{ focus?: () => void } | null>(null);
 const commitLoading = ref<"commit" | "commitAndPush" | null>(null);
-const canCommit = computed(() => stagedFiles.value.length > 0 && commitMessage.value.trim().length > 0 && !props.gitBusy);
+type CommitMode = "commit" | "commitAndPush";
+type CommitDialog = { id: number; target: GitTarget; stagedCount: number };
+type CommitRequest = CommitDialog & { message: string; mode: CommitMode };
+let commitDialogSeq = 0;
+const commitDialog = shallowRef<CommitDialog | null>(null);
+const commitDrafts = new Map<string, string>();
+const canCommit = computed(() => Boolean(commitDialog.value?.stagedCount) && commitMessage.value.trim().length > 0 && !props.gitBusy && !commitLoading.value);
 
 const identityOpen = ref(false);
-const pendingCommitMode = ref<"commit" | "commitAndPush" | null>(null);
+const pendingCommitRequest = shallowRef<CommitRequest | null>(null);
 const identitySubmitting = ref(false);
 
 watch(
@@ -370,7 +381,7 @@ async function openSelectedDiff() {
       path: compare.value.path,
       language: compareLanguage.value,
       title: compare.value.path,
-      tabKey: `codeReview:${selected.value.mode}:${selected.value.oldPath || selected.value.path}->${selected.value.path}`,
+      tabKey: `codeReview:${targetKey(props.target)}:${selected.value.mode}:${selected.value.oldPath || selected.value.path}->${selected.value.path}`,
       source: "codeReview"
     }
   });
@@ -498,23 +509,13 @@ async function reconcileSelectedAfterRefresh() {
   selected.value = null;
 }
 
-async function refreshChanges(mode: ChangeMode) {
-  if (!props.target) return;
-  const loadingRef = mode === "unstaged" ? unstagedLoading : stagedLoading;
-  const loadedRef = mode === "unstaged" ? unstagedLoaded : stagedLoaded;
-  loadingRef.value = true;
-  try {
-    const res = await listChanges(props.target, {mode});
-    if (mode === "unstaged") unstaged.value = res.files;
-    else staged.value = res.files;
-    loadedRef.value = true;
-  } finally {
-    loadingRef.value = false;
-  }
-}
-
 async function refreshAll() {
-  if (!props.target) {
+  if (disposed) return;
+  const request = ++listReqSeq;
+  const target = props.target ? { ...props.target } : null;
+  if (!target) {
+    unstagedLoading.value = false;
+    stagedLoading.value = false;
     unstaged.value = [];
     staged.value = [];
     unstagedLoaded.value = true;
@@ -524,12 +525,36 @@ async function refreshAll() {
     compare.value = null;
     compareError.value = null;
     compareLoading.value = false;
-    emit("changesSummary", {unstaged: 0, staged: 0});
+    emit("changesSummary", { unstaged: 0, staged: 0 });
     return;
   }
-  await Promise.all([refreshChanges("unstaged"), refreshChanges("staged")]);
-  emit("changesSummary", {unstaged: unstaged.value.length, staged: staged.value.length});
-  await reconcileSelectedAfterRefresh();
+  unstagedLoading.value = true;
+  stagedLoading.value = true;
+  try {
+    const [nextUnstaged, nextStaged] = await Promise.all([
+      listChanges(target, { mode: "unstaged" }),
+      listChanges(target, { mode: "staged" })
+    ]);
+    if (disposed || request !== listReqSeq || targetKey(target) !== targetKey(props.target)) return;
+    unstaged.value = nextUnstaged.files;
+    staged.value = nextStaged.files;
+    unstagedLoaded.value = true;
+    stagedLoaded.value = true;
+    emit("changesSummary", { unstaged: unstaged.value.length, staged: staged.value.length });
+    await reconcileSelectedAfterRefresh();
+  } finally {
+    if (request === listReqSeq) {
+      unstagedLoading.value = false;
+      stagedLoading.value = false;
+    }
+  }
+}
+
+async function refreshAfterGitOperation(target: GitTarget) {
+  if (disposed) return;
+  // 旧仓库的操作结束后，不覆盖新仓库列表；后台摘要仍要更新。
+  if (targetKey(target) === targetKey(props.target)) await refreshAll();
+  await props.refreshStatus?.();
 }
 
 function normalizeStatusForAction(statusRaw: string) {
@@ -556,12 +581,16 @@ function normalizeRelPath(rawInput: string) {
   return parts.join("/");
 }
 
+function fileKindLabel(f: ChangeItem) {
+  return f.kind ? t(`codeReview.file.${f.kind}`) : "";
+}
+
 function isOpenFileDisabled(f: ChangeItem) {
-  return isDeletedChange(f) || !resolveOpenFilePath(f);
+  return Boolean(f.kind) || isDeletedChange(f) || !resolveOpenFilePath(f);
 }
 
 function resolveOpenFilePath(f: ChangeItem) {
-  if (isDeletedChange(f)) return "";
+  if (f.kind || isDeletedChange(f)) return "";
   const repoRel = normalizeRelPath(f.path);
   if (!repoRel) return "";
 
@@ -577,7 +606,7 @@ function resolveOpenFilePath(f: ChangeItem) {
 async function openFileFromChange(f: ChangeItem) {
   const path = resolveOpenFilePath(f);
   if (!path) {
-    message.warning(t("codeReview.actions.openFileUnavailable"));
+    message.warning(t(f.kind ? "codeReview.diff.notPreviewableTitle" : "codeReview.actions.openFileUnavailable"));
     return;
   }
   try {
@@ -668,16 +697,20 @@ function onStagedContextMenuClick(f: ChangeItem, info: { key?: string | number }
 function openCommit() {
   if (props.gitBusy) return;
   if (stagedFiles.value.length === 0) return;
+  if (!props.target) return;
+  if (commitDialog.value) commitDrafts.set(targetKey(commitDialog.value.target), commitMessage.value);
+  commitDialog.value = { id: ++commitDialogSeq, target: { ...props.target }, stagedCount: stagedFiles.value.length };
+  commitMessage.value = commitDrafts.get(targetKey(props.target)) ?? "";
   commitOpen.value = true;
 }
 
 async function stageAll() {
-  if (!props.target) return;
-  if (props.gitBusy) return;
+  const target = props.target ? { ...props.target } : null;
+  if (!target || props.gitBusy) return;
   const release = props.beginGitOp();
   try {
-    await stageWorkspace({target: props.target, all: true});
-    await refreshAll();
+    await stageWorkspace({target, all: true});
+    await refreshAfterGitOperation(target);
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err));
   } finally {
@@ -686,12 +719,12 @@ async function stageAll() {
 }
 
 async function stageOne(f: ChangeItem) {
-  if (!props.target) return;
-  if (props.gitBusy) return;
+  const target = props.target ? { ...props.target } : null;
+  if (!target || props.gitBusy) return;
   const release = props.beginGitOp();
   try {
-    await stageWorkspace({target: props.target, items: [{path: f.path, oldPath: f.oldPath}]});
-    await refreshAll();
+    await stageWorkspace({target, items: [{path: f.path, oldPath: f.oldPath}]});
+    await refreshAfterGitOperation(target);
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err));
   } finally {
@@ -724,7 +757,7 @@ async function discardOne(f: ChangeItem) {
       const release = props.beginGitOp();
       try {
         await discardWorkspace({target, items: [{path: f.path, oldPath: f.oldPath}]});
-        await refreshAll();
+        await refreshAfterGitOperation(target);
         message.success(f.status === "??" ? t("codeReview.discard.deleted") : t("codeReview.discard.discarded"));
       } catch (err) {
         message.error(err instanceof Error ? err.message : String(err));
@@ -751,7 +784,7 @@ async function discardAll() {
       const release = props.beginGitOp();
       try {
         await discardWorkspace({target, all: true, includeUntracked: true});
-        await refreshAll();
+        await refreshAfterGitOperation(target);
         message.success(t("codeReview.discard.discardedAll"));
       } catch (err) {
         message.error(err instanceof Error ? err.message : String(err));
@@ -763,12 +796,12 @@ async function discardAll() {
 }
 
 async function unstageAll() {
-  if (!props.target) return;
-  if (props.gitBusy) return;
+  const target = props.target ? { ...props.target } : null;
+  if (!target || props.gitBusy) return;
   const release = props.beginGitOp();
   try {
-    await unstageWorkspace({target: props.target, all: true});
-    await refreshAll();
+    await unstageWorkspace({target, all: true});
+    await refreshAfterGitOperation(target);
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err));
   } finally {
@@ -777,12 +810,12 @@ async function unstageAll() {
 }
 
 async function unstageOne(f: ChangeItem) {
-  if (!props.target) return;
-  if (props.gitBusy) return;
+  const target = props.target ? { ...props.target } : null;
+  if (!target || props.gitBusy) return;
   const release = props.beginGitOp();
   try {
-    await unstageWorkspace({target: props.target, items: [{path: f.path, oldPath: f.oldPath}]});
-    await refreshAll();
+    await unstageWorkspace({target, items: [{path: f.path, oldPath: f.oldPath}]});
+    await refreshAfterGitOperation(target);
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err));
   } finally {
@@ -790,84 +823,75 @@ async function unstageOne(f: ChangeItem) {
   }
 }
 
-async function submitCommit(mode: "commit" | "commitAndPush") {
-  if (!props.target) return;
-  if (!canCommit.value) return;
-  const msg = commitMessage.value.trim();
-  commitLoading.value = mode;
-  const release = props.beginGitOp();
-  try {
-    const res = await commitWorkspace({target: props.target, message: msg});
-    message.success(t("codeReview.commit.committed", {sha: res.sha.slice(0, 8)}));
-    commitOpen.value = false;
-    commitMessage.value = "";
-    await refreshAll();
-  } catch (err) {
-    const e = err instanceof ApiError ? err : new ApiError({message: err instanceof Error ? err.message : String(err)});
-    if (e.code === "GIT_IDENTITY_REQUIRED") {
-      pendingCommitMode.value = mode;
-      identityOpen.value = true;
-      return;
-    }
-    message.error(e.message);
-    return;
-  } finally {
-    release();
-    commitLoading.value = null;
-  }
-
-  if (mode === "commitAndPush") {
-    try {
-      await props.push?.();
-    } catch {
-      // push 内部自行 toast/弹窗；这里不重复提示
-    }
-  }
+async function submitCommit(mode: CommitMode) {
+  const dialog = commitDialog.value;
+  if (!dialog || !canCommit.value) return;
+  const request: CommitRequest = { ...dialog, target: { ...dialog.target }, message: commitMessage.value.trim(), mode };
+  await runCommit(request);
 }
 
-async function onIdentitySubmit(identity: any) {
-  if (!props.target) return;
-  const mode = pendingCommitMode.value ?? "commit";
-  const msg = commitMessage.value.trim();
-  if (!msg) return;
-
-  commitLoading.value = mode;
+async function runCommit(request: CommitRequest, identity?: Parameters<typeof commitWorkspace>[0]["identity"]) {
+  commitLoading.value = request.mode;
+  identitySubmitting.value = Boolean(identity);
   const release = props.beginGitOp();
-  identitySubmitting.value = true;
+  let committed = false;
   try {
-    const res = await commitWorkspace({target: props.target, message: msg, identity});
-    message.success(t("codeReview.commit.committed", {sha: res.sha.slice(0, 8)}));
-    commitOpen.value = false;
-    commitMessage.value = "";
-    identityOpen.value = false;
-    pendingCommitMode.value = null;
-    await refreshAll();
+    const res = await commitWorkspace({ target: request.target, message: request.message, ...(identity ? { identity } : {}) });
+    committed = true;
+    message.success(t("codeReview.commit.committed", { sha: res.sha.slice(0, 8) }));
+    if (commitDialog.value?.id === request.id && commitMessage.value.trim() === request.message) {
+      commitOpen.value = false;
+      commitMessage.value = "";
+    }
+    if (commitDrafts.get(targetKey(request.target))?.trim() === request.message) commitDrafts.delete(targetKey(request.target));
+    if (pendingCommitRequest.value === request) {
+      identityOpen.value = false;
+      pendingCommitRequest.value = null;
+    }
   } catch (err) {
-    const e = err instanceof ApiError ? err : new ApiError({message: err instanceof Error ? err.message : String(err)});
-    message.error(e.message);
-    return;
+    const error = err instanceof ApiError ? err : new ApiError({ message: err instanceof Error ? err.message : String(err) });
+    if (error.code === "GIT_IDENTITY_REQUIRED" && !identity) {
+      pendingCommitRequest.value = request;
+      identityOpen.value = true;
+    } else {
+      message.error(error.message);
+    }
   } finally {
     release();
     commitLoading.value = null;
     identitySubmitting.value = false;
   }
-
-  if (mode === "commitAndPush") {
+  if (!committed) return;
+  if (request.mode === "commitAndPush") {
     try {
-      await props.push?.();
+      // 同一调用栈内续接 push，让宿主先取得 busy；不要先 await 被动刷新，
+      // 否则期间开始的其他 Git 操作可能使本次必需的 push 被 busy gate 跳过。
+      await props.push?.(request.target);
     } catch {
-      // push 内部自行 toast/弹窗；这里不重复提示
+      // 宿主负责 push 的提示/确认，不重复弹出。
     }
   }
+  try {
+    await refreshAfterGitOperation(request.target);
+  } catch (err) {
+    message.error(err instanceof Error ? err.message : String(err));
+  }
+}
+
+async function onIdentitySubmit(identity: Parameters<typeof commitWorkspace>[0]["identity"]) {
+  const request = pendingCommitRequest.value;
+  if (!request || props.gitBusy || commitLoading.value) return;
+  await runCommit(request, identity);
 }
 
 async function refreshCompare() {
   compareReqSeq += 1;
   const req = compareReqSeq;
+  const target = props.target ? { ...props.target } : null;
 
   compareError.value = null;
   compare.value = null;
-  if (!props.target) {
+  if (!target) {
     compareLoading.value = false;
     return;
   }
@@ -878,15 +902,15 @@ async function refreshCompare() {
 
   compareLoading.value = true;
   try {
-    const next = await fileCompare(props.target, {
+    const next = await fileCompare(target, {
       mode: selected.value.mode,
       path: selected.value.path,
       oldPath: selected.value.oldPath
     });
-    if (req !== compareReqSeq) return;
+    if (disposed || req !== compareReqSeq || targetKey(target) !== targetKey(props.target)) return;
     compare.value = next;
   } catch (err) {
-    if (req !== compareReqSeq) return;
+    if (disposed || req !== compareReqSeq || targetKey(target) !== targetKey(props.target)) return;
     compareError.value = err instanceof Error ? err.message : String(err);
   } finally {
     if (req === compareReqSeq) compareLoading.value = false;
@@ -914,7 +938,10 @@ watch([selected, openDiffRequestedByUserKey], async () => {
 
   if (!shouldOpenDiff) return;
 
+  const requestedTarget = targetKey(props.target);
+  const requestedCompare = compareReqSeq + 1;
   await refreshCompare();
+  if (requestedTarget !== targetKey(props.target) || requestedCompare !== compareReqSeq) return;
   const latestKey = selected.value ? `${selected.value.mode}|${selected.value.path}|${selected.value.oldPath || ""}` : null;
   if (latestKey !== selectionKey) return;
 
@@ -932,73 +959,31 @@ watch([selected, openDiffRequestedByUserKey], async () => {
   void openSelectedDiff();
 });
 
-const pollIntervalMs = 5000;
-let pollTimer: ReturnType<typeof setInterval> | null = null;
-const pollInFlight = ref(false);
-
-async function pollTick() {
-  if (!props.target) return;
-  if (props.gitBusy) return;
-  if (pollInFlight.value) return;
-  pollInFlight.value = true;
-  try {
-    await refreshAll();
-  } catch {
-    // 轮询失败时不打断 UI
-  } finally {
-    pollInFlight.value = false;
-  }
-}
-
-function startPolling() {
-  if (!props.pollingEnabled) return;
-  if (pollTimer) return;
-  pollTimer = setInterval(pollTick, pollIntervalMs);
-}
-
-function stopPolling() {
-  if (!pollTimer) return;
-  clearInterval(pollTimer);
-  pollTimer = null;
-}
-
-function handleVisibilityChange() {
-  if (!props.pollingEnabled) return;
-  if (typeof document === "undefined") return;
-  if (document.visibilityState === "hidden") {
-    stopPolling();
-    return;
-  }
-  startPolling();
-  void pollTick();
-}
-
 watch(
-    () => props.target?.kind === "workspaceRepo" ? props.target.dirName : "",
-    async () => {
-      selectedFingerprint.value = null;
-      selected.value = null;
-      await refreshAll();
-    }
+  () => targetKey(props.target),
+  () => {
+    listReqSeq += 1;
+    compareReqSeq += 1;
+    unstaged.value = [];
+    staged.value = [];
+    unstagedLoaded.value = false;
+    stagedLoaded.value = false;
+    selectedFingerprint.value = null;
+    selected.value = null;
+    compare.value = null;
+    compareError.value = null;
+    compareLoading.value = false;
+    void refreshAll().catch(() => {
+      // 初始/切仓库加载失败不伪装为空列表；后台摘要负责限频提示。
+    });
+  },
+  { immediate: true, flush: "sync" }
 );
 
-onMounted(async () => {
-  await refreshAll();
-  if (props.pollingEnabled) {
-    startPolling();
-    if (typeof document !== "undefined") {
-      document.addEventListener("visibilitychange", handleVisibilityChange, {passive: true});
-    }
-  }
-});
-
 onUnmounted(() => {
-  if (props.pollingEnabled) {
-    stopPolling();
-    if (typeof document !== "undefined") {
-      document.removeEventListener("visibilitychange", handleVisibilityChange);
-    }
-  }
+  disposed = true;
+  listReqSeq += 1;
+  compareReqSeq += 1;
 });
 
 defineExpose({refreshAll});
@@ -1019,3 +1004,11 @@ function formatBytes(bytes: number) {
   return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
 }
 </script>
+
+<style scoped>
+.code-review-changes { height: 100%; min-height: 0; min-width: 0; overflow: hidden; }
+.review-change-groups { height: 100%; min-height: 0; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); }
+.review-change-heading { flex: none; }
+.review-file-list { flex: 1; min-height: 0; min-width: 0; overflow-x: hidden; overflow-y: auto; }
+.review-clean-state { height: 100%; display: flex; align-items: center; justify-content: center; padding: 16px; box-sizing: border-box; color: var(--text-tertiary); font-size: 12px; }
+</style>

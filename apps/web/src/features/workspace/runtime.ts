@@ -1,4 +1,4 @@
-import type { GitTarget } from "@agent-workbench/shared";
+import type { GitTarget, WorkspaceGitStatusRequest, WorkspaceGitStatusResponse } from "@agent-workbench/shared";
 import type { ToolCall, ToolCallEnvelope, WorkspaceToolEvent } from "./host";
 
 export type ToolRuntimeContext = {
@@ -11,14 +11,17 @@ export type ToolRuntimeContext = {
   getCurrentTarget: () => GitTarget | null;
   getVisible: () => boolean;
   refreshView?: () => void | Promise<void>;
+  onWorkspaceGitStatus?: (status: WorkspaceGitStatusResponse) => void;
+  onBackgroundError?: (error: unknown) => void;
   api?: {
-    getGitStatus?: (params: { target: GitTarget }) => Promise<unknown>;
+    getWorkspaceGitStatus?: (params: WorkspaceGitStatusRequest) => Promise<WorkspaceGitStatusResponse>;
   };
 };
 
 export type ToolRuntime = {
   start: () => void;
   dispose: () => void;
+  refresh?: () => Promise<void>;
   onRepoChange: (nextTarget: GitTarget | null) => void;
   onVisibilityChange: (visible: boolean) => void;
   onCall: (envelope: ToolCallEnvelope) => void;

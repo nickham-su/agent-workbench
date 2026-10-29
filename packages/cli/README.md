@@ -1,6 +1,6 @@
 # AWB CLI
 
-独立的 Node.js 22 HTTP 客户端，不读取 API 数据库，也不依赖 Worker 注入身份。首版提供 `login` 和通用 `session list`；只有固定可读文本输出，没有 JSON、分页或文件导出模式。
+独立的 Node.js HTTP 客户端（运行要求 Node.js 22+，本仓库使用 Node.js 24 开发与验证），不读取 API 数据库，也不依赖 Worker 注入身份。首版提供 `login` 和通用 `session list`；只有固定可读文本输出，没有 JSON、分页或文件导出模式。
 
 ## 本地安装
 

@@ -65,20 +65,21 @@ export function rebuildDirtyRollups(db: AnalyticsDb, now = Date.now(), maxBucket
         const value = db.prepare(`SELECT COUNT(*) AS request_count, SUM(status='completed') AS completed_count, SUM(status='failed') AS failed_count,
           SUM(status='timed_out') AS timed_out_count, SUM(status NOT IN ('completed','failed','timed_out')) AS other_count,
           COALESCE(SUM(CASE WHEN status='completed' AND ended_at IS NOT NULL THEN ended_at-started_at ELSE 0 END),0) AS duration_sum,
-          SUM(status='completed' AND ended_at IS NOT NULL) AS duration_samples, COALESCE(SUM(input_tokens),0) AS input_tokens,
+          SUM(status='completed' AND ended_at IS NOT NULL) AS duration_samples, COALESCE(SUM(request_preparation_ms),0) AS preparation_sum, COUNT(request_preparation_ms) AS preparation_samples, COALESCE(SUM(input_tokens),0) AS input_tokens,
           COALESCE(SUM(output_tokens),0) AS output_tokens, COALESCE(SUM(total_tokens),0) AS total_tokens
            FROM analytics_model_call_fact WHERE started_at>=? AND started_at<?`).get(bucket_start, end) as Record<string, number>;
-        db.prepare("INSERT OR REPLACE INTO dashboard_model_1h VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(bucket_start, value.request_count, value.completed_count ?? 0, value.failed_count ?? 0, value.timed_out_count ?? 0, value.other_count ?? 0, value.duration_sum, value.duration_samples ?? 0, value.input_tokens, value.output_tokens, value.total_tokens);
+        db.prepare("INSERT OR REPLACE INTO dashboard_model_1h VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(bucket_start, value.request_count, value.completed_count ?? 0, value.failed_count ?? 0, value.timed_out_count ?? 0, value.other_count ?? 0, value.duration_sum, value.duration_samples ?? 0, value.input_tokens, value.output_tokens, value.total_tokens, value.preparation_sum, value.preparation_samples);
         db.prepare("DELETE FROM dashboard_model_dimension_1h WHERE bucket_start=?").run(bucket_start);
         const dimensions = db.prepare(`SELECT provider_id, model_id, status, timeout_kind, COUNT(*) AS request_count,
           COALESCE(SUM(CASE WHEN status='completed' AND ended_at IS NOT NULL THEN ended_at-started_at ELSE 0 END),0) AS duration_sum, SUM(status='completed' AND ended_at IS NOT NULL) AS duration_samples,
+          COALESCE(SUM(request_preparation_ms),0) AS preparation_sum, COUNT(request_preparation_ms) AS preparation_samples,
           COALESCE(SUM(input_tokens),0) AS input_tokens, SUM(input_tokens IS NOT NULL) AS input_reported_count, COALESCE(SUM(output_tokens),0) AS output_tokens, SUM(output_tokens IS NOT NULL) AS output_reported_count,
           COALESCE(SUM(total_tokens),0) AS total_tokens, SUM(total_source='reported') AS total_reported_count, SUM(total_source='derived') AS total_derived_count,
            COALESCE(SUM(CASE WHEN cache_comparable=1 THEN cache_read_tokens ELSE 0 END),0) AS cache_read_tokens, SUM(cache_comparable=1) AS cache_comparable_count,
            COALESCE(SUM(CASE WHEN cache_comparable=1 THEN cache_input_tokens ELSE 0 END),0) AS comparable_input_tokens, COALESCE(SUM(CASE WHEN cache_comparable=1 THEN cache_read_tokens ELSE 0 END),0) AS comparable_cache_read_tokens
           FROM analytics_model_call_fact WHERE started_at>=? AND started_at<? GROUP BY provider_id, model_id, status, timeout_kind`).all(bucket_start, end) as Array<Record<string, unknown>>;
-        const insertDimension = db.prepare("INSERT INTO dashboard_model_dimension_1h VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-        for (const row of dimensions) insertDimension.run(bucket_start, row.provider_id, row.model_id, row.status, row.timeout_kind, row.request_count, row.duration_sum, row.duration_samples, row.input_tokens, row.input_reported_count, row.output_tokens, row.output_reported_count, row.total_tokens, row.total_reported_count, row.total_derived_count, row.cache_read_tokens, row.cache_comparable_count, row.comparable_input_tokens, row.comparable_cache_read_tokens);
+        const insertDimension = db.prepare("INSERT INTO dashboard_model_dimension_1h VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        for (const row of dimensions) insertDimension.run(bucket_start, row.provider_id, row.model_id, row.status, row.timeout_kind, row.request_count, row.duration_sum, row.duration_samples, row.input_tokens, row.input_reported_count, row.output_tokens, row.output_reported_count, row.total_tokens, row.total_reported_count, row.total_derived_count, row.cache_read_tokens, row.cache_comparable_count, row.comparable_input_tokens, row.comparable_cache_read_tokens, row.preparation_sum, row.preparation_samples);
       } else if (domain === "tool") {
         db.prepare("DELETE FROM dashboard_tool_1h WHERE bucket_start=?").run(bucket_start);
         const source = db.prepare(`SELECT tool_name, status, COUNT(*) AS call_count, COALESCE(SUM(completed_duration_ms),0) AS duration_sum,

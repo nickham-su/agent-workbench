@@ -3,7 +3,7 @@
     <div class="model-primary-metrics">
       <DashboardMetricCard :title="t('dashboard.requestCount')" :value="formatCount(metricNumberValue(model.metrics.requestCount), locale)" :result="model.metrics.requestCount" clickable :selected="trend === 'requests'" test-id="model-metric-requestCount" @select="trend = 'requests'" />
       <DashboardMetricCard :title="t('dashboard.successRate')" :value="formatRatio(metricRatioValue(model.metrics.successRate), locale)" :result="model.metrics.successRate" clickable :selected="trend === 'successRate'" test-id="model-metric-successRate" @select="trend = 'successRate'" />
-      <DashboardMetricCard :title="t('dashboard.timeoutRate')" :value="formatRatio(metricRatioValue(model.metrics.timeoutRate), locale)" :result="model.metrics.timeoutRate" clickable :selected="trend === 'timeoutRate'" test-id="model-metric-timeoutRate" @select="trend = 'timeoutRate'" />
+      <DashboardMetricCard :title="t('dashboard.averagePreparationDuration')" :value="formatDuration(model.metrics.averagePreparationDuration.status === 'unavailable' ? null : model.metrics.averagePreparationDuration.value.durationMs)" :result="model.metrics.averagePreparationDuration" :description="preparationSamplingDescription" clickable :selected="trend === 'averagePreparationDuration'" test-id="model-metric-averagePreparationDuration" @select="trend = 'averagePreparationDuration'" />
       <DashboardMetricCard :title="t('dashboard.completedAverageDuration')" :value="formatDuration(model.metrics.completedAverageDuration.status === 'unavailable' ? null : model.metrics.completedAverageDuration.value.durationMs)" :result="model.metrics.completedAverageDuration" clickable :selected="trend === 'completedAverageDuration'" test-id="model-metric-completedAverageDuration" @select="trend = 'completedAverageDuration'" />
       <article class="token-card" :class="{ selected: trend === 'tokens' }" data-testid="model-metric-tokens">
         <button type="button" :aria-pressed="trend === 'tokens'" @click="trend = 'tokens'">
@@ -11,12 +11,12 @@
           <span class="token-values">
             <span>
               <span class="token-label">{{ t('dashboard.inputTokens') }}</span>
-              <strong>{{ formatCount(metricNullableCountValue(model.metrics.inputTokens), locale) }}</strong>
+              <strong>{{ formatTokenCount(metricNullableCountValue(model.metrics.inputTokens), locale) }}</strong>
               <span v-if="comparisonLabel(model.metrics.inputTokens, metricNullableCountValue(model.metrics.inputTokens) !== null)" class="token-comparison">{{ comparisonLabel(model.metrics.inputTokens, true) }}</span>
             </span>
             <span>
               <span class="token-label">{{ t('dashboard.outputTokens') }}</span>
-              <strong>{{ formatCount(metricNullableCountValue(model.metrics.outputTokens), locale) }}</strong>
+              <strong>{{ formatTokenCount(metricNullableCountValue(model.metrics.outputTokens), locale) }}</strong>
               <span v-if="comparisonLabel(model.metrics.outputTokens, metricNullableCountValue(model.metrics.outputTokens) !== null)" class="token-comparison">{{ comparisonLabel(model.metrics.outputTokens, true) }}</span>
             </span>
           </span>
@@ -45,7 +45,7 @@
 import { computed, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import type { DashboardData, MetricResult } from "@agent-workbench/shared";
-import { formatComparison, formatCount, formatDuration, formatRatio } from "../dashboard-formatters";
+import { formatComparison, formatCount, formatDuration, formatRatio, formatTokenCount } from "../dashboard-formatters";
 import { metricNumberValue, metricNullableCountValue, metricRatioValue } from "../dashboard-types";
 import DashboardMetricCard from "./DashboardMetricCard.vue";
 import DashboardMiniRatioChart from "./DashboardMiniRatioChart.vue";
@@ -55,7 +55,11 @@ import DashboardTrendChart from "./DashboardTrendChart.vue";
 
 const props = defineProps<{ model: DashboardData["model"]; cacheHitRate: DashboardData["overview"]["cacheHitRate"]; timezone: string }>();
 const { t, locale } = useI18n();
-const kinds = { requests: "model_status", successRate: "ratio", timeoutRate: "ratio", completedAverageDuration: "duration", tokens: "tokens", cacheHitRate: "ratio" } as const;
+const preparationSamplingDescription = computed(() => t('dashboard.preparationSamplingDescription', {
+  count: props.model.metrics.averagePreparationDuration.status === 'unavailable'
+    ? '—' : formatCount(props.model.metrics.averagePreparationDuration.value.reliableSampleCount, locale.value),
+}));
+const kinds = { requests: "model_status", successRate: "ratio", averagePreparationDuration: "duration", completedAverageDuration: "duration", tokens: "tokens", cacheHitRate: "ratio" } as const;
 const trend = ref<keyof typeof kinds>("requests");
 function comparisonLabel(result: MetricResult<unknown>, hasValue: boolean): string {
   return hasValue && result.status === "available" && result.comparison.status === "available" ? formatComparison(result.comparison, locale.value) : "";

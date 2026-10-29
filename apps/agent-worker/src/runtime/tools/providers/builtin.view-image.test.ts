@@ -31,9 +31,9 @@ test("view_image accepts genuine uploaded images and screenshots but returns onl
     await fs.writeFile(path.join(workspacePath, relativePath), bytes);
     assert.deepEqual(await provider.execute("view_image", { path: relativePath }, ctx), { type: "image_ref", path: relativePath });
   }
-  const output = buildToolSuccessTextForTest({ toolName: "view_image", args: { path: "repo/screenshots/page.png" }, result: { type: "image_ref", path: "repo/screenshots/page.png" } });
+  const output = buildToolSuccessTextForTest({ toolName: "view_image", args: { path: "repo/screenshots/page.png" }, result: { type: "image_ref", path: "repo/screenshots/page.png" }, completedAt: Date.parse("2026-05-20T08:30:12.345Z") });
   assert.equal(output, viewImagePathPreview("repo/screenshots/page.png"));
-  assert.throws(() => buildToolSuccessTextForTest({ toolName: "view_image", args: {}, result: { type: "image_ref", path: "a.png", data: png } }), /invalid view_image result/);
+  assert.throws(() => buildToolSuccessTextForTest({ toolName: "view_image", args: {}, result: { type: "image_ref", path: "a.png", data: png }, completedAt: Date.parse("2026-05-20T08:30:12.345Z") }), /invalid view_image result/);
   assert.equal(provider.canHandle("view_image"), true);
   assert.equal(provider.isToolEnabled("view_image", { profile: { agent: { tools: ["view_image"] } } } as never), true);
   assert.equal(provider.isToolEnabled("view_image", { profile: { agent: { tools: [] } } } as never), false);
@@ -67,6 +67,17 @@ test("view_image rejects traversal, forged types, symlinks, empty and oversized 
   await assert.rejects(() => provider.execute("view_image", { path: "repo/screenshots/page.png" }, { ...ctx, run: { ...ctx.run, workspacePath: path.join(base, "other-workspace") } }));
 });
 
+test("a new view_image call still fails after its source directory was deleted", async (t) => {
+  const { workspacePath, provider, ctx } = await fixture(t);
+  const imagePath = "repo/screenshots/page.png";
+  await fs.writeFile(path.join(workspacePath, imagePath), png);
+  await provider.execute("view_image", { path: imagePath }, ctx);
+  await fs.rm(path.join(workspacePath, "repo/screenshots"), { recursive: true });
+  await assert.rejects(provider.execute("view_image", { path: imagePath }, ctx), {
+    message: "view_image cannot read a valid Workspace image at this path",
+  });
+});
+
 test("view_image inode competition never returns bytes or reads a sibling file", async (t) => {
   const { base, workspacePath, provider, ctx } = await fixture(t);
   const image = path.join(workspacePath, "repo", "screenshots", "page.png");
@@ -81,5 +92,24 @@ test("view_image inode competition never returns bytes or reads a sibling file",
     if (outcome) assert.deepEqual(outcome, { type: "image_ref", path: "repo/screenshots/page.png" });
     await fs.unlink(image);
     await fs.unlink(`${image}.old`);
+  }
+});
+
+
+test("a new view_image permission failure remains a tool error, never an image placeholder", async (t) => {
+  const { workspacePath, provider, ctx } = await fixture(t);
+  const imagePath = "repo/screenshots/page.png";
+  await fs.writeFile(path.join(workspacePath, imagePath), png);
+  const originalOpen = fs.open.bind(fs);
+  for (const code of ["EACCES", "EPERM"]) {
+    const mocked = t.mock.method(fs, "open", async (...args: Parameters<typeof fs.open>) => {
+      if (String(args[0]).endsWith("/page.png")) throw Object.assign(new Error("private permission details"), { code });
+      return originalOpen(...args);
+    });
+    try {
+      await assert.rejects(provider.execute("view_image", { path: imagePath }, ctx), {
+        message: "view_image cannot read a valid Workspace image at this path",
+      });
+    } finally { mocked.mock.restore(); }
   }
 });

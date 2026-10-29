@@ -5,6 +5,7 @@ import type { AnalyticsControlSignal, AnalyticsGenerationControlSignal, Analytic
 import { AnalyticsSignalResultSchema, AnalyticsSignalSchema } from "@agent-workbench/shared";
 import { openSecureAnalyticsRoot } from "@agent-workbench/shared/node/analytics-root";
 import { Value } from "@sinclair/typebox/value";
+import { parseAnalyticsProducerGeneration } from "../config/analytics-generation.js";
 
 const canonicalJson = (value: unknown): string => {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
@@ -13,7 +14,7 @@ const canonicalJson = (value: unknown): string => {
   return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(",")}}`;
 };
 
-type ProducerOptions = { apiOrigin: string; internalToken: string; dataDir: string; namespace: "agent_worker" | "api_local_fallback"; producerId: string; checkpointMs?: number };
+type ProducerOptions = { apiOrigin: string; internalToken: string; dataDir: string; namespace: "agent_worker" | "api_local_fallback"; producerId: string; checkpointMs?: number; generation?: string };
 
 /**
  * Best-effort, bounded producer for execution/model slots.  It intentionally
@@ -23,7 +24,7 @@ type ProducerOptions = { apiOrigin: string; internalToken: string; dataDir: stri
 export class AnalyticsSignalProducer {
   private sequence = 0;
   private readonly controlSequences: Record<"execution" | "model", number> = { execution: 0, model: 0 };
-  private readonly generation = randomUUID();
+  private readonly generation: string;
   private inFlight = 0;
   private droppedSinceSequence: number | null = null;
   private lossEpoch = 0;
@@ -36,6 +37,7 @@ export class AnalyticsSignalProducer {
   private started = false;
 
   constructor(private readonly options: ProducerOptions) {
+    this.generation = parseAnalyticsProducerGeneration(options.generation) ?? randomUUID();
     this.outboxDir = path.join(options.dataDir, "analytics", "model-outbox", options.namespace, options.producerId, this.generation);
   }
 

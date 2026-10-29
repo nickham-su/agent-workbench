@@ -62,7 +62,7 @@ test("tool output allows standalone text/error/image or a nonempty flat success 
   }
   const prompt = {
     headMessageId: null, sessionRevision: 0, system: "", tools: [], pendingTools: [],
-    lastResponseTotalTokens: null, uiLocale: null, externalSkills: [],
+    lastResponseTotalTokens: null, uiLocale: null, workspaceRepoNames: [], externalSkills: [],
     messages: [{ role: "tool", content: [{ type: "tool-result", toolCallId: "call", toolName: "view_image", output: [text, image] }] }]
   };
   assert.equal(Value.Check(AgentApiPromptContextResponseSchema, prompt), true);

@@ -12,7 +12,9 @@ test("normalizeAgentTools 保留可配置工具、去重并过滤隐藏默认工
       "read",
       "view_image",
       "todolist",
-      "skill"
+      "skill",
+      "archive_read",
+      "archive_search"
     ]),
     ["bash", "todolist", "view_image"]
   );
@@ -27,19 +29,21 @@ test("DEFAULT_AGENT_TOOLS 默认不包含 todolist 和 view_image", () => {
   assert.equal(DEFAULT_AGENT_TOOLS.includes("view_image"), false);
 });
 
+test("归档工具始终内置，不作为默认勾选或历史可配置工具保留", () => {
+  assert.equal(DEFAULT_AGENT_TOOLS.includes("archive_read"), false);
+  assert.equal(DEFAULT_AGENT_TOOLS.includes("archive_search"), false);
+  assert.deepEqual(normalizeAgentTools(["archive_read", "archive_search"]), []);
+});
+
 test("toAgentToolOptions 包含可配置工具并复用标签 key", () => {
   const options = toAgentToolOptions((key) => key);
-  assert.deepEqual(options.map((item) => item.value), ["bash", "write", "apply_patch", "subtask", "scratchpad", "todolist", "view_image", "archive_read", "archive_search"]);
+  assert.deepEqual(options.map((item) => item.value), ["bash", "write", "apply_patch", "subtask", "git", "scratchpad", "todolist", "view_image"]);
   const scratchpad = options.find((item) => item.value === "scratchpad");
   const todolist = options.find((item) => item.value === "todolist");
   const viewImage = options.find((item) => item.value === "view_image");
-  const archiveRead = options.find((item) => item.value === "archive_read");
-  const archiveSearch = options.find((item) => item.value === "archive_search");
   assert.equal(scratchpad?.label, agentToolLabelKey("scratchpad"));
   assert.equal(todolist?.label, agentToolLabelKey("todolist"));
   assert.equal(viewImage?.label, agentToolLabelKey("view_image"));
-  assert.equal(archiveRead?.label, agentToolLabelKey("archive_read"));
-  assert.equal(archiveSearch?.label, agentToolLabelKey("archive_search"));
 });
 
 test("Agent 配置工具列表在中英文下显示 View Image，工具值仍为 view_image", () => {
@@ -51,5 +55,18 @@ test("Agent 配置工具列表在中英文下显示 View Image，工具值仍为
       label: "View Image",
       value: "view_image"
     });
+  }
+});
+
+test("Git is explicitly configurable but never silently added to new or existing profiles", () => {
+  assert.equal(DEFAULT_AGENT_TOOLS.includes("git"), false);
+  assert.deepEqual(DEFAULT_AGENT_TOOLS, ["bash", "write", "apply_patch", "subtask"]);
+  assert.deepEqual(normalizeAgentTools(DEFAULT_AGENT_TOOLS), DEFAULT_AGENT_TOOLS);
+  assert.deepEqual(normalizeAgentTools(["bash"]), ["bash"]);
+  assert.deepEqual(normalizeAgentTools(["bash", "git", "git"]), ["bash", "git"]);
+  assert.deepEqual(normalizeAgentTools([]), []);
+  for (const locale of [zhCN, enUS]) {
+    const options = toAgentToolOptions((key) => key === agentToolLabelKey("git") ? locale.settings.agentProfiles.tools.git : key);
+    assert.deepEqual(options.find((item) => item.value === "git"), { label: "Git", value: "git" });
   }
 });

@@ -261,6 +261,7 @@ export type UpdateAgentGlobalPromptSettingsRequest = Static<typeof UpdateAgentGl
 
 export const AgentToolNameSchema = Type.Union([
   Type.Literal("bash"),
+  Type.Literal("git"),
   Type.Literal("read"),
   Type.Literal("write"),
   Type.Literal("apply_patch"),

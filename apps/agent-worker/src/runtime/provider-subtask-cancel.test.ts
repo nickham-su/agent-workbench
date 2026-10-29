@@ -18,6 +18,7 @@ function baseContext(): PromptContext {
     messages: [],
     lastResponseTotalTokens: null,
     uiLocale: null,
+    workspaceRepoNames: [],
     externalSkills: [],
   };
 }

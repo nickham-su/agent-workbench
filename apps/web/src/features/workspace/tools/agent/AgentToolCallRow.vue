@@ -4,7 +4,7 @@
     type="button"
     class="m-0 flex w-full min-w-0 appearance-none items-center gap-2 border-0 bg-transparent px-0 py-0.5 text-left font-mono text-[1em] text-[color:var(--text-secondary)] outline-none"
     :disabled="loading"
-    :title="titleText"
+    :title="showTitle ? titleText : undefined"
     @click="emit('activate')"
   >
     <span class="shrink-0 font-semibold text-[color:var(--text-color)]">{{ toolName }}</span>
@@ -26,7 +26,7 @@
   <div
     v-else
     class="flex w-full min-w-0 items-center gap-2 px-0 py-0.5 font-mono text-[1em] text-[color:var(--text-secondary)]"
-    :title="titleText"
+    :title="showTitle ? titleText : undefined"
   >
     <span class="shrink-0 font-semibold text-[color:var(--text-color)]">{{ toolName }}</span>
     <span class="min-w-0 flex-1 truncate">{{ inputText }}</span>
@@ -70,8 +70,9 @@ const props = withDefaults(
     now: number;
     interactive?: boolean;
     loading?: boolean;
+    showTitle?: boolean;
   }>(),
-  { interactive: false, loading: false },
+  { interactive: false, loading: false, showTitle: true },
 );
 const emit = defineEmits<{ activate: [] }>();
 

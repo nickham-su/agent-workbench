@@ -1,5 +1,7 @@
 import type * as monaco from "monaco-editor/esm/vs/editor/editor.api.js";
 import type { FileVersion } from "@agent-workbench/shared";
+import type { EditorImageFailure } from "./editorImages";
+import type { MermaidViewportState } from "./mermaidViewport";
 
 export type EditorOpenAtHighlight =
   | { kind: "none" }
@@ -40,6 +42,12 @@ export type FileEditorTab = {
   reason?: "too_large" | "binary" | "decode_failed" | "unsafe_path" | "missing";
   version?: FileVersion;
   model?: monaco.editor.ITextModel;
+  /** Monotonic invalidation signal for model edits, replacement and disposal; absent means zero. */
+  contentRevision?: number;
+  /** Display state only; independent of the read-only open mode. */
+  presentationMode?: "source" | "preview";
+  previewScrollTop?: number;
+  mermaidViewport?: MermaidViewportState;
   savedContent: string;
   dirty: boolean;
   saving: boolean;
@@ -48,8 +56,20 @@ export type FileEditorTab = {
   error?: string;
   openAt?: EditorOpenAt;
   readOnly: boolean;
+  /** Caller open mode, preserved separately from image/media's forced read-only display. */
+  requestedReadOnly?: boolean;
   disposable?: monaco.IDisposable;
   viewState?: monaco.editor.ICodeEditorViewState | null;
+  image?: {
+    status: "loading" | "ready" | "error";
+    url?: string;
+    reason?: EditorImageFailure;
+  };
+  /** Media bytes belong to the native player, never to a Blob or Monaco model. */
+  media?: { kind: "audio" | "video" };
+  /** Invalidates reads when the Tab is closed, renamed or refreshed. */
+  loadVersion?: number;
+  needsReload?: boolean;
 };
 
 export type PreviewEditorTab = {

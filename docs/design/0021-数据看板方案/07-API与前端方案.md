@@ -30,6 +30,8 @@ type DashboardQueryRequest = {
 
 请求不接收本地时间字符串。客户端先按 IANA timezone 解析为 UTC ms；本地不存在/歧义时间无法解析时不发请求。服务端负责 IANA 分桶和 DST 边界。
 
+`preset_24h` 保留当前小时：先取 `[reportingLagAnchor - 24h, reportingLagAnchor)`，再将起点向上对齐到请求时区实际存在的整点（已是整点则保留），终点不变。趋势按本地整点切分，尾桶允许不完整；例如当地今天 10:37 查询时，从昨天 11:00 开始，到今天 10:37 结束，通常为 24 桶，并非严格滚动 24 小时。DST 跳时/回拨按真实时间顺序覆盖，特殊时区不强制固定桶数。概览、表格、趋势共享该实际范围，比较取紧邻前一个等长实际窗口；custom 和其他预设范围不受影响。
+
 | 无效条件 | HTTP 400 受控错误码 |
 | --- | --- |
 | 非法 rangeKind、preset 携带 from/to、custom 缺少 from/to、非安全整数、`from >= to` | `ANALYTICS_RANGE_INVALID` |

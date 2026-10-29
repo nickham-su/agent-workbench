@@ -23,13 +23,10 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import type { GitTarget, TerminalRecord } from "@agent-workbench/shared";
+import type { TerminalRecord } from "@agent-workbench/shared";
 import { parseWsMessage, sendWs, terminalWsUrl, type TerminalWsState } from "./ws";
-import { getTerminalLinkStatStore, type TerminalLinkStatStore } from "./terminalLinkStatStore";
 import { terminalFontSize } from "@/shared/settings/uiFontSizes";
 import { emitUnauthorized } from "@/features/auth/unauthorized";
-import { useWorkspaceHost } from "@/features/workspace/host";
-import { useWorkspaceContext } from "@/features/workspace/context";
 
 const props = defineProps<{ terminal: TerminalRecord; active?: boolean }>();
 const emit = defineEmits<{
@@ -37,14 +34,6 @@ const emit = defineEmits<{
   invalidated: [terminalId: string];
 }>();
 const { t } = useI18n();
-const host = useWorkspaceHost();
-const workspaceCtx = useWorkspaceContext();
-
-type BufferLine = {
-  length: number;
-  translateToString: (trimRight?: boolean, startColumn?: number, endColumn?: number) => string;
-  getCell: (x: number) => { getChars: () => string; getWidth: () => number } | undefined;
-};
 
 const wsState = ref<TerminalWsState>("idle");
 const connecting = computed(() => wsState.value === "connecting");
@@ -64,7 +53,9 @@ let fitBurstTimers: number[] = [];
 let didResizeNudge = false;
 let removeElListeners: (() => void) | null = null;
 let stopWatchFontSize: (() => void) | null = null;
-let linkProviderDisposable: { dispose: () => void } | null = null;
+let displayedSessionName = props.terminal.sessionName;
+let sessionChangeRevision = 0;
+let disposed = false;
 
 function focusIfActive() {
   if (!term) return;
@@ -118,24 +109,26 @@ function writeHint(lines: string[]) {
 function cleanupWs() {
   if (!ws) return;
   closingByUs = true;
-  ws.close();
+  const socket = ws;
   ws = null;
+  socket.onopen = socket.onclose = socket.onerror = socket.onmessage = null;
+  socket.close();
   wsState.value = "idle";
 }
 
 function closeWsKeepState() {
   if (!ws) return;
   closingByUs = true;
-  ws.close();
+  const socket = ws;
   ws = null;
+  socket.onopen = socket.onclose = socket.onerror = socket.onmessage = null;
+  socket.close();
 }
 
 function cleanupTerm() {
   if (term) {
     term.dispose();
   }
-  linkProviderDisposable?.dispose();
-  linkProviderDisposable = null;
   term = null;
   fitAddon = null;
   lastSize = null;
@@ -244,10 +237,10 @@ function connect(force: boolean) {
     return;
   }
 
+  const socket = ws;
   let opened = false;
-  ws.onopen = () => {
-    const socket = ws;
-    if (!socket) return;
+  socket.onopen = () => {
+    if (ws !== socket) return;
     opened = true;
     wsState.value = "connected";
     lastSize = null;
@@ -259,10 +252,12 @@ function connect(force: boolean) {
     window.setTimeout(() => nudgeResizeToForceRedraw(), 60);
     focusIfActiveSoon();
   };
-  ws.onerror = () => {
+  socket.onerror = () => {
+    if (ws !== socket) return;
     if (!opened) scheduleReconnect();
   };
-  ws.onclose = (evt) => {
+  socket.onclose = (evt) => {
+    if (ws !== socket) return;
     clearFitBurst();
     if (evt.code === 4401) {
       wsState.value = "errored";
@@ -308,7 +303,8 @@ function connect(force: boolean) {
       scheduleReconnect();
     }
   };
-  ws.onmessage = (evt) => {
+  socket.onmessage = (evt) => {
+    if (ws !== socket) return;
     const msg = parseWsMessage(evt);
     if (!msg) return;
 
@@ -332,266 +328,6 @@ function connect(force: boolean) {
       return;
     }
   };
-}
-
-function buildColumnInfoMap(line: BufferLine, lineText: string) {
-  const map: Array<{ col: number; width: number }> = [];
-  if (!lineText) return map;
-  const maxCols = Math.min(line.length, term?.cols ?? line.length);
-  let charIndex = 0;
-  for (let col = 0; col < maxCols && charIndex < lineText.length; col += 1) {
-    const cell = line.getCell(col);
-    if (!cell) continue;
-    const chars = cell.getChars();
-    if (!chars) continue;
-    const width = Math.max(1, cell.getWidth());
-    for (let i = 0; i < chars.length && charIndex < lineText.length; i += 1) {
-      map[charIndex] = { col: col + 1, width };
-      charIndex += 1;
-    }
-  }
-  return map;
-}
-
-function canonicalizeTerminalLinkPath(rawPath: string) {
-  let p = String(rawPath || "").trim();
-  if (!p) return "";
-
-  // 去掉前导 ./，避免输出为 ./xxx 时无法正确归一化
-  while (p.startsWith("./")) p = p.slice(2);
-
-  // 兼容部分工具输出反斜杠分隔符
-  p = p.replace(/\\/g, "/");
-  // 合并重复的 /
-  p = p.replace(/\/{2,}/g, "/");
-  // 去掉尾部 /
-  while (p.endsWith("/")) p = p.slice(0, -1);
-
-  return p;
-}
-
-function rangesOverlap(a: { start: { x: number; y: number }; end: { x: number; y: number } }, b: { start: { x: number; y: number }; end: { x: number; y: number } }) {
-  if (a.start.y !== b.start.y) return false;
-  const aStart = Math.min(a.start.x, a.end.x);
-  const aEnd = Math.max(a.start.x, a.end.x);
-  const bStart = Math.min(b.start.x, b.end.x);
-  const bEnd = Math.max(b.start.x, b.end.x);
-  return aStart <= bEnd && bStart <= aEnd;
-}
-
-function tryParseHardWrapTwoLineTarget(params: { firstLineText: string; secondLineText: string }) {
-  // 第一行: 取行尾连续 token，且必须包含 /，才认为“看起来像路径”
-  const firstTrimmed = String(params.firstLineText || "").replace(/[ \t]+$/g, "");
-  const tailMatch = firstTrimmed.match(/([A-Za-z0-9_./-]+)$/);
-  const tail = tailMatch?.[1] ?? "";
-  if (!tail || !tail.includes("/")) return null;
-  const tailStartIndex = firstTrimmed.length - tail.length;
-  const tailEndIndex = tailStartIndex + tail.length - 1;
-
-  // 第二行: 允许行首空格/Tab 缩进，但必须从一个路径 token 开始，并且同一行内包含 :line；
-  // 不支持断在 : 的情况(即第二行以 : 或纯数字开头)。
-  const secondText = String(params.secondLineText || "");
-  const indentLen = secondText.match(/^[ \t]*/)?.[0]?.length ?? 0;
-  const rest = secondText.slice(indentLen);
-  if (!rest) return null;
-  if (rest.startsWith(":")) return null;
-  const headMatch = rest.match(/^([A-Za-z0-9_./-]+):([1-9][0-9]*)/);
-  if (!headMatch) return null;
-  const headPathPart = headMatch[1] ?? "";
-  const lineStr = headMatch[2] ?? "";
-  if (!headPathPart || !lineStr) return null;
-
-  const combinedRawPath = `${tail}${headPathPart}`;
-  const line = Number(lineStr || 0);
-  if (!Number.isFinite(line) || line <= 0) return null;
-  if (combinedRawPath.startsWith("/")) return null;
-  const parts = combinedRawPath.split("/");
-  if (parts.some((p) => p === "..")) return null;
-
-  const secondStartIndex = indentLen;
-  const secondEndIndex = indentLen + (headMatch[0]?.length ?? 0) - 1;
-  if (secondEndIndex < secondStartIndex) return null;
-
-  return {
-    combinedRawPath,
-    line,
-    firstSeg: { startIndex: tailStartIndex, endIndex: tailEndIndex },
-    secondSeg: { startIndex: secondStartIndex, endIndex: secondEndIndex }
-  };
-}
-
-function buildFallbackPath(path: string, currentTarget: GitTarget | null) {
-  if (!currentTarget) return "";
-  const dirName = String(currentTarget.dirName || "").trim();
-  if (!dirName) return "";
-  if (path === dirName || path.startsWith(dirName + "/")) return "";
-  return `${dirName}/${path}`;
-}
-
-function hasRepoPrefix(path: string, repoDirNames: Set<string>) {
-  const head = String(path || "").split("/")[0] ?? "";
-  if (!head) return false;
-  return repoDirNames.has(head);
-}
-
-async function ensureStatWithFallback(params: {
-  path: string;
-  currentTarget: GitTarget | null;
-  repoDirNames: Set<string>;
-  statStore: TerminalLinkStatStore;
-}) {
-  const res = await params.statStore.ensureStat(params.path);
-  if (res?.ok) return res;
-  if (hasRepoPrefix(params.path, params.repoDirNames)) return res;
-  const fallbackPath = buildFallbackPath(params.path, params.currentTarget);
-  if (!fallbackPath) return res;
-  const fallbackRes = await params.statStore.ensureStat(fallbackPath);
-  if (fallbackRes?.ok) return fallbackRes;
-  return fallbackRes ?? res;
-}
-
-async function openPathAt(params: { path: string; line: number; statStore: TerminalLinkStatStore }) {
-  const repoDirNames = new Set(
-    workspaceCtx.repos.value
-      .map((r) => r.dirName)
-      .filter((dirName) => dirName && typeof dirName === "string")
-  );
-  const res = await ensureStatWithFallback({
-    path: params.path,
-    currentTarget: workspaceCtx.currentTarget.value,
-    repoDirNames,
-    statStore: params.statStore
-  });
-  if (!res || !res.ok) return;
-  const finalPath = res.normalizedPath || res.path;
-  host.callFrom("terminal", "editor", {
-    type: "editor.openFile",
-    payload: { path: finalPath, mode: "preview", line: params.line, highlight: { kind: "line" } }
-  });
-}
-
-function createHardWrapTwoLineLinks(params: {
-  bufferLineNumber: number;
-  currentLineText: string;
-  currentLine: BufferLine;
-}) {
-  const links: Array<{
-    text: string;
-    range: { start: { x: number; y: number }; end: { x: number; y: number } };
-    activate: (event: MouseEvent, text: string) => void;
-  }> = [];
-  if (!term) return links;
-
-  const workspaceId = props.terminal.workspaceId;
-  if (!workspaceId) return links;
-  const statStore = getTerminalLinkStatStore(workspaceId);
-
-  const buffer = term.buffer.active;
-  const currentIndex0 = params.bufferLineNumber - 1;
-  const prev = currentIndex0 > 0 ? (buffer.getLine(currentIndex0 - 1) as BufferLine | undefined) : undefined;
-  const next = buffer.getLine(currentIndex0 + 1) as BufferLine | undefined;
-
-  const emitLink = (parsed: ReturnType<typeof tryParseHardWrapTwoLineTarget>, which: "first" | "second", lineText: string, line: BufferLine) => {
-    if (!parsed) return;
-    const seg = which === "first" ? parsed.firstSeg : parsed.secondSeg;
-    const linkPath = canonicalizeTerminalLinkPath(parsed.combinedRawPath);
-    if (!linkPath) return;
-
-    const columnInfo = buildColumnInfoMap(line, lineText);
-    const startInfo = columnInfo[seg.startIndex];
-    const endInfo = columnInfo[seg.endIndex];
-    const startCol = startInfo?.col ?? seg.startIndex + 1;
-    const endBase = endInfo?.col ?? seg.endIndex + 1;
-    const endCol = endBase + Math.max(1, endInfo?.width ?? 1) - 1;
-    const linkLine = parsed.line;
-
-    links.push({
-      text: `${parsed.combinedRawPath}:${linkLine}`,
-      range: { start: { x: startCol, y: params.bufferLineNumber }, end: { x: endCol, y: params.bufferLineNumber } },
-      activate: (event) => {
-        // 仅响应鼠标左键点击；按住 Alt/Option 时保留为“强制选择文本”手势
-        if (event.button !== 0) return;
-        if (event.altKey) return;
-        void (async () => {
-          await openPathAt({ path: linkPath, line: linkLine, statStore });
-        })();
-      }
-    });
-  };
-
-  // 情况 A: 当前行作为“第一行”，尝试与下一行拼接；返回当前行的尾部片段 link
-  if (next) {
-    const parsed = tryParseHardWrapTwoLineTarget({
-      firstLineText: params.currentLineText,
-      secondLineText: next.translateToString(true)
-    });
-    emitLink(parsed, "first", params.currentLineText, params.currentLine);
-  }
-
-  // 情况 B: 当前行作为“第二行”，尝试与上一行拼接；返回当前行的头部片段 link
-  if (prev) {
-    const prevText = prev.translateToString(true);
-    const parsed = tryParseHardWrapTwoLineTarget({ firstLineText: prevText, secondLineText: params.currentLineText });
-    emitLink(parsed, "second", params.currentLineText, params.currentLine);
-  }
-
-  return links;
-}
-
-function createPathLineLinks(lineText: string, bufferLineNumber: number, line: BufferLine | null) {
-  const links: Array<{
-    text: string;
-    range: { start: { x: number; y: number }; end: { x: number; y: number } };
-    activate: (event: MouseEvent, text: string) => void;
-  }> = [];
-  if (!lineText || !line) return links;
-
-  const workspaceId = props.terminal.workspaceId;
-  if (!workspaceId) return links;
-  const statStore = getTerminalLinkStatStore(workspaceId);
-  const columnInfo = buildColumnInfoMap(line, lineText);
-  const re = /(^|[^A-Za-z0-9_./-])([A-Za-z0-9_./-]+):([1-9][0-9]*)/g;
-  let match: RegExpExecArray | null = null;
-  let count = 0;
-  while ((match = re.exec(lineText))) {
-    if (count >= 20) break;
-    const prefix = match[1] ?? "";
-    const path = match[2] ?? "";
-    const line = Number(match[3] ?? 0);
-    if (!path || !Number.isFinite(line) || line <= 0) continue;
-    if (path.startsWith("/")) continue;
-    const parts = path.split("/");
-    if (parts.some((p) => p === "..")) continue;
-
-    const linkPath = canonicalizeTerminalLinkPath(path);
-    if (!linkPath) continue;
-
-    const startIndex = match.index + prefix.length;
-    const text = `${path}:${line}`;
-    const endIndex = startIndex + text.length - 1;
-    const startInfo = columnInfo[startIndex];
-    const endInfo = columnInfo[endIndex];
-    const startCol = startInfo?.col ?? startIndex + 1;
-    const endBase = endInfo?.col ?? endIndex + 1;
-    const endCol = endBase + Math.max(1, endInfo?.width ?? 1) - 1;
-    const linkLine = line;
-
-    links.push({
-      text,
-      range: { start: { x: startCol, y: bufferLineNumber }, end: { x: endCol, y: bufferLineNumber } },
-      activate: (event) => {
-        // 仅响应鼠标左键点击；按住 Alt/Option 时保留为“强制选择文本”手势
-        if (event.button !== 0) return;
-        if (event.altKey) return;
-        void (async () => {
-          await openPathAt({ path: linkPath, line: linkLine, statStore });
-        })();
-      }
-    });
-    count += 1;
-  }
-
-  return links;
 }
 
 function confirmTakeover() {
@@ -627,28 +363,6 @@ onMounted(() => {
   term.loadAddon(fitAddon);
   term.open(el);
   focusIfActiveSoon();
-
-  linkProviderDisposable = term.registerLinkProvider({
-    provideLinks: (bufferLineNumber, callback) => {
-      const line = term?.buffer.active.getLine(bufferLineNumber - 1);
-      if (!line) {
-        callback(undefined);
-        return;
-      }
-      const lineText = line.translateToString(true);
-      const links = createPathLineLinks(lineText, bufferLineNumber, line as BufferLine);
-      const hardWrapLinks = createHardWrapTwoLineLinks({
-        bufferLineNumber,
-        currentLineText: lineText,
-        currentLine: line as BufferLine
-      });
-
-      // 两行硬换行启发式的第二行，往往会被单行解析误识别成“截断后的相对路径”，这里让硬换行链接优先。
-      const filtered = hardWrapLinks.length > 0 ? links.filter((l) => !hardWrapLinks.some((h) => rangesOverlap(l.range, h.range))) : links;
-      const combined = filtered.concat(hardWrapLinks);
-      callback(combined.length > 0 ? combined : undefined);
-    }
-  });
 
   // 初始渲染时容器尺寸/字体度量可能还不稳定，先提前做一次 fit（不依赖 ws）
   void nextTick().then(() => {
@@ -733,6 +447,42 @@ onMounted(() => {
   );
 });
 
+// A successful configuration rerun starts a fresh screen in the same tab.
+// Failed/creating generations must retain the last displayed run's output.
+watch(
+  () => [props.terminal.sessionName, props.terminal.status, props.terminal.configId] as const,
+  ([sessionName, status, configId]) => {
+    const terminal = term;
+    const revision = ++sessionChangeRevision;
+    if (!terminal || disposed || sessionName === displayedSessionName) return;
+
+    clearReconnectTimer();
+    clearFitBurst();
+    cleanupWs(); // Invalidate old socket callbacks before draining queued output.
+    const reconnect = () => {
+      displayedSessionName = sessionName;
+      reconnectAttempts = 0;
+      didResizeNudge = false;
+      connect(false);
+    };
+    if (!configId) { reconnect(); return; } // Ordinary terminals retain their history.
+    if (status !== "active") return;
+
+    const { id, workspaceId } = props.terminal;
+    // reset() is synchronous: it does not discard queued writes or cancel an
+    // unfinished escape sequence. CAN ends that sequence without erasing text;
+    // its public write callback is also a barrier after all old queued output.
+    terminal.write("\x18", () => {
+      if (disposed || term !== terminal || revision !== sessionChangeRevision
+        || props.terminal.id !== id || props.terminal.workspaceId !== workspaceId
+        || props.terminal.sessionName !== sessionName || props.terminal.status !== "active"
+        || props.terminal.configId !== configId) return;
+      terminal.reset();
+      reconnect();
+    });
+  }
+);
+
 watch(
   () => isActive.value,
   (active) => {
@@ -749,6 +499,8 @@ watch(
 );
 
 onBeforeUnmount(async () => {
+  disposed = true;
+  sessionChangeRevision++;
   window.removeEventListener("resize", tryFitAndResize);
   resizeObserver?.disconnect();
   resizeObserver = null;

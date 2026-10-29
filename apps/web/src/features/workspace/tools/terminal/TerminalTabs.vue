@@ -1,7 +1,7 @@
 <template>
   <div class="h-full flex flex-col min-h-0">
     <div v-if="terminals.length === 0"
-         class="p-1"
+         class="terminal-empty-toolbar"
     >
       <a-tooltip :title="t('terminal.empty.create')">
         <a-button
@@ -15,6 +15,10 @@
           <CodeOutlined class="text-xl"/>
         </a-button>
       </a-tooltip>
+      <span class="flex-1" />
+      <a-tooltip v-if="showConfigButton" :title="t('terminal.config.title')">
+        <a-button type="text" size="small" class="terminal-config-entry" :aria-label="t('terminal.config.title')" @click="emit('openConfig')"><CaretRightOutlined /></a-button>
+      </a-tooltip>
     </div>
 
     <template v-else>
@@ -26,6 +30,9 @@
           class="terminal-tabs"
       >
         <template #rightExtra>
+          <a-tooltip v-if="showConfigButton" :title="t('terminal.config.title')">
+            <a-button type="text" size="small" class="terminal-config-entry" :aria-label="t('terminal.config.title')" @click="emit('openConfig')"><CaretRightOutlined /></a-button>
+          </a-tooltip>
           <a-tooltip :title="collapseLabel" placement="topRight">
             <a-button
                 v-if="terminals.length > 0"
@@ -46,13 +53,13 @@
           <template #tab>
             <span class="terminal-tab-label">
               <span>{{ t("terminal.tab.name", { index: terminalDisplayIndex(term.id) }) }}</span>
-              <a-tooltip :title="t('terminal.tab.close')">
-                <CloseOutlined
-                    class="cursor-pointer text-[color:var(--text-tertiary)] hover:text-[color:var(--text-secondary)] !mr-0 text-xs"
-                    @mousedown.stop.prevent
-                    @click.stop.prevent="confirmDelete(term.id)"
-                />
-              </a-tooltip>
+              <TerminalTabCloseButton
+                  :active-source="closeConfirmation?.source"
+                  :deleting="!!closeConfirmation?.deleting"
+                  @openChange="(source, open) => setCloseConfirmationOpen(term.id, source, open)"
+                  @confirm="confirmDelete(term.id, $event)"
+                  @dispose="disposeCloseConfirmation"
+              />
             </span>
           </template>
           <div class="h-full flex flex-col min-h-0">
@@ -77,13 +84,14 @@
 </template>
 
 <script setup lang="ts">
-import {Modal, message} from "ant-design-vue";
-import {CloseOutlined, PlusOutlined, CodeOutlined, MinusOutlined} from "@ant-design/icons-vue";
-import {computed, nextTick, ref, watch} from "vue";
+import {message} from "ant-design-vue";
+import {PlusOutlined, CodeOutlined, MinusOutlined, CaretRightOutlined} from "@ant-design/icons-vue";
+import {computed, nextTick, onBeforeUnmount, ref, watch} from "vue";
 import { useI18n } from "vue-i18n";
 import type {TerminalRecord} from "@agent-workbench/shared";
 import { createTerminal, deleteTerminal } from "@/shared/api";
 import TerminalView from "./TerminalView.vue";
+import TerminalTabCloseButton from "./TerminalTabCloseButton.vue";
 
 const ADD_TAB_KEY = "__terminal_add__";
 const TERMINAL_ACTIVE_TAB_STORAGE_KEY_PREFIX = "agent-workbench.workspace.terminal.activeTab";
@@ -91,12 +99,14 @@ const TERMINAL_ACTIVE_TAB_STORAGE_KEY_PREFIX = "agent-workbench.workspace.termin
 const props = defineProps<{
   workspaceId: string;
   terminals: TerminalRecord[];
+  showConfigButton?: boolean;
 }>();
 
 const emit = defineEmits<{
   created: [];
   deleted: [];
   minimize: [];
+  openConfig: [];
   terminalExited: [terminalId: string];
   terminalInvalidated: [terminalId: string];
 }>();
@@ -113,6 +123,22 @@ const creating = ref(false);
 const pendingActivateKey = ref<string | null>(null);
 const suppressActiveKeyPersist = ref(false);
 const tabNoMap = ref<Record<string, number>>({});
+const closeConfirmation = ref<{ workspaceId: string; terminalId: string; source: symbol | null; deleting: boolean } | null>(null);
+
+watch(
+  [() => props.workspaceId, () => props.terminals.map((term) => term.id)],
+  () => {
+    const target = closeConfirmation.value;
+    if (target && (target.workspaceId !== props.workspaceId || !props.terminals.some((term) => term.id === target.terminalId))) {
+      closeConfirmation.value = null;
+    }
+  },
+  { flush: "sync" }
+);
+
+onBeforeUnmount(() => {
+  closeConfirmation.value = null;
+});
 
 const collapseLabel = computed(() => t("terminal.panel.collapse"));
 
@@ -249,12 +275,23 @@ watch(
   }
 );
 
+function activateTerminal(terminalId: string) {
+  if (!props.terminals.some((term) => term.id === terminalId && term.workspaceId === props.workspaceId)) return false;
+  pendingActivateKey.value = null;
+  activeKey.value = terminalId;
+  return true;
+}
+function activateCreatedTerminal(terminalId: string) {
+  if (!activateTerminal(terminalId)) pendingActivateKey.value = terminalId;
+  emit("created");
+}
+defineExpose({ activateCreatedTerminal, activateTerminal });
+
 async function createOne() {
   creating.value = true;
   try {
     const created = await createTerminal(props.workspaceId, {});
-    pendingActivateKey.value = created.id;
-    emit("created");
+    activateCreatedTerminal(created.id);
   } catch (err) {
     message.error(err instanceof Error ? err.message : String(err));
   } finally {
@@ -262,28 +299,41 @@ async function createOne() {
   }
 }
 
-function confirmDelete(terminalId: string) {
-  let deleting = false;
-  Modal.confirm({
-    title: t("terminal.confirmClose.title"),
-    content: t("terminal.confirmClose.content"),
-    okText: t("terminal.confirmClose.ok"),
-    okType: "danger",
-    cancelText: t("terminal.confirmClose.cancel"),
-    onOk: (close) => {
-      if (deleting) return;
-      deleting = true;
-      void deleteTerminal(terminalId)
-        .then(() => {
-          emit("deleted");
-          close();
-        })
-        .catch((err) => {
-          deleting = false;
-          message.error(err instanceof Error ? err.message : String(err));
-        });
+function setCloseConfirmationOpen(terminalId: string, source: symbol, open: boolean) {
+  // 请求中保持提示可见；切换工作区或目标消失仍由 watcher 清理。
+  if (closeConfirmation.value?.deleting) return;
+  if (!open) {
+    if (closeConfirmation.value?.source === source) closeConfirmation.value = null;
+    return;
+  }
+  if (!props.terminals.some((term) => term.id === terminalId && term.workspaceId === props.workspaceId)) return;
+  closeConfirmation.value = { workspaceId: props.workspaceId, terminalId, source, deleting: false };
+}
+
+function disposeCloseConfirmation(source: symbol) {
+  const target = closeConfirmation.value;
+  if (target?.source !== source) return;
+  // 锚点消失只清理浮层；在途删除仍需防重复并在完成后刷新列表。
+  if (target.deleting) target.source = null;
+  else closeConfirmation.value = null;
+}
+
+async function confirmDelete(terminalId: string, source: symbol) {
+  const target = closeConfirmation.value;
+  if (!target || target.terminalId !== terminalId || target.source !== source || target.deleting) return;
+  target.deleting = true;
+  try {
+    await deleteTerminal(terminalId);
+    if (closeConfirmation.value !== target) return;
+    closeConfirmation.value = null;
+    emit("deleted");
+  } catch (err) {
+    if (closeConfirmation.value === target) {
+      message.error(err instanceof Error ? err.message : String(err));
     }
-  });
+  } finally {
+    target.deleting = false;
+  }
 }
 
 function onTerminalExited(payload: { terminalId: string; exitCode: number }) {
@@ -296,6 +346,9 @@ function onTerminalInvalidated(terminalId: string) {
 </script>
 
 <style scoped>
+.terminal-empty-toolbar { display: flex; align-items: center; height: 40px; padding: 0 4px; background: var(--panel-bg-elevated); }
+.terminal-config-entry { width: 28px; height: 28px; padding: 0; }
+
 .terminal-tabs {
   flex: 1;
   min-height: 0;
@@ -319,6 +372,8 @@ function onTerminalInvalidated(terminalId: string) {
 }
 
 .terminal-tabs :deep(.ant-tabs-nav) {
+  height: 40px;
+  min-height: 40px;
   margin-bottom: 0 !important;
   background: var(--panel-bg-elevated);
 }

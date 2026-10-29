@@ -1,5 +1,6 @@
-import { computed, markRaw, reactive, ref, type ComputedRef, type Ref } from "vue";
-import * as monaco from "monaco-editor/esm/vs/editor/editor.api.js";
+import { computed, reactive, ref, type ComputedRef, type Ref } from "vue";
+import { disposeFileModel, replaceFileModel } from "./editorModels";
+import { getEditorFilePresentation } from "./editorPresentation";
 import { inferLanguageFromPath } from "@/shared/monaco/languageUtils";
 import type { DiffEditorTab, EditorOpenFileRequest, EditorTab, PreviewEditorTab, QueuedEditorOpenFileRequest } from "./types";
 
@@ -28,31 +29,39 @@ export type EditorStore = {
 
 const stores = new Map<string, EditorStore>();
 
+/** All image URL replacement/disposal goes through this single release point. */
+export function releaseEditorImage(tab: Extract<EditorTab, { kind: "file" }>) {
+  if (tab.image?.url) URL.revokeObjectURL(tab.image.url);
+  if (tab.image) tab.image.url = undefined;
+}
+
 function disposeTab(tab: EditorTab) {
   if (tab.kind !== "file") return;
-  tab.disposable?.dispose();
-  tab.disposable = undefined;
-  tab.model?.dispose();
-  tab.model = undefined;
+  tab.loadVersion = (tab.loadVersion ?? 0) + 1;
+  releaseEditorImage(tab);
+  disposeFileModel(tab);
 }
 
 function updateFileTabPath(tab: Extract<EditorTab, { kind: "file" }>, nextPath: string) {
+  tab.loadVersion = (tab.loadVersion ?? 0) + 1;
+  // Conflict dialogs belong to the old path/version. Release that state now;
+  // stale callbacks remain invalid and cannot clear a later conflict.
+  tab.conflictOpen = false;
+  const presentation = getEditorFilePresentation(nextPath);
+  const becomesResource = presentation === "image" || presentation === "audio" || presentation === "video";
+  if (tab.image || tab.media || (becomesResource && !tab.dirty && !tab.saving)) {
+    releaseEditorImage(tab);
+    tab.needsReload = true;
+    if (tab.image) tab.image = { status: "loading" };
+  }
+  // Dirty text is retained across a format-changing rename until explicitly reloaded.
   tab.path = nextPath;
   tab.key = `file:${nextPath}`;
   tab.title = nextPath.split("/").filter(Boolean).pop() || nextPath;
   tab.language = inferLanguageFromPath(nextPath);
   if (!tab.model) return;
   const value = tab.model.getValue();
-  tab.disposable?.dispose();
-  tab.disposable = undefined;
-  tab.model.dispose();
-  tab.model = markRaw(monaco.editor.createModel(value, tab.language || "plaintext", monaco.Uri.parse(`inmemory://editor/${encodeURIComponent(nextPath)}`)));
-  tab.disposable = markRaw(
-    tab.model.onDidChangeContent(() => {
-      const current = tab.model?.getValue() ?? "";
-      tab.dirty = current !== tab.savedContent;
-    })
-  );
+  replaceFileModel(tab, value, tab.language || "plaintext");
 }
 
 function updateReadonlyTabPath(tab: PreviewEditorTab | DiffEditorTab, previousPath: string, nextPath: string): [string, string] {
