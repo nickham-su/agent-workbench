@@ -200,7 +200,11 @@ async function handleMessage(message: AnalyticsParentMessage) {
       `startupId=${message.requestId} at=${new Date().toISOString()} stage=initializing elapsedMs=${Math.max(0, Math.round(performance.now() - startedAt))}`;
     console.info(`[Analytics] database initialization started; ${startupFields()}`);
     try {
-      db = await openAnalyticsDb(analyticsDataDir);
+      db = await openAnalyticsDb(analyticsDataDir, Date.now(), {
+        onProgress: (progress) => {
+          console.info(`[Analytics] database startup stage ${progress.status}; ${startupFields()} dbStage=${progress.stage} schemaVersion=${progress.schemaVersion ?? "unknown"} stageElapsedMs=${progress.elapsedMs}`);
+        },
+      });
       initialized = true;
       console.info(`[Analytics] database initialization completed; ${startupFields()}`);
       send({ type: "ready", requestId: message.requestId });

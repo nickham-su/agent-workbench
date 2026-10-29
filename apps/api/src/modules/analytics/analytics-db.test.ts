@@ -7,7 +7,7 @@ import path from "node:path";
 import { test } from "node:test";
 import { analyticsConfigSourcePath, analyticsDbPath, analyticsModelOutboxRoot } from "../../infra/fs/paths.js";
 import { allocateAnalyticsConfigSource, readAnalyticsConfigSource, readAnalyticsConfigSourceForTest } from "./analytics-config-source.js";
-import { ANALYTICS_SCHEMA_VERSION, closeAnalyticsDb, createHistoricalSchemaForTest, openAnalyticsDb, readAnalyticsDomainStates } from "./analytics-db.js";
+import { ANALYTICS_SCHEMA_VERSION, closeAnalyticsDb, createHistoricalSchemaForTest, openAnalyticsDb, readAnalyticsDomainStates, type AnalyticsDbOpenProgress } from "./analytics-db.js";
 import { queryDashboard } from "./analytics-dashboard-query.js";
 import { acceptAnalyticsSignal } from "./signal-store.js";
 
@@ -160,6 +160,75 @@ test("reopening a current Analytics database inspects and fully validates its sc
   assert.equal(fullValidations, 1);
 });
 
+for (const version of [20, ANALYTICS_SCHEMA_VERSION]) test(`v${version} startup streams rows and performs only necessary full validations`, async (t) => {
+  const dataDir = await tempDataDir(`awb-analytics-v${version}-validation-count-`);
+  t.after(() => fs.rm(dataDir, { recursive: true, force: true }));
+  const seed = await openAnalyticsDb(dataDir, 1);
+  if (version === 20) createHistoricalSchemaForTest(seed, 20);
+  const insert = seed.prepare(`INSERT INTO analytics_event_receipt
+    (event_id,producer_namespace,producer_id,producer_generation,sequence,payload_version,event_type,subject_identity,fingerprint,received_at,committed_at)
+    VALUES (?,'agent_worker','agent_runner','synthetic-generation',?,1,'model_invoked','synthetic',?,1,1)`);
+  seed.transaction(() => { for (let i = 1; i <= 1_000; i++) insert.run(`event-${i}`, i, "0".repeat(64)); })();
+  closeAnalyticsDb(seed);
+
+  let inspections = 0;
+  let receiptValidations = 0;
+  const originalPrepare = Database.prototype.prepare;
+  t.mock.method(Database.prototype, "prepare", function (this: Database.Database, source: string) {
+    if (source.startsWith("SELECT schema_version, typeof(schema_version) AS storage_type")) inspections++;
+    if (source.startsWith("SELECT sequence, typeof(sequence)") && source.includes("FROM analytics_event_receipt")) receiptValidations++;
+    const statement = originalPrepare.call(this, source);
+    if (/^SELECT .* FROM analytics_(event_receipt|run_fact|session_fact|message_fact|tool_fact|execution_fact|model_call_fact|producer_slot|producer_generation|producer_checkpoint|signal_coverage_gap|worker_event_fact|worker_live_snapshot|domain_config_version)(?:\s|$)/s.test(source)) {
+      t.mock.method(statement, "all", () => { assert.fail("startup must not materialize an entire history table"); });
+    }
+    return statement;
+  });
+  const progress: AnalyticsDbOpenProgress[] = [];
+  const reopened = await openAnalyticsDb(dataDir, 2, { onProgress: (event) => progress.push(event) });
+  t.after(() => closeAnalyticsDb(reopened));
+  assert.equal(inspections, 1);
+  assert.equal(receiptValidations, version === 20 ? 2 : 1);
+  assert.equal((reopened.prepare("SELECT COUNT(*) AS count FROM analytics_event_receipt").get() as { count: number }).count, 1_000);
+  const stages = version === 20
+    ? ["schema_detection", "initial_validation", "migration", "final_validation"]
+    : ["schema_detection", "initial_validation"];
+  assert.deepEqual(progress.map(({ stage, status }) => `${stage}:${status}`), stages.flatMap((stage) => [`${stage}:started`, `${stage}:completed`]));
+  assert.equal(progress[1]!.schemaVersion, version);
+  assert.equal(progress.at(-1)!.schemaVersion, ANALYTICS_SCHEMA_VERSION);
+  assert.ok(progress.every(({ elapsedMs }) => Number.isSafeInteger(elapsedMs) && elapsedMs >= 0));
+});
+
+for (const invalidTable of ["analytics_event_receipt", "analytics_run_fact", "analytics_domain_config_version"] as const) {
+  test(`streamed startup validation rejects an invalid final row in ${invalidTable}`, async (t) => {
+    const dataDir = await tempDataDir("awb-analytics-streamed-invalid-tail-");
+    t.after(() => fs.rm(dataDir, { recursive: true, force: true }));
+    const seed = await openAnalyticsDb(dataDir, 1);
+    if (invalidTable === "analytics_event_receipt") {
+      const insert = seed.prepare(`INSERT INTO analytics_event_receipt
+        (event_id,producer_namespace,producer_id,producer_generation,sequence,payload_version,event_type,subject_identity,fingerprint,received_at,committed_at)
+        VALUES (?,'agent_worker','agent_runner','synthetic-generation',?,1,'model_invoked','synthetic',?,1,1)`);
+      seed.transaction(() => { for (let i = 1; i <= 128; i++) insert.run(`event-${i}`, i, "0".repeat(64)); })();
+      seed.prepare("UPDATE analytics_event_receipt SET sequence=? WHERE event_id='event-128'").run(Number.MAX_SAFE_INTEGER + 1);
+    } else if (invalidTable === "analytics_run_fact") {
+      const insert = seed.prepare("INSERT INTO analytics_run_fact VALUES (?, 'user', NULL, 'running', 'observed', NULL, 1, NULL, 1, 1)");
+      seed.transaction(() => { for (let i = 1; i <= 128; i++) insert.run(`run-${i}`); })();
+      seed.prepare("UPDATE analytics_run_fact SET source_updated_at=? WHERE run_id='run-128'").run(Number.MAX_SAFE_INTEGER + 1);
+    } else {
+      const insert = seed.prepare("INSERT INTO analytics_domain_config_version VALUES (?, 1, '[]', 1)");
+      seed.transaction(() => { for (let i = 1; i <= 128; i++) insert.run(String(i).padStart(16, "0")); })();
+      seed.prepare("UPDATE analytics_domain_config_version SET enabled_fact_domains_json='private-invalid-tail' WHERE collection_config_version=?").run(String(128).padStart(16, "0"));
+    }
+    closeAnalyticsDb(seed);
+    const before = snapshotPersistentState(dataDir);
+    const progress: AnalyticsDbOpenProgress[] = [];
+    await assert.rejects(() => openAnalyticsDb(dataDir, 2, { onProgress: (event) => progress.push(event) }), /analytics database unavailable/);
+    assert.deepEqual(snapshotPersistentState(dataDir), before);
+    assert.deepEqual(progress.map(({ stage, status }) => `${stage}:${status}`), ["schema_detection:started", "schema_detection:completed", "initial_validation:started"]);
+    assert.ok(!JSON.stringify(progress).includes("private-invalid-tail"));
+    assert.ok(!JSON.stringify(progress).includes(dataDir));
+  });
+}
+
 test("current v19 fails closed for a persisted running Execution with inferred quality", async (t) => {
   const dataDir = await tempDataDir("awb-analytics-v18-invalid-running-");
   t.after(() => fs.rm(dataDir, { recursive: true, force: true }));
@@ -263,6 +332,31 @@ test("complete stage-two Analytics schema migrates transactionally to collector 
   assert.equal((migrated.prepare("SELECT COUNT(*) AS count FROM analytics_run_fact").get() as { count: number }).count, 0);
 });
 
+for (const version of [3, "legacy-v3", 5] as const) test(`${version} store advances through its legacy jump to the current schema`, async (t) => {
+  const dataDir = await tempDataDir(`awb-analytics-legacy-${version}-`);
+  t.after(() => fs.rm(dataDir, { recursive: true, force: true }));
+  const seed = await openAnalyticsDb(dataDir, 1);
+  createHistoricalSchemaForTest(seed, 18);
+  seed.prepare("INSERT INTO analytics_run_fact VALUES ('preserved', 'user', NULL, 'running', 'observed', NULL, 1, NULL, 1, 1)").run();
+  if (version === 5) {
+    const slot = (seed.prepare("SELECT sql FROM sqlite_master WHERE name='analytics_producer_slot'").get() as { sql: string }).sql.replace(/config_version TEXT NOT NULL,\s*/i, "");
+    const receipt = (seed.prepare("SELECT sql FROM sqlite_master WHERE name='analytics_event_receipt'").get() as { sql: string }).sql.replace("'worker_snapshot', 'worker_restart_attempted', 'worker_restart_succeeded', 'worker_restart_failed',", "'worker_restart',");
+    seed.exec(`DROP TABLE analytics_producer_slot; DROP TABLE analytics_event_receipt; ${slot}; ${receipt};
+      CREATE INDEX idx_analytics_receipt_committed_at ON analytics_event_receipt(committed_at);
+      CREATE INDEX idx_analytics_receipt_generation_sequence ON analytics_event_receipt(producer_namespace, producer_id, producer_generation, sequence);`);
+  } else {
+    for (const table of ["analytics_producer_slot", "analytics_producer_generation", "analytics_producer_checkpoint", "analytics_event_receipt", "analytics_signal_coverage_gap", "analytics_execution_fact", "analytics_model_call_fact", "analytics_worker_event_fact", "analytics_worker_live_snapshot"]) seed.exec(`DROP TABLE ${table}`);
+    if (version === "legacy-v3") seed.exec(`DROP TABLE analytics_collector_watermark;
+      CREATE TABLE analytics_collector_watermark (domain TEXT PRIMARY KEY NOT NULL, cursor_updated_at INTEGER NOT NULL, cursor_stable_id TEXT NOT NULL, updated_at INTEGER NOT NULL);`);
+  }
+  seed.prepare("UPDATE analytics_schema_meta SET schema_version=?").run(version === "legacy-v3" ? 3 : version);
+  closeAnalyticsDb(seed);
+  const migrated = await openAnalyticsDb(dataDir, 2);
+  t.after(() => closeAnalyticsDb(migrated));
+  assert.equal((migrated.prepare("SELECT schema_version FROM analytics_schema_meta").get() as { schema_version: number }).schema_version, ANALYTICS_SCHEMA_VERSION);
+  assert.equal((migrated.prepare("SELECT COUNT(*) AS count FROM analytics_run_fact").get() as { count: number }).count, version === "legacy-v3" ? 0 : 1);
+});
+
 test("v7 store migrates dashboard aggregate metadata without rewriting facts", async (t) => {
   const dataDir = await tempDataDir("awb-analytics-v7-dashboard-");
   t.after(async () => fs.rm(dataDir, { recursive: true, force: true }));
@@ -280,7 +374,7 @@ test("v7 store migrates dashboard aggregate metadata without rewriting facts", a
   assert.deepEqual(migrated.prepare("SELECT run_id FROM analytics_run_fact").all(), [{ run_id: "preserved" }]);
 });
 
-test("v9 Model cache migration invalidates legacy markers and preserves Dashboard Fact values", async (t) => {
+for (const version of [9, 10]) test(`v${version} cache migration invalidates legacy markers and preserves Dashboard Fact values`, async (t) => {
   const dataDir = await tempDataDir("awb-analytics-v9-model-");
   t.after(async () => fs.rm(dataDir, { recursive: true, force: true }));
   const db = await openAnalyticsDb(dataDir, 10);
@@ -289,11 +383,10 @@ test("v9 Model cache migration invalidates legacy markers and preserves Dashboar
   db.prepare(`INSERT INTO analytics_model_call_fact(model_call_id,execution_id,run_id,attempt_no,provider_id,model_id,started_at,ended_at,status,completion_quality,timeout_kind,input_tokens,output_tokens,total_tokens,total_source,cache_read_tokens,cache_write_tokens,cache_comparable,cache_write_verified,failure_kind,observed_at,updated_at,collected_at)
     VALUES ('legacy-model','e','r',1,'p','m',0,10,'completed','observed',NULL,2,3,5,'reported',NULL,NULL,0,0,NULL,10,10,10)`).run();
   db.prepare("INSERT INTO dashboard_model_1h VALUES(0,99,99,0,0,0,0,0,0,0,0)").run();
-  db.prepare("INSERT INTO analytics_rollup_hour VALUES('model',0,10)").run();
-  // Construct the authenticated v9 layout: no Model dimension/indexes and
+  if (version === 9) db.prepare("INSERT INTO analytics_rollup_hour VALUES('model',0,10)").run();
+  // Construct the authenticated v9/v10 layout: no Model dimension/indexes and
   // the pre-v11 Message cache shape.
-  db.exec(`DROP TABLE dashboard_model_dimension_1h;
-    DROP INDEX idx_analytics_execution_collected_at; DROP INDEX idx_analytics_model_collected_at; DROP INDEX idx_analytics_worker_event_collected_at;
+  db.exec(`${version === 9 ? "DROP TABLE dashboard_model_dimension_1h; DROP INDEX idx_analytics_execution_collected_at; DROP INDEX idx_analytics_model_collected_at; DROP INDEX idx_analytics_worker_event_collected_at;" : ""}
     DROP TABLE dashboard_message_1h;
     CREATE TABLE dashboard_message_1h (
       bucket_start INTEGER NOT NULL CHECK (bucket_start >= 0),
@@ -303,15 +396,17 @@ test("v9 Model cache migration invalidates legacy markers and preserves Dashboar
       message_count INTEGER NOT NULL CHECK (message_count >= 0),
       PRIMARY KEY (bucket_start, message_kind, message_status, compaction_kind)
     );`);
-  db.prepare("UPDATE analytics_schema_meta SET schema_version=9").run();
+  db.prepare("UPDATE analytics_schema_meta SET schema_version=?").run(version);
   closeAnalyticsDb(db);
 
   const migrated = await openAnalyticsDb(dataDir, 3_600_001);
   t.after(() => closeAnalyticsDb(migrated));
   assert.equal((migrated.prepare("SELECT schema_version FROM analytics_schema_meta").get() as { schema_version: number }).schema_version, ANALYTICS_SCHEMA_VERSION);
-  assert.equal(migrated.prepare("SELECT 1 FROM analytics_rollup_hour WHERE domain='model' AND bucket_start=0").get(), undefined);
-  assert.ok(migrated.prepare("SELECT 1 FROM analytics_dirty_hour WHERE domain='model' AND bucket_start=0").get());
-  assert.equal((migrated.prepare("SELECT rollup_ready_through FROM analytics_domain_state WHERE domain='model'").get() as { rollup_ready_through: number | null }).rollup_ready_through, null);
+  if (version === 9) {
+    assert.equal(migrated.prepare("SELECT 1 FROM analytics_rollup_hour WHERE domain='model' AND bucket_start=0").get(), undefined);
+    assert.ok(migrated.prepare("SELECT 1 FROM analytics_dirty_hour WHERE domain='model' AND bucket_start=0").get());
+    assert.equal((migrated.prepare("SELECT rollup_ready_through FROM analytics_domain_state WHERE domain='model'").get() as { rollup_ready_through: number | null }).rollup_ready_through, null);
+  }
   const response = queryDashboard(migrated, { rangeKind: "custom", timezone: "UTC", from: 0, to: 3_600_000 }, 3_600_001);
   assert.equal(response.kind, "success");
   assert.equal(response.data.model.metrics.requestCount.value, 1);
@@ -748,7 +843,7 @@ for (const version of [11, 12, 13] as const) test(`real v${version} historical f
   assert.deepEqual(migrated.prepare("SELECT producer_namespace,producer_id,producer_generation FROM analytics_model_call_fact WHERE model_call_id='historical-model'").get(), { producer_namespace: null, producer_id: null, producer_generation: null });
 });
 
-for (const version of [11, 12, 13, 14, 15, 16, 17] as const) test(`historical v${version} migrates through the complete chain to v19`, async (t) => {
+for (const version of [11, 12, 13, 14, 15, 16, 17, 18, 19, 20] as const) test(`historical v${version} migrates through the complete chain to the current schema`, async (t) => {
   const dataDir = await tempDataDir(`awb-analytics-v${version}-to-v18-`);
   t.after(() => fs.rm(dataDir, { recursive: true, force: true }));
   const seed = await openAnalyticsDb(dataDir, 1);
@@ -764,6 +859,18 @@ for (const version of [11, 12, 13, 14, 15, 16, 17] as const) test(`historical v$
   assert.equal(executionSql.includes("'inferred'"), true);
   assert.equal(executionSql.includes("'worker_exit'"), true);
   assert.deepEqual((migrated.prepare("PRAGMA index_info(idx_analytics_execution_open)").all() as Array<{ name: string }>).map((column) => column.name), ["producer_namespace", "producer_id", "producer_generation", "status", "started_at"]);
+});
+
+for (const version of [11, 12, 13] as const) test(`v${version} migration rejects damaged intermediate Git schema before its retirement`, async (t) => {
+  const dataDir = await tempDataDir(`awb-analytics-v${version}-invalid-git-`);
+  t.after(() => fs.rm(dataDir, { recursive: true, force: true }));
+  const seed = await openAnalyticsDb(dataDir, 1);
+  createHistoricalSchemaForTest(seed, version);
+  seed.exec("ALTER TABLE analytics_git_repo_state ADD COLUMN unexpected_column TEXT");
+  closeAnalyticsDb(seed);
+  const before = snapshotPersistentState(dataDir);
+  await assert.rejects(() => openAnalyticsDb(dataDir, 2), /analytics database unavailable/);
+  assert.deepEqual(snapshotPersistentState(dataDir), before);
 });
 
 test("v17 to v18 execution rebuild rolls back atomically", async (t) => {
