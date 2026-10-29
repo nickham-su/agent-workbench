@@ -35,8 +35,7 @@ test("usage errors, unknown and duplicate options never echo offending values", 
     ["login", "--url", "http://example.test", "--test-secret"],
     ["login", "--url=http://example.test", "--url", "http://other.test"],
     ["login", "--url", "http://example.test", "--token-stdin", "--token-stdin"],
-    ["session", "list", "--workspace", "id", "--workspace=id", "--updated-within", "24h"],
-    ["session", "list", "--workspace", "id", "--updated-within", "24h", "--json"]
+    ["session", "list", "--workspace", "id", "--workspace=id", "--updated-within", "24h"]
   ];
   for (const args of bad) {
     const capture = captureIO();

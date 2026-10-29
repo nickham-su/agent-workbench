@@ -6,6 +6,7 @@ import type {
   AgentSessionQueryStatus
 } from "@agent-workbench/shared/contracts/agent-session-query";
 import { CliError, isRecord, responseError } from "./errors.js";
+import { isId, parseDuration, validateId } from "./validation.js";
 
 export interface SessionListOptions {
   workspace: string;
@@ -20,33 +21,18 @@ export interface SessionListQuery extends Required<AgentSessionQueryRequest> {
 
 const maximumSeconds = 90 * 24 * 60 * 60;
 const maximumTimestamp = 8_640_000_000_000_000;
-const unitSeconds: Record<string, number> = { s: 1, m: 60, h: 3600, d: 86400 };
-
-function isKind(value: unknown): value is AgentSessionQueryKind {
-  return value === "primary" || value === "subtask" || value === "all";
-}
 
 function isStatus(value: unknown): value is AgentSessionQueryStatus {
   return value === "idle" || value === "running" || value === "all";
 }
 
 export function parseSessionListOptions(options: SessionListOptions): SessionListQuery {
-  if (typeof options.workspace !== "string" || !/\S/.test(options.workspace)) {
-    throw new CliError(2, "Workspace ID 必须是非空且不全为空白的字符串。");
-  }
-  const match = typeof options.updatedWithin === "string" && /^([1-9][0-9]*)(s|m|h|d)$/.exec(options.updatedWithin);
-  if (!match || match[0] !== options.updatedWithin) throw new CliError(2, "更新时间窗口必须是正整数 s/m/h/d 时长，例如 24h，且不超过 90d。");
-  const amount = Number(match[1]);
-  if (!Number.isSafeInteger(amount)) {
-    throw new CliError(2, "更新时间窗口必须在 1 秒至 90 天之间，不能溢出或超限。");
-  }
-  const seconds = amount * unitSeconds[match[2]];
-  if (!Number.isSafeInteger(seconds) || seconds < 1 || seconds > maximumSeconds) {
-    throw new CliError(2, "更新时间窗口必须在 1 秒至 90 天之间，不能溢出或超限。");
-  }
-  const kind = options.kind === undefined ? "all" : options.kind;
+  validateId(options.workspace);
+  const seconds = parseDuration(options.updatedWithin, maximumSeconds, "更新时间窗口");
+  const kind = options.kind === undefined ? "primary" : options.kind;
   const status = options.status === undefined ? "all" : options.status;
-  if (!isKind(kind) || !isStatus(status)) throw new CliError(2, "Session 类型或状态参数无效，请查看 session list --help。");
+  if (kind !== "primary") throw new CliError(2, "会话列表现仅支持 primary；subtask/all 已移除，请用已知 ID 查询 show/messages/status。", { effect: "not_sent" });
+  if (!isStatus(status)) throw new CliError(2, "Session 状态参数无效，请查看 session list --help。");
   return { workspaceId: options.workspace, updatedWithinSeconds: seconds, kind, status, duration: options.updatedWithin };
 }
 
@@ -80,7 +66,7 @@ export function validateSessionQueryResponse(value: unknown, query: SessionListQ
   const to = value.updatedTo;
   const items: AgentSessionQueryItem[] = value.items.map((item: unknown) => {
     if (!isRecord(item) || !hasExactKeys(item, itemKeys)
-      || typeof item.id !== "string" || item.id.length === 0 || ids.has(item.id)
+      || !isId(item.id) || ids.has(item.id)
       || typeof item.title !== "string"
       || (item.kind !== "primary" && item.kind !== "subtask")
       || (item.status !== "idle" && item.status !== "running")

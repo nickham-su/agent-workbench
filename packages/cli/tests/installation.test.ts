@@ -20,7 +20,8 @@ test("Docker definition installs the executable outside HOME and includes its wo
   const dockerfile = await fs.readFile(join(repository, "Dockerfile"), "utf8");
   const copyManifest = "COPY packages/cli/package.json packages/cli/package.json";
   assert.ok(dockerfile.includes(copyManifest));
-  assert.ok(dockerfile.indexOf(copyManifest) < dockerfile.indexOf("RUN npm ci"));
+  const install = dockerfile.search(/\bnpm ci\b/);
+  assert.ok(install >= 0 && dockerfile.indexOf(copyManifest) < install);
   assert.match(dockerfile, /COPY --from=builder \/app\/packages\/cli \/app\/packages\/cli/);
   assert.match(dockerfile, /COPY --from=builder \/app\/packages\/cli\/dist\/cli\.cjs \/opt\/awb-cli\/cli\.cjs/);
   assert.match(dockerfile, /chmod 0755 \/opt\/awb-cli\/cli\.cjs/);

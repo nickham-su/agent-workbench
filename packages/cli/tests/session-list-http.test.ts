@@ -23,7 +23,6 @@ test("built CLI initializes auth-off connection then returns every 165 Session a
   payload.items[1].title = "任意名称\n不能形成新字段\t\u001b[31m";
   payload.items[1].userMessageCount = 0;
   payload.items[1].completedAssistantMessageCount = 0;
-  payload.items[2].kind = "subtask";
   payload.items[2].status = "running";
   const requests: string[] = [];
   const server = await httpServer((request, response) => {
@@ -33,7 +32,7 @@ test("built CLI initializes auth-off connection then returns every 165 Session a
     const url = new URL(request.url!, "http://test.invalid");
     assert.equal(url.pathname, "/api/agent/sessions/query");
     assert.deepEqual([...url.searchParams], [
-      ["workspaceId", "workspace-example"], ["updatedWithinSeconds", "86400"], ["kind", "all"], ["status", "all"]
+      ["workspaceId", "workspace-example"], ["updatedWithinSeconds", "86400"], ["kind", "primary"], ["status", "all"]
     ]);
     response.end(JSON.stringify(payload));
   });
@@ -50,7 +49,7 @@ test("built CLI initializes auth-off connection then returns every 165 Session a
   assert.match(result.stdout, /标题：（空标题）/);
   assert.match(result.stdout, /标题：任意名称\\n不能形成新字段\\t\\u001b\[31m/);
   assert.match(result.stdout, /用户消息累计数：0\n已完成助手消息累计数：0/);
-  assert.match(result.stdout, /类型：subtask\n状态：running/);
+  assert.match(result.stdout, /类型：primary\n状态：running/);
   assert.equal((result.stdout.match(/^创建时间：2025-12-31T00:00:00.000Z$/gm) ?? []).length, 165);
   assert.match(result.stdout, /创建时间：2025-12-31T00:00:00.000Z\n最近更新时间：2026-01-02T00:00:00.000Z/);
   assert.match(result.stdout, /查询结束：已输出 165 个 Session。\n$/);
@@ -64,7 +63,7 @@ test("built CLI initializes auth-off connection then returns every 165 Session a
 test("built CLI encodes original Workspace, filtered duration, and displays only server UTC window", async (t) => {
   const home = await temporaryDirectory("query-built-filtered");
   t.after(() => fs.rm(home, { recursive: true, force: true }));
-  const query = parseSessionListOptions({ workspace: " id/中文+ ", updatedWithin: "30m", kind: "subtask", status: "running" });
+  const query = parseSessionListOptions({ workspace: "id/中文+", updatedWithin: "30m", kind: "primary", status: "running" });
   const payload = queryResponse(query);
   payload.updatedFrom = -1800000;
   payload.updatedTo = 0;
@@ -73,7 +72,7 @@ test("built CLI encodes original Workspace, filtered duration, and displays only
   const server = await httpServer((request, response) => {
     calls++;
     const url = new URL(request.url!, "http://test.invalid");
-    assert.deepEqual([...url.searchParams], [["workspaceId", query.workspaceId], ["updatedWithinSeconds", "1800"], ["kind", "subtask"], ["status", "running"]]);
+    assert.deepEqual([...url.searchParams], [["workspaceId", query.workspaceId], ["updatedWithinSeconds", "1800"], ["kind", "primary"], ["status", "running"]]);
     assert.equal(request.headers.cookie, `awb_session=${cookieValue}`);
     response.setHeader("Set-Cookie", renewedHeader);
     response.end(JSON.stringify(payload));
@@ -81,7 +80,7 @@ test("built CLI encodes original Workspace, filtered duration, and displays only
   t.after(server.close);
   const store = new FileConfigStore(home);
   await store.save({ version: 1, apiOrigin: server.origin, cookie: { name: "awb_session", value: cookieValue, secure: false } });
-  const result = await runBuiltCli(["session", "list", "--workspace", query.workspaceId, "--updated-within", "30m", "--kind", "subtask", "--status", "running"], home);
+  const result = await runBuiltCli(["session", "list", "--workspace", query.workspaceId, "--updated-within", "30m", "--kind", "primary", "--status", "running"], home);
   assert.equal(result.code, 0);
   assert.equal(result.stderr, "");
   assert.match(result.stdout, /1969-12-31T23:30:00.000Z 至 1970-01-01T00:00:00.000Z/);

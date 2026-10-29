@@ -19,11 +19,11 @@ test("strict duration converts supported units and exact 90-day boundaries witho
   }
 });
 
-test("workspace preserves its original ID, filters default to all and strict enums reject empty values", () => {
-  assert.deepEqual(parseSessionListOptions({ workspace: " id/中文+ ", updatedWithin: "1s" }), {
-    workspaceId: " id/中文+ ", updatedWithinSeconds: 1, kind: "all", status: "all", duration: "1s"
+test("workspace preserves opaque valid IDs, kind defaults to primary and removed values reject", () => {
+  assert.deepEqual(parseSessionListOptions({ workspace: "id/中文+", updatedWithin: "1s" }), {
+    workspaceId: "id/中文+", updatedWithinSeconds: 1, kind: "primary", status: "all", duration: "1s"
   });
-  for (const kind of ["primary", "subtask", "all"]) {
+  for (const kind of ["primary"]) {
     for (const status of ["idle", "running", "all"]) {
       const query = parseSessionListOptions({ workspace: "id", updatedWithin: "1s", kind, status });
       assert.equal(query.kind, kind);
@@ -31,7 +31,7 @@ test("workspace preserves its original ID, filters default to all and strict enu
     }
   }
   for (const workspace of ["", " ", "\t\r\n"]) assert.throws(() => parseSessionListOptions({ workspace, updatedWithin: "1s" }), exitCode(2));
-  for (const kind of ["", "Primary", "unknown", " all "]) assert.throws(() => parseSessionListOptions({ workspace: "id", updatedWithin: "1s", kind }), exitCode(2));
+  for (const kind of ["", "Primary", "unknown", " all ", "subtask", "all"]) assert.throws(() => parseSessionListOptions({ workspace: "id", updatedWithin: "1s", kind }), exitCode(2));
   for (const status of ["", "Running", "unknown", "all\n"]) assert.throws(() => parseSessionListOptions({ workspace: "id", updatedWithin: "1s", status }), exitCode(2));
 });
 
@@ -43,7 +43,7 @@ test("DTO accepts empty/all data, boundary timestamps, safe count maxima and eve
   response.items[0].userMessageCount = 0;
   response.items[0].completedAssistantMessageCount = Number.MAX_SAFE_INTEGER;
   assert.deepEqual(validateSessionQueryResponse(response, defaultQuery), response);
-  for (const kind of ["primary", "subtask", "all"]) {
+  for (const kind of ["primary"]) {
     for (const status of ["idle", "running", "all"]) {
       const query = parseSessionListOptions({ workspace: "id", updatedWithin: "1s", kind, status });
       const item = queryResponse(query);
@@ -80,7 +80,7 @@ test("DTO rejects nonclosed structures, wrong echo, invalid window/total and mis
   for (const key of ["workspaceId", "updatedWithinSeconds", "updatedFrom", "updatedTo", "kind", "status", "total", "items"]) mutate((value) => { delete value[key]; });
   for (const [key, invalid] of [
     ["workspaceId", "other"], ["updatedWithinSeconds", 86401], ["updatedWithinSeconds", "86400"],
-    ["kind", "primary"], ["status", "running"], ["updatedFrom", Date.UTC(2026, 0, 1) - 1],
+    ["kind", "all"], ["status", "running"], ["updatedFrom", Date.UTC(2026, 0, 1) - 1],
     ["updatedTo", null], ["updatedTo", 0.1], ["updatedTo", Number.MAX_SAFE_INTEGER],
     ["total", -1], ["total", 0.1], ["total", 0], ["total", Number.MAX_SAFE_INTEGER + 1], ["items", {}],
     ["nextCursor", "unexpected"], ["tokenCount", 1]
@@ -121,7 +121,7 @@ test("fixed text has UTC dates, visible control escapes, complete IDs and a zero
   response.items[0].id = "a-complete-session-identifier-that-is-not-truncated";
   response.items[0].title = "第一行\n第二行\t\\n\r\u001b[31m\u0085\u2028\u2029";
   const expected = [
-    "Workspace：workspace-example", "筛选：最近 24h；类型 all；状态 all",
+    "Workspace：workspace-example", "筛选：最近 24h；类型 primary；状态 all",
     "更新时间范围：2026-01-01T00:00:00.000Z 至 2026-01-02T00:00:00.000Z（含两端）", "匹配总数：1", "",
     "Session ID：a-complete-session-identifier-that-is-not-truncated",
     "标题：第一行\\n第二行\\t\\\\n\\r\\u001b[31m\\u0085\\u2028\\u2029",
