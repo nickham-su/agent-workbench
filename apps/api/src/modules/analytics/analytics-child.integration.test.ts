@@ -8,7 +8,7 @@ import fs from "node:fs/promises";
 import { test } from "node:test";
 import { createApp } from "../../app/createApp.js";
 import { analyticsDbPath } from "../../infra/fs/paths.js";
-import { closeAnalyticsDb, openAnalyticsDb, ANALYTICS_SCHEMA_VERSION } from "./analytics-db.js";
+import { closeAnalyticsDb, openAnalyticsDb, ANALYTICS_SCHEMA_VERSION, createHistoricalSchemaForTest } from "./analytics-db.js";
 import { AnalyticsSupervisor, __analyticsSupervisorInternals } from "./analytics-supervisor.js";
 import { analyticsFingerprint } from "./signal-store.js";
 import { createAgentTestFixture } from "../agent/testkit/agent-testkit.js";
@@ -63,12 +63,14 @@ test("Analytics child owns an empty store and serves a contract-valid 200 respon
   assert.equal((await app.inject({ method: "GET", url: "/api/health" })).statusCode, 200);
 });
 
-for (const failInitialization of [false, true]) {
-  test(`Analytics startup logs correlate parent and child ${failInitialization ? "initialization failure" : "successful serving"}`, async (t) => {
+for (const startupState of ["new", "current", "v20", "invalid"] as const) {
+  const failInitialization = startupState === "invalid";
+  test(`Analytics startup logs correlate parent and child ${startupState}`, async (t) => {
     const fixture = await createAgentTestFixture({ dataDirPrefix: "analytics-startup-private-test-" });
-    if (failInitialization) {
+    if (startupState !== "new") {
       const db = await openAnalyticsDb(fixture.dataDir);
-      db.prepare("UPDATE analytics_schema_meta SET schema_version = ?").run(ANALYTICS_SCHEMA_VERSION + 1);
+      if (failInitialization) db.prepare("UPDATE analytics_schema_meta SET schema_version = ?").run(ANALYTICS_SCHEMA_VERSION + 1);
+      if (startupState === "v20") createHistoricalSchemaForTest(db, 20);
       closeAnalyticsDb(db);
     }
     const parentLogs: string[] = [];
@@ -126,6 +128,20 @@ for (const failInitialization of [false, true]) {
       assert.ok(at);
       assert.equal(new Date(at).toISOString(), at);
       assert.match(line, /stage=initializing elapsedMs=\d+/);
+    }
+    const stageLines = childLogs.split("\n").filter((line) => line.includes("[Analytics] database startup stage"));
+    const stages = failInitialization || startupState === "current"
+      ? ["schema_detection", "initial_validation"]
+      : ["schema_detection", "initial_validation", "migration", "final_validation"];
+    assert.deepEqual(stageLines.map((line) => /dbStage=(\w+)/.exec(line)?.[1]), stages.flatMap((stage, index) => failInitialization && index === 1 ? [stage] : [stage, stage]));
+    for (const line of stageLines) {
+      assert.ok(line.includes(`startupId=${startupId}`));
+      assert.match(line, /schemaVersion=(unknown|new|\d+) stageElapsedMs=\d+$/);
+      assert.match(line, /database startup stage (started|completed);/);
+    }
+    if (startupState === "v20") {
+      assert.ok(stageLines.some((line) => /dbStage=migration schemaVersion=20/.test(line)));
+      assert.ok(stageLines.some((line) => new RegExp(`dbStage=final_validation schemaVersion=${ANALYTICS_SCHEMA_VERSION}`).test(line)));
     }
     const terminalLogs = parentLogs.filter((line) => /worker startup (completed|failed);/.test(line));
     assert.equal(terminalLogs.length, 1);

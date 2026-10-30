@@ -507,22 +507,23 @@ function verifyBaseSchema(db: AnalyticsDb, expectedVersion: number, includeSourc
     if (row.last_error_code !== null && (row.last_error_code_type !== "text" || typeof row.last_error_code !== "string")) unavailableSchema();
     if (!isSafeSqliteInteger(row.updated_at, row.updated_at_type)) unavailableSchema();
   }
-  const configs = db.prepare("SELECT collection_config_version, typeof(collection_config_version) AS version_type, effective_at, typeof(effective_at) AS effective_type, enabled_fact_domains_json, typeof(enabled_fact_domains_json) AS enabled_type, changed_at, typeof(changed_at) AS changed_type FROM analytics_domain_config_version").all() as Array<Record<string, unknown>>;
-  if (configs.length === 0 || configs.some((row) => {
-    if (row.version_type !== "text" || typeof row.collection_config_version !== "string" || row.collection_config_version.length === 0 || !isSafeSqliteInteger(row.effective_at, row.effective_type) || !isSafeSqliteInteger(row.changed_at, row.changed_type) || row.enabled_type !== "text" || typeof row.enabled_fact_domains_json !== "string") return true;
-    try { return !validEnabledFactDomains(JSON.parse(row.enabled_fact_domains_json), expectedVersion < V19_SCHEMA_VERSION); } catch { return true; }
-  })) unavailableSchema();
-  if (expectedVersion >= V17_SCHEMA_VERSION) {
-    const baseline = configs.filter((row) =>
-      row.collection_config_version === "0000000000000000" &&
-      row.effective_at === 0 && row.changed_at === 0,
-    );
-    if (baseline.length !== 1 || configs.some((row) => !/^\d{16}$/.test(row.collection_config_version as string))) unavailableSchema();
+  let configCount = 0;
+  let baselineCount = 0;
+  for (const row of db.prepare("SELECT collection_config_version, typeof(collection_config_version) AS version_type, effective_at, typeof(effective_at) AS effective_type, enabled_fact_domains_json, typeof(enabled_fact_domains_json) AS enabled_type, changed_at, typeof(changed_at) AS changed_type FROM analytics_domain_config_version").iterate() as Iterable<Record<string, unknown>>) {
+    configCount++;
+    if (row.version_type !== "text" || typeof row.collection_config_version !== "string" || row.collection_config_version.length === 0 || !isSafeSqliteInteger(row.effective_at, row.effective_type) || !isSafeSqliteInteger(row.changed_at, row.changed_type) || row.enabled_type !== "text" || typeof row.enabled_fact_domains_json !== "string") unavailableSchema();
+    try {
+      if (!validEnabledFactDomains(JSON.parse(row.enabled_fact_domains_json as string), expectedVersion < V19_SCHEMA_VERSION)) unavailableSchema();
+    } catch { unavailableSchema(); }
+    if (expectedVersion >= V17_SCHEMA_VERSION) {
+      if (!/^\d{16}$/.test(row.collection_config_version as string)) unavailableSchema();
+      if (row.collection_config_version === "0000000000000000") {
+        if (row.effective_at === 0 && row.changed_at === 0) baselineCount++;
+        if (row.enabled_fact_domains_json !== "[]") unavailableSchema();
+      }
+    }
   }
-  if (expectedVersion >= 17 && configs.some((row) =>
-    row.collection_config_version === "0000000000000000" &&
-    row.enabled_fact_domains_json !== "[]",
-  )) unavailableSchema();
+  if (configCount === 0 || (expectedVersion >= V17_SCHEMA_VERSION && baselineCount !== 1)) unavailableSchema();
 }
 
 function verifyFacts(db: AnalyticsDb) {
@@ -549,18 +550,18 @@ function verifyFactEnumValues(db: AnalyticsDb) {
   const runKinds = new Set(["user", "manual_compaction", "subtask"]);
   const runStatuses = new Set(["running", "completed", "failed", "cancelled", "interrupted", "unknown"]);
   const qualities = new Set(["observed", "inferred"]);
-  for (const row of db.prepare("SELECT run_kind, display_status, status_quality FROM analytics_run_fact").all() as Array<{ run_kind: string; display_status: string; status_quality: string }>) {
+  for (const row of db.prepare("SELECT run_kind, display_status, status_quality FROM analytics_run_fact").iterate() as Iterable<{ run_kind: string; display_status: string; status_quality: string }>) {
     if (!runKinds.has(row.run_kind) || !runStatuses.has(row.display_status) || !qualities.has(row.status_quality)) unavailableSchema();
   }
-  for (const row of db.prepare("SELECT session_kind FROM analytics_session_fact").all() as Array<{ session_kind: string }>) if (row.session_kind !== "primary" && row.session_kind !== "subtask") unavailableSchema();
+  for (const row of db.prepare("SELECT session_kind FROM analytics_session_fact").iterate() as Iterable<{ session_kind: string }>) if (row.session_kind !== "primary" && row.session_kind !== "subtask") unavailableSchema();
   const messageKinds = new Set(["user", "assistant", "runtime", "system", "compaction"]);
   const messageStatuses = new Set(["streaming", "completed", "failed", "cancelled", "superseded"]);
-  for (const row of db.prepare("SELECT message_kind, message_status, compaction_kind, compaction_source_quality FROM analytics_message_fact").all() as Array<{ message_kind: string; message_status: string; compaction_kind: string | null; compaction_source_quality: string }>) {
+  for (const row of db.prepare("SELECT message_kind, message_status, compaction_kind, compaction_source_quality FROM analytics_message_fact").iterate() as Iterable<{ message_kind: string; message_status: string; compaction_kind: string | null; compaction_source_quality: string }>) {
     if (!messageKinds.has(row.message_kind) || !messageStatuses.has(row.message_status) || !["known", "unknown", "not_applicable"].includes(row.compaction_source_quality)) unavailableSchema();
     if ((row.compaction_kind !== null && (!["manual", "auto"].includes(row.compaction_kind) || row.compaction_source_quality !== "known")) || (row.compaction_kind === null && !["unknown", "not_applicable"].includes(row.compaction_source_quality))) unavailableSchema();
   }
   const toolStatuses = new Set(["queued", "running", "completed", "failed", "cancelled", "unknown"]);
-  for (const row of db.prepare("SELECT tool_name, tool_name_quality, status, started_at, completed_at, completed_duration_ms FROM analytics_tool_fact").all() as Array<{ tool_name: string | null; tool_name_quality: string; status: string; started_at: number | null; completed_at: number | null; completed_duration_ms: number | null }>) {
+  for (const row of db.prepare("SELECT tool_name, tool_name_quality, status, started_at, completed_at, completed_duration_ms FROM analytics_tool_fact").iterate() as Iterable<{ tool_name: string | null; tool_name_quality: string; status: string; started_at: number | null; completed_at: number | null; completed_duration_ms: number | null }>) {
     if (!toolStatuses.has(row.status) || !["known", "unavailable"].includes(row.tool_name_quality) || (row.tool_name === null) !== (row.tool_name_quality === "unavailable")) unavailableSchema();
     if (row.completed_duration_ms !== null && (row.status !== "completed" || row.started_at === null || row.completed_at === null || row.completed_at < row.started_at || row.completed_duration_ms !== row.completed_at - row.started_at)) unavailableSchema();
   }
@@ -584,8 +585,7 @@ function verifyV5SignalSchema(db: AnalyticsDb) {
 
 function verifyFactRows(db: AnalyticsDb, table: string, textFields: readonly string[], integerFields: readonly string[]) {
   const projection = [...textFields.map((field) => `${field}, typeof(${field}) AS ${field}_type`), ...integerFields.map((field) => `${field}, typeof(${field}) AS ${field}_type`)].join(", ");
-  const rows = db.prepare(`SELECT ${projection} FROM ${table}`).all() as Array<Record<string, unknown>>;
-  for (const row of rows) {
+  for (const row of db.prepare(`SELECT ${projection} FROM ${table}`).iterate() as Iterable<Record<string, unknown>>) {
     if (textFields.some((field) => row[field] !== null && (row[`${field}_type`] !== "text" || typeof row[field] !== "string"))) unavailableSchema();
     if (integerFields.some((field) => row[field] !== null && !isSafeSqliteInteger(row[field], row[`${field}_type`]))) unavailableSchema();
   }
@@ -798,15 +798,15 @@ function verifySignalRows(db: AnalyticsDb) {
   for (const [table, fields] of Object.entries(integerFields)) {
     const text = textFields[table] ?? [];
     const projection = [...fields, ...text].map((field) => `${field}, typeof(${field}) AS ${field}_type`).join(", ");
-    for (const row of db.prepare(`SELECT ${projection} FROM ${table}`).all() as Array<Record<string, unknown>>) {
+    for (const row of db.prepare(`SELECT ${projection} FROM ${table}`).iterate() as Iterable<Record<string, unknown>>) {
       if (fields.some((field) => row[field] !== null && !isSafeSqliteInteger(row[field], row[`${field}_type`]))) unavailableSchema();
       if (text.some((field) => row[field] !== null && (row[`${field}_type`] !== "text" || typeof row[field] !== "string"))) unavailableSchema();
     }
   }
-  for (const row of db.prepare("SELECT lifecycle, final_sequence, committed_sequence, known_drop, dropped_since_sequence, outbox_pending, oldest_pending_at FROM analytics_producer_generation").all() as Array<GenerationValidationRow>) {
+  for (const row of db.prepare("SELECT lifecycle, final_sequence, committed_sequence, known_drop, dropped_since_sequence, outbox_pending, oldest_pending_at FROM analytics_producer_generation").iterate() as Iterable<GenerationValidationRow>) {
     if (!['registered', 'closing', 'closed', 'stale', 'abandoned'].includes(row.lifecycle) || (row.final_sequence !== null && row.committed_sequence > row.final_sequence) || (row.known_drop === 0) !== (row.dropped_since_sequence === null) || (row.outbox_pending === 0) !== (row.oldest_pending_at === null)) unavailableSchema();
   }
-  for (const row of db.prepare("SELECT status, end_time_quality, ended_at, effective_ended_at, end_reason FROM analytics_execution_fact").all() as Array<{ status: string; end_time_quality: string; ended_at: number | null; effective_ended_at: number | null; end_reason: string | null }>) {
+  for (const row of db.prepare("SELECT status, end_time_quality, ended_at, effective_ended_at, end_reason FROM analytics_execution_fact").iterate() as Iterable<{ status: string; end_time_quality: string; ended_at: number | null; effective_ended_at: number | null; end_reason: string | null }>) {
     const hasTerminalTimes = row.ended_at !== null && row.effective_ended_at !== null;
     const hasNoTerminalTimes = row.ended_at === null && row.effective_ended_at === null;
     const knownEnded = row.status === "ended" && ["observed", "inferred"].includes(row.end_time_quality) && hasTerminalTimes && row.end_reason !== null;
@@ -971,30 +971,38 @@ function verifyV6SignalSchema(db: AnalyticsDb) {
   }
 }
 
-function inspectSchema(db: AnalyticsDb): "new" | "v2" | "v3" | "legacy-v3" | "v4" | "v5" | "v6" | "v7" | "v8" | "v9" | "v10" | "v11" | "v12" | "v13" | "v14" | "v15" | "v16" | "v17" | "v18" | "v19" | "v20" | "current" {
-  if (db.prepare("SELECT name FROM sqlite_master WHERE type IN ('table', 'index', 'trigger', 'view') LIMIT 1").all().length === 0) return "new";
-  const meta = db.prepare("SELECT schema_version, typeof(schema_version) AS storage_type FROM analytics_schema_meta").all() as Array<{ schema_version: unknown; storage_type: unknown }>;
+type AnalyticsSchemaState = "new" | "v2" | "v3" | "legacy-v3" | "v4" | "v5" | "v6" | "v7" | "v8" | "v9" | "v10" | "v11" | "v12" | "v13" | "v14" | "v15" | "v16" | "v17" | "v18" | "v19" | "v20" | "current";
+type AnalyticsSchemaVersion = number | "new";
+
+function readSchemaVersion(db: AnalyticsDb): AnalyticsSchemaVersion {
+  if (!db.prepare("SELECT name FROM sqlite_master WHERE type IN ('table', 'index', 'trigger', 'view') LIMIT 1").get()) return "new";
+  const meta = db.prepare("SELECT schema_version, typeof(schema_version) AS storage_type FROM analytics_schema_meta LIMIT 2").all() as Array<{ schema_version: unknown; storage_type: unknown }>;
   if (meta.length !== 1 || !isSafeSqliteInteger(meta[0]?.schema_version, meta[0]?.storage_type)) unavailableSchema();
-  if (meta[0]?.schema_version === 2) { verifyBaseSchema(db, 2); return "v2"; }
-  if (meta[0]?.schema_version === 3 && hasLegacyV3Watermark(db)) { verifyBaseSchema(db, 3); return "legacy-v3"; }
-  if (meta[0]?.schema_version === 3) { verifyV3Schema(db); return "v3"; }
-  if (meta[0]?.schema_version === 5) { verifyV5SignalSchema(db); return "v5"; }
-  if (meta[0]?.schema_version === 6) { verifyV6SignalSchema(db); return "v6"; }
-  if (meta[0]?.schema_version === 7) { verifyV7Schema(db); return "v7"; }
-  if (meta[0]?.schema_version === 8) { verifyV8Schema(db); return "v8"; }
-  if (meta[0]?.schema_version === 9) { verifyV9Schema(db); return "v9"; }
-  if (meta[0]?.schema_version === 10) { verifyV10Schema(db); return "v10"; }
-  if (meta[0]?.schema_version === 11) { verifyBaseSchema(db, 11); verifyFacts(db); verifySignalSchema(db, true, true, true, true); verifyDashboardSchema(db); return "v11"; }
-  if (meta[0]?.schema_version === 12) { verifyBaseSchema(db, 12); verifyFacts(db); verifySignalSchema(db, true, true, true, true); verifyDashboardSchema(db); return "v12"; }
-  if (meta[0]?.schema_version === 13) { verifyBaseSchema(db, 13); verifyFacts(db); verifySignalSchema(db, true, false, true, false); verifyDashboardSchema(db); return "v13"; }
-  if (meta[0]?.schema_version === V14_SCHEMA_VERSION) { verifyBaseSchema(db, V14_SCHEMA_VERSION); verifyFacts(db); verifySignalSchema(db); verifyDashboardSchema(db); verifyGitSchema(db); return "v14"; }
-  if (meta[0]?.schema_version === V15_SCHEMA_VERSION) { verifyBaseSchema(db, V15_SCHEMA_VERSION, true); verifyFacts(db); verifySignalSchema(db); verifyDashboardSchema(db); verifyGitSchema(db); return "v15"; }
-  if (meta[0]?.schema_version === V16_SCHEMA_VERSION) { verifyBaseSchema(db, V16_SCHEMA_VERSION, true); verifyFacts(db); verifySignalSchema(db); verifyDashboardSchema(db); verifyGitSchema(db); return "v16"; }
-  if (meta[0]?.schema_version === V17_SCHEMA_VERSION) { verifyBaseSchema(db, V17_SCHEMA_VERSION, true); verifyFacts(db); verifySignalSchema(db, true, false, false, false, true); verifyDashboardSchema(db); verifyGitSchema(db); return "v17"; }
-  if (meta[0]?.schema_version === V18_SCHEMA_VERSION) { verifyBaseSchema(db, V18_SCHEMA_VERSION, true); verifyFacts(db); verifySignalSchema(db); verifyDashboardSchema(db); verifyGitSchema(db); return "v18"; }
-  if (meta[0]?.schema_version === V19_SCHEMA_VERSION) { verifyV19Schema(db); return "v19"; }
-  if (meta[0]?.schema_version === V20_SCHEMA_VERSION) { verifyV19Schema(db, V20_SCHEMA_VERSION); return "v20"; }
-  if (meta[0]?.schema_version === 4) {
+  return meta[0]!.schema_version as number;
+}
+
+function inspectSchema(db: AnalyticsDb, version = readSchemaVersion(db)): AnalyticsSchemaState {
+  if (version === "new") return "new";
+  if (version === 2) { verifyBaseSchema(db, 2); return "v2"; }
+  if (version === 3 && hasLegacyV3Watermark(db)) { verifyBaseSchema(db, 3); return "legacy-v3"; }
+  if (version === 3) { verifyV3Schema(db); return "v3"; }
+  if (version === 5) { verifyV5SignalSchema(db); return "v5"; }
+  if (version === 6) { verifyV6SignalSchema(db); return "v6"; }
+  if (version === 7) { verifyV7Schema(db); return "v7"; }
+  if (version === 8) { verifyV8Schema(db); return "v8"; }
+  if (version === 9) { verifyV9Schema(db); return "v9"; }
+  if (version === 10) { verifyV10Schema(db); return "v10"; }
+  if (version === 11) { verifyBaseSchema(db, 11); verifyFacts(db); verifySignalSchema(db, true, true, true, true); verifyDashboardSchema(db); return "v11"; }
+  if (version === 12) { verifyBaseSchema(db, 12); verifyFacts(db); verifySignalSchema(db, true, true, true, true); verifyDashboardSchema(db); verifyGitSchema(db); return "v12"; }
+  if (version === 13) { verifyBaseSchema(db, 13); verifyFacts(db); verifySignalSchema(db, true, false, true, false); verifyDashboardSchema(db); verifyGitSchema(db); return "v13"; }
+  if (version === V14_SCHEMA_VERSION) { verifyBaseSchema(db, V14_SCHEMA_VERSION); verifyFacts(db); verifySignalSchema(db); verifyDashboardSchema(db); verifyGitSchema(db); return "v14"; }
+  if (version === V15_SCHEMA_VERSION) { verifyBaseSchema(db, V15_SCHEMA_VERSION, true); verifyFacts(db); verifySignalSchema(db); verifyDashboardSchema(db); verifyGitSchema(db); return "v15"; }
+  if (version === V16_SCHEMA_VERSION) { verifyBaseSchema(db, V16_SCHEMA_VERSION, true); verifyFacts(db); verifySignalSchema(db); verifyDashboardSchema(db); verifyGitSchema(db); return "v16"; }
+  if (version === V17_SCHEMA_VERSION) { verifyBaseSchema(db, V17_SCHEMA_VERSION, true); verifyFacts(db); verifySignalSchema(db, true, false, false, false, true); verifyDashboardSchema(db); verifyGitSchema(db); return "v17"; }
+  if (version === V18_SCHEMA_VERSION) { verifyBaseSchema(db, V18_SCHEMA_VERSION, true); verifyFacts(db); verifySignalSchema(db); verifyDashboardSchema(db); verifyGitSchema(db); return "v18"; }
+  if (version === V19_SCHEMA_VERSION) { verifyV19Schema(db); return "v19"; }
+  if (version === V20_SCHEMA_VERSION) { verifyV19Schema(db, V20_SCHEMA_VERSION); return "v20"; }
+  if (version === 4) {
     // Do not treat a relabelled current schema as a migratable legacy store.
     // The v4 execution fact had `state`; v5 has the formal `status` contract.
     const columns = db.prepare("PRAGMA table_info(analytics_execution_fact)").all() as Array<{ name: string }>;
@@ -1256,6 +1264,7 @@ function migrateV11ToV12(db: AnalyticsDb) {
     // Interrupted pre-release stores may contain these objects with a v11
     // marker. Current-schema verification still rejects a non-authoritative DDL.
     db.exec(GIT_TABLE_SQL.replaceAll("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ").replaceAll("CREATE INDEX ", "CREATE INDEX IF NOT EXISTS "));
+    verifyGitSchema(db);
     db.prepare("UPDATE analytics_schema_meta SET schema_version=? WHERE singleton=1").run(V12_SCHEMA_VERSION);
   })();
 }
@@ -1410,8 +1419,16 @@ export function createHistoricalSchemaForTest(db: AnalyticsDb, version: 11 | 12 
   migrateV16ToV17(db);
 }
 
+/** Only bounded diagnostic metadata; never includes paths, SQL, rows or error details. */
+export type AnalyticsDbOpenProgress = {
+  stage: "schema_detection" | "initial_validation" | "migration" | "final_validation";
+  status: "started" | "completed";
+  schemaVersion: AnalyticsSchemaVersion | null;
+  elapsedMs: number;
+};
+
 /** Opens the isolated Analytics store. Production callers are restricted to the Analytics child process. */
-export async function openAnalyticsDb(dataDir: string, nowMs = Date.now(), options?: { testFaultAt?: "v8_after_dashboard_rebuild" | "v13_after_worker_event_rebuild" | "v14_after_fact_identity_rebuild" | "v15_after_source_control_create" | "v16_after_baseline_rewrite" | "v17_after_empty_baseline" | "v18_after_execution_rebuild" | "v19_after_collected_rebuild" | "v20_after_cache_fact_reset" | "v21_after_preparation_columns"; afterFilePinnedForTest?: () => Promise<void> | void }): Promise<AnalyticsDb> {
+export async function openAnalyticsDb(dataDir: string, nowMs = Date.now(), options?: { testFaultAt?: "v8_after_dashboard_rebuild" | "v13_after_worker_event_rebuild" | "v14_after_fact_identity_rebuild" | "v15_after_source_control_create" | "v16_after_baseline_rewrite" | "v17_after_empty_baseline" | "v18_after_execution_rebuild" | "v19_after_collected_rebuild" | "v20_after_cache_fact_reset" | "v21_after_preparation_columns"; afterFilePinnedForTest?: () => Promise<void> | void; onProgress?: (progress: AnalyticsDbOpenProgress) => void }): Promise<AnalyticsDb> {
   const root = await openSecureAnalyticsRoot(dataDir);
   let db: AnalyticsDb | null = null;
   let pinned: FileHandle | null = null;
@@ -1431,30 +1448,49 @@ export async function openAnalyticsDb(dataDir: string, nowMs = Date.now(), optio
     db = new Database(root.path("analytics.sqlite"));
     try { await verifyPinned(); }
     catch (error) { db.close(); db = null; throw error; }
-    const state = inspectSchema(db);
-    if (state === "new") initializeNewSchema(db, nowMs);
-    if (state === "v2") createCollectorSchemaFromV2(db);
-    if (state === "legacy-v3") migrateLegacyV3(db);
-    if (state === "v3") migrateV3Signals(db);
-    if (state === "v4") migrateV4Signals(db);
-    if (state === "v5") migrateV5ToV6(db);
-    if (state === "v6") migrateV6ToV7(db);
-    if (state === "v7") migrateV7ToV8(db);
-    if (state === "v8") migrateV8ToV11(db, nowMs, options?.testFaultAt === "v8_after_dashboard_rebuild" ? "after_dashboard_rebuild" : undefined);
-    if (state === "v9") { migrateV9ToV10(db); migrateV10ToV11(db); }
-    if (state === "v10") migrateV10ToV11(db);
+    let schemaVersion: AnalyticsSchemaVersion | null = null;
+    const runStage = <T>(stage: AnalyticsDbOpenProgress["stage"], action: (database: AnalyticsDb) => T): T => {
+      const startedAt = performance.now();
+      options?.onProgress?.({ stage, status: "started", schemaVersion, elapsedMs: 0 });
+      const result = action(db!);
+      options?.onProgress?.({ stage, status: "completed", schemaVersion, elapsedMs: Math.max(0, Math.round(performance.now() - startedAt)) });
+      return result;
+    };
+    runStage("schema_detection", (database) => { schemaVersion = readSchemaVersion(database); });
+    const state = runStage("initial_validation", (database) => inspectSchema(database, schemaVersion!));
     if (state !== "current") {
-      if (inspectSchema(db) === "v11") migrateV11ToV12(db);
-      if (inspectSchema(db) === "v12") migrateV12ToV13(db, options?.testFaultAt === "v13_after_worker_event_rebuild" ? "after_worker_event_rebuild" : undefined);
-      if (inspectSchema(db) === "v13") migrateV13ToV14(db, options?.testFaultAt === "v14_after_fact_identity_rebuild" ? "after_fact_identity_rebuild" : undefined);
-      if (inspectSchema(db) === "v14") migrateV14ToV15(db, options?.testFaultAt === "v15_after_source_control_create" ? "after_source_control_create" : undefined);
-      if (inspectSchema(db) === "v15") migrateV15ToV16(db, options?.testFaultAt === "v16_after_baseline_rewrite" ? "after_baseline_rewrite" : undefined);
-      if (inspectSchema(db) === "v16") migrateV16ToV17(db, options?.testFaultAt === "v17_after_empty_baseline" ? "after_empty_baseline" : undefined);
-      if (inspectSchema(db) === "v17") migrateV17ToV18(db, options?.testFaultAt === "v18_after_execution_rebuild" ? "after_execution_rebuild" : undefined);
-      if (inspectSchema(db) === "v18") migrateV18ToV19(db, options?.testFaultAt === "v19_after_collected_rebuild" ? "after_collected_rebuild" : undefined);
-      if (inspectSchema(db) === "v19") migrateV19ToV20(db, options?.testFaultAt === "v20_after_cache_fact_reset" ? "after_cache_fact_reset" : undefined);
-      if (inspectSchema(db) === "v20") migrateV20ToV21(db, options?.testFaultAt === "v21_after_preparation_columns" ? "after_preparation_columns" : undefined);
-      verifyCurrentSchema(db);
+      runStage("migration", (database) => {
+        // Advance the already-validated version. Re-inspecting each branch would
+        // repeatedly scan every Fact and receipt before the actual migration.
+        let next: AnalyticsSchemaState = state;
+        if (next === "new") { initializeNewSchema(database, nowMs); next = "current"; }
+        if (next === "v2") { createCollectorSchemaFromV2(database); next = "v11"; }
+        if (next === "legacy-v3") { migrateLegacyV3(database); next = "v11"; }
+        if (next === "v3") { migrateV3Signals(database); next = "v11"; }
+        if (next === "v4") { migrateV4Signals(database); next = "v11"; }
+        if (next === "v5") { migrateV5ToV6(database); next = "v11"; }
+        if (next === "v6") { migrateV6ToV7(database); next = "v11"; }
+        if (next === "v7") { migrateV7ToV8(database); next = "v11"; }
+        if (next === "v8") { migrateV8ToV11(database, nowMs, options?.testFaultAt === "v8_after_dashboard_rebuild" ? "after_dashboard_rebuild" : undefined); next = "v11"; }
+        if (next === "v9") { migrateV9ToV10(database); migrateV10ToV11(database); next = "v11"; }
+        if (next === "v10") { migrateV10ToV11(database); next = "v11"; }
+        // Older layouts have partial preflight checks. Keep the v11 boundary
+        // validation before later migrations can rebuild or retire their tables.
+        if (next === "v11" && state !== "v11") inspectSchema(database, 11);
+        if (next === "v11") { migrateV11ToV12(database); next = "v12"; }
+        if (next === "v12") { migrateV12ToV13(database, options?.testFaultAt === "v13_after_worker_event_rebuild" ? "after_worker_event_rebuild" : undefined); next = "v13"; }
+        if (next === "v13") { migrateV13ToV14(database, options?.testFaultAt === "v14_after_fact_identity_rebuild" ? "after_fact_identity_rebuild" : undefined); next = "v14"; }
+        if (next === "v14") { migrateV14ToV15(database, options?.testFaultAt === "v15_after_source_control_create" ? "after_source_control_create" : undefined); next = "v15"; }
+        if (next === "v15") { migrateV15ToV16(database, options?.testFaultAt === "v16_after_baseline_rewrite" ? "after_baseline_rewrite" : undefined); next = "v16"; }
+        if (next === "v16") { migrateV16ToV17(database, options?.testFaultAt === "v17_after_empty_baseline" ? "after_empty_baseline" : undefined); next = "v17"; }
+        if (next === "v17") { migrateV17ToV18(database, options?.testFaultAt === "v18_after_execution_rebuild" ? "after_execution_rebuild" : undefined); next = "v18"; }
+        if (next === "v18") { migrateV18ToV19(database, options?.testFaultAt === "v19_after_collected_rebuild" ? "after_collected_rebuild" : undefined); next = "v19"; }
+        if (next === "v19") { migrateV19ToV20(database, options?.testFaultAt === "v20_after_cache_fact_reset" ? "after_cache_fact_reset" : undefined); next = "v20"; }
+        if (next === "v20") { migrateV20ToV21(database, options?.testFaultAt === "v21_after_preparation_columns" ? "after_preparation_columns" : undefined); next = "current"; }
+        if (next !== "current") unavailableSchema();
+        schemaVersion = ANALYTICS_SCHEMA_VERSION;
+      });
+      runStage("final_validation", verifyCurrentSchema);
     }
     db.pragma("busy_timeout = 1000");
     db.pragma("foreign_keys = ON");

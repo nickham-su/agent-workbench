@@ -44,16 +44,16 @@ test("invalid query values fail before configuration creation or network and nev
 });
 
 test("successful query sends only normalized server parameters, saves renewal before any output, and does not read stdin", async () => {
-  const query = parseSessionListOptions({ workspace: " id/中文+ ", updatedWithin: "30m", kind: "subtask", status: "running" });
+  const query = parseSessionListOptions({ workspace: "id/中文+", updatedWithin: "30m", kind: "primary", status: "running" });
   const memory = memoryConfig();
   const capture = captureIO("must-not-read-test-token\n");
   let reads = 0;
   capture.io.stdin.read = () => { reads++; throw new Error("Must not read stdin"); };
   let requests = 0;
   const originalWrite = capture.io.stdout.write.bind(capture.io.stdout);
-  capture.io.stdout.write = ((chunk: string | Uint8Array) => {
+  capture.io.stdout.write = ((...args: Parameters<typeof capture.io.stdout.write>) => {
     assert.equal(memory.current().cookie?.value, renewedValue);
-    return originalWrite(chunk);
+    return originalWrite(...args);
   }) as typeof capture.io.stdout.write;
   await listSessions(query, {
     config: memory.store, io: capture.io,
@@ -63,7 +63,7 @@ test("successful query sends only normalized server parameters, saves renewal be
       const url = new URL(path, origin);
       assert.equal(url.pathname, "/api/agent/sessions/query");
       assert.deepEqual([...url.searchParams], [
-        ["workspaceId", query.workspaceId], ["updatedWithinSeconds", "1800"], ["kind", "subtask"], ["status", "running"]
+        ["workspaceId", query.workspaceId], ["updatedWithinSeconds", "1800"], ["kind", "primary"], ["status", "running"]
       ]);
       assert.deepEqual(request, { cookie: base.cookie });
       return response(200, JSON.stringify(queryResponse(query)), ["other=x; Domain=ignored.test; Path=/other", renewedHeader]);
@@ -72,7 +72,7 @@ test("successful query sends only normalized server parameters, saves renewal be
   assert.equal(requests, 1);
   assert.equal(reads, 0);
   assert.equal(memory.writes(), 1);
-  assert.match(capture.output(), /类型：subtask\n状态：running/);
+  assert.match(capture.output(), /类型：primary\n状态：running/);
   assert.match(capture.output(), /查询结束：已输出 1 个 Session。\n$/);
   assert.equal(capture.diagnostic(), "");
 });

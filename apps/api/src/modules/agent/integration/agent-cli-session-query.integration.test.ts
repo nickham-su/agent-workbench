@@ -7,7 +7,7 @@ import path from "node:path";
 import { test, type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import { AUTH_REMEMBER_TTL_MS, createSessionCookieValue, readSessionCookiePayload } from "../../../infra/auth/sessionCookie.js";
-import { createMessageSession } from "../agent-message.store.js";
+import { appendMessage, createMessageSession } from "../agent-message.store.js";
 import { createAgentTestFixture, createTestWorkspace } from "../testkit/agent-testkit.js";
 
 const repoRoot = fileURLToPath(new URL("../../../../../../", import.meta.url));
@@ -43,10 +43,14 @@ async function fixture(t: TestContext, authToken: string | null) {
   const home = path.join(f.dataDir, "cli-home");
   await fs.mkdir(home);
   const app = f.app!;
+  let queryRequests = 0;
+  app.server.on("request", (request) => {
+    if (request.url?.startsWith("/api/agent/sessions/query?")) queryRequests++;
+  });
   const origin = await app.listen({ host: "127.0.0.1", port: 0 });
   const file = path.join(home, ".config/awb/config.json");
   const args = ["session", "list", "--workspace", workspace.id, "--updated-within", "1h"];
-  return { ...f, workspaceId: workspace.id, home, origin, file, args };
+  return { ...f, workspaceId: workspace.id, home, origin, file, args, queryRequests: () => queryRequests };
 }
 
 function privateOutput(result: { stdout: string; stderr: string }, secrets: string[]) {
@@ -56,7 +60,7 @@ function privateOutput(result: { stdout: string; stderr: string }, secrets: stri
   }
 }
 
-test("production CLI initializes auth-off API and returns all records and native counts in UTC", async (t) => {
+test("production CLI initializes auth-off API and returns primary records and native counts in UTC", async (t) => {
   const f = await fixture(t, null);
   const createdAt = Date.now() - 2 * 3600_000;
   const createdIso = new Date(createdAt).toISOString();
@@ -78,22 +82,54 @@ test("production CLI initializes auth-off API and returns all records and native
   const result = await runCli(f.home, f.args, "", "America/New_York");
   assert.equal(result.code, 0);
   assert.equal(result.stderr, "");
-  assert.equal((result.stdout.match(/^Session ID：/gm) ?? []).length, 165);
-  assert.match(result.stdout, /匹配总数：165/);
+  assert.equal((result.stdout.match(/^Session ID：/gm) ?? []).length, 83);
+  assert.match(result.stdout, /匹配总数：83/);
   assert.match(result.stdout, /标题：（空标题）/);
   assert.match(result.stdout, /用户消息累计数：1\n已完成助手消息累计数：1/);
-  assert.equal(result.stdout.split(`创建时间：${createdIso}\n`).length - 1, 165);
+  assert.equal(result.stdout.split(`创建时间：${createdIso}\n`).length - 1, 83);
   assert.ok(result.stdout.includes(`创建时间：${createdIso}\n最近更新时间：`));
   assert.match(result.stdout, /最近更新时间：[^\n]+Z\n/);
-  assert.match(result.stdout, /查询结束：已输出 165 个 Session。\n$/);
+  assert.match(result.stdout, /查询结束：已输出 83 个 Session。\n$/);
   assert.equal(result.stdout.length > 8_000 && result.stdout.length < 200_000, true);
   const after = await fs.stat(f.file);
   assert.equal(after.ino, before.ino);
   assert.equal(after.mtimeMs, before.mtimeMs);
-  const filtered = await runCli(f.home, [...f.args, "--kind", "subtask", "--status", "idle"]);
-  assert.equal(filtered.code, 0);
-  assert.equal(filtered.stderr, "");
-  assert.equal((filtered.stdout.match(/^Session ID：/gm) ?? []).length, 82);
+  const compatible = await runCli(f.home, [...f.args, "--kind", "primary"]);
+  assert.equal(compatible.code, 0);
+  assert.equal((compatible.stdout.match(/^Session ID：/gm) ?? []).length, 83);
+  assert.match(compatible.stdout, /类型 primary/);
+  const beforeRejectedKinds = f.queryRequests();
+  for (const kind of ["subtask", "all"]) {
+    const filtered = await runCli(f.home, [...f.args, "--kind", kind, "--status", "idle"]);
+    assert.equal(filtered.code, 2);
+    assert.equal(filtered.stdout, "");
+    assert.match(filtered.stderr, /primary/);
+    assert.match(filtered.stderr, /已移除/);
+    assert.equal(f.queryRequests(), beforeRejectedKinds);
+  }
+});
+
+test("全面审查L1: production CLI includes hidden, headless and primary Fork sessions but excludes subtask/foreign workspace", async (t) => {
+  const f = await fixture(t, null); const now = Date.now() - 1000;
+  createMessageSession(f.db, { id: "source", workspaceId: f.workspaceId, title: "source", kind: "primary", createdAt: now - 3600_000 });
+  appendMessage(f.db, { id: "source-message", workspaceId: f.workspaceId, sessionId: "source", expectedHeadMessageId: null, expectedRevision: 0, type: "user", status: "completed", parts: [{ id: "source-part", position: 0, type: "text", text: "inherited fixture" }], createdAt: now });
+  createMessageSession(f.db, { id: "primary-fork", workspaceId: f.workspaceId, title: "fork", kind: "primary", createdAt: now, forkedFromSessionId: "source", forkedFromMessageId: "source-message", headMessageId: "source-message" });
+  for (const id of ["hidden", "headless"]) createMessageSession(f.db, { id, workspaceId: f.workspaceId, title: "", kind: "primary", createdAt: now });
+  createMessageSession(f.db, { id: "subtask", workspaceId: f.workspaceId, title: "", kind: "subtask", createdAt: now });
+  const foreign = await createTestWorkspace(f, { title: "foreign workspace" });
+  createMessageSession(f.db, { id: "foreign", workspaceId: foreign.id, title: "", kind: "primary", createdAt: now });
+  f.db.prepare("insert into workspace_session_tab_state (workspace_id,session_id,visible,updated_at) values (?, ?, 0, ?)").run(f.workspaceId, "hidden", now);
+  assert.equal((await runCli(f.home, ["login", "--url", f.origin])).code, 0);
+  const result = await runCli(f.home, [...f.args, "--json"]); assert.equal(result.code, 0, result.stderr);
+  const data = JSON.parse(result.stdout).data;
+  assert.deepEqual(data.items.map((item: { id: string }) => item.id).sort(), ["headless", "hidden", "primary-fork", "source"]);
+  assert.equal(data.count, 4);
+  for (const item of data.items) {
+    assert.equal(item.kind, "primary");
+    assert.equal(item.userMessageCount, item.id === "source" ? 1 : 0);
+    assert.equal(item.completedAssistantMessageCount, 0);
+    if (item.id === "primary-fork") assert.equal(item.createdAt, now);
+  }
 });
 
 test("production CLI persists actual threshold renewals before success and business errors, but leaves rejected credentials unchanged", async (t) => {
