@@ -1,3 +1,4 @@
+import { textField, messageIds } from "./helpers.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { agentSession, jsonResult } from "./agent-fixture.js";
@@ -49,22 +50,17 @@ function controls(options: { kind?: string; busy?: boolean; conflict?: boolean; 
 test("normal cancel output reports the returned state without inventing a cancelled Run", async () => {
   for (const busy of [false, true]) {
     const expectedStatus = busy ? "running" : "idle";
-    const human = await executeFollow(["cancel", "-w", "w", "-s", "s"], controls({ busy }), false);
+    const human = await executeFollow(["cancel", "-w", "w", "-s", "s"], controls({ busy }));
     assert.equal(human.code, 0, human.stderr);
     assert.equal(human.stdout, `取消请求已处理。\n状态：${expectedStatus}\n`);
     assert.equal(human.stderr, "");
     assert.equal(human.requests.length, 2);
-    const json = await executeFollow(["cancel", "-w", "w", "-s", "s"], controls({ busy }));
-    assert.equal(json.code, 0, json.stderr);
-    assert.deepEqual(JSON.parse(json.stdout), {
-      schemaVersion: 1, ok: true, command: "session cancel",
-      data: { workspaceId: "w", sessionId: "s", requested: true, status: expectedStatus }
-    });
+
   }
 });
 
 test("normal compact output reports acceptance and keeps all Run identities", async () => {
-  const result = await executeFollow(["compact", "-w", "w", "-s", "s"], controls(), false);
+  const result = await executeFollow(["compact", "-w", "w", "-s", "s"], controls());
   assert.equal(result.code, 0, result.stderr);
   assert.match(result.stdout, /^压缩请求已受理。\n/);
   assert.doesNotMatch(result.stdout, /不代表|不是排队|已经改变上下文/);
@@ -81,7 +77,7 @@ test("A-CONTROL-CANCEL-TYPE/RACE: one primary precheck and one cancel, subtask r
   for (const kind of ["primary", "subtask"]) {
     const result = await executeFollow(["cancel", "-w", "w", "-s", "s"], controls({ kind }));
     assert.equal(result.code, kind === "primary" ? 0 : 2, result.stderr);
-    if (kind === "primary") assert.deepEqual(JSON.parse(result.stdout).data, { workspaceId: "w", sessionId: "s", requested: true, status: "idle" });
+    if (kind === "primary") assert.match(result.stdout, /取消请求已处理。\n状态：idle/);
     assert.equal(result.requests.filter(({ url }) => url.pathname === "/api/agent/sessions/s").length, 1);
     assert.equal(result.requests.filter(({ request }) => request.method === "POST").length, kind === "primary" ? 1 : 0);
     assert.equal(result.requests.filter(({ url }) => url.pathname.endsWith("/run-state")).length, 0);
@@ -93,7 +89,7 @@ test("A-COMPACT-TYPE-BUSY/EMPTY: local boundaries and backend conflict never que
     const result = await executeFollow(["compact", "-w", "w", "-s", "s"], controls(options));
     assert.equal(result.code, "kind" in options ? 2 : 6, result.stderr);
     assert.equal(result.requests.filter(({ request }) => request.method === "POST").length, "conflict" in options || "empty" in options ? 1 : 0);
-    if ("empty" in options) assert.equal(JSON.parse(result.stderr).error.serviceCode, "AGENT_COMPACTION_EMPTY");
+    if ("empty" in options) assert.equal(textField(result.stderr, "serviceCode"), "AGENT_COMPACTION_EMPTY");
   }
 });
 
@@ -103,15 +99,15 @@ test("A-COMPACT-ACCEPT/SKIP/FAIL: default exits on acceptance, follow uses run r
   for (const resultCode of ["compaction_completed", "compaction_not_needed", "compaction_no_progress", "compaction_oversized_tail", "compaction_media_requires_resend", "compaction_pending_tools", "compaction_provider_unavailable", "compaction_failed"]) {
     const failed = ["compaction_pending_tools", "compaction_provider_unavailable", "compaction_failed"].includes(resultCode);
     const result = await executeFollow(["compact", "-w", "w", "-s", "s", "-f"], controls({ status: failed ? "failed" : "completed", resultCode }));
-    assert.equal(result.code, failed ? 8 : 0, result.stderr); assert.equal(result.events[0].type, "metadata"); assert.equal(result.events[0].agentId, "first");
-    assert.equal(result.events.at(-1)?.complete, true); assert.equal(result.events.at(-1)?.resultCode, resultCode); assert.equal(result.events.filter((event) => event.type === "message").length, 0);
+    assert.equal(result.code, failed ? 8 : 0, result.stderr); assert.equal(textField(result.stdout, "agentId"), "first");
+    assert.equal(textField(result.stdout, "complete") === "true", true); assert.equal(textField(result.stdout, "resultCode"), resultCode); assert.equal(messageIds(result.stdout).length, 0);
   }
 });
 
 test("A-COMPACT-DEDUP: fresh request cannot prove earlier Agent; preserve accepted run instead of faking skip success", async () => {
   const result = await executeFollow(["compact", "-w", "w", "-s", "s", "-f"], controls({ dedup: true }));
-  assert.equal(result.code, 6); const error = JSON.parse(result.stderr).error;
-  assert.equal(error.effect, "accepted"); assert.equal(error.context.runId, "r"); assert.equal(error.context.agentId, undefined);
+  assert.equal(result.code, 6); const error = result.stderr;
+  assert.equal(textField(error, "effect"), "accepted"); assert.equal(textField(error, "runId"), "r"); assert.equal(textField(error, "agentId"), undefined);
   assert.equal(result.stdout, ""); assert.equal(result.requests.filter(({ request }) => request.method === "POST").length, 1);
 });
 

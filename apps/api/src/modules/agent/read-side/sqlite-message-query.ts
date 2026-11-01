@@ -1,5 +1,6 @@
 import type {
   AgentCompactionMessage,
+  AgentHeadReplacementProof,
   AgentMessage,
   AgentMessageRow,
   AgentOrdinaryMessage,
@@ -20,6 +21,23 @@ import type { Db } from "../../../infra/db/db.js";
 import { HttpError } from "../../../app/errors.js";
 
 const MESSAGE_PART_QUERY_CHUNK_SIZE = 500;
+const MAX_HEAD_REPLACEMENT_EDGES = 256;
+
+type TimelineInput = {
+  workspaceId: string;
+  sessionId: string;
+  mode?: "snapshot" | "delta" | "before";
+  sinceRevision?: number;
+  knownHeadMessageId?: string;
+  knownContextRootMessageId?: string | null;
+  beforeMessageId?: string;
+  limit?: number;
+};
+type TimelinePage = AgentTimelineDeltaResponse & { hasMore: boolean; nextBeforeMessageId: string | null };
+type ReplacementHead = Pick<AgentMessageRow,
+  "id" | "workspaceId" | "previousMessageId" | "replacesMessageId" | "depth" |
+  "type" | "status" | "originSessionId" | "originRunId" | "updatedRevision"
+>;
 
 type HydratedMessage = AgentMessageRow & { inCurrentOperationRange?: boolean; parts: AgentMessagePart[] };
 
@@ -180,16 +198,13 @@ function toRunState(row: RunStateRow): AgentMessageSessionRunState {
 export class SqliteMessageQuery {
   constructor(private readonly db: Db) {}
 
-  getTimeline(input: {
-    workspaceId: string;
-    sessionId: string;
-    mode?: "snapshot" | "delta" | "before";
-    sinceRevision?: number;
-    knownHeadMessageId?: string;
-    knownContextRootMessageId?: string | null;
-    beforeMessageId?: string;
-    limit?: number;
-  }): AgentTimelineDeltaResponse & { hasMore: boolean; nextBeforeMessageId: string | null } {
+  getTimeline(input: TimelineInput): TimelinePage {
+    // A single deferred read transaction binds session, pages, Parts, executions
+    // and replacement evidence to one SQLite snapshot; nothing awaits inside it.
+    return this.db.transaction(() => this.readTimeline(input))();
+  }
+
+  private readTimeline(input: TimelineInput): TimelinePage {
     const session = this.requireSession(input.workspaceId, input.sessionId);
     const mode = input.mode ?? (input.sinceRevision === undefined ? "snapshot" : "delta");
     const limit = Math.max(1, Math.min(500, input.limit ?? 100));
@@ -219,7 +234,92 @@ export class SqliteMessageQuery {
     const toolExecutions = mode === "delta" && !timelineReset
       ? this.listTimelineExecutions(session, input.sinceRevision)
       : this.listTimelineExecutionsForMessages(page.map((message) => message.id));
-    return { session, timelineReset, messages, toolExecutions, hasMore, nextBeforeMessageId: page[0]?.id ?? null };
+    const headReplacement = mode === "delta" && (rootChanged || !knownHeadStillVisible)
+      ? this.proveHeadReplacement(session, input.knownHeadMessageId, input.sinceRevision)
+      : undefined;
+    return {
+      session, timelineReset, messages, toolExecutions, hasMore, nextBeforeMessageId: page[0]?.id ?? null,
+      ...(headReplacement ? { headReplacement } : {})
+    };
+  }
+
+  private replacementHead(workspaceId: string, messageId: string): ReplacementHead | undefined {
+    // Never hydrate hidden Parts, provider replay or tool data while proving identity.
+    return this.db.prepare(`
+      select id, workspace_id as workspaceId, previous_message_id as previousMessageId,
+             replaces_message_id as replacesMessageId, depth, type, status,
+             origin_session_id as originSessionId, origin_run_id as originRunId,
+             updated_revision as updatedRevision
+      from agent_message where id = ? and workspace_id = ?
+    `).get(messageId, workspaceId) as ReplacementHead | undefined;
+  }
+
+  private visibleReplacementCandidate(session: AgentSessionMessageState, depth: number): ReplacementHead | undefined {
+    if (!session.headMessageId) return undefined;
+    // Stop at the requested slot, not at the context root or the current tail page.
+    // Strictly decreasing depths also bound traversal of a corrupt previous chain.
+    return this.db.prepare(`
+      with recursive slot_chain(id, workspace_id, previous_message_id, replaces_message_id, depth, type, status,
+                                origin_session_id, origin_run_id, updated_revision) as (
+        select id, workspace_id, previous_message_id, replaces_message_id, depth, type, status,
+               origin_session_id, origin_run_id, updated_revision
+        from agent_message where id = @headMessageId and workspace_id = @workspaceId and depth >= @depth
+        union all
+        select message.id, message.workspace_id, message.previous_message_id, message.replaces_message_id,
+               message.depth, message.type, message.status, message.origin_session_id, message.origin_run_id,
+               message.updated_revision
+        from agent_message message join slot_chain chain on chain.previous_message_id = message.id
+        where message.workspace_id = @workspaceId and chain.depth > @depth and message.depth = chain.depth - 1
+      )
+      select id, workspace_id as workspaceId, previous_message_id as previousMessageId,
+             replaces_message_id as replacesMessageId, depth, type, status,
+             origin_session_id as originSessionId, origin_run_id as originRunId,
+             updated_revision as updatedRevision
+      from slot_chain where depth = @depth
+    `).get({ ...this.displayChainParams(session), depth }) as ReplacementHead | undefined;
+  }
+
+  private proveHeadReplacement(
+    session: AgentSessionMessageState, knownHeadMessageId: string | undefined, sinceRevision: number | undefined
+  ): AgentHeadReplacementProof | undefined {
+    if (!knownHeadMessageId || !Number.isSafeInteger(sinceRevision) || sinceRevision! < 0 || sinceRevision! > session.revision) return undefined;
+    const from = this.replacementHead(session.workspaceId, knownHeadMessageId);
+    if (!from || from.type !== "assistant" || from.status !== "superseded" || from.originSessionId !== session.id ||
+      !from.originRunId || !Number.isSafeInteger(from.depth) || from.depth < 0 ||
+      (from.previousMessageId !== null && !from.previousMessageId) ||
+      !Number.isSafeInteger(from.updatedRevision) || from.updatedRevision <= sinceRevision! || from.updatedRevision > session.revision) return undefined;
+
+    const sameSlot = (head: ReplacementHead) => head.workspaceId === session.workspaceId && head.type === "assistant" &&
+      head.originSessionId === session.id && head.originRunId === from.originRunId &&
+      head.depth === from.depth && head.previousMessageId === from.previousMessageId &&
+      Number.isSafeInteger(head.updatedRevision) && head.updatedRevision >= 0 && head.updatedRevision <= session.revision;
+    const to = this.visibleReplacementCandidate(session, from.depth);
+    if (!to || to.id === from.id || !sameSlot(to) ||
+      (to.status !== "streaming" && to.status !== "completed" && to.status !== "failed" && to.status !== "cancelled")) return undefined;
+
+    const visited = new Set([to.id]);
+    let child = to;
+    for (let count = 1; count <= MAX_HEAD_REPLACEMENT_EDGES; count++) {
+      const parentId = child.replacesMessageId;
+      if (!parentId || visited.has(parentId)) return undefined;
+      // The last allowed edge must reach from. Do not read a 257th edge's head;
+      // reuse the authorized from row instead of reading it twice at the boundary.
+      if (count === MAX_HEAD_REPLACEMENT_EDGES && parentId !== from.id) return undefined;
+      const parent = parentId === from.id ? from : this.replacementHead(session.workspaceId, parentId);
+      if (!parent || !sameSlot(parent) || parent.status !== "superseded" ||
+        (child === to ? child.updatedRevision < parent.updatedRevision : child.updatedRevision <= parent.updatedRevision)) return undefined;
+      if (parent.id === from.id) {
+        return {
+          workspaceId: session.workspaceId, sessionId: session.id, runId: from.originRunId,
+          fromMessageId: from.id, toMessageId: to.id, previousMessageId: from.previousMessageId, depth: from.depth,
+          fromSupersededRevision: from.updatedRevision, toUpdatedRevision: to.updatedRevision,
+          toStatus: to.status, replacementCount: count, atRevision: session.revision
+        };
+      }
+      visited.add(parent.id);
+      child = parent;
+    }
+    return undefined;
   }
 
   getMessage(input: { workspaceId: string; sessionId: string; messageId: string }): AgentCompactionMessage | AgentOrdinaryMessage {

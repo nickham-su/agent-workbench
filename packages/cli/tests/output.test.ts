@@ -1,21 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Writable } from "node:stream";
-import { displayBody, writeEvent, writeSuccess, writeText } from "../src/output.js";
+import { displayBody, writeSuccess, writeText } from "../src/output.js";
 import { CliError } from "../src/errors.js";
 import { captureIO } from "./helpers.js";
 
-test("A-OUTPUT-TERMINAL-SAFE: normal body newlines survive, controls escape, JSON/JSONL stay original", async () => {
+test("A-OUTPUT-TERMINAL-SAFE: one natural text mode escapes controls and preserves body newlines", async () => {
   const text = "第一行\r\nsecond\nstandalone\r\u001b[31m\t\\\u0000\u0085";
   const human = displayBody(text);
   assert.equal(human, "第一行\nsecond\nstandalone\\r\\u001b[31m\\t\\\\\\u0000\\u0085");
   assert.equal(human.includes("\u001b"), false);
   const capture = captureIO();
-  await writeSuccess(capture.io, true, "sample", { text }, human);
-  assert.equal(JSON.parse(capture.output()).data.text, text);
-  const events = captureIO();
-  await writeEvent(events.io, { type: "message", message: { parts: [{ type: "text", text }] } });
-  assert.equal(JSON.parse(events.output()).message.parts[0].text, text);
+  await writeSuccess(capture.io, human);
+  assert.equal(capture.output(), human);
 });
 
 test("output awaits slow Writable backpressure instead of reporting success before completion", async () => {

@@ -11,6 +11,5 @@ export async function listSessions(query: SessionListQuery, dependencies: Sessio
   const response = await api.json(`/api/agent/sessions/query?${parameters}`, {
     phase: "history", context: { workspaceId: query.workspaceId }, validate: (value) => validateSessionQueryResponse(value, query)
   });
-  const { total, ...data } = response;
-  await writeSuccess(dependencies.io, Boolean(dependencies.json), "session list", { ...data, count: total }, renderSessionList(response, query.duration), { phase: "history", effect: "not_applicable", context: { workspaceId: query.workspaceId } });
+  await writeSuccess(dependencies.io, renderSessionList(response, query.duration), { phase: "history", effect: "not_applicable", context: { workspaceId: query.workspaceId } });
 }

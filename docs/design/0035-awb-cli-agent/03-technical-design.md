@@ -1,5 +1,7 @@
 # 技术设计
 
+> **历史基线，部分规则已被替代：** CLI 对外 JSON/JSONL、`--json`、累计全文 upsert／终态重打、零只读重试，以及草稿合法替换即失败的规则，由 [0036 设计与实施](../0036-cli-natural-output-and-resilient-follow/README.md) 替代。0036 还增加最小只读 API 替换证明支撑；本文件保留当时的技术背景和验收记录，不代表当前输出契约。未变的内部 HTTP/config JSON、输入／权限／下载安全及业务语义继续有效。
+
 ## 实施边界
 
 - 实现薄 HTTP 客户端，不导入 API service、不读取 SQLite、不调用内部 SSE/Worker 控制面。

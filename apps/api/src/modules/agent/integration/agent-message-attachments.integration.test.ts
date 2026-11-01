@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { test, type TestContext } from "node:test";
+import type { ModelMessage } from "ai";
 import { AgentApiEndpoints } from "@agent-workbench/shared/internal-contracts/agent-api";
 import {
   agentAttachmentStorageKey,
@@ -616,12 +617,14 @@ test("未认证附件请求优先返回 401，不探测可见性或不安全文�
     assert.equal(response.statusCode, 401);
   }
 });
-test("真实压缩提交后用户图与同 Run 工具图超过 20 MiB 在 SDK 请求前失败", async (t: TestContext) => {
+test("真实压缩后混合媒体合计超过 20 MiB 但每图合法仍进入 SDK", async (t: TestContext) => {
   const fixture = await createIntegrationFixture(t, { agentWorkerConcurrency: 0 });
   const session = await createSession(fixture.app, fixture.workspaceId);
+  const userBytes = pngBytes(9 * 1024 * 1024);
+  // This is one legal upload; historical tool media is not part of the upload's 20 MiB budget.
   const uploaded = await fixture.app.inject({ method: "POST", url: `/api/agent/sessions/${session.id}/messages`,
     ...multipartMessage({ workspaceId: fixture.workspaceId, clientRequestId: "mixed-compaction-budget",
-      text: "inspect", images: [{ filename: "user.png", bytes: pngBytes(9 * 1024 * 1024) }] }) });
+      text: "inspect", images: [{ filename: "user.png", bytes: userBytes }] }) });
   assert.equal(uploaded.statusCode, 201, uploaded.body);
   const { messageId, runId } = uploaded.json() as { messageId: string; runId: string };
   const workspace = getWorkspace(fixture.db, fixture.workspaceId)!;
@@ -633,6 +636,7 @@ test("真实压缩提交后用户图与同 Run 工具图超过 20 MiB 在 SDK �
     workspacePath: workspace.path, workspaceRepoDirNames: [], inputText: "inspect" };
   const paths = ["screens/first.png", "screens/second.png"];
   const sizes = [7 * 1024 * 1024, 5 * 1024 * 1024];
+  const toolBytes = sizes.map(pngBytes);
   const calls = paths.map((imagePath) => ({ id: newSortableId("part"), position: paths.indexOf(imagePath),
     type: "tool_call" as const, toolName: "view_image", input: { path: imagePath }, providerToolCallId: newSortableId("call") }));
   const executions = calls.map((call) => ({ id: newSortableId("exec"), callPartId: call.id,
@@ -641,9 +645,9 @@ test("真实压缩提交后用户图与同 Run 工具图超过 20 MiB 在 SDK �
   for (const [index, imagePath] of paths.entries()) {
     const fullPath = path.join(workspace.path, imagePath);
     await fs.mkdir(path.dirname(fullPath), { recursive: true });
-    await fs.writeFile(fullPath, pngBytes(sizes[index]!));
+    await fs.writeFile(fullPath, toolBytes[index]!);
   }
-  let sdkRequests = 0;
+  const sdkRequests: Array<{ messages: ModelMessage[] }> = [];
   const runner = new AgentRunner({
     async updateToolExecution(payload: Record<string, unknown>) {
       const response = await injectJson(fixture.app, { method: AgentApiEndpoints.updateToolExecution.method,
@@ -657,7 +661,14 @@ test("真实压缩提交后用户图与同 Run 工具图超过 20 MiB 在 SDK �
     async completeTerminalAssistant() { return { result: "updated" }; },
   } as any, {} as any, { info() {}, warn() {}, error() {} }, 1, {
     attachmentStorage: createAgentAttachmentStorage(),
-    streamText: (() => { sdkRequests++; throw new Error("SDK must not be called"); }) as any,
+    streamText: ((request: (typeof sdkRequests)[number]) => {
+      sdkRequests.push(request);
+      return { fullStream: (async function* () {
+        yield { type: "text-delta", text: "saw all three images" };
+        yield { type: "raw", rawValue: { type: "response.completed", response: { output: [] } } };
+        yield { type: "finish" };
+      })() };
+    }) as any,
   });
   for (const [index, call] of calls.entries()) {
     await executeToolForTest(runner, { profile, run, tool: {
@@ -682,7 +693,49 @@ test("真实压缩提交后用户图与同 Run 工具图超过 20 MiB 在 SDK �
   assert.match(prompt.body, /"type":"attachment_ref"/);
   assert.equal((prompt.body.match(/"type":"image_ref"/g) ?? []).length, 2);
   (runner as any).toolRegistry.listTools = async () => [];
-  await assert.rejects((runner as any).runModelStep({ profile, run, context: prompt.json(), step: 1,
-    signal: new AbortController().signal, repeatedToolCallCounter: new Map() }), /20 MiB/);
-  assert.equal(sdkRequests, 0);
+  const execute = () => (runner as any).runModelStep({ profile, run, context: prompt.json(), step: 1,
+    signal: new AbortController().signal, repeatedToolCallCounter: new Map() });
+  await execute();
+  assert.equal(sdkRequests.length, 1);
+  const messages = sdkRequests[0]!.messages;
+  assert.deepEqual(messages.map((message) => message.role), ["system", "user", "assistant", "tool"]);
+  const user = messages[1]!;
+  assert.equal(user.role, "user");
+  assert.ok(Array.isArray(user.content));
+  const files = user.content.filter((part) => part.type === "file");
+  assert.equal(files.length, 1);
+  assert.equal(files[0]!.filename, "user.png");
+  assert.equal(files[0]!.mediaType, "image/png");
+  assert.ok(files[0]!.data instanceof Uint8Array);
+  assert.deepEqual(Buffer.from(files[0]!.data), userBytes);
+  const assistantMessage = messages[2]!;
+  assert.equal(assistantMessage.role, "assistant");
+  assert.ok(Array.isArray(assistantMessage.content));
+  assert.deepEqual(assistantMessage.content.filter((part) => part.type === "tool-call")
+    .map((part) => part.toolCallId), calls.map((call) => call.providerToolCallId));
+  const tool = messages[3]!;
+  assert.equal(tool.role, "tool");
+  assert.equal(tool.content.length, 2);
+  const mediaBytes = tool.content.map((result, index) => {
+    assert.equal(result.toolName, "view_image");
+    assert.equal(result.toolCallId, calls[index]!.providerToolCallId);
+    assert.equal(result.output.type, "content");
+    assert.equal(result.output.value.length, 1);
+    const media = result.output.value[0]!;
+    assert.equal(media.type, "media");
+    assert.equal(media.mediaType, "image/png");
+    const decoded = Buffer.from(media.data, "base64");
+    assert.deepEqual(decoded, toolBytes[index]);
+    return decoded;
+  });
+  assert.ok(userBytes.length + mediaBytes.reduce((sum, bytes) => sum + bytes.length, 0) > 20 * 1024 * 1024);
+  assert.ok([userBytes, ...mediaBytes].every((bytes) => bytes.length <= 10 * 1024 * 1024));
+
+  await t.test("真实上传并压缩后用户附件缺失仍在 SDK 请求前失败，不套用工具图占位", async () => {
+    const attachment = fixture.db.prepare("select attachment_id as id from agent_message_part where message_id = ? and type = 'image'")
+      .get(messageId) as { id: string };
+    await fs.rm(workspaceAttachmentFilePath(fixture, attachment.id));
+    await assert.rejects(execute(), /cannot read a valid user image in this Workspace/);
+    assert.equal(sdkRequests.length, 1, "missing user attachment must fail before another SDK request");
+  });
 });

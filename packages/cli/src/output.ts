@@ -1,5 +1,5 @@
 import type { Writable } from "node:stream";
-import { CliError, errorDiagnostic, errorObject, withErrorDetails, type ErrorDetails } from "./errors.js";
+import { CliError, errorDiagnostic, withErrorDetails, type ErrorDetails } from "./errors.js";
 import { escapeDisplayText } from "./session-list-output.js";
 import type { CliIO } from "./token-input.js";
 
@@ -26,40 +26,47 @@ export async function writeText(stream: Writable, text: string): Promise<void> {
   });
 }
 export function displayBody(text: string): string {
-  return text.replace(/\r\n/g, "\n").split("\n").map(escapeDisplayText).join("\n");
+  return text.replace(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g, "\ufffd").replace(/\r\n/g, "\n").split("\n").map(escapeDisplayText).join("\n");
 }
-export async function writeSuccess(io: CliIO, json: boolean, command: string, data: unknown, human: string, details: ErrorDetails = {}): Promise<void> {
-  try { await writeText(io.stdout, json ? `${JSON.stringify({ schemaVersion: 1, ok: true, command, data })}\n` : human); }
+export async function writeSuccess(io: CliIO, human: string, details: ErrorDetails = {}): Promise<void> {
+  try { await writeText(io.stdout, human); }
   catch (error) { throw withErrorDetails(error, details); }
 }
-export async function writeEvent(io: CliIO, event: Record<string, unknown>): Promise<void> {
-  await writeText(io.stdout, `${JSON.stringify({ schemaVersion: 1, ...event })}\n`);
+export async function writeFailure(io: CliIO, error: CliError): Promise<void> {
+  await writeDiagnostic(io.stderr, errorDiagnostic(error));
 }
-export async function writeFailure(io: CliIO, json: boolean, error: CliError): Promise<void> {
-  // Only the final diagnostic is best effort. Never replace the operation's error
-  // or hold its exit hostage to an unread stderr. Normal output uses writeText.
-  const alreadyClosed = io.stderr.closed;
-  await new Promise<void>((resolve) => {
+/** Bounded best effort for diagnostics only; business stdout must use writeText. */
+export async function writeDiagnostic(stream: Writable, text: string, signal?: AbortSignal): Promise<boolean> {
+  const alreadyClosed = stream.closed;
+  return new Promise<boolean>((resolve) => {
     let settled = false;
-    const cleanup = () => { io.stderr.removeListener("error", onError); io.stderr.removeListener("close", onClose); };
-    const finish = () => { if (settled) return; settled = true; clearTimeout(timer); resolve(); };
+    const cleanup = () => {
+      stream.removeListener("error", onError); stream.removeListener("close", onClose);
+      signal?.removeEventListener("abort", abandon);
+    };
+    const finish = (written = false) => {
+      if (settled) return;
+      settled = true; clearTimeout(timer); signal?.removeEventListener("abort", abandon); resolve(written);
+    };
     const abandon = () => {
       if (settled) return;
       finish();
       // Destroy without an error: late write callbacks cannot emit an unhandled
       // write error. Keep the guard until destruction completes (or reports error).
       // An already-closed stream will not emit another close; a closing one still needs the guard.
-      try { io.stderr.destroy(); if (alreadyClosed) cleanup(); } catch { cleanup(); }
+      try { stream.destroy(); if (alreadyClosed) cleanup(); } catch { cleanup(); }
     };
     const onError = () => { abandon(); cleanup(); };
     const onClose = () => { finish(); cleanup(); };
     const timer = setTimeout(abandon, 250);
-    io.stderr.on("error", onError); io.stderr.once("close", onClose);
+    stream.on("error", onError); stream.once("close", onClose);
+    signal?.addEventListener("abort", abandon, { once: true });
+    if (signal?.aborted) { abandon(); return; }
     try {
-      io.stderr.write(json ? `${JSON.stringify(errorObject(error))}\n` : errorDiagnostic(error), (failure) => {
+      stream.write(text, (failure) => {
         if (settled) return;
         if (failure) abandon();
-        else { finish(); cleanup(); }
+        else { finish(true); cleanup(); }
       });
     } catch { abandon(); }
   });

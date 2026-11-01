@@ -75,3 +75,17 @@ export async function runBuiltCli(args: string[], home: string, input = ""): Pro
   const [code] = await once(child, "close");
   return { code, stdout, stderr };
 }
+
+/** Assert individual stable diagnostic/business fields, not a reverse JSON protocol. */
+export function textField(text: string, key: string): string | undefined {
+  const label: Record<string, string> = { code: "错误码", phase: "阶段", help: "帮助", workspaceId: "Workspace", sessionId: "Session ID", runId: "Run ID", agentId: "Agent ID", messageId: "用户消息 ID" };
+  if (key === "category") return /^\[([^\]]+)\]/m.exec(text)?.[1];
+  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pair = new RegExp(`(?:^|[； \\n])${escaped}=([^； \\n]+)`, "m").exec(text)?.[1];
+  if (pair !== undefined) return pair;
+  const title = (label[key] ?? key).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^${title}：([^；\\n]*)`, "m").exec(text)?.[1];
+}
+export function messageIds(text: string): string[] {
+  return [...text.matchAll(/^消息 ID：([^\n]+)$/gm)].map((match) => match[1]);
+}

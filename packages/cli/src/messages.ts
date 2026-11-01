@@ -1,19 +1,21 @@
-import type { AgentMessageStatus, AgentMessageType, AgentSessionRecord } from "@agent-workbench/shared";
+import type { AgentHeadReplacementProof, AgentMessageStatus, AgentMessageType, AgentSessionRecord } from "@agent-workbench/shared";
 import { AgentApi, sessionRecord } from "./agent-api.js";
 import type { ReadCommandDependencies } from "./discovery.js";
 import { CliError, isRecord, responseError, withErrorDetails } from "./errors.js";
-import { displayBody, writeSuccess } from "./output.js";
-import { escapeDisplayText } from "./session-list-output.js";
+import { writeText } from "./output.js";
+import { MessageRenderer } from "./message-render.js";
 import { encodeId, isCount, isId, isTimestamp, validateId } from "./validation.js";
 
 export type VisiblePart = { type: "text"; text: string } | { type: "image"; attachmentId: string; mediaType: "image/png" | "image/jpeg" | "image/webp"; filename: string };
+export type PartIdentity = { id: string; position: number; updatedRevision: number };
+export type LayoutPart = (PartIdentity & VisiblePart) | (PartIdentity & { type: "hidden"; kind: "reasoning" | "tool_call" });
 export interface MessageView {
   id: string; type: AgentMessageType; status: AgentMessageStatus; originSessionId: string | null; originRunId: string | null;
-  previousMessageId: string | null; depth: number; updatedRevision: number; createdAt: number; updatedAt: number; parts: VisiblePart[];
+  previousMessageId: string | null; depth: number; updatedRevision: number; createdAt: number; updatedAt: number; parts: VisiblePart[]; layoutParts: LayoutPart[];
 }
 /** Internal chain records keep even invisible rows, but never reasoning or tool input. */
 export interface TimelineMessage extends MessageView { replacesMessageId: string | null; }
-export interface TimelinePage { session: AgentSessionRecord; timelineReset: boolean; messages: TimelineMessage[]; hasMore: boolean; nextBeforeMessageId: string | null; }
+export interface TimelinePage { session: AgentSessionRecord; timelineReset: boolean; messages: TimelineMessage[]; hasMore: boolean; nextBeforeMessageId: string | null; headReplacement?: AgentHeadReplacementProof; }
 export type MessageSelection = { mode: "last"; count: number } | { mode: "after"; messageId: string };
 export interface HistoryFrame {
   workspaceId: string; sessionId: string;
@@ -27,6 +29,7 @@ const messageTypes = new Set(["user", "assistant", "system", "compaction", "runt
 const messageStatuses = new Set(["streaming", "completed", "failed", "cancelled", "superseded"]);
 export function parseMessage(value: unknown, workspaceId: string): TimelineMessage {
   if (!isRecord(value) || !isId(value.id) || value.workspaceId !== workspaceId || !nullableId(value.previousMessageId)
+    || value.previousMessageId === value.id
     || !nullableId(value.replacesMessageId) || !nullableId(value.originSessionId) || !nullableId(value.originRunId)
     || !isCount(value.depth) || !isCount(value.updatedRevision) || !isTimestamp(value.createdAt) || !isTimestamp(value.updatedAt)
     || !messageTypes.has(value.type as string) || !messageStatuses.has(value.status as string) || !Array.isArray(value.parts)) throw responseError("消息响应身份或结构无效。");
@@ -34,25 +37,28 @@ export function parseMessage(value: unknown, workspaceId: string): TimelineMessa
     || value.parts.length !== 1 || !isRecord(value.parts[0]) || value.parts[0].type !== "text" || value.parts[0].position !== 0 || typeof value.parts[0].text !== "string" || !value.parts[0].text)) throw responseError("压缩消息结构无效。");
   const ids = new Set<string>();
   const positions = new Set<number>();
-  const parts: { position: number; part: VisiblePart }[] = [];
+  const layoutParts: LayoutPart[] = [];
   for (const item of value.parts) {
     if (!isRecord(item) || !isId(item.id) || item.messageId !== value.id || !isCount(item.position) || !isCount(item.updatedRevision)
-      || !isTimestamp(item.createdAt) || !isTimestamp(item.updatedAt) || ids.has(item.id) || positions.has(item.position)) throw responseError("消息内容身份、顺序或版本无效。");
+      || !isTimestamp(item.createdAt) || !isTimestamp(item.updatedAt) || item.updatedRevision > value.updatedRevision || ids.has(item.id) || positions.has(item.position)) throw responseError("消息内容身份、顺序或版本无效。");
     ids.add(item.id); positions.add(item.position);
+    const identity = { id: item.id, position: item.position, updatedRevision: item.updatedRevision };
     if (item.type === "text" || item.type === "reasoning") {
       if (typeof item.text !== "string") throw responseError("消息文本结构无效。");
-      if (item.type === "text") parts.push({ position: item.position, part: { type: "text", text: item.text } });
+      layoutParts.push(item.type === "text" ? { ...identity, type: "text", text: item.text } : { ...identity, type: "hidden", kind: "reasoning" });
     } else if (item.type === "image") {
       if (!isId(item.attachmentId) || !["image/png", "image/jpeg", "image/webp"].includes(item.mediaType as string) || typeof item.filename !== "string" || !item.filename) throw responseError("消息图片结构无效。");
-      parts.push({ position: item.position, part: { type: "image", attachmentId: item.attachmentId, mediaType: item.mediaType as "image/png" | "image/jpeg" | "image/webp", filename: item.filename } });
+      layoutParts.push({ ...identity, type: "image", attachmentId: item.attachmentId, mediaType: item.mediaType as "image/png" | "image/jpeg" | "image/webp", filename: item.filename });
     } else if (item.type === "tool_call") {
       if (!isId(item.toolName) || !isRecord(item.input) || !nullableId(item.providerToolCallId)) throw responseError("消息工具部分结构无效。");
+      layoutParts.push({ ...identity, type: "hidden", kind: "tool_call" });
     } else throw responseError("消息包含未知内容类型。");
   }
   return { id: value.id, type: value.type as AgentMessageType, status: value.status as AgentMessageStatus,
     originSessionId: value.originSessionId, originRunId: value.originRunId, previousMessageId: value.previousMessageId,
     replacesMessageId: value.replacesMessageId, depth: value.depth, updatedRevision: value.updatedRevision,
-    createdAt: value.createdAt, updatedAt: value.updatedAt, parts: parts.sort((a, b) => a.position - b.position).map((item) => item.part) };
+    createdAt: value.createdAt, updatedAt: value.updatedAt, layoutParts: layoutParts.sort((a, b) => a.position - b.position),
+    parts: layoutParts.filter((part): part is PartIdentity & VisiblePart => part.type !== "hidden").map(({ id: _id, position: _position, updatedRevision: _revision, ...part }) => part) };
 }
 export function projectMessage(message: TimelineMessage): MessageView | null {
   if (message.status === "superseded" || (message.type !== "user" && message.type !== "assistant")
@@ -68,18 +74,41 @@ export function parseTimeline(value: unknown, workspaceId: string, sessionId: st
   const ids = new Set<string>();
   for (let i = 0; i < messages.length; i++) {
     const message = messages[i];
-    if (ids.has(message.id) || (i > 0 && message.depth <= messages[i - 1].depth)) throw responseError("消息页包含重复 ID 或顺序异常。");
+    if (message.updatedRevision > session.revision || ids.has(message.id) || (i > 0 && message.depth <= messages[i - 1].depth)) throw responseError("消息页包含重复 ID 或顺序异常。");
     ids.add(message.id);
   }
   if (value.hasMore && (!messages.length || value.nextBeforeMessageId !== messages[0].id)) throw responseError("消息分页缺少有效的前进游标。");
   if (!messages.length && value.nextBeforeMessageId !== null) throw responseError("空消息页携带无效游标。");
-  return { session, messages, timelineReset: value.timelineReset, hasMore: value.hasMore, nextBeforeMessageId: value.nextBeforeMessageId };
+  const headReplacement = value.headReplacement === undefined ? undefined : parseHeadReplacement(value.headReplacement, workspaceId, sessionId, session.revision);
+  return { session, messages, timelineReset: value.timelineReset, hasMore: value.hasMore, nextBeforeMessageId: value.nextBeforeMessageId,
+    ...(headReplacement === undefined ? {} : { headReplacement }) };
+}
+/** Constant-sized proof only: never retain arbitrary server properties or intermediate IDs. */
+function parseHeadReplacement(value: unknown, workspaceId: string, sessionId: string, revision: number): AgentHeadReplacementProof {
+  const keys = ["workspaceId", "sessionId", "runId", "fromMessageId", "toMessageId", "previousMessageId", "depth",
+    "fromSupersededRevision", "toUpdatedRevision", "toStatus", "replacementCount", "atRevision"];
+  if (!isRecord(value) || Object.keys(value).length !== keys.length || keys.some((key) => !Object.hasOwn(value, key))
+    || value.workspaceId !== workspaceId || value.sessionId !== sessionId || !isId(value.runId)
+    || !isId(value.fromMessageId) || !isId(value.toMessageId) || value.fromMessageId === value.toMessageId
+    || !nullableId(value.previousMessageId) || !isCount(value.depth) || !isCount(value.fromSupersededRevision)
+    || value.previousMessageId === value.fromMessageId || value.previousMessageId === value.toMessageId
+    || !isCount(value.toUpdatedRevision) || !isCount(value.atRevision) || value.atRevision !== revision
+    || value.fromSupersededRevision > value.toUpdatedRevision || value.toUpdatedRevision > revision
+    || !isCount(value.replacementCount) || value.replacementCount < 1 || value.replacementCount > 256
+    || !["streaming", "completed", "failed", "cancelled"].includes(value.toStatus as string)) throw responseError("消息替换证明结构或响应绑定无效。");
+  return value as unknown as AgentHeadReplacementProof;
 }
 export type TimelineRequest = { mode: "snapshot" | "before" | "delta"; beforeMessageId?: string; sinceRevision?: number; knownHeadMessageId?: string; knownContextRootMessageId?: string; knownContextRootIsNull?: true; limit?: number; };
 export async function readTimeline(api: AgentApi, workspaceId: string, sessionId: string, request: TimelineRequest): Promise<TimelinePage> {
   const query = new URLSearchParams({ workspaceId, mode: request.mode, limit: String(request.limit ?? 100) });
   for (const [key, value] of Object.entries(request)) if (key !== "mode" && key !== "limit" && value !== undefined) query.set(key, String(value));
-  return api.json(`/api/agent/sessions/${encodeId(sessionId)}/timeline?${query}`, { phase: "history", context: { workspaceId, sessionId }, validate: (value) => parseTimeline(value, workspaceId, sessionId) });
+  return api.json(`/api/agent/sessions/${encodeId(sessionId)}/timeline?${query}`, { phase: "history", context: { workspaceId, sessionId }, validate: (value) => {
+    const page = parseTimeline(value, workspaceId, sessionId);
+    const proof = page.headReplacement;
+    if (proof && (request.mode !== "delta" || proof.fromMessageId !== request.knownHeadMessageId
+      || request.sinceRevision === undefined || proof.fromSupersededRevision <= request.sinceRevision)) throw responseError("替换证明与本次读取请求不一致。");
+    return page;
+  } });
 }
 export async function readMessage(api: AgentApi, workspaceId: string, sessionId: string, messageId: string): Promise<TimelineMessage> {
   return api.json(`/api/agent/sessions/${encodeId(sessionId)}/messages/${encodeId(messageId)}?${new URLSearchParams({ workspaceId })}`, {
@@ -92,6 +121,11 @@ export async function readMessage(api: AgentApi, workspaceId: string, sessionId:
   });
 }
 function changed(message = "消息分支或分页游标已变化，未输出不完整结果。"): CliError { return new CliError(6, message, { code: "TIMELINE_CHANGED", phase: "history", effect: "not_applicable" }); }
+/** Only an authenticated, missing visible-chain lookup is structural evidence. */
+export function isTimelineLookupMissing(error: unknown): error is CliError {
+  return error instanceof CliError && error.retryEvidence?.kind === "http_status" && error.retryEvidence.status === 404
+    && (error.details.serviceCode === "TIMELINE_CURSOR_NOT_FOUND" || error.details.serviceCode === "MESSAGE_NOT_FOUND");
+}
 function checkChain(messages: TimelineMessage[]): void {
   for (let i = 1; i < messages.length; i++) if (messages[i].previousMessageId !== messages[i - 1].id || messages[i].depth <= messages[i - 1].depth) throw changed();
 }
@@ -123,7 +157,7 @@ export async function completeHistory(api: AgentApi, frame: HistoryFrame, select
     let page: TimelinePage;
     try { page = await readTimeline(api, frame.workspaceId, frame.sessionId, { mode: "before", beforeMessageId: cursor }); }
     catch (error) {
-      if (error instanceof CliError && error.exitCode === 6) throw changed();
+      if (isTimelineLookupMissing(error)) throw changed();
       throw error;
     }
     if (page.timelineReset || page.session.revision < frame.initial.session.revision || !page.messages.length) throw changed();
@@ -137,7 +171,7 @@ export async function completeHistory(api: AgentApi, frame: HistoryFrame, select
         const head = await readMessage(api, frame.workspaceId, frame.sessionId, frame.initial.session.headMessageId);
         const original = frame.messages.get(head.id)!;
         if (head.previousMessageId !== original.previousMessageId || head.depth !== original.depth || head.updatedRevision < original.updatedRevision) throw changed();
-      } catch (error) { if (error instanceof CliError && error.exitCode === 6) throw changed(); throw error; }
+      } catch (error) { if (isTimelineLookupMissing(error)) throw changed(); throw error; }
     }
     for (const message of page.messages) frame.messages.set(message.id, message);
     frame.hasMore = page.hasMore;
@@ -152,17 +186,13 @@ export function parseMessageSelection(options: { last?: string; after?: string }
   if (!match || match[0] !== options.last || !Number.isSafeInteger(count)) throw new CliError(2, "-n/--last 必须是无前导零的正安全整数。");
   return { mode: "last", count };
 }
-export function renderMessage(message: MessageView): string {
-  const body = message.parts.map((part) => part.type === "text" ? displayBody(part.text) : `[图片 attachmentId=${escapeDisplayText(part.attachmentId)} mediaType=${part.mediaType} filename=${escapeDisplayText(part.filename)}]`).join("\n");
-  return `Message ID：${escapeDisplayText(message.id)}；type=${message.type}；status=${message.status}\n${body}\n`;
-}
 export async function listMessages(workspaceId: string, sessionId: string, selection: MessageSelection, dependencies: ReadCommandDependencies): Promise<void> {
   try {
     const api = await AgentApi.connect(dependencies);
     const frame = await startHistory(api, workspaceId, sessionId);
     const items = await completeHistory(api, frame, selection);
-    const data = { workspaceId, sessionId, selection, items, count: items.length, complete: true };
-    await writeSuccess(dependencies.io, Boolean(dependencies.json), "session messages", data,
-      items.map(renderMessage).join("\n") + `消息快照结束：已输出 ${items.length} 条普通消息。\n`, { phase: "history", effect: "not_applicable", context: { workspaceId, sessionId } });
+    const renderer = new MessageRenderer((text) => writeText(dependencies.io.stdout, text), "snapshot");
+    for (const item of items) await renderer.message(item);
+    await writeText(dependencies.io.stdout, `消息快照结束：已输出 ${items.length} 条普通消息。\n`);
   } catch (error) { throw withErrorDetails(error, { phase: "history", effect: "not_applicable", context: { workspaceId, sessionId } }); }
 }

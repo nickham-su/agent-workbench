@@ -1,3 +1,4 @@
+import { textField } from "./helpers.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import * as fs from "node:fs/promises";
@@ -25,7 +26,7 @@ test("A-FOLLOW-SIGNALS: stalled stdout backpressure cannot prevent SIGTERM exit 
   let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
     await new FileConfigStore(home).save({ version: 1, apiOrigin: server.origin, cookie: null });
-    const child = spawn(process.execPath, [join(repository, "packages/cli/dist/cli.cjs"), "session", "messages", "-w", "w", "-s", "s", "-n", "1", "-f", "--json"], {
+    const child = spawn(process.execPath, [join(repository, "packages/cli/dist/cli.cjs"), "session", "messages", "-w", "w", "-s", "s", "-n", "1", "-f"], {
       cwd: home, env: { HOME: home, USERPROFILE: home, TMPDIR: home, PATH: dirname(process.execPath), NODE_PATH: "" }, stdio: ["pipe", "pipe", "pipe"]
     });
     t.after(() => { child.kill("SIGKILL"); });
@@ -35,6 +36,6 @@ test("A-FOLLOW-SIGNALS: stalled stdout backpressure cannot prevent SIGTERM exit 
     const execution = (async () => { await responseStarted; await new Promise<void>((resolve) => setTimeout(resolve, 100)); child.kill("SIGTERM"); return close; })();
     const [code, signal] = await Promise.race([execution, new Promise<never>((_resolve, reject) => { timeout = setTimeout(() => { child.kill("SIGKILL"); reject(Error("CLI failed to exit under backpressure")); }, 8_000); })]);
     child.stdout.destroy();
-    assert.equal(code, 143, stderr); assert.equal(signal, null); assert.equal(cancels, 0); assert.equal(JSON.parse(stderr).error.category, "INTERRUPTED");
+    assert.equal(code, 143, stderr); assert.equal(signal, null); assert.equal(cancels, 0); assert.equal(textField(stderr, "category"), "INTERRUPTED");
   } finally { clearTimeout(timeout); await server.close(); }
 });

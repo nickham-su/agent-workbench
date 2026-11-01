@@ -1,3 +1,4 @@
+import { textField } from "./helpers.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import * as fs from "node:fs/promises";
@@ -17,7 +18,7 @@ async function waitForTemp(root: string) {
   throw new Error("fixture never created temp");
 }
 function launch(home: string, output: string) {
-  return spawn(process.execPath, [join(repository, "packages/cli/dist/cli.cjs"), "file", "download", "-w", "w", "--path", "report", "--output", output, "--json"], { cwd: home, env: { HOME: home, USERPROFILE: home, TMPDIR: home, PATH: dirname(process.execPath), NODE_PATH: "" }, stdio: ["pipe", "pipe", "pipe"] });
+  return spawn(process.execPath, [join(repository, "packages/cli/dist/cli.cjs"), "file", "download", "-w", "w", "--path", "report", "--output", output], { cwd: home, env: { HOME: home, USERPROFILE: home, TMPDIR: home, PATH: dirname(process.execPath), NODE_PATH: "" }, stdio: ["pipe", "pipe", "pipe"] });
 }
 
 test("A-DOWNLOAD-INTERRUPT: real SIGINT/SIGTERM clean only owned temp and SIGKILL leftovers are never auto-scanned", async (t) => {
@@ -38,9 +39,9 @@ test("A-DOWNLOAD-INTERRUPT: real SIGINT/SIGTERM clean only owned temp and SIGKIL
       assert.deepEqual((await fs.readdir(root)).filter((name) => name.startsWith(".awb-download-")), leftovers);
     }
     else {
-      assert.equal(code, signal === "SIGINT" ? 130 : 143); const error = JSON.parse(stderr).error;
-      assert.equal(error.category, "INTERRUPTED"); assert.equal(error.code, "INTERRUPTED");
-      assert.equal(error.phase, "download"); assert.equal(error.effect, "not_applicable"); assert.deepEqual(error.context, { workspaceId: "w", published: false });
+      assert.equal(code, signal === "SIGINT" ? 130 : 143); const error = stderr;
+      assert.equal(textField(error, "category"), "INTERRUPTED"); assert.equal(textField(error, "code"), "INTERRUPTED");
+      assert.equal(textField(error, "phase"), "download"); assert.equal(textField(error, "effect"), "not_applicable"); for (const [key, value] of Object.entries({ workspaceId: "w", published: false })) assert.equal(textField(error, key), String(value));
       assert.deepEqual((await fs.readdir(root)).filter((name) => name.startsWith(".awb-download-")), [".awb-download-other.tmp"]);
     }
     assert.deepEqual(methods, signal === "SIGKILL" ? ["GET", "GET"] : ["GET"], "local interruption must never POST a remote cancel");
@@ -55,7 +56,7 @@ test("A-DOWNLOAD-INTERRUPT: real EPIPE during summary retains a complete publish
   await new FileConfigStore(home).save({ version: 1, apiOrigin: server.origin, cookie: null });
   const child = launch(home, output); let stderr = ""; child.stderr.on("data", (chunk) => { stderr += chunk; }); child.stdin.end();
   await ready; child.stdout.destroy(); finishResponse(); const [code] = await finish(child);
-  assert.equal(code, 141); const error = JSON.parse(stderr).error;
-  assert.equal(error.category, "OUTPUT"); assert.equal(error.code, "OUTPUT_CLOSED"); assert.equal(error.phase, "publish");
-  assert.equal(error.effect, "not_applicable"); assert.deepEqual(error.context, { workspaceId: "w", published: true }); assert.equal(await fs.readFile(output, "utf8"), "complete");
+  assert.equal(code, 141); const error = stderr;
+  assert.equal(textField(error, "category"), "OUTPUT"); assert.equal(textField(error, "code"), "OUTPUT_CLOSED"); assert.equal(textField(error, "phase"), "publish");
+  assert.equal(textField(error, "effect"), "not_applicable"); for (const [key, value] of Object.entries({ workspaceId: "w", published: true })) assert.equal(textField(error, key), String(value)); assert.equal(await fs.readFile(output, "utf8"), "complete");
 });

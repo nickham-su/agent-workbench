@@ -29,9 +29,17 @@ const defaultCodes: Record<Exclude<CliExitCode, 0>, string> = {
   8: "RUN_FAILED", 9: "RUN_CANCELLED", 10: "FOLLOW_TIMEOUT", 130: "INTERRUPTED", 141: "OUTPUT_CLOSED", 143: "INTERRUPTED"
 };
 
+/** Internal provenance only: never include in public diagnostics or ErrorContext. */
+export type RetryEvidence =
+  | { kind: "transport" }
+  | { kind: "request_timeout" }
+  | { kind: "http_status"; status: number }
+  | { kind: "blocked" };
+
 /** Messages/details must be locally authored or previously validated, never raw exceptions/bodies. */
 export class CliError extends Error {
-  constructor(readonly exitCode: Exclude<CliExitCode, 0>, message: string, readonly details: ErrorDetails = {}) {
+  constructor(readonly exitCode: Exclude<CliExitCode, 0>, message: string, readonly details: ErrorDetails = {},
+    readonly retryEvidence?: RetryEvidence) {
     super(message);
     this.name = "CliError";
   }
@@ -43,7 +51,7 @@ export function withErrorDetails(error: unknown, details: ErrorDetails): CliErro
   return new CliError(safe.exitCode, safe.message, {
     ...details, ...safe.details,
     context: { ...details.context, ...safe.details.context }
-  });
+  }, safe.retryEvidence);
 }
 
 export function errorObject(error: CliError) {
@@ -58,8 +66,12 @@ export function errorObject(error: CliError) {
 
 export function errorDiagnostic(error: CliError): string {
   const value = errorObject(error).error;
-  const context = Object.entries(value.context).map(([key, item]) => `${key}=${escapeDisplayText(String(item))}`).join(" ");
-  return `[${value.category}] ${value.message}\n阶段：${value.phase}；effect=${value.effect}${context ? `；${context}` : ""}\n帮助：${value.help}\n`;
+  const safeKeys = ["workspaceId", "sessionId", "agentId", "runId", "clientRequestId", "published"] as const;
+  const context = safeKeys.filter((key) => value.context[key] !== undefined)
+    .map((key) => `${key}=${escapeDisplayText(String(value.context[key]))}`).join(" ");
+  const userMessageId = value.phase === "send" ? value.context.messageId : undefined;
+  const userIdentity = userMessageId ? `用户消息 ID：${escapeDisplayText(userMessageId)}\n` : "";
+  return `[${value.category}] ${value.message}\n错误码：${value.code}${value.serviceCode ? `；serviceCode=${value.serviceCode}` : ""}\n阶段：${value.phase}；effect=${value.effect}${context ? `；${context}` : ""}\n${userIdentity}帮助：${value.help}\n`;
 }
 
 export function responseError(message: string): CliError { return new CliError(6, message); }

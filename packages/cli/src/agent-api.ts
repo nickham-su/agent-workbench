@@ -2,10 +2,12 @@ import type { AgentMessageSessionRunState, AgentSessionRecord } from "@agent-wor
 import type { CliConfigV1, ConfigStore } from "./config.js";
 import { readResponseCookie } from "./cookie.js";
 import { CliError, errorDiagnostic, isRecord, responseError, withErrorDetails, type ErrorContext, type ErrorPhase, type OperationEffect } from "./errors.js";
+import type { FollowReadRetry } from "./follow-read-retry.js";
 import { apiUrl, httpStatusError, parseJson, type HttpRequest, type HttpResult, type HttpStreamResult, type HttpTransport } from "./http.js";
 import { compareCodePoints, encodeId, isCount, isId, isTimestamp } from "./validation.js";
 
-export interface ApiDependencies { config: ConfigStore; http: HttpTransport; timeoutMs?: number; signal?: AbortSignal; }
+export interface ApiDependencies { config: ConfigStore; http: HttpTransport; timeoutMs?: number; signal?: AbortSignal;
+  followReadRetry?: FollowReadRetry; }
 export interface ApiCall<T> extends Omit<HttpRequest, "cookie"> {
   phase: ErrorPhase;
   context?: ErrorContext;
@@ -22,6 +24,11 @@ export class AgentApi {
     catch (error) { throw withErrorDetails(error instanceof CliError ? error : new CliError(3, "无法读取有效的本地连接配置，请重新执行 awb login。"), { phase: "config", effect: "not_sent" }); }
   }
   async json<T>(path: string, options: ApiCall<T>): Promise<T> {
+    // An accepted write and all its successful preparation steps are never replayed.
+    const retry = (options.method ?? "GET") === "GET" ? this.dependencies.followReadRetry : undefined;
+    return retry ? retry.read(() => this.jsonOnce(path, options)) : this.jsonOnce(path, options);
+  }
+  private async jsonOnce<T>(path: string, options: ApiCall<T>): Promise<T> {
     const { phase, context = {}, validate, identity, ...request } = options;
     const write = request.method === "POST";
     let effect: OperationEffect = write ? "not_sent" : "not_applicable";
@@ -37,7 +44,8 @@ export class AgentApi {
           ...(request.signal ?? this.dependencies.signal ? { signal: request.signal ?? this.dependencies.signal } : {})
         });
       } catch (error) {
-        throw error instanceof CliError ? error : new CliError(5, "网络请求失败，未能确认完整响应。");
+        throw error instanceof CliError ? error : new CliError(5, "网络请求失败，未能确认完整响应。", {},
+          (request.signal ?? this.dependencies.signal)?.aborted ? { kind: "blocked" } : { kind: "transport" });
       }
       const mainError = httpStatusError(result);
       if (write && result.status >= 400 && result.status < 500) effect = "rejected";
@@ -52,7 +60,7 @@ export class AgentApi {
       // validation may collect identity, but no result is published before save.
       try { await this.renew(result); }
       catch (error) {
-        if (mainError && error instanceof CliError) throw new CliError(mainError.exitCode, `${mainError.message}\n${errorDiagnostic(error).trimEnd()}`, mainError.details);
+        if (mainError && error instanceof CliError) throw new CliError(mainError.exitCode, `${mainError.message}\n${errorDiagnostic(error).trimEnd()}`, mainError.details, { kind: "blocked" });
         throw error;
       }
       if (mainError) throw mainError;
@@ -78,7 +86,7 @@ export class AgentApi {
         const mainError = httpStatusError({ status: result.status, body, setCookies: result.setCookies });
         if (mainError && result.status >= 300 && result.status < 400) throw mainError;
         try { await this.renew(result); }
-        catch (error) { if (mainError && error instanceof CliError) throw new CliError(mainError.exitCode, `${mainError.message}\n${errorDiagnostic(error).trimEnd()}`, mainError.details); throw error; }
+        catch (error) { if (mainError && error instanceof CliError) throw new CliError(mainError.exitCode, `${mainError.message}\n${errorDiagnostic(error).trimEnd()}`, mainError.details, { kind: "blocked" }); throw error; }
         if (mainError) throw mainError;
         return options.consume(result);
       });
@@ -89,7 +97,7 @@ export class AgentApi {
     if (!cookie) return;
     const next = { ...this.connection, cookie };
     try { await this.dependencies.config.save(next); }
-    catch { throw new CliError(7, "无法保存续签凭证，旧配置保持不变；请检查用户目录权限，不要重发已受理操作。", { code: "COOKIE_SAVE_FAILED" }); }
+    catch { throw new CliError(7, "无法保存续签凭证，旧配置保持不变；请检查用户目录权限，不要重发已受理操作。", { code: "COOKIE_SAVE_FAILED" }, { kind: "blocked" }); }
     this.connection = next;
   }
   workspaces(): Promise<WorkspaceView[]> {

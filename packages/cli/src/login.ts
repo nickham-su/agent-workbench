@@ -7,7 +7,7 @@ import { writeSuccess } from "./output.js";
 import { readLoginToken, type CliIO } from "./token-input.js";
 
 export interface LoginOptions { url: string; tokenStdin?: boolean; }
-export interface LoginDependencies { config: ConfigStore; http: HttpTransport; io: CliIO; json?: boolean; timeoutMs?: number; signal?: AbortSignal; }
+export interface LoginDependencies { config: ConfigStore; http: HttpTransport; io: CliIO; timeoutMs?: number; signal?: AbortSignal; }
 function healthAuthEnabled(value: unknown): boolean {
   if (!isRecord(value) || value.ok !== true || value.name !== "agent-workbench" || typeof value.version !== "string"
     || typeof value.authEnabled !== "boolean" || typeof value.authed !== "boolean" || typeof value.previewEnabled !== "boolean") throw responseError("服务健康响应结构无效。");
@@ -28,7 +28,7 @@ export async function login(options: LoginOptions, dependencies: LoginDependenci
     if (!authEnabled) {
       phase = "config";
       await save({ version: 1, apiOrigin, cookie: null });
-      await writeSuccess(io, Boolean(dependencies.json), "login", { authEnabled: false, authenticated: false }, "连接初始化成功（服务未开启认证）。\n");
+      await writeSuccess(io, "连接初始化成功（服务未开启认证）。\n");
       return;
     }
     phase = "input"; effect = "not_sent";
@@ -44,7 +44,7 @@ export async function login(options: LoginOptions, dependencies: LoginDependenci
     const cookie = readResponseCookie(result.setCookies, apiOrigin);
     if (!cookie) throw responseError("登录响应缺少会话 Cookie，未保存配置。");
     await save({ version: 1, apiOrigin, cookie });
-    await writeSuccess(io, Boolean(dependencies.json), "login", { authEnabled: true, authenticated: true }, "登录成功，已保存连接与会话凭证。\n");
+    await writeSuccess(io, "登录成功，已保存连接与会话凭证。\n");
   } catch (error) { throw withErrorDetails(error, { phase, effect }); }
   async function save(value: Parameters<ConfigStore["save"]>[0]): Promise<void> {
     try { await config.save(value); }

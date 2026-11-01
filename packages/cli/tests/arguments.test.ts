@@ -1,3 +1,4 @@
+import { textField } from "./helpers.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Command } from "commander";
@@ -10,7 +11,7 @@ test("全面审查M1: invalid root timeout precedes stdin/config/HTTP and known 
   for (const timeout of ["0s", "25h", "invalid"]) for (const help of [false, true]) {
     const capture = captureIO(); let reads = 0; let configs = 0; let requests = 0;
     capture.io.stdin.read = () => { reads++; throw Error("stdin must not be touched"); };
-    const code = await runCli(["--timeout", timeout, "session", "send", "-w", "w", "--stdin", "--json", ...(help ? ["--help"] : [])], {
+    const code = await runCli(["--timeout", timeout, "session", "send", "-w", "w", "--stdin", ...(help ? ["--help"] : [])], {
       io: capture.io,
       createConfigStore: () => { configs++; throw Error("config must not be constructed"); },
       http: { request: async () => { requests++; throw Error("HTTP must not start"); } }
@@ -18,7 +19,7 @@ test("全面审查M1: invalid root timeout precedes stdin/config/HTTP and known 
     assert.equal(code, help ? 0 : 2);
     assert.equal(reads, 0); assert.equal(configs, 0); assert.equal(requests, 0);
     if (help) { assert.match(capture.output(), /Usage: awb session send/); assert.equal(capture.diagnostic(), ""); }
-    else { assert.equal(capture.output(), ""); assert.equal(JSON.parse(capture.diagnostic()).error.category, "USAGE"); }
+    else { assert.equal(capture.output(), ""); assert.equal(textField(capture.diagnostic(), "category"), "USAGE"); }
   }
 });
 
@@ -29,7 +30,7 @@ test("A-HELP-LAYERS/PRIORITY/JSON: all connected commands help before invalid va
     capture.io.stdin.read = () => { throw new Error("Must not read stdin"); };
     let factories = 0;
     let requests = 0;
-    const args = [...path, flag, "--json"];
+    const args = [...path, flag];
     if (path.join(" ") === "session list") args.push("-w", "invalid\n", "--updated-within", "-1s");
     const code = await runCli(args, { io: capture.io, createConfigStore: () => { factories++; throw new Error("Must not create config"); }, http: { request: async () => { requests++; throw new Error("Must not request"); } } });
     assert.equal(code, 0, args.join(" "));
@@ -40,7 +41,7 @@ test("A-HELP-LAYERS/PRIORITY/JSON: all connected commands help before invalid va
     if (path.length === 2 || path[0] === "login") {
       assert.match(capture.output(), /例：awb/);
       assert.match(capture.output(), /--timeout/);
-      assert.match(capture.output(), /--json/);
+      assert.doesNotMatch(capture.output(), /--json|JSONL/);
     }
     assert.equal(capture.diagnostic(), "");
   }
@@ -61,7 +62,7 @@ test("A-PARSE-ALIASES: equivalent aliases/global option positions and duplicate 
   let first = "";
   for (const position of [0, 1, args.length]) {
     const capture = captureIO();
-    const invocation = [...args.slice(0, position), "--json", "--timeout", "1s", ...args.slice(position)];
+    const invocation = [...args.slice(0, position), "--timeout", "1s", ...args.slice(position)];
     const code = await runCli(invocation, { io: capture.io, createConfigStore: () => ({ load: async () => ({ version: 1, apiOrigin: "http://example.test", cookie: null }), save: async () => {} }), http: {
       request: async (_origin, path, request) => {
         assert.equal(request?.timeoutMs, 1000);
@@ -71,14 +72,11 @@ test("A-PARSE-ALIASES: equivalent aliases/global option positions and duplicate 
     } });
     assert.equal(code, 0);
     assert.equal(capture.diagnostic(), "");
-    const parsed = JSON.parse(capture.output());
-    assert.equal(parsed.command, "session list");
-    assert.equal(parsed.data.count, 1);
+    assert.match(capture.output(), /查询结束：已输出 1 个 Session/);
     if (first) assert.equal(capture.output(), first); else first = capture.output();
   }
   for (const invocation of [
-    [...args, "--workspace", "secret"], [...args, "--json", "--json"],
-    ["--json", ...args, "--json"], [...args, "--timeout", "1s", "--timeout=2s"],
+    [...args, "--workspace", "secret"], [...args, "--status", "idle", "--status", "all"], [...args, "--timeout", "1s", "--timeout=2s"],
     ["session", "show", "-w", "w", "-s", "s", "--session", "secret"]
   ]) {
     const capture = captureIO();
@@ -91,7 +89,7 @@ test("A-PARSE-ALIASES: equivalent aliases/global option positions and duplicate 
 });
 
 test("grammar scanner consumes text option values rather than finding phantom flags; images may repeat", () => {
-  const root = new Command().name("awb").option("--json");
+  const root = new Command().name("awb");
   const send = root.command("session").command("send").option("-w, --workspace <ID>").option("--prompt <text>").option("--image <file>");
   for (const prompt of ["some --workspace in text", "--workspace"]) {
     const inspection = inspectArguments(["session", "send", "--workspace", "w", `--prompt=${prompt}`, "--image", "one", "--image", "two"], root);
@@ -112,12 +110,12 @@ test("A-PARSE-ID/DOT and A-COMPAT-KIND: invalid identifiers/kinds never load con
   for (const args of cases) {
     const capture = captureIO();
     let factories = 0;
-    assert.equal(await runCli([...args, "--json"], { io: capture.io, createConfigStore: () => { factories++; throw new Error("Must not create"); } }), 2);
+    assert.equal(await runCli([...args], { io: capture.io, createConfigStore: () => { factories++; throw new Error("Must not create"); } }), 2);
     assert.equal(factories, 0);
     assert.equal(capture.output(), "");
-    const error = JSON.parse(capture.diagnostic()).error;
-    assert.equal(error.code, "INPUT_INVALID");
-    assert.equal(error.effect, "not_sent");
+    const error = capture.diagnostic();
+    assert.equal(textField(error, "code"), "INPUT_INVALID");
+    assert.equal(textField(error, "effect"), "not_sent");
   }
 });
 
@@ -132,4 +130,19 @@ test("global request timeouts validate before config creation; legal maximum rea
   assert.equal(await runCli(["workspace", "list", "--timeout", "24h"], { io: capture.io, createConfigStore: () => ({ load: async () => ({ version: 1, apiOrigin: "http://example.test", cookie: null }), save: async () => {} }), http: {
     request: async (_origin, _path, request) => { assert.equal(request?.timeoutMs, 86_400_000); return { status: 200, body: "[]", setCookies: [] }; }
   } }), 0);
+});
+
+// ACC-COMMAND-FLAG: removed flags must not be swallowed by any help layer.
+test("ACC-COMMAND-FLAG/HELP: --json is rejected at root, group and action positions even with help", async () => {
+  for (const path of commandPaths) for (const help of [[], ["--help"]]) for (const position of [0, path.length]) {
+    const capture = captureIO(); let configs = 0; let requests = 0;
+    const invocation = [...path.slice(0, position), "--json", ...path.slice(position), ...help];
+    assert.equal(await runCli(invocation, { io: capture.io,
+      createConfigStore: () => { configs++; throw Error("must not access config"); },
+      http: { request: async () => { requests++; throw Error("must not send"); } }
+    }), 2);
+    assert.equal(configs, 0); assert.equal(requests, 0); assert.equal(capture.output(), "");
+    assert.equal(textField(capture.diagnostic(), "code"), "INPUT_INVALID");
+    assert.doesNotMatch(capture.diagnostic(), /^\{/);
+  }
 });

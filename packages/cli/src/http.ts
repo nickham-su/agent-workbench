@@ -58,7 +58,7 @@ export class HttpClient implements HttpTransport {
     if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 86_400_000) throw new CliError(2, "请求时限无效。", { effect: "not_sent" });
     const controller = new AbortController();
     const abort = () => controller.abort();
-    if (request.signal?.aborted) throw new CliError(5, "请求已在发送前中止。", { effect: "not_sent" });
+    if (request.signal?.aborted) throw new CliError(5, "请求已在发送前中止。", { effect: "not_sent" }, { kind: "blocked" });
     request.signal?.addEventListener("abort", abort, { once: true });
     let timedOut = false;
     const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
@@ -68,10 +68,13 @@ export class HttpClient implements HttpTransport {
       if (controller.signal.aborted) throw new Error("Request aborted during body consumption");
       return value;
     } catch (error) {
-      if (error instanceof CliError) throw error;
-      throw new CliError(5, timedOut ? "单次请求时限已耗尽，未能确认完整响应。" : "网络请求失败或响应传输中断，未能确认完整响应。", {
-        code: timedOut ? "REQUEST_TIMEOUT" : "TRANSPORT_FAILED", effect: request.method === "POST" ? "unknown" : "not_applicable"
-      });
+      const blocked = request.signal?.aborted;
+      if (error instanceof CliError) throw blocked
+        ? new CliError(error.exitCode, error.message, error.details, { kind: "blocked" }) : error;
+      const timeout = timedOut && !blocked;
+      throw new CliError(5, timeout ? "单次请求时限已耗尽，未能确认完整响应。" : "网络请求失败或响应传输中断，未能确认完整响应。", {
+        code: timeout ? "REQUEST_TIMEOUT" : "TRANSPORT_FAILED", effect: request.method === "POST" ? "unknown" : "not_applicable"
+      }, blocked ? { kind: "blocked" } : { kind: timeout ? "request_timeout" : "transport" });
     } finally { clearTimeout(timer); request.signal?.removeEventListener("abort", abort); }
   }
 }
@@ -81,7 +84,8 @@ export function parseJson(result: HttpResult): unknown {
 }
 const safeErrorCodes = new Set([
   "AGENT_SESSION_QUERY_INVALID", "AGENT_SESSION_QUERY_STATE_INVALID", "WORKSPACE_NOT_FOUND",
-  "AGENT_COMPACTION_EMPTY", "AGENT_WORKER_UNAVAILABLE", "AGENT_SUBTASK_READONLY", "SESSION_RUNNING"
+  "AGENT_COMPACTION_EMPTY", "AGENT_WORKER_UNAVAILABLE", "AGENT_SUBTASK_READONLY", "SESSION_RUNNING",
+  "TIMELINE_CURSOR_NOT_FOUND", "MESSAGE_NOT_FOUND"
 ]);
 export function httpStatusError(result: HttpResult): CliError | null {
   if (result.status >= 200 && result.status < 300) return null;
@@ -89,7 +93,8 @@ export function httpStatusError(result: HttpResult): CliError | null {
   try { const body: unknown = JSON.parse(result.body); if (isRecord(body) && typeof body.code === "string" && safeErrorCodes.has(body.code)) serviceCode = body.code; } catch { /* Status remains authoritative. */ }
   const suffix = serviceCode ? `（${serviceCode}）` : "";
   const details = { code: result.status === 401 ? "AUTH_REQUIRED" : "HTTP_REJECTED", ...(serviceCode ? { serviceCode } : {}) };
-  if (result.status === 401) return new CliError(4, `HTTP 401${suffix}：认证失败，请重新执行 awb login。`, details);
-  if (result.status >= 300 && result.status < 400) return new CliError(6, `HTTP ${result.status}：不跟随重定向，请检查服务 origin。`, details);
-  return new CliError(6, `HTTP ${result.status}${suffix}：API 请求失败。`, details);
+  const evidence = { kind: "http_status", status: result.status } as const;
+  if (result.status === 401) return new CliError(4, `HTTP 401${suffix}：认证失败，请重新执行 awb login。`, details, evidence);
+  if (result.status >= 300 && result.status < 400) return new CliError(6, `HTTP ${result.status}：不跟随重定向，请检查服务 origin。`, details, evidence);
+  return new CliError(6, `HTTP ${result.status}${suffix}：API 请求失败。`, details, evidence);
 }

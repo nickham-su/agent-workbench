@@ -120,17 +120,15 @@ test("全面审查L1: production CLI includes hidden, headless and primary Fork 
   createMessageSession(f.db, { id: "foreign", workspaceId: foreign.id, title: "", kind: "primary", createdAt: now });
   f.db.prepare("insert into workspace_session_tab_state (workspace_id,session_id,visible,updated_at) values (?, ?, 0, ?)").run(f.workspaceId, "hidden", now);
   assert.equal((await runCli(f.home, ["login", "--url", f.origin])).code, 0);
-  const result = await runCli(f.home, [...f.args, "--json"]); assert.equal(result.code, 0, result.stderr);
-  const data = JSON.parse(result.stdout).data;
-  assert.deepEqual(data.items.map((item: { id: string }) => item.id).sort(), ["headless", "hidden", "primary-fork", "source"]);
-  assert.equal(data.count, 4);
-  for (const item of data.items) {
-    assert.equal(item.kind, "primary");
-    assert.equal(item.userMessageCount, item.id === "source" ? 1 : 0);
-    assert.equal(item.completedAssistantMessageCount, 0);
-    if (item.id === "primary-fork") assert.equal(item.createdAt, now);
-  }
+  const result = await runCli(f.home, f.args); assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual([...result.stdout.matchAll(/^Session ID：([^\n]+)$/gm)].map((match) => match[1]).sort(), ["headless", "hidden", "primary-fork", "source"]);
+  assert.match(result.stdout, /匹配总数：4/);
+  assert.equal(result.stdout.match(/^类型：primary$/gm)?.length, 4);
+  assert.equal(result.stdout.match(/^用户消息累计数：1$/gm)?.length, 1);
+  assert.equal(result.stdout.match(/^已完成助手消息累计数：0$/gm)?.length, 4);
+  assert.ok(result.stdout.includes(`创建时间：${new Date(now).toISOString()}`));
 });
+
 
 test("production CLI persists actual threshold renewals before success and business errors, but leaves rejected credentials unchanged", async (t) => {
   const authToken = randomUUID();

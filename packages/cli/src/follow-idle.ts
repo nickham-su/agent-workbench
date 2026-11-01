@@ -1,18 +1,23 @@
 import type { AgentApi } from "./agent-api.js";
-import { assertFinal, assertRetained, incomplete, loadThrough, ordered, timelineChanged } from "./follow-chain.js";
-import { completeHistory, selectHistory, startHistory, type HistoryFrame, type MessageSelection, type MessageView, type TimelineMessage } from "./messages.js";
+import { assertFinal, incomplete, ordered, timelineChanged } from "./follow-chain.js";
+import { completeHistory, projectMessage, selectHistory, type HistoryFrame, type MessageSelection, type MessageView, type TimelineMessage } from "./messages.js";
 import { readRun } from "./run-status.js";
+import { FollowState } from "./follow-state.js";
+import type { FollowOutput } from "./follow-output.js";
 
 function source(message: TimelineMessage | MessageView | undefined, sessionId: string): string | null {
   return message?.originSessionId === sessionId && message.originRunId !== null ? message.originRunId : null;
 }
 /** A single bounded idle finalization. Never discovers a Run by walking past H0. */
-export async function finalizeIdle(api: AgentApi, initial: HistoryFrame, selection: MessageSelection): Promise<MessageView[]> {
+export async function finalizeIdle(api: AgentApi, initial: HistoryFrame, selection: MessageSelection, output: FollowOutput): Promise<MessageView[]> {
   const { workspaceId, sessionId } = initial;
-  const selected = await completeHistory(api, initial, selection);
   const h0 = initial.initial.session.headMessageId;
   const head = h0 === null ? undefined : initial.initial.messages.find((message) => message.id === h0);
   const k0 = source(head, sessionId);
+  // With a native H0, defer prefix loading to the proof-aware FinalDrain. Looking up
+  // a replaced H0 during generic snapshot pagination would reject a legitimate retry.
+  const selected = k0 === null ? await completeHistory(api, initial, selection)
+    : selectHistory(initial, selection) ?? ordered(initial).map(projectMessage).filter((message): message is MessageView => message !== null);
   const known = new Set<string>(k0 === null ? [] : [k0]);
   for (const message of selected) if (message.status === "streaming") {
     const runId = source(message, sessionId);
@@ -20,20 +25,17 @@ export async function finalizeIdle(api: AgentApi, initial: HistoryFrame, selecti
     known.add(runId);
   }
   for (const runId of known) if ((await readRun(api, workspaceId, sessionId, runId)).status === "running") throw incomplete();
-  const final = await startHistory(api, workspaceId, sessionId); // Exactly one closing snapshot.
-  const h1 = final.initial.session.headMessageId;
+  const observer = new FollowState(initial, k0, { anchor: selection.mode === "after" ? selection.messageId : null, selection, includeInitialRun: false }, output);
+  const final = k0 === null ? await observer.closeIdle(api) : await observer.finalDrain(api, false);
   if (h0 === null) {
-    if (h1 !== null) throw incomplete();
+    if (final.messages.size) throw incomplete();
     return [];
   }
-  // Re-read enough of the prefix for both the original selector and all H0..H1 additions.
-  const anchor = !initial.hasMore ? null : selection.mode === "after" ? selection.messageId : selected[0]?.id ?? h0;
-  await loadThrough(api, final, anchor);
-  assertRetained(initial, final, [h0, ...selected.map((message) => message.id), ...(selection.mode === "after" ? [selection.messageId] : [])]);
-  const finalH0 = final.messages.get(h0)!;
+  const finalH0 = final.messages.get(h0) ?? ordered(final).find((message) => message.depth === head!.depth);
+  if (!finalH0) throw timelineChanged();
   let effectiveHead = finalH0;
   if (k0 === null) {
-    if (h1 !== h0) throw incomplete();
+    if (ordered(final).at(-1)?.id !== h0) throw incomplete();
   } else {
     let otherRun = false;
     for (const message of ordered(final).filter((message) => message.depth > finalH0.depth)) {

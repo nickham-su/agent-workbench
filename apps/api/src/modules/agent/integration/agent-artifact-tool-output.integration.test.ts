@@ -439,7 +439,7 @@ test("persisted view_image execution reaches a real Worker model request as medi
   assert.deepEqual(JSON.parse(persisted.structuredResultJson), { type: "image_ref", path: relativePath });
 });
 
-test("真实压缩提交后同 Run 尾部工具图重读并进入 SDK；源文件丢失时请求前失败", async (t: TestContext) => {
+test("真实压缩保留工具图重读；缺失后安全文本降级并继续 SDK", async (t: TestContext) => {
   const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 });
   const session = await createSession(fixture.app, fixture.workspaceId);
   appendMessageFixture({ fixture, sessionId: session.id, type: "user", text: "old prefix" });
@@ -517,7 +517,27 @@ test("真实压缩提交后同 Run 尾部工具图重读并进入 SDK；源文�
   assert.ok(wire);
   assert.match(JSON.stringify(wire), /input_image/);
   assert.match(JSON.stringify(wire), new RegExp(bytes.toString("base64")));
+  const callId = (created.parts[0] as { providerToolCallId: string }).providerToolCallId;
+  const firstTool = requests[0]!.messages!.find((message) => message.role === "tool")!;
+  assert.ok(Array.isArray(firstTool.content));
+  assert.equal(firstTool.content[0]!.toolCallId, callId);
   await fs.rm(imagePath);
-  await assert.rejects(execute(), /cannot read a valid tool image/);
-  assert.equal(requests.length, 1, "missing source must fail before another SDK request");
+  await execute();
+  assert.equal(requests.length, 2, "missing historical tool image must not prevent the next SDK request");
+  const messages = requests[1]!.messages!;
+  const assistant = messages.find((message) => message.role === "assistant" && Array.isArray(message.content)
+    && message.content.some((part) => part.type === "tool-call" && part.toolCallId === callId));
+  assert.ok(assistant, "the placeholder must preserve the original assistant/tool pairing");
+  const tool = messages.find((message) => message.role === "tool")!;
+  assert.ok(Array.isArray(tool.content));
+  assert.equal(tool.content.length, 1);
+  assert.equal(tool.content[0]!.toolCallId, callId);
+  assert.equal(tool.content[0]!.toolName, "view_image");
+  assert.deepEqual(tool.content[0]!.output, { type: "content", value: [
+    { type: "text", text: "此前已成功查看该图片，但源文件当前不存在，无法再次加载。" },
+  ] });
+  assert.doesNotMatch(JSON.stringify(messages), /"type":"(?:media|file)"|iVBOR/);
+  const persisted = fixture.db.prepare("select structured_result_json as result from agent_tool_execution where id = ?")
+    .get(created.executionId) as { result: string };
+  assert.deepEqual(JSON.parse(persisted.result), { type: "image_ref", path: relativePath });
 });

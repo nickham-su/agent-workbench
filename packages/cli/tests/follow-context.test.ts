@@ -1,3 +1,4 @@
+import { textField } from "./helpers.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { CliError, errorObject } from "../src/errors.js";
@@ -11,11 +12,11 @@ test("全面审查M2: failure adds only a validated captured Run and preserves m
   const capture = captureIO(); const lifetime = new FollowLifetime(capture.io.stdout);
   try {
     for (const target of ["target-run", null]) {
-      const output = new FollowOutput(capture.io, true, lifetime, { workspaceId: "w", sessionId: "s" }, target);
+      const output = new FollowOutput(capture.io, lifetime, { workspaceId: "w", sessionId: "s" }, target);
       const error = output.error(new CliError(4, "fixture auth", { code: "AUTH_REQUIRED", phase: "history", effect: "rejected", context: { messageId: "anchor" } }));
       const value = errorObject(error).error;
       assert.equal(value.category, "AUTH"); assert.equal(value.code, "AUTH_REQUIRED"); assert.equal(value.phase, "history"); assert.equal(value.effect, "rejected");
-      assert.deepEqual(value.context, { workspaceId: "w", sessionId: "s", messageId: "anchor", ...(target === null ? {} : { runId: target }) });
+      assert.deepEqual(value.context, { workspaceId: "w", sessionId: "s", ...(target === null ? {} : { runId: target }) });
       assert.equal(output.error(new CliError(6, "fixture precise", { context: { runId: "more-precise-run" } })).details.context?.runId, "more-precise-run");
     }
   } finally { lifetime.dispose(); }
@@ -36,11 +37,11 @@ test("全面审查M2: delta, refill and final-drain failures retain the captured
       return jsonResult(page([], 10, { session: agentSession({ headMessageId: "a", revision: 10 }) }));
     });
     assert.equal(result.code, failure === "auth" ? 4 : 5, `${where}: ${result.stderr}`);
-    const diagnostic = JSON.parse(result.stderr).error;
-    assert.equal(diagnostic.category, failure === "auth" ? "AUTH" : "NETWORK");
-    assert.equal(diagnostic.code, failure === "auth" ? "AUTH_REQUIRED" : "TRANSPORT_FAILED");
-    assert.deepEqual(diagnostic.context, { workspaceId: "w", sessionId: "s", runId: "target-run" });
-    assert.equal(result.events[0].runId, "target-run"); assert.equal(result.events.at(-1)?.complete, false);
+    const diagnostic = result.stderr;
+    assert.equal(textField(diagnostic, "category"), failure === "auth" ? "AUTH" : "NETWORK");
+    assert.equal(textField(diagnostic, "code"), failure === "auth" ? "AUTH_REQUIRED" : "TRANSPORT_FAILED");
+    for (const [key, value] of Object.entries({ workspaceId: "w", sessionId: "s", runId: "target-run" })) assert.equal(textField(diagnostic, key), value);
+    assert.equal(textField(result.stdout, "runId"), "target-run"); assert.equal(textField(result.stdout, "complete") === "true", false);
     assert.equal(result.requests.some(({ url }) => url.pathname.endsWith("/cancel")), false);
   }
 });

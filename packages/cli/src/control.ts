@@ -20,9 +20,8 @@ export async function cancelSession(workspaceId: string, sessionId: string, depe
     const result = await api.json(`/api/agent/sessions/${encodeId(sessionId)}/cancel`, {
       method: "POST", body: { workspaceId }, phase: "cancel", context, validate: (value) => controlResult(value, workspaceId, sessionId)
     });
-    const data = { workspaceId, sessionId, requested: true, status: result.runState.status };
-    await writeSuccess(dependencies.io, Boolean(dependencies.json), "session cancel", data,
-      `取消请求已处理。\n状态：${data.status}\n`, { phase: "cancel", effect: "accepted", context });
+    await writeSuccess(dependencies.io,
+      `取消请求已处理。\n状态：${result.runState.status}\n`, { phase: "cancel", effect: "accepted", context });
   } catch (error) { throw withErrorDetails(error, { phase: "cancel", effect: "not_sent", context }); }
 }
 interface CompactAcceptance {
@@ -54,12 +53,12 @@ export async function acceptCompact(workspaceId: string, sessionId: string, depe
   } catch (error) { throw withErrorDetails(error, { phase: "compact", effect: "not_sent", context }); }
 }
 export async function compactSession(workspaceId: string, sessionId: string, options: FollowOptions, dependencies: ReadCommandDependencies): Promise<CliExitCode> {
-  if (options.follow) return followAccepted("session compact", async (signal) => {
-    const { api, data, anchor } = await acceptCompact(workspaceId, sessionId, { ...dependencies, signal });
+  if (options.follow) return followAccepted("session compact", async (signal, followReadRetry) => {
+    const { api, data, anchor } = await acceptCompact(workspaceId, sessionId, { ...dependencies, signal, followReadRetry });
     return { api, identity: { workspaceId, sessionId, agentId: data.agentId, runId: data.runId, clientRequestId: data.clientRequestId }, anchor };
   }, options, dependencies);
   const { data } = await acceptCompact(workspaceId, sessionId, dependencies);
-  await writeSuccess(dependencies.io, Boolean(dependencies.json), "session compact", data,
+  await writeSuccess(dependencies.io,
     "压缩请求已受理。\n"
     + Object.entries(data).map(([key, value]) => `${key}：${escapeDisplayText(String(value))}`).join("\n") + "\n", { phase: "compact", effect: "accepted", context: { workspaceId, sessionId, runId: data.runId, agentId: data.agentId, clientRequestId: data.clientRequestId } });
   return 0;

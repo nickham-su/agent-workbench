@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
+import type { LightMyRequestResponse } from "fastify";
 import { Value } from "@sinclair/typebox/value";
+import { AgentTimelineDeltaResponseSchema, type AgentTimelineDeltaResponse } from "@agent-workbench/shared";
 import { getPromptText } from "@agent-workbench/shared/prompts";
 import { AgentApiEndpoints, AgentApiPromptContextResponseSchema } from "@agent-workbench/shared/internal-contracts/agent-api";
 import { createMessageRunRecord } from "./agent-message.store.js";
@@ -12,6 +14,7 @@ import {
   createMessageSession,
   flushStreamingParts,
   getMessageSessionHead,
+  replaceStreamingAssistant,
   startMessageRun
 } from "./agent-message.store.js";
 import { newSortableId } from "../../utils/ids.js";
@@ -473,6 +476,85 @@ test("Timeline 路由将显式 null root 前提传入查询，并在首次压缩
   });
   assert.equal(conflict.statusCode, 400, conflict.body);
   assert.equal((conflict.json() as { code: string }).code, "TIMELINE_ROOT_PRECONDITION_CONFLICT");
+});
+
+test("ACC-PROOF-SCHEMA/ISOLATION: public Timeline serializes bounded replacement evidence, never hidden message details", async () => {
+  const { fixture, workspace } = await createReadSideFixture();
+  assert.ok(fixture.app);
+  const { sessionId, runId } = createRun(fixture, workspace.id);
+  const head = getMessageSessionHead(fixture.db, { workspaceId: workspace.id, sessionId })!;
+  const attempts = [newSortableId("msg"), newSortableId("msg"), newSortableId("msg")];
+  appendStreamingAssistant(fixture.db, {
+    workspaceId: workspace.id, sessionId, runId, id: attempts[0]!,
+    expectedHeadMessageId: head.headMessageId, expectedRevision: head.revision, createdAt: Date.now()
+  });
+  flushStreamingParts(fixture.db, {
+    workspaceId: workspace.id, sessionId, runId, messageId: attempts[0]!, updatedAt: Date.now(),
+    parts: [{ id: newSortableId("part"), position: 0, type: "text", text: "old draft body must stay hidden" }]
+  });
+  const observed = getMessageSessionHead(fixture.db, { workspaceId: workspace.id, sessionId })!;
+  for (let i = 1; i < attempts.length; i++) {
+    const current = getMessageSessionHead(fixture.db, { workspaceId: workspace.id, sessionId })!;
+    const replaced = replaceStreamingAssistant(fixture.db, {
+      workspaceId: workspace.id, sessionId, runId, oldMessageId: attempts[i - 1]!, newMessageId: attempts[i]!,
+      expectedHeadMessageId: current.headMessageId, expectedRevision: current.revision,
+      runNoticeText: "retrying", retryCount: i, nextRetryAt: null, createdAt: Date.now()
+    });
+    assert.equal(replaced.result, "updated");
+  }
+  completeAssistantWithExecutions(fixture.db, {
+    workspaceId: workspace.id, sessionId, runId, messageId: attempts[2]!, executions: [], updatedAt: Date.now()
+  });
+  // Keep the replacement out of both the newest head and the limit=1 reset page.
+  for (let i = 0; i < 2; i++) {
+    const current = getMessageSessionHead(fixture.db, { workspaceId: workspace.id, sessionId })!;
+    appendMessage(fixture.db, {
+      id: newSortableId("msg"), workspaceId: workspace.id, sessionId,
+      expectedHeadMessageId: current.headMessageId, expectedRevision: current.revision,
+      type: "user", status: "completed", parts: [], createdAt: Date.now()
+    });
+  }
+  const params = new URLSearchParams({
+    workspaceId: workspace.id, mode: "delta", sinceRevision: String(observed.revision),
+    knownHeadMessageId: attempts[0]!, knownContextRootIsNull: "true", limit: "1"
+  });
+  const response = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions/${sessionId}/timeline?${params}` });
+  assert.equal(response.statusCode, 200, response.body);
+  const body = response.json<AgentTimelineDeltaResponse>();
+  assert.equal(Value.Check(AgentTimelineDeltaResponseSchema, body), true);
+  assert.equal(body.timelineReset, true);
+  assert.equal(body.messages.length, 1);
+  assert.notEqual(body.messages[0]!.id, attempts[2]);
+  assert.deepEqual(body.headReplacement, {
+    workspaceId: workspace.id, sessionId, runId, fromMessageId: attempts[0], toMessageId: attempts[2],
+    previousMessageId: head.headMessageId, depth: 1, fromSupersededRevision: observed.revision + 1,
+    toUpdatedRevision: observed.revision + 3, toStatus: "completed", replacementCount: 2, atRevision: body.session.revision
+  });
+  assert.equal(Object.keys(body.headReplacement!).length, 12);
+  assert.doesNotMatch(response.body, /old draft body must stay hidden/);
+  assert.equal(response.body.includes(attempts[1]!), false);
+  for (const messageId of attempts.slice(0, 2)) {
+    const hidden: LightMyRequestResponse = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions/${sessionId}/messages/${messageId}?workspaceId=${workspace.id}` });
+    assert.equal(hidden.statusCode, 404, hidden.body);
+    assert.equal(hidden.json().code, "MESSAGE_NOT_FOUND");
+  }
+  const other = createRun(fixture, workspace.id);
+  const isolatedParams = new URLSearchParams(params);
+  isolatedParams.set("sinceRevision", "0");
+  const isolated = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions/${other.sessionId}/timeline?${isolatedParams}` });
+  assert.equal(isolated.statusCode, 200, isolated.body);
+  assert.equal(Object.hasOwn(isolated.json(), "headReplacement"), false);
+  const anotherWorkspace = await createTestWorkspace(fixture, { title: "replacement proof isolation" });
+  const otherWorkspaceRun = createRun(fixture, anotherWorkspace.id);
+  isolatedParams.set("workspaceId", anotherWorkspace.id);
+  const isolatedWorkspace = await fixture.app.inject({
+    method: "GET", url: `/api/agent/sessions/${otherWorkspaceRun.sessionId}/timeline?${isolatedParams}`
+  });
+  assert.equal(isolatedWorkspace.statusCode, 200, isolatedWorkspace.body);
+  assert.equal(Object.hasOwn(isolatedWorkspace.json(), "headReplacement"), false);
+  const snapshot = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions/${sessionId}/timeline?workspaceId=${workspace.id}` });
+  assert.equal(snapshot.statusCode, 200, snapshot.body);
+  assert.equal(Object.hasOwn(snapshot.json(), "headReplacement"), false);
 });
 
 test("read-side internal routes preserve token, body validation, and missing-resource responses", async () => {

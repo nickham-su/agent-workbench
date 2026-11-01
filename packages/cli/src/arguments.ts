@@ -1,10 +1,9 @@
 import type { Command, Option } from "commander";
 
-export interface ArgumentInspection { command: Command; json: boolean; help: boolean; invalid: boolean; duplicate: boolean; }
+export interface ArgumentInspection { command: Command; help: boolean; invalid: boolean; duplicate: boolean; }
 /** Follow the registered grammar, consuming option values rather than scanning raw strings. */
 export function inspectArguments(args: readonly string[], root: Command): ArgumentInspection {
   let command = root;
-  let json = false;
   let help = false;
   let invalid = false;
   let duplicate = false;
@@ -31,7 +30,6 @@ export function inspectArguments(args: readonly string[], root: Command): Argume
       }
       if (!option) { invalid = true; continue; }
       const key = option.attributeName();
-      if (key === "json") json = true;
       if (seen.has(key) && key !== "image") duplicate = true;
       seen.add(key);
       if (option.required && equals < 0 && !attachedShort) {
@@ -43,7 +41,7 @@ export function inspectArguments(args: readonly string[], root: Command): Argume
     if (child) command = child;
     else invalid = true;
   }
-  return { command, json, help, invalid, duplicate };
+  return { command, help, invalid, duplicate };
 }
 export function commandName(command: Command): string {
   const parts: string[] = [];

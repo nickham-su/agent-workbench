@@ -1,3 +1,4 @@
+import { textField } from "./helpers.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { AgentApi, selectAgent } from "../src/agent-api.js";
@@ -30,32 +31,30 @@ async function execute(args: string[], body: unknown, status = 200) {
 test("A-DISCOVER-WORKSPACE: stable code-point sorting, narrow projections and empty lists", async () => {
   const data = [{ id: "z", title: "same", repos: [{ url: "private-repo-url" }], dirName: "private-path" },
     { id: "b", title: "\u{10000}" }, { id: "a", title: "same" }, { id: "c", title: "\ue000" }, { id: "empty", title: "" }];
-  const output = await execute(["workspace", "list", "--json"], data);
+  const output = await execute(["workspace", "list"], data);
   assert.equal(output.code, 0);
   assert.deepEqual(output.requests, ["/api/workspaces"]);
-  assert.deepEqual(JSON.parse(output.stdout), { schemaVersion: 1, ok: true, command: "workspace list", data: { items: [
-    { id: "empty", name: "" }, { id: "a", name: "same" }, { id: "z", name: "same" }, { id: "c", name: "\ue000" }, { id: "b", name: "\u{10000}" }
-  ], count: 5 } });
-  assert.equal(output.stderr, "");
-  assert.equal(output.stdout.includes("private-"), false);
-  const empty = await execute(["--json", "workspace", "list"], []);
-  assert.deepEqual(JSON.parse(empty.stdout).data, { items: [], count: 0 });
+  assert.deepEqual([...output.stdout.matchAll(/^Workspace ID：(.+)$/gm)].map((item) => item[1]), ["empty", "a", "z", "c", "b"]);
+  assert.match(output.stdout, /工作区总数：5/);
+  assert.doesNotMatch(output.stdout, /private-/);
+  const empty = await execute(["workspace", "list"], []);
+  assert.equal(empty.stdout, "工作区总数：0\n");
 });
 
 test("A-DISCOVER-AGENT: config order, minimal fields, empty success and one shared selection rule", async () => {
   const agents = [{ id: "z", name: "z", summary: "摘要\n\u001b[31m", prompt: "private-agent-prompt", defaultModel: { providerId: "private-provider" } }, { id: "a", name: "a", summary: "" }];
-  const output = await execute(["agent", "--json", "list", "-w", "w"], { agents });
+  const output = await execute(["agent", "list", "-w", "w"], { agents });
   assert.equal(output.code, 0);
   assert.deepEqual(output.requests, ["/api/workspaces/w/agents/available?surface=user"]);
-  assert.deepEqual(JSON.parse(output.stdout).data, { workspaceId: "w", count: 2, items: agents.map(({ id, name, summary }) => ({ id, name, summary })) });
+  assert.match(output.stdout, /Workspace：w/); assert.match(output.stdout, /Agent 总数：2/); assert.deepEqual([...output.stdout.matchAll(/^Agent ID：(.+)$/gm)].map((item) => item[1]), agents.map((item) => item.id));
   assert.equal(output.stdout.includes("private-"), false);
   const human = await execute(["agent", "list", "--workspace", "w"], { agents });
   assert.equal(human.stdout.includes("\u001b"), false);
   assert.ok(human.stdout.includes("摘要\\n\\u001b[31m"));
   assert.match(human.stdout, /Agent 总数：2\n$/);
   assert.doesNotMatch(human.stdout, /不保证|可用仅|可用只|Worker/);
-  const empty = await execute(["agent", "list", "-w", "w", "--json"], { agents: [] });
-  assert.deepEqual(JSON.parse(empty.stdout).data.items, []);
+  const empty = await execute(["agent", "list", "-w", "w"], { agents: [] });
+  assert.match(empty.stdout, /Agent 总数：0/);
   assert.equal(selectAgent(agents).id, "z");
   assert.equal(selectAgent(agents, "a").id, "a");
   assert.throws(() => selectAgent([]), (error: unknown) => error instanceof CliError && error.details.code === "NO_AVAILABLE_AGENT");
@@ -65,10 +64,10 @@ test("A-DISCOVER-AGENT: config order, minimal fields, empty success and one shar
 test("A-SESSIONS-SHOW: primary/subtask metadata, fork provenance and no window requirement", async () => {
   for (const kind of ["primary", "subtask"] as const) {
     const data = { ...sessionFixture(kind), privateExtra: "private-configuration" };
-    const output = await execute(["session", "show", "-w", "w", "-s", "s", "--json"], data);
+    const output = await execute(["session", "show", "-w", "w", "-s", "s"], data);
     assert.equal(output.code, 0);
     assert.deepEqual(output.requests, ["/api/agent/sessions/s?workspaceId=w"]);
-    assert.deepEqual(JSON.parse(output.stdout).data, sessionFixture(kind));
+    assert.match(output.stdout, new RegExp(`类型：${kind}`)); assert.match(output.stdout, /Session ID：s/); assert.doesNotMatch(output.stdout, /headMessageId|contextRootMessageId|forkedFromMessageId|：head|：root|：fork/);
     assert.equal(output.stdout.includes("private-"), false);
     const human = await execute(["session", "show", "-w", "w", "-s", "s"], data);
     assert.equal(human.stdout.includes("\u001b"), false);
@@ -78,10 +77,10 @@ test("A-SESSIONS-SHOW: primary/subtask metadata, fork provenance and no window r
 
 test("A-CONTROL-STATUS: only busy/idle, no activeRunId, runtime notice or success inference", async () => {
   for (const status of ["idle", "running"] as const) {
-    const output = await execute(["--json", "session", "status", "-w", "w", "-s", "s"], stateFixture(status));
+    const output = await execute(["session", "status", "-w", "w", "-s", "s"], stateFixture(status));
     assert.equal(output.code, 0);
     assert.deepEqual(output.requests, ["/api/agent/sessions/s/run-state?workspaceId=w"]);
-    assert.deepEqual(JSON.parse(output.stdout).data, { workspaceId: "w", sessionId: "s", status });
+    assert.match(output.stdout, new RegExp(`状态：${status}`)); assert.match(output.stdout, /Session ID：s/);
     assert.equal(output.stdout.includes("private-"), false);
     const human = await execute(["session", "status", "-w", "w", "-s", "s"], stateFixture(status));
     assert.equal(human.code, 0);
@@ -104,27 +103,27 @@ test("strict discovery/detail/status DTO errors publish no partial list or guess
     [["session", "status", "-w", "w", "-s", "s"], { ...stateFixture(), retryCount: -1 }]
   ];
   for (const [args, body] of cases) {
-    const output = await execute([...args, "--json"], body);
+    const output = await execute([...args], body);
     assert.equal(output.code, 6);
     assert.equal(output.stdout, "");
     assert.equal(output.requests.length, 1);
-    assert.equal(JSON.parse(output.stderr).error.code, "RESPONSE_INVALID");
+    assert.equal(textField(output.stderr, "code"), "RESPONSE_INVALID");
   }
 });
 
 test("HTTP 401/404/409/503 return one safe JSON error, never retry, login or switch scope", async () => {
   for (const status of [401, 404, 409, 503]) {
-    const output = await execute(["session", "show", "-w", "w", "-s", "s", "--json"], { code: "PRIVATE_SECRET_CODE", message: "private-response-secret" }, status);
+    const output = await execute(["session", "show", "-w", "w", "-s", "s"], { code: "PRIVATE_SECRET_CODE", message: "private-response-secret" }, status);
     assert.equal(output.code, status === 401 ? 4 : 6);
     assert.equal(output.stdout, "");
     assert.equal(output.stderr.includes("private-response-secret"), false);
     assert.equal(output.stderr.includes("PRIVATE_SECRET_CODE"), false);
     assert.deepEqual(output.requests, ["/api/agent/sessions/s?workspaceId=w"]);
-    const error = JSON.parse(output.stderr).error;
-    assert.equal(error.phase, "status");
-    assert.equal(error.effect, "not_applicable");
-    assert.deepEqual(error.context, { workspaceId: "w", sessionId: "s" });
-    assert.equal(error.help, "awb session show --help");
+    const error = output.stderr;
+    assert.equal(textField(error, "phase"), "status");
+    assert.equal(textField(error, "effect"), "not_applicable");
+    for (const [key, value] of Object.entries({ workspaceId: "w", sessionId: "s" })) assert.equal(textField(error, key), String(value));
+    assert.equal(textField(error, "help"), "awb session show --help");
   }
 });
 
@@ -180,7 +179,7 @@ test("A-OUTPUT-JSON login modes emit one safe result without loading old credent
     const capture = captureIO("fixture-only-token\n");
     const requests: string[] = [];
     let saves = 0;
-    const code = await runCli(["login", "--url", "http://example.test", "--token-stdin", "--json"], {
+    const code = await runCli(["login", "--url", "http://example.test", "--token-stdin"], {
       io: capture.io,
       createConfigStore: () => ({ load: async () => { throw new Error("Must not load old credentials"); }, save: async () => { saves++; } }),
       http: { request: async (_origin, path) => {
@@ -191,7 +190,7 @@ test("A-OUTPUT-JSON login modes emit one safe result without loading old credent
     assert.equal(code, 0);
     assert.equal(saves, 1);
     assert.deepEqual(requests, authEnabled ? ["/api/health", "/api/auth/login"] : ["/api/health"]);
-    assert.deepEqual(JSON.parse(capture.output()), { schemaVersion: 1, ok: true, command: "login", data: { authEnabled, authenticated: authEnabled } });
+    assert.match(capture.output(), authEnabled ? /登录成功/ : /连接初始化成功（服务未开启认证）/);
     assert.equal(capture.diagnostic(), "");
     assert.equal(capture.output().includes("fixture-only-token"), false);
     assert.equal(capture.output().includes(cookieValue), false);
@@ -201,16 +200,16 @@ test("A-OUTPUT-JSON login modes emit one safe result without loading old credent
 test("config failures carry CONFIG phase/code without leaking raw exceptions or performing requests", async () => {
   const capture = captureIO();
   let requests = 0;
-  const code = await runCli(["workspace", "list", "--json"], { io: capture.io,
+  const code = await runCli(["workspace", "list"], { io: capture.io,
     createConfigStore: () => ({ load: async () => { throw new Error("private-config-error"); }, save: async () => {} }),
     http: { request: async () => { requests++; throw new Error("Must not request"); } }
   });
   assert.equal(code, 3);
   assert.equal(requests, 0);
   assert.equal(capture.output(), "");
-  const error = JSON.parse(capture.diagnostic()).error;
-  assert.equal(error.category, "CONFIG");
-  assert.equal(error.code, "CONFIG_INVALID");
-  assert.equal(error.phase, "config");
+  const error = capture.diagnostic();
+  assert.equal(textField(error, "category"), "CONFIG");
+  assert.equal(textField(error, "code"), "CONFIG_INVALID");
+  assert.equal(textField(error, "phase"), "config");
   assert.equal(capture.diagnostic().includes("private-config-error"), false);
 });
