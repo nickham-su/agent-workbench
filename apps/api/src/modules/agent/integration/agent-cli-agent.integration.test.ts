@@ -67,7 +67,7 @@ async function fixture(t: TestContext, worker: boolean, observe?: (request: { me
   const publicRequests: string[] = []; f.app!.server.on("request", (request) => { if (request.headers.cookie?.includes("awb_session=")) publicRequests.push(request.url ?? ""); });
   const origin = await f.app!.listen({ host: "127.0.0.1", port: apiPort });
   async function run(args: string[], input = "") {
-    const child = spawn(process.execPath, [cliEntry, ...args, "--json"], { cwd: home, env: { HOME: home, USERPROFILE: home, TMPDIR: home, PATH: path.dirname(process.execPath), NODE_PATH: "" }, stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn(process.execPath, [cliEntry, ...args], { cwd: home, env: { HOME: home, USERPROFILE: home, TMPDIR: home, PATH: path.dirname(process.execPath), NODE_PATH: "" }, stdio: ["pipe", "pipe", "pipe"] });
     let stdout = ""; let stderr = ""; child.stdout.on("data", (chunk) => { stdout += chunk; }); child.stderr.on("data", (chunk) => { stderr += chunk; }); child.stdin.end(input);
     const timer = setTimeout(() => child.kill("SIGKILL"), 25000);
     try { const [code] = await once(child, "close"); return { code, stdout, stderr }; } finally { clearTimeout(timer); }
@@ -77,8 +77,17 @@ async function fixture(t: TestContext, worker: boolean, observe?: (request: { me
   async function publicJson(route: string) { const result = await fetch(`${origin}${route}`, { headers: { cookie: controllerCookie } }); assert.equal(result.status, 200); return result.json() as Promise<Record<string, unknown>>; }
   return { ...f, workspace, home, origin, run, publicJson, controllerCookie, publicRequests };
 }
-function success(result: { code: unknown; stdout: string; stderr: string }) { assert.equal(result.code, 0, result.stderr); assert.equal(result.stderr, ""); return JSON.parse(result.stdout).data; }
-function events(result: { code: unknown; stdout: string; stderr: string }) { assert.equal(result.code, 0, result.stderr); assert.equal(result.stderr, ""); const rows = result.stdout.trim().split("\n").map((line) => JSON.parse(line)); assert.equal(rows[0].type, "metadata"); assert.equal(rows.at(-1).type, "terminal"); assert.equal(rows.at(-1).complete, true); return rows; }
+function success(result: { code: unknown; stdout: string; stderr: string }): string {
+  assert.equal(result.code, 0, result.stderr); assert.equal(result.stderr, ""); return result.stdout;
+}
+function follow(result: { code: unknown; stdout: string; stderr: string }): string {
+  const text = success(result); assert.match(text, /监听结束：/); assert.match(text, /complete=true/); return text;
+}
+function field(text: string, label: string): string {
+  const value = text.split("\n").find((line) => line.startsWith(`${label}：`))?.slice(label.length + 1);
+  assert.notEqual(value, undefined, label); return value!;
+}
+function messageIds(text: string): string[] { return [...text.matchAll(/^消息 ID：([^\n]+)$/gm)].map((match) => match[1]); }
 
 /** Parse central directory entries, then inflate each file: no external unzip binary needed. */
 function unzip(buffer: Buffer): Map<string, Buffer> {
@@ -100,27 +109,27 @@ test("A-REGRESSION-API: real managed Worker and controlled Provider exercise CLI
     ["/api/settings/agent/agents", { agents: [{ id: "default", name: "CLI smoke", summary: "controlled", prompt: "Answer the fixture request.", tools: ["read"], pluginTools: [], mcpServers: [], defaultModel: { providerId: "fixture-provider", modelId: "fixture-model" }, scope: "both", order: 0 }] }],
     ["/api/settings/agent/runtime", { modelRequestMaxRetries: 0, modelIdleTimeoutMs: 5000, modelTotalTimeoutMs: 10000, autoCompactThresholdPct: 80 }]
   ] as const) { const result = await f.app!.inject({ method: "PUT", url, headers: { cookie: f.controllerCookie }, payload }); assert.equal(result.statusCode, 200, result.body); }
-  assert.deepEqual(success(await f.run(["workspace", "list"])).items, [{ id: w, name: "CLI smoke workspace" }]);
-  const agents = success(await f.run(["agent", "list", "-w", w])); assert.deepEqual(agents.items, [{ id: "default", name: "CLI smoke", summary: "controlled" }]);
-  const sent = events(await f.run(["session", "send", "-w", w, "--prompt", "fixture question", "-f", "--follow-timeout", "20s"])); const s = sent[0].sessionId as string;
-  assert.equal(sent.at(-1).runStatus, "completed"); assert.ok(sent.some((row) => row.type === "message" && row.message.parts.some((part: { text?: string }) => part.text === "受控 Provider 最终回答")));
-  const recent = success(await f.run(["session", "messages", "-w", w, "-s", s, "-n", "1"])); assert.equal(recent.items.length, 1); assert.equal(recent.items[0].parts[0].text, "受控 Provider 最终回答");
+  const workspaces = success(await f.run(["workspace", "list"])); assert.match(workspaces, /工作区总数：1/); assert.equal(field(workspaces, "Workspace ID"), w); assert.equal(field(workspaces, "名称"), "CLI smoke workspace");
+  const agents = success(await f.run(["agent", "list", "-w", w])); assert.equal(field(agents, "Agent ID"), "default"); assert.equal(field(agents, "名称"), "CLI smoke"); assert.equal(field(agents, "用途"), "controlled");
+  const sent = follow(await f.run(["session", "send", "-w", w, "--prompt", "fixture question", "-f", "--follow-timeout", "20s"])); const s = field(sent, "Session ID");
+  assert.match(sent, /runStatus=completed/); assert.ok(sent.includes("受控 Provider 最终回答"));
+  const recent = success(await f.run(["session", "messages", "-w", w, "-s", s, "-n", "1"])); assert.equal(messageIds(recent).length, 1); assert.ok(recent.includes("受控 Provider 最终回答"));
   const image = path.join(f.dataDir, "fixture.png"); await fs.writeFile(image, Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aRZkAAAAASUVORK5CYII=", "base64"));
-  events(await f.run(["session", "send", "-w", w, "-s", s, "--image", image, "-f", "--follow-timeout", "20s"]));
+  follow(await f.run(["session", "send", "-w", w, "-s", s, "--image", image, "-f", "--follow-timeout", "20s"]));
   assert.ok(stub.requests.some((request) => JSON.stringify(request.input).includes("data:image/png;base64,")));
   await fs.writeFile(path.join(f.workspace.path, "tool-input.txt"), "tool fixture content");
-  const toolCycle = events(await f.run(["session", "send", "-w", w, "-s", s, "--prompt", "fixture tool cycle", "-f", "--follow-timeout", "20s"]));
-  assert.ok(toolCycle.some((row) => row.type === "message" && row.message.type === "assistant"));
-  for (const row of toolCycle.filter((row) => row.type === "message")) assert.ok(row.message.parts.every((part: { type: string }) => part.type === "text" || part.type === "image"));
+  const toolCycle = follow(await f.run(["session", "send", "-w", w, "-s", s, "--prompt", "fixture tool cycle", "-f", "--follow-timeout", "20s"]));
+  assert.match(toolCycle, /助手回复/);
+  assert.doesNotMatch(toolCycle, /tool_call|hidden tool input|private fixture reasoning/); assert.ok(messageIds(toolCycle).length >= 1);
   assert.ok(stub.requests.some((request) => JSON.stringify(request.input).includes("function_call_output")));
-  assert.equal(success(await f.run(["session", "status", "-w", w, "-s", s])).status, "idle");
+  assert.equal(field(success(await f.run(["session", "status", "-w", w, "-s", s])), "状态"), "idle");
   const before = success(await f.run(["session", "messages", "-w", w, "-s", s, "-n", "20"]));
-  const compact = events(await f.run(["session", "compact", "-w", w, "-s", s, "-f", "--follow-timeout", "20s"])); assert.equal(compact.at(-1).runStatus, "completed");
-  const after = success(await f.run(["session", "messages", "-w", w, "-s", s, "-n", "20"])); assert.deepEqual(after.items.map((message: { id: string }) => message.id), before.items.map((message: { id: string }) => message.id));
+  const compact = follow(await f.run(["session", "compact", "-w", w, "-s", s, "-f", "--follow-timeout", "20s"])); assert.equal(compact.includes("runStatus=completed"), true);
+  const after = success(await f.run(["session", "messages", "-w", w, "-s", s, "-n", "20"])); assert.deepEqual(messageIds(after), messageIds(before));
   await fs.mkdir(path.join(f.workspace.path, "reports", "empty"), { recursive: true }); await fs.writeFile(path.join(f.workspace.path, "reports", "answer.txt"), "artifact bytes");
   const file = path.join(f.home, "answer.bin"); const zip = path.join(f.home, "reports.zip");
-  assert.equal(success(await f.run(["file", "download", "-w", w, "--path", "reports/answer.txt", "--output", file])).format, "file"); assert.equal(await fs.readFile(file, "utf8"), "artifact bytes");
-  assert.equal(success(await f.run(["file", "download", "-w", w, "--path", "reports", "--output", zip])).format, "zip"); const entries = unzip(await fs.readFile(zip)); assert.equal(entries.get("reports/answer.txt")?.toString(), "artifact bytes"); assert.equal(entries.has("reports/empty/"), false);
+  assert.match(success(await f.run(["file", "download", "-w", w, "--path", "reports/answer.txt", "--output", file])), /（file，[0-9]+ bytes，published=true）/); assert.equal(await fs.readFile(file, "utf8"), "artifact bytes");
+  assert.match(success(await f.run(["file", "download", "-w", w, "--path", "reports", "--output", zip])), /（zip，[0-9]+ bytes，published=true）/); const entries = unzip(await fs.readFile(zip)); assert.equal(entries.get("reports/answer.txt")?.toString(), "artifact bytes"); assert.equal(entries.has("reports/empty/"), false);
   assert.ok(f.publicRequests.length > 15); assert.equal(f.publicRequests.some((route) => route.startsWith("/api/internal/") || route.includes("/events") || route.includes("/settings/")), false);
   assert.equal((await fetch(`${f.origin}/api/internal/agent/sessions/${s}/run-state`)).status, 401);
 });
@@ -139,14 +148,14 @@ test("A-CONTROL-CANCEL-TREE: CLI cancellation reaches active child/grandchild, l
   const f = await fixture(t, false); const w = f.workspace.id; const root = seedRun(f, w, "primary", null); const child = seedRun(f, w, "subtask", root.runId); const grandchild = seedRun(f, w, "subtask", child.runId); const done = seedRun(f, w, "subtask", root.runId, "completed");
   const written = path.join(f.workspace.path, "before-cancel.txt"); await fs.writeFile(written, "must survive");
   for (const target of [child, grandchild]) {
-    assert.equal(success(await f.run(["session", "show", "-w", w, "-s", target.sessionId])).kind, "subtask");
-    assert.equal(success(await f.run(["session", "status", "-w", w, "-s", target.sessionId])).status, "running");
-    assert.equal(success(await f.run(["session", "messages", "-w", w, "-s", target.sessionId, "-n", "1"])).count, 1);
+    assert.equal(field(success(await f.run(["session", "show", "-w", w, "-s", target.sessionId])), "类型"), "subtask");
+    assert.equal(field(success(await f.run(["session", "status", "-w", w, "-s", target.sessionId])), "状态"), "running");
+    assert.match(success(await f.run(["session", "messages", "-w", w, "-s", target.sessionId, "-n", "1"])), /消息快照结束：已输出 1 条普通消息/);
     const denied = await f.run(["session", "cancel", "-w", w, "-s", target.sessionId]); assert.equal(denied.code, 2); assert.equal(denied.stdout, "");
   }
-  const cancel = success(await f.run(["session", "cancel", "-w", w, "-s", root.sessionId])); assert.equal(cancel.requested, true);
+  const cancel = success(await f.run(["session", "cancel", "-w", w, "-s", root.sessionId])); assert.match(cancel, /取消请求已处理/);
   for (const target of [root, child, grandchild]) {
-    const state = success(await f.run(["session", "status", "-w", w, "-s", target.sessionId])); assert.equal(state.status, "idle");
+    const state = success(await f.run(["session", "status", "-w", w, "-s", target.sessionId])); assert.equal(field(state, "状态"), "idle");
     const run = await f.publicJson(`/api/agent/sessions/${target.sessionId}/runs/${target.runId}?workspaceId=${w}`); assert.equal(run.status, "cancelled");
   }
   assert.equal((await f.publicJson(`/api/agent/sessions/${done.sessionId}/runs/${done.runId}?workspaceId=${w}`)).status, "completed");
@@ -180,27 +189,27 @@ test("全面审查M3: real API cancel uses new current Run after CLI precheck, n
     }
   });
   const result = success(await f.run(["session", "cancel", "-w", w, "-s", old.sessionId]));
-  assert.equal(transitionError, undefined); assert.equal(prechecks, 1); assert.deepEqual(posted, [{ workspaceId: w }]); assert.equal(result.status, "idle");
+  assert.equal(transitionError, undefined); assert.equal(prechecks, 1); assert.deepEqual(posted, [{ workspaceId: w }]); assert.equal(field(result, "状态"), "idle");
   assert.ok(nextChild);
   for (const [sessionId, runId, expected] of [
     [old.sessionId, old.runId, "completed"], [old.sessionId, nextRunId, "cancelled"],
     [nextChild.sessionId, nextChild.runId, "cancelled"], [historicalChild.sessionId, historicalChild.runId, "running"]
   ]) assert.equal((await f.publicJson(`/api/agent/sessions/${sessionId}/runs/${runId}?workspaceId=${w}`)).status, expected);
-  assert.equal(success(await f.run(["session", "status", "-w", w, "-s", historicalChild.sessionId])).status, "running");
+  assert.equal(field(success(await f.run(["session", "status", "-w", w, "-s", historicalChild.sessionId])), "状态"), "running");
 });
 
 test("全面审查M3: real API idle-root cancel never scans or cancels historical active descendants", async (t) => {
   const f = await fixture(t, false); const w = f.workspace.id;
   const root = seedRun(f, w, "primary", null, "completed"); const orphan = seedRun(f, w, "subtask", root.runId); const descendant = seedRun(f, w, "subtask", orphan.runId);
-  assert.equal(success(await f.run(["session", "status", "-w", w, "-s", root.sessionId])).status, "idle");
+  assert.equal(field(success(await f.run(["session", "status", "-w", w, "-s", root.sessionId])), "状态"), "idle");
   const before = f.publicRequests.length;
   const result = success(await f.run(["session", "cancel", "-w", w, "-s", root.sessionId]));
-  assert.equal(result.status, "idle");
+  assert.equal(field(result, "状态"), "idle");
   assert.equal(f.publicRequests.slice(before).filter((route) => route.includes("/cancel")).length, 1);
   assert.equal((await f.publicJson(`/api/agent/sessions/${root.sessionId}/runs/${root.runId}?workspaceId=${w}`)).status, "completed");
   for (const target of [orphan, descendant]) {
     assert.equal((await f.publicJson(`/api/agent/sessions/${target.sessionId}/runs/${target.runId}?workspaceId=${w}`)).status, "running");
-    assert.equal(success(await f.run(["session", "status", "-w", w, "-s", target.sessionId])).status, "running");
+    assert.equal(field(success(await f.run(["session", "status", "-w", w, "-s", target.sessionId])), "状态"), "running");
   }
 });
 
@@ -208,7 +217,7 @@ test("A-DOWNLOAD-LIMITS/TYPES: real API preserves 100 MiB directory limit, .git/
   const f = await fixture(t, false); const w = f.workspace.id;
   const directory = path.join(f.workspace.path, "large"); await fs.mkdir(directory);
   const source = path.join(directory, "sparse.bin"); const handle = await fs.open(source, "w"); await handle.truncate(100 * 1024 * 1024); await handle.close();
-  const exact = path.join(f.home, "exact.zip"); assert.equal(success(await f.run(["file", "download", "-w", w, "--path", "large", "--output", exact])).format, "zip");
+  const exact = path.join(f.home, "exact.zip"); assert.match(success(await f.run(["file", "download", "-w", w, "--path", "large", "--output", exact])), /（zip，[0-9]+ bytes，published=true）/);
   // Inspect ZIP metadata without inflating 100 MiB into the test process.
   const zip = await fs.readFile(exact); const central = zip.indexOf(Buffer.from([0x50,0x4b,0x01,0x02])); assert.ok(central >= 0); assert.equal(zip.readUInt32LE(central + 24), 100 * 1024 * 1024);
   const larger = await fs.open(source, "r+"); await larger.truncate(100 * 1024 * 1024 + 1); await larger.close();
@@ -230,8 +239,8 @@ test("A-MESSAGES-PAGES/SUBTASK: real Timeline pages >500 sparse records and idle
     appendMessage(f.db, { id, workspaceId: w, sessionId, expectedHeadMessageId: head, expectedRevision: index, type: ordinary ? "user" : "assistant", status: "completed", parts: [{ id: newSortableId("part"), position: 0, type: ordinary ? "text" : "reasoning", text: ordinary ? `visible-${index}` : "private fixture reasoning" }], createdAt: now + index });
     head = id; if (ordinary) visible.push(id);
   }
-  const history = success(await f.run(["session", "messages", "-w", w, "-s", sessionId, "-n", "10"])); assert.deepEqual(history.items.map((message: { id: string }) => message.id), visible);
-  const observed = events(await f.run(["session", "messages", "-w", w, "-s", sessionId, "-n", "10", "-f", "--follow-timeout", "10s"])); assert.equal(observed.at(-1).outcome, "no_active_run"); assert.deepEqual(observed.filter((row) => row.type === "message").map((row) => row.message.id), visible);
+  const history = success(await f.run(["session", "messages", "-w", w, "-s", sessionId, "-n", "10"])); assert.deepEqual(messageIds(history), visible);
+  const observed = follow(await f.run(["session", "messages", "-w", w, "-s", sessionId, "-n", "10", "-f", "--follow-timeout", "10s"])); assert.match(observed, /outcome=no_active_run/); assert.deepEqual(messageIds(observed), visible);
   assert.equal(JSON.stringify(history).includes("private fixture reasoning"), false);
   assert.ok(f.publicRequests.filter((route) => route.includes("mode=before")).length >= 8);
 });

@@ -7,7 +7,7 @@ async function help(args: string[]) {
   const capture = captureIO();
   let configurations = 0;
   let requests = 0;
-  const code = await runCli([...args, "--help", "--json"], {
+  const code = await runCli([...args, "--help"], {
     io: capture.io,
     createConfigStore: () => { configurations++; throw Error("help must stay offline"); },
     http: { request: async () => { requests++; throw Error("help must stay offline"); } }
@@ -27,6 +27,19 @@ test("normal help describes usage without speculative availability or result dis
   for (const command of commands) {
     const output = await help(command);
     assert.doesNotMatch(output, /不保证|不代表|不表示|竞态|仅词法过滤|尚非最终正文|不显示仓库地址|不查询或推断/, command.join(" "));
+  }
+});
+
+test("workspace help describes server order and session list hides only the compatibility kind option", async () => {
+  const workspace = await help(["workspace", "list"]);
+  assert.ok(workspace.includes("最近使用优先（按服务端顺序）"));
+  assert.doesNotMatch(workspace, /按名称排序/);
+  for (const options of [[], ["--kind", "primary"], ["--kind=primary"], ["--kind", "subtask"], ["--kind", "all"], ["--kind"]]) {
+    const output = await help(["session", "list", ...options]);
+    assert.doesNotMatch(output, /--kind|已弃用|subtask\/all/);
+    for (const visible of ["--workspace<ID>", "--updated-within<duration>", "--status<status>", "--timeout<duration>"]) {
+      assert.ok(output.includes(visible), visible);
+    }
   }
 });
 
@@ -50,7 +63,12 @@ test("positive help retains input, follow, cancellation and download operation r
   assert.ok(compact.includes("配置顺序第一个userAgent"));
   assert.ok(compact.includes("空闲主"));
   assert.ok(compact.includes("保留原消息历史和工作区文件"));
-  for (const output of [send, messages, compact]) assert.ok(output.includes("中断监听不会取消后台执行"));
+  for (const output of [send, messages, compact]) {
+    assert.ok(output.includes("中断监听不会取消后台执行"));
+    assert.ok(output.includes("按新增正文输出，消息终结后展示消息ID"));
+    assert.ok(output.includes("HTTP429/502/503/504"));
+    assert.ok(output.includes("最多重试三次，依次等待1/2/4秒；写操作不自动重试"));
+  }
   const download = await help(["file", "download"]);
   for (const rule of ["目录由服务端生成ZIP", "100MiB", ".git/软链整次失败", "空目录不保留", "不覆盖已有文件或链接"]) {
     assert.ok(download.includes(rule), rule);

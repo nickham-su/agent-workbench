@@ -264,10 +264,34 @@ export const AgentTimelineDeltaRequestSchema = Type.Object({
 }, { additionalProperties: false });
 export type AgentTimelineDeltaRequest = Static<typeof AgentTimelineDeltaRequestSchema>;
 
+/** A bounded, read-view-bound proof of a native assistant retry in one display slot. */
+export const AgentHeadReplacementProofSchema = Type.Object({
+  workspaceId: IdSchema,
+  sessionId: IdSchema,
+  runId: IdSchema,
+  fromMessageId: IdSchema,
+  toMessageId: IdSchema,
+  previousMessageId: NullableIdSchema,
+  depth: Type.Integer({ minimum: 0 }),
+  fromSupersededRevision: Type.Integer({ minimum: 0 }),
+  toUpdatedRevision: Type.Integer({ minimum: 0 }),
+  toStatus: Type.Union([
+    Type.Literal("streaming"),
+    Type.Literal("completed"),
+    Type.Literal("failed"),
+    Type.Literal("cancelled")
+  ]),
+  replacementCount: Type.Integer({ minimum: 1, maximum: 256 }),
+  atRevision: Type.Integer({ minimum: 0 })
+}, { additionalProperties: false });
+export type AgentHeadReplacementProof = Static<typeof AgentHeadReplacementProofSchema>;
+
 export const AgentTimelineDeltaResponseSchema = Type.Object({
   session: AgentSessionMessageStateSchema,
   /** true 表示调用方必须丢弃本地 timeline，以本响应作为新的尾部 snapshot。 */
   timelineReset: Type.Boolean(),
+  /** Only delta may prove a superseded knownHead; never includes old Parts or intermediate IDs. */
+  headReplacement: Type.Optional(AgentHeadReplacementProofSchema),
   messages: Type.Array(AgentMessageSchema),
   toolExecutions: Type.Array(AgentTimelineToolExecutionSchema),
   hasMore: Type.Optional(Type.Boolean()),

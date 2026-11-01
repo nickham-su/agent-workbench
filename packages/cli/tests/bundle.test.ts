@@ -84,13 +84,13 @@ test("A-REGRESSION-BUNDLE: builtin-only artifact actually logs in, posts multipa
     res.statusCode = 404; res.end("{}");
   }); t.after(server.close);
   async function run(args: string[]) {
-    const child = spawn(process.execPath, ["--require", preload, artifact, ...args, "--json"], { cwd: root, env: { HOME: home, USERPROFILE: home, TMPDIR: root, PATH: dirname(process.execPath), NODE_PATH: "" }, stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn(process.execPath, ["--require", preload, artifact, ...args], { cwd: root, env: { HOME: home, USERPROFILE: home, TMPDIR: root, PATH: dirname(process.execPath), NODE_PATH: "" }, stdio: ["pipe", "pipe", "pipe"] });
     let stdout = ""; let stderr = ""; child.stdout.on("data", (chunk) => { stdout += chunk; }); child.stderr.on("data", (chunk) => { stderr += chunk; }); child.stdin.end();
     const timer = setTimeout(() => child.kill("SIGKILL"), 10000);
-    try { const [code] = await once(child, "close"); assert.equal(code, 0, stderr); assert.equal(stderr, ""); return JSON.parse(stdout); } finally { clearTimeout(timer); }
+    try { const [code] = await once(child, "close"); assert.equal(code, 0, stderr); assert.equal(stderr, ""); return stdout; } finally { clearTimeout(timer); }
   }
-  assert.equal((await run(["login", "--url", server.origin])).command, "login");
-  assert.equal((await run(["session", "send", "-w", "w", "--image", image])).data.accepted, true);
-  assert.equal((await run(["file", "download", "-w", "w", "--path", "report", "--output", output])).data.published, true);
+  assert.match(await run(["login", "--url", server.origin]), /连接初始化成功/);
+  assert.match(await run(["session", "send", "-w", "w", "--image", image]), /accepted：true/);
+  assert.match(await run(["file", "download", "-w", "w", "--path", "report", "--output", output]), /published=true/);
   assert.equal(await fs.readFile(output, "utf8"), "bundle-stream"); assert.equal(multipart, 1); assert.equal(downloads, 1);
 });

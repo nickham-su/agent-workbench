@@ -167,6 +167,7 @@ export class PluginRuntimeManager {
   }
 
   async listTools(ctx: ToolListContext): Promise<ResolvedToolDefinition[]> {
+    if (ctx.profile.agent.pluginTools.length === 0) return [];
     const snapshots = await this.getSnapshots(ctx.apiClient);
     const selected = this.selectSnapshots(ctx.profile, snapshots);
     const tools: ResolvedToolDefinition[] = [];

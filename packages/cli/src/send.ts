@@ -67,6 +67,9 @@ export async function acceptSend(options: SendOptions, prepared: PreparedSend, d
 }
 export async function sendMessage(options: SendOptions, prepared: PreparedSend, dependencies: ReadCommandDependencies): Promise<void> {
   const { data } = await acceptSend(options, prepared, dependencies);
-  const human = `已受理。\n` + Object.entries(data).map(([key, value]) => `${key}：${escapeDisplayText(String(value))}`).join("\n") + "\n";
-  await writeSuccess(dependencies.io, Boolean(dependencies.json), "session send", data, human, { phase: "send", effect: "accepted", context: { workspaceId: data.workspaceId, sessionId: data.sessionId, agentId: data.agentId, messageId: data.messageId, runId: data.runId, clientRequestId: data.clientRequestId } });
+  const fields = { Workspace: data.workspaceId, "Session ID": data.sessionId, "Agent ID": data.agentId,
+    "用户消息 ID": data.messageId, "Run ID": data.runId, clientRequestId: data.clientRequestId,
+    sessionCreated: data.sessionCreated, accepted: true, deduplicated: data.deduplicated };
+  const human = `请求已受理；执行结果尚未确认。\n` + Object.entries(fields).map(([key, value]) => `${key}：${escapeDisplayText(String(value))}`).join("\n") + "\n";
+  await writeSuccess(dependencies.io, human, { phase: "send", effect: "accepted", context: { workspaceId: data.workspaceId, sessionId: data.sessionId, agentId: data.agentId, messageId: data.messageId, runId: data.runId, clientRequestId: data.clientRequestId } });
 }

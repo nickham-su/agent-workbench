@@ -40,9 +40,9 @@ test("A-DOWNLOAD-TYPES/SIZE: file and unknown-length ZIP stream into exclusive t
       let offset = 0; const write = () => { while (offset < content.length) { const chunk = content.subarray(offset, offset + 16_384); offset += chunk.length; if (!response.write(chunk)) { response.once("drain", write); return; } } response.end(); }; write();
     }); t.after(server.close);
     const io = captureIO(); const output = join(root, `${format}.bin`);
-    await downloadFile({ workspaceId: "w", path: "%2e%2e/name", output }, { io: io.io, json: true, config: connectionStore(server.origin), http: new HttpClient() });
+    await downloadFile({ workspaceId: "w", path: "%2e%2e/name", output }, { io: io.io, config: connectionStore(server.origin), http: new HttpClient() });
     assert.deepEqual(await fs.readFile(output), content); assert.equal(fetched, 1);
-    const summary = JSON.parse(io.output()); assert.equal(summary.data.format, format); assert.equal(summary.data.bytes, content.length); assert.equal(summary.data.published, true);
+    assert.ok(io.output().includes(`（${format}，${content.length} bytes，published=true）`));
     assert.deepEqual((await fs.readdir(root)).filter((name) => name.startsWith(".awb-download-")), []);
     if (process.platform !== "win32") assert.equal((await fs.stat(output)).mode & 0o777, 0o600);
   }
@@ -152,7 +152,7 @@ test("A-DOWNLOAD-SOURCE-CHANGE: streaming EOF is transport completeness, not a s
   const root = await directory(t); let source = "before";
   const server = await httpServer((_req, res) => { res.setHeader("content-type", "application/zip"); res.write(source); source = "after"; setImmediate(() => res.end(source)); }); t.after(server.close);
   const io = captureIO(); const target = join(root, "changed-source.zip");
-  await downloadFile({ workspaceId: "w", path: "changing-directory", output: target }, { io: io.io, json: true, config: connectionStore(server.origin), http: new HttpClient() });
+  await downloadFile({ workspaceId: "w", path: "changing-directory", output: target }, { io: io.io, config: connectionStore(server.origin), http: new HttpClient() });
   assert.equal(await fs.readFile(target, "utf8"), "beforeafter");
-  const summary = JSON.parse(io.output()).data; assert.equal(summary.bytes, 11); assert.equal(summary.published, true); assert.equal("snapshot" in summary, false);
+  assert.match(io.output(), /zip，11 bytes，published=true/); assert.doesNotMatch(io.output(), /snapshot/);
 });

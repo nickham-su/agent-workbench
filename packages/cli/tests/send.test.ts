@@ -1,3 +1,4 @@
+import { textField } from "./helpers.js";
 import assert from "node:assert/strict";
 import * as fs from "node:fs/promises";
 import { join } from "node:path";
@@ -22,7 +23,7 @@ function normal(call: Call): HttpResult {
 }
 async function execute(args: string[] = [], handle: (call: Call) => HttpResult | Promise<HttpResult> = normal, config: ConfigStore = connectionStore()) {
   const calls: Call[] = []; const capture = captureIO();
-  const code = await runCli(["session", "send", "-w", "w", "--prompt", "hello --workspace", "--json", ...args], {
+  const code = await runCli(["session", "send", "-w", "w", "--prompt", "hello --workspace", ...args], {
     io: capture.io, createConfigStore: () => config,
     http: { request: async (_origin, path, request = {}) => { const call = { path, request }; calls.push(call); return handle(call); } }
   });
@@ -38,9 +39,9 @@ test("normal send output reports acceptance and identities without a speculative
     http: { request: async (_origin, path, request = {}) => { const call = { path, request }; calls.push(call); return normal(call); } }
   });
   assert.equal(code, 0, capture.diagnostic());
-  assert.match(capture.output(), /^已受理。\n/);
+  assert.match(capture.output(), /^请求已受理；执行结果尚未确认。\n/);
   assert.doesNotMatch(capture.output(), /不代表|不保证|执行成功/);
-  for (const entry of ["workspaceId：w", "sessionId：s", "agentId：a", "messageId：m", "runId：r", "sessionCreated：true", "accepted：true", "deduplicated：false"]) {
+  for (const entry of ["Workspace：w", "Session ID：s", "Agent ID：a", "用户消息 ID：m", "Run ID：r", "sessionCreated：true", "accepted：true", "deduplicated：false"]) {
     assert.ok(capture.output().includes(`${entry}\n`), entry);
   }
   const requestId = (posts(calls)[1].request.body as { clientRequestId: string }).clientRequestId;
@@ -59,7 +60,7 @@ test("A-SEND-CREATE/REQUEST-ID: one create then one send, first Agent is fixed a
     assert.equal(body.agentId, "a"); assert.equal(body.text, "hello --workspace");
     assert.match(body.clientRequestId as string, /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/);
     ids.push(body.clientRequestId as string);
-    assert.deepEqual(JSON.parse(output.stdout).data, { workspaceId: "w", sessionId: "s", agentId: "a", messageId: "m", runId: "r", clientRequestId: body.clientRequestId, sessionCreated: true, accepted: true, deduplicated: false });
+    for (const [key, value] of Object.entries({ workspaceId: "w", sessionId: "s", agentId: "a", messageId: "m", runId: "r", clientRequestId: body.clientRequestId, sessionCreated: true, accepted: true, deduplicated: false })) assert.equal(textField(output.stdout, key), String(value));
   }
   assert.notEqual(ids[0], ids[1]);
 });
@@ -68,14 +69,14 @@ test("A-SEND-EXISTING/SUBTASK/BUSY: primary writes once, explicit Agent verified
   const explicit = await execute(["-s", "s", "-a", "b"]);
   assert.equal(explicit.code, 0); assert.equal(posts(explicit.calls).length, 1);
   assert.equal((posts(explicit.calls)[0].request.body as { agentId: string }).agentId, "b");
-  assert.equal(JSON.parse(explicit.stdout).data.sessionCreated, false);
+  assert.equal(textField(explicit.stdout, "sessionCreated"), "false");
   const defaultExisting = await execute(["-s", "s"]);
   assert.equal((posts(defaultExisting.calls)[0].request.body as { agentId: string }).agentId, "a");
   const child = await execute(["-s", "s"], (call) => call.path.startsWith("/api/agent/sessions/s?") ? jsonResult(agentSession({ kind: "subtask" })) : normal(call));
   assert.equal(child.code, 2); assert.equal(posts(child.calls).length, 0);
   const busy = await execute(["-s", "s"], (call) => call.path.endsWith("/messages") ? jsonResult({ message: "private body" }, 409) : normal(call));
   assert.equal(busy.code, 6); assert.equal(posts(busy.calls).length, 1);
-  assert.equal(JSON.parse(busy.stderr).error.effect, "rejected");
+  assert.equal(textField(busy.stderr, "effect"), "rejected");
   assert.equal(busy.stdout, ""); assert.equal(busy.stderr.includes("private body"), false);
 });
 
@@ -94,15 +95,15 @@ test("A-UNKNOWN-REJECT/CREATE: rejected vs unknown create; no retry or later sen
   for (const status of [401, 404, 500]) {
     const output = await execute([], (call) => call.path === "/api/agent/sessions" ? jsonResult({ message: "private server detail" }, status) : normal(call));
     assert.equal(output.code, status === 401 ? 4 : 6); assert.equal(posts(output.calls).length, 1);
-    const error = JSON.parse(output.stderr).error;
-    assert.equal(error.phase, "create"); assert.equal(error.effect, status < 500 ? "rejected" : "unknown");
-    assert.equal(error.context.sessionId, undefined); assert.equal(output.stderr.includes("private server detail"), false);
+    const error = output.stderr;
+    assert.equal(textField(error, "phase"), "create"); assert.equal(textField(error, "effect"), status < 500 ? "rejected" : "unknown");
+    assert.equal(textField(error, "sessionId"), undefined); assert.equal(output.stderr.includes("private server detail"), false);
   }
   for (const body of ["not-json", JSON.stringify({ id: "untrusted" }), JSON.stringify(agentSession({ kind: "subtask" }))]) {
     const output = await execute([], (call) => call.path === "/api/agent/sessions" ? { status: 201, body, setCookies: [] } : normal(call));
     assert.equal(output.code, 6); assert.equal(posts(output.calls).length, 1);
-    assert.equal(JSON.parse(output.stderr).error.effect, "unknown");
-    assert.equal(JSON.parse(output.stderr).error.context.sessionId, undefined);
+    assert.equal(textField(output.stderr, "effect"), "unknown");
+    assert.equal(textField(output.stderr, "sessionId"), undefined);
   }
 });
 
@@ -122,11 +123,11 @@ test("A-UNKNOWN-CREATE/SEND: real TCP server accepted side effect then destroyed
     });
     try {
       const capture = captureIO();
-      const code = await runCli(["session", "send", "-w", "w", "--prompt", "hello", "--json"], { io: capture.io, createConfigStore: () => connectionStore(server.origin), http: new HttpClient() });
+      const code = await runCli(["session", "send", "-w", "w", "--prompt", "hello"], { io: capture.io, createConfigStore: () => connectionStore(server.origin), http: new HttpClient() });
       assert.equal(code, 5); assert.equal(creates, 1); assert.equal(sends, drop === "send" ? 1 : 0); assert.equal(cancels, 0);
-      assert.equal(capture.output(), ""); const error = JSON.parse(capture.diagnostic()).error;
-      assert.equal(error.phase, drop); assert.equal(error.effect, "unknown"); assert.equal(error.context.sessionId, drop === "send" ? "s" : undefined);
-      assert.equal(error.context.runId, undefined);
+      assert.equal(capture.output(), ""); const error = capture.diagnostic();
+      assert.equal(textField(error, "phase"), drop); assert.equal(textField(error, "effect"), "unknown"); assert.equal(textField(error, "sessionId"), drop === "send" ? "s" : undefined);
+      assert.equal(textField(error, "runId"), undefined);
     } finally { await server.close(); }
   }
 });
@@ -135,8 +136,8 @@ test("A-UNKNOWN-SEND: create-success/send-409 or invalid ack preserves confirmed
   for (const result of [jsonResult({}, 409), { status: 201, body: "invalid-json", setCookies: [] }, jsonResult({ ...ack, sessionId: "foreign" }, 201)]) {
     const output = await execute([], (call) => call.path.endsWith("/messages") ? result : normal(call));
     assert.equal(output.code, 6); assert.equal(posts(output.calls).length, 2);
-    assert.equal(JSON.parse(output.stderr).error.context.sessionId, "s");
-    assert.equal(JSON.parse(output.stderr).error.effect, result.status === 409 ? "rejected" : "unknown");
+    assert.equal(textField(output.stderr, "sessionId"), "s");
+    assert.equal(textField(output.stderr, "effect"), result.status === 409 ? "rejected" : "unknown");
     assert.equal(output.calls.some((call) => call.path.endsWith("/cancel")), false);
   }
 });
@@ -150,11 +151,11 @@ test("A-UNKNOWN-PERSIST: valid create/send response identity survives Cookie sav
       return result;
     }, config);
     assert.equal(output.code, 7); assert.equal(posts(output.calls).length, failure === "create" ? 1 : 2);
-    const error = JSON.parse(output.stderr).error;
-    assert.equal(error.effect, "accepted"); assert.equal(error.phase, failure); assert.equal(error.context.sessionId, "s");
-    assert.equal(error.context.runId, failure === "send" ? "r" : undefined);
-    assert.equal(error.context.messageId, failure === "send" ? "m" : undefined);
-    assert.ok(error.context.clientRequestId); assert.equal(output.stdout, "");
+    const error = output.stderr;
+    assert.equal(textField(error, "effect"), "accepted"); assert.equal(textField(error, "phase"), failure); assert.equal(textField(error, "sessionId"), "s");
+    assert.equal(textField(error, "runId"), failure === "send" ? "r" : undefined);
+    assert.equal(textField(error, "messageId"), failure === "send" ? "m" : undefined);
+    assert.ok(textField(error, "clientRequestId")); assert.equal(output.stdout, "");
     assert.equal(output.stderr.includes("private OS detail"), false);
   }
 });
@@ -164,9 +165,9 @@ test("A-SEND-DEDUP-IDENTITY: unexpected dedup preserves trustworthy IDs but neve
     const config = connectionStore(); if (persistFailure) config.save = async () => { throw Error("cannot save"); };
     const output = await execute([], (call) => call.path.endsWith("/messages") ? jsonResult({ ...ack, deduplicated: true }, 201, persistFailure ? [cookieHeader] : []) : normal(call), config);
     assert.equal(output.code, persistFailure ? 7 : 6); assert.equal(posts(output.calls).length, 2);
-    const error = JSON.parse(output.stderr).error;
-    assert.equal(error.context.runId, "r"); assert.equal(error.context.messageId, "m"); assert.equal(error.context.agentId, undefined);
-    assert.equal(error.effect, "accepted"); assert.equal(output.stdout, "");
+    const error = output.stderr;
+    assert.equal(textField(error, "runId"), "r"); assert.equal(textField(error, "messageId"), "m"); assert.equal(textField(error, "agentId"), undefined);
+    assert.equal(textField(error, "effect"), "accepted"); assert.equal(output.stdout, "");
   }
 });
 
@@ -179,7 +180,7 @@ test("A-SEND-TEXT-LIMIT: exact JSON/multipart payload bytes are sent, +1 creates
       const overhead = Buffer.byteLength(JSON.stringify({ workspaceId: "w", clientRequestId: "x".repeat(36), agentId: "a", text: "" }));
       const prompt = "x".repeat(maximum - overhead + extra);
       const capture = captureIO(); const calls: Call[] = [];
-      const code = await runCli(["session", "send", "-w", "w", "--prompt", prompt, ...(multipart ? ["--image", image] : []), "--json"], {
+      const code = await runCli(["session", "send", "-w", "w", "--prompt", prompt, ...(multipart ? ["--image", image] : [])], {
         io: capture.io, createConfigStore: () => connectionStore(), http: { request: async (_origin, path, request = {}) => { const call = { path, request }; calls.push(call); return normal(call); } }
       });
       assert.equal(code, extra ? 2 : 0, capture.diagnostic());
@@ -207,7 +208,7 @@ test("A-SEND-MULTIPART: real TCP Fetch boundary, pure-image empty text and order
   try {
     for (const prompt of [undefined, "描述\n图片"]) {
       const capture = captureIO();
-      assert.equal(await runCli(["session", "send", "-w", "w", "--image", first, "--image", second, ...(prompt === undefined ? [] : ["--prompt", prompt]), "--json"], { io: capture.io, createConfigStore: () => connectionStore(server.origin), http: new HttpClient() }), 0, capture.diagnostic());
+      assert.equal(await runCli(["session", "send", "-w", "w", "--image", first, "--image", second, ...(prompt === undefined ? [] : ["--prompt", prompt])], { io: capture.io, createConfigStore: () => connectionStore(server.origin), http: new HttpClient() }), 0, capture.diagnostic());
       const { contentType, body } = captured.at(-1)!;
       const boundary = /boundary=(.+)$/.exec(contentType)?.[1]; assert.ok(boundary);
       const wire = body.toString("utf8");

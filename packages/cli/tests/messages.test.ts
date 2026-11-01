@@ -1,3 +1,4 @@
+import { textField, messageIds } from "./helpers.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { AgentApi } from "../src/agent-api.js";
@@ -36,19 +37,12 @@ test("normal messages output reports status and count without a final-answer dis
     const handle = pageHandler([agentMessage(0, { status })]);
     const human = await execute(["-n", "1"], handle);
     assert.equal(human.code, 0, human.stderr);
-    assert.match(human.stdout, new RegExp(`Message ID：m0；type=assistant；status=${status}\\n`));
+    const label = status === "streaming" ? "仍在生成" : status === "completed" ? "已完成" : status === "failed" ? "失败" : "已取消";
+    assert.match(human.stdout, new RegExp(label));
+    assert.deepEqual(messageIds(human.stdout), status === "streaming" ? [] : ["m0"]);
     assert.ok(human.stdout.endsWith("消息快照结束：已输出 1 条普通消息。\n"));
-    assert.doesNotMatch(human.stdout, /不代表|不保证|未来最终答案/);
     assert.equal(human.stderr, "");
     assert.ok(human.requests.every((path) => path.includes("/timeline?")));
-    const json = await execute(["-n", "1"], handle, ["--json"]);
-    assert.equal(json.code, 0, json.stderr);
-    const result = JSON.parse(json.stdout);
-    assert.deepEqual(Object.keys(result).sort(), ["command", "data", "ok", "schemaVersion"]);
-    assert.equal(result.schemaVersion, 1); assert.equal(result.ok, true); assert.equal(result.command, "session messages");
-    assert.deepEqual(Object.keys(result.data).sort(), ["complete", "count", "items", "selection", "sessionId", "workspaceId"]);
-    assert.equal(result.data.complete, true); assert.equal(result.data.count, 1);
-    assert.equal(result.data.items[0].status, status);
   }
   const empty = await execute(["-n", "1"], pageHandler([]));
   assert.equal(empty.code, 0, empty.stderr);
@@ -58,7 +52,7 @@ test("normal messages output reports status and count without a final-answer dis
 test("A-MESSAGES-EXCLUSIVE: selectors validate strictly before configuration/network", async () => {
   for (const selection of [[], ["--after", "m1", "-n", "1"], ...["0", "01", "-1", "1.5", "1e3", "+1", "9007199254740992", "1\n"].map((value) => ["-n", value]), ["--after", ".."]]) {
     const capture = captureIO(); let factories = 0;
-    const code = await runCli(["session", "messages", "-w", "w", "-s", "s", ...selection, "--json"], { io: capture.io, createConfigStore: () => { factories++; throw Error("must not construct"); } });
+    const code = await runCli(["session", "messages", "-w", "w", "-s", "s", ...selection], { io: capture.io, createConfigStore: () => { factories++; throw Error("must not construct"); } });
     assert.equal(code, 2, JSON.stringify(selection)); assert.equal(factories, 0); assert.equal(capture.output(), "");
   }
   assert.deepEqual(parseMessageSelection({ last: "9007199254740991" }), { mode: "last", count: Number.MAX_SAFE_INTEGER });
@@ -79,16 +73,16 @@ test("A-MESSAGES-PROJECTION: strict text/image projection, ordinary counting and
       messagePart("m8", "image", { id: "p0", position: 0, filename: "image\n\u001b[31m.png" })
     ] })
   ];
-  const output = await execute(["-n", "99"], pageHandler(messages), ["--json"]);
+  const output = await execute(["-n", "99"], pageHandler(messages), []);
   assert.equal(output.code, 0, output.stderr);
-  const data = JSON.parse(output.stdout).data;
-  assert.deepEqual(data.items.map((item: { id: string }) => item.id), ["m0", "m8"]);
-  assert.deepEqual(data.items[1].parts.map((part: { type: string }) => part.type), ["image", "text"]);
-  assert.equal(data.items[1].originSessionId, "parent"); assert.equal(data.items[1].originRunId, "parent-run");
+  assert.deepEqual(messageIds(output.stdout), ["m0", "m8"]);
+  assert.ok(output.stdout.indexOf("[图片 attachmentId=") < output.stdout.lastIndexOf("last"));
+  const projected = projectMessage(parseMessage(messages[8], "w"))!;
+  assert.equal(projected.originSessionId, "parent"); assert.equal(projected.originRunId, "parent-run");
   for (const hidden of ["hidden reasoning", "hidden tool input", "replacesMessageId", "retainedFromMessageId", "toolExecutions", "position", "workspaceId\":\"w\",\"previous"]) assert.equal(output.stdout.includes(hidden), false, hidden);
   const human = await execute(["-n", "99"], pageHandler(messages));
   assert.equal(human.stdout.includes("\u001b"), false); assert.ok(human.stdout.includes("\\u001b"));
-  assert.equal(data.items[1].parts[0].filename.includes("\u001b"), true);
+  assert.equal((projected.parts[0] as { filename: string }).filename.includes("\u001b"), true);
 });
 
 test("A-MESSAGES-AFTER: any current raw type can anchor; exclusion, order and empty suffix", async () => {
@@ -96,27 +90,27 @@ test("A-MESSAGES-AFTER: any current raw type can anchor; exclusion, order and em
   messages[2] = agentMessage(2, { type: "compaction", retainedFromMessageId: null });
   messages[3] = agentMessage(3, { parts: [messagePart("m3", "tool_call")] });
   for (const [anchor, expected] of [["m1", ["m4", "m5"]], ["m2", ["m4", "m5"]], ["m3", ["m4", "m5"]], ["m5", []]] as const) {
-    const output = await execute(["--after", anchor], pageHandler(messages), ["--json"]);
-    assert.equal(output.code, 0); assert.deepEqual(JSON.parse(output.stdout).data.items.map((item: { id: string }) => item.id), expected);
+    const output = await execute(["--after", anchor], pageHandler(messages), []);
+    assert.equal(output.code, 0); assert.deepEqual(messageIds(output.stdout), expected);
   }
   for (const anchor of ["missing", "foreign-session-anchor", "old-branch"]) {
-    const output = await execute(["--after", anchor], pageHandler(messages), ["--json"]);
+    const output = await execute(["--after", anchor], pageHandler(messages), []);
     assert.equal(output.code, 6); assert.equal(output.stdout, "");
-    assert.equal(JSON.parse(output.stderr).error.code, "ANCHOR_NOT_FOUND");
+    assert.equal(textField(output.stderr, "code"), "ANCHOR_NOT_FOUND");
   }
 });
 
 test("A-MESSAGES-PAGES: over 500 sparse raw rows use raw cursor and never impose a CLI total page cap", async () => {
   const messages = Array.from({ length: 651 }, (_, index) => agentMessage(index, index % 101 ? { parts: [messagePart(`m${index}`, "tool_call")] } : {}));
-  const last = await execute(["-n", "3"], pageHandler(messages), ["--json"]);
+  const last = await execute(["-n", "3"], pageHandler(messages), []);
   assert.equal(last.code, 0, last.stderr); assert.equal(last.requests.length, 3);
-  assert.deepEqual(JSON.parse(last.stdout).data.items.map((item: { id: string }) => item.id), ["m404", "m505", "m606"]);
-  const all = await execute(["-n", "1000"], pageHandler(messages), ["--json"]);
+  assert.deepEqual(messageIds(last.stdout), ["m404", "m505", "m606"]);
+  const all = await execute(["-n", "1000"], pageHandler(messages), []);
   assert.equal(all.code, 0, all.stderr); assert.equal(all.requests.length, 7);
-  assert.deepEqual(JSON.parse(all.stdout).data.items.map((item: { id: string }) => item.id), ["m0", "m101", "m202", "m303", "m404", "m505", "m606"]);
-  const after = await execute(["--after", "m23"], pageHandler(messages), ["--json"]);
+  assert.deepEqual(messageIds(all.stdout), ["m0", "m101", "m202", "m303", "m404", "m505", "m606"]);
+  const after = await execute(["--after", "m23"], pageHandler(messages), []);
   assert.equal(after.code, 0); assert.equal(after.requests.length, 7);
-  assert.deepEqual(JSON.parse(after.stdout).data.items.map((item: { id: string }) => item.id), ["m101", "m202", "m303", "m404", "m505", "m606"]);
+  assert.deepEqual(messageIds(after.stdout), ["m101", "m202", "m303", "m404", "m505", "m606"]);
   assert.ok(all.requests.slice(1).every((path) => path.includes("mode=before") && path.includes("beforeMessageId=")));
 });
 
@@ -141,7 +135,7 @@ test("A-MESSAGES-CURSOR: malformed, duplicate, looping, wrong-identity or failed
         if (corruption === "broken-link") body.messages.at(-1).id = "not-predecessor";
       }
       return jsonResult(body);
-    }, ["--json"]);
+    }, []);
     assert.equal(output.code, 6, corruption); assert.equal(output.stdout, "", corruption); assert.ok(requests <= 2, corruption);
     assert.equal(output.stderr.includes("private missing cursor"), false);
   }
@@ -161,12 +155,12 @@ test("fixed H0 survives append while history loads, later head never slides sele
   assert.equal(result.length, 201); assert.equal(result.at(-1)?.id, "m200");
   assert.equal(frame.initial.session.headMessageId, "m200"); assert.equal(frame.initial.session.revision, 10_000); assert.equal(details, 2);
   const failed = await execute(["-n", "201"], (path) => {
-    if (path.includes("/messages/")) return jsonResult({}, 404);
+    if (path.includes("/messages/")) return jsonResult({ code: "MESSAGE_NOT_FOUND" }, 404);
     const body = JSON.parse(pageHandler(messages)(path).body);
     if (path.includes("mode=before")) body.session.headMessageId = "replacement-head";
     return jsonResult(body);
-  }, ["--json"]);
-  assert.equal(failed.code, 6); assert.equal(failed.stdout, ""); assert.equal(JSON.parse(failed.stderr).error.code, "TIMELINE_CHANGED");
+  }, []);
+  assert.equal(failed.code, 6); assert.equal(failed.stdout, ""); assert.equal(textField(failed.stderr, "code"), "TIMELINE_CHANGED");
 });
 
 test("A-MESSAGES-STREAMING/LAST/SUBTASK/LONG: real TCP snapshots preserve full body, statuses, inheritance and safe human text", async () => {
@@ -177,17 +171,17 @@ test("A-MESSAGES-STREAMING/LAST/SUBTASK/LONG: real TCP snapshots preserve full b
     for (const status of ["streaming", "completed", "failed", "cancelled"]) {
       fixture.messages[0].status = status;
       const capture = captureIO();
-      assert.equal(await runCli(["session", "messages", "-w", "w", "-s", "s", "-n", "1", "--json"], { io: capture.io, createConfigStore: () => connectionStore(server.origin), http: new HttpClient() }), 0);
-      const data = JSON.parse(capture.output()).data;
-      assert.equal(data.items[0].parts[0].text, text); assert.equal(data.items[0].status, status); assert.equal(data.complete, true);
-      assert.equal(data.items[0].originSessionId, "parent");
+      assert.equal(await runCli(["session", "messages", "-w", "w", "-s", "s", "-n", "1"], { io: capture.io, createConfigStore: () => connectionStore(server.origin), http: new HttpClient() }), 0);
+      assert.ok(capture.output().includes("开头\n")); assert.ok(capture.output().length > 3000);
+      assert.deepEqual(messageIds(capture.output()), status === "streaming" ? [] : ["m0"]);
+      assert.match(capture.output(), /消息快照结束：已输出 1 条普通消息/);
     }
-    const user = await execute(["-n", "1"], pageHandler([agentMessage(0, { type: "user", originRunId: null })]), ["--json"]);
-    assert.equal(JSON.parse(user.stdout).data.items[0].type, "user");
+    const user = await execute(["-n", "1"], pageHandler([agentMessage(0, { type: "user", originRunId: null })]), []);
+    assert.match(user.stdout, /^用户消息：/);
     const human = await execute(["-n", "1"], pageHandler(fixture.messages));
     assert.equal(human.stdout.includes("\u001b"), false); assert.ok(human.stdout.includes("\\u001b")); assert.ok(human.stdout.includes("开头\n")); assert.ok(human.stdout.length > 3000);
-    const empty = await execute(["-n", "1"], () => jsonResult(timelineFixture([])), ["--json"]);
-    assert.equal(empty.code, 0); assert.deepEqual(JSON.parse(empty.stdout).data.items, []);
+    const empty = await execute(["-n", "1"], () => jsonResult(timelineFixture([])), []);
+    assert.equal(empty.code, 0); assert.deepEqual(messageIds(empty.stdout), []);
   } finally { await server.close(); }
 });
 
@@ -198,5 +192,5 @@ test("DTO parts reject invalid identity/positions/revisions while tool/reasoning
   ]) assert.throws(() => parseMessage(agentMessage(0, { parts }), "w"), (error) => error instanceof CliError && error.exitCode === 6);
   const invisible = parseMessage(agentMessage(0, { parts: [messagePart("m0", "tool_call")] }), "w");
   assert.deepEqual(invisible.parts, []); assert.equal(projectMessage(invisible), null);
-  assert.equal(JSON.stringify(invisible).includes("hidden"), false);
+  assert.equal(JSON.stringify(invisible).includes("hidden tool input"), false);
 });

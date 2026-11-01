@@ -1,3 +1,4 @@
+import { textField } from "./helpers.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import * as fs from "node:fs/promises";
@@ -10,7 +11,7 @@ import { msg, page, run, state } from "./follow-fixture.js";
 import { httpServer, repository, temporaryDirectory } from "./helpers.js";
 
 function launch(home: string, args: string[]) {
-  return spawn(process.execPath, [join(repository, "packages/cli/dist/cli.cjs"), "session", ...args, "--json"], {
+  return spawn(process.execPath, [join(repository, "packages/cli/dist/cli.cjs"), "session", ...args], {
     cwd: home, env: { HOME: home, USERPROFILE: home, TMPDIR: home, PATH: dirname(process.execPath), NODE_PATH: "" }, stdio: ["pipe", "pipe", "pipe"]
   });
 }
@@ -47,18 +48,17 @@ test("A-FOLLOW-SIGNALS: real SIGINT/SIGTERM after accepted send and during final
       await new FileConfigStore(home).save({ version: 1, apiOrigin: server.origin, cookie: null });
       child = launch(home, ["send", "-w", "w", "-s", "s", "--prompt", "fixture", "-f"]);
       let stdout = ""; let stderr = ""; let signalled = false;
-      child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString(); if (phase === "accepted" && !signalled && stdout.includes('"type":"metadata"')) { signalled = true; child!.kill(signal); } });
+      child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString(); if (phase === "accepted" && !signalled && stdout.includes("Run ID：")) { signalled = true; child!.kill(signal); } });
       child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); }); child.stdin.end();
       const [code, killedBy] = await finish(child);
       assert.equal(killedBy, null); assert.equal(code, signal === "SIGINT" ? 130 : 143, stderr); assert.equal(writes, 1); assert.equal(cancels, 0);
-      const events = stdout.trim().split("\n").map((line) => JSON.parse(line));
-      assert.equal(events[0].type, "metadata"); assert.equal(events.at(-1).complete, false); assert.equal(events.at(-1).outcome, "interrupted");
-      const error = JSON.parse(stderr).error;
-      assert.equal(error.category, "INTERRUPTED"); assert.equal(error.code, "INTERRUPTED");
-      assert.equal(error.phase, "follow"); assert.equal(error.effect, "accepted");
-      assert.deepEqual(error.context, { workspaceId: "w", sessionId: "s", agentId: "a", messageId: "u", runId: "r", clientRequestId: events[0].clientRequestId });
-      assert.equal(typeof error.context.clientRequestId, "string"); assert.ok(error.context.clientRequestId.length > 0);
-      if (phase === "drain") assert.equal(events.at(-1).runStatus, "completed");
+      assert.equal(textField(stdout, "complete"), "false"); assert.equal(textField(stdout, "outcome"), "interrupted");
+      const error = stderr;
+      assert.equal(textField(error, "category"), "INTERRUPTED"); assert.equal(textField(error, "code"), "INTERRUPTED");
+      assert.equal(textField(error, "phase"), "follow"); assert.equal(textField(error, "effect"), "accepted");
+      for (const [key, value] of Object.entries({ workspaceId: "w", sessionId: "s", agentId: "a", runId: "r", clientRequestId: textField(stdout, "clientRequestId") })) assert.equal(textField(error, key), String(value));
+      assert.equal(typeof textField(error, "clientRequestId"), "string"); assert.ok(textField(error, "clientRequestId")!.length > 0);
+      if (phase === "drain") assert.equal(textField(stdout, "runStatus"), "completed");
     } finally { child?.kill("SIGKILL"); await server.close(); }
   }
 });
@@ -81,9 +81,9 @@ test("A-FOLLOW-SIGNALS: real closed stdout EPIPE stops reads with 141 and no rem
     child.stdout.once("data", () => child!.stdout.destroy()); let stderr = "";
     child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); }); child.stdin.end();
     const [code, signal] = await finish(child); assert.equal(signal, null); assert.equal(code, 141, stderr); assert.equal(cancels, 0);
-    const error = JSON.parse(stderr).error;
-    assert.equal(error.category, "OUTPUT"); assert.equal(error.code, "OUTPUT_CLOSED");
-    assert.deepEqual(error.context, { workspaceId: "w", sessionId: "s", runId: "r" });
+    const error = stderr;
+    assert.equal(textField(error, "category"), "OUTPUT"); assert.equal(textField(error, "code"), "OUTPUT_CLOSED");
+    for (const [key, value] of Object.entries({ workspaceId: "w", sessionId: "s", runId: "r" })) assert.equal(textField(error, key), String(value));
   } finally { child?.kill("SIGKILL"); await server.close(); }
 });
 
@@ -103,10 +103,10 @@ test("A-FOLLOW-DEADLINE: real final JSON body stalls under whole deadline, repor
     child = launch(home, ["messages", "-w", "w", "-s", "s", "-n", "1", "-f", "--follow-timeout", "1s"]);
     let stdout = ""; let stderr = ""; child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString(); }); child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); }); child.stdin.end();
     const [code] = await finish(child); assert.equal(code, 10, stderr); assert.equal(cancels, 0); assert.equal(deltas, 2);
-    const terminal = JSON.parse(stdout.trim().split("\n").at(-1)!); assert.equal(terminal.complete, false); assert.equal(terminal.runStatus, "completed");
-    const error = JSON.parse(stderr).error;
-    assert.equal(error.category, "FOLLOW_TIMEOUT"); assert.equal(error.code, "FOLLOW_TIMEOUT");
-    assert.deepEqual(error.context, { workspaceId: "w", sessionId: "s", runId: "r" });
+    const terminal = stdout; assert.equal(textField(terminal, "complete"), "false"); assert.equal(textField(terminal, "runStatus"), "completed");
+    const error = stderr;
+    assert.equal(textField(error, "category"), "FOLLOW_TIMEOUT"); assert.equal(textField(error, "code"), "FOLLOW_TIMEOUT");
+    for (const [key, value] of Object.entries({ workspaceId: "w", sessionId: "s", runId: "r" })) assert.equal(textField(error, key), String(value));
   } finally { child?.kill("SIGKILL"); await server.close(); }
 });
 
@@ -127,9 +127,9 @@ test("A-FOLLOW-SIGNALS/UNKNOWN-SEND: SIGINT after POST dispatch before complete 
     child = launch(home, ["send", "-w", "w", "-s", "s", "--prompt", "fixture", "-f"]);
     let stdout = ""; let stderr = ""; child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString(); }); child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); }); child.stdin.end();
     const [code, signal] = await finish(child); assert.equal(code, 130, stderr); assert.equal(signal, null); assert.equal(stdout, ""); assert.equal(writes, 1); assert.equal(cancels, 0);
-    const error = JSON.parse(stderr).error; assert.equal(error.phase, "send"); assert.equal(error.effect, "unknown"); assert.equal(error.context.sessionId, "s"); assert.equal(error.context.runId, undefined);
-    assert.equal(error.category, "INTERRUPTED"); assert.equal(error.code, "INTERRUPTED");
-    assert.equal(error.context.workspaceId, "w"); assert.equal(typeof error.context.clientRequestId, "string"); assert.ok(error.context.clientRequestId.length > 0);
+    const error = stderr; assert.equal(textField(error, "phase"), "send"); assert.equal(textField(error, "effect"), "unknown"); assert.equal(textField(error, "sessionId"), "s"); assert.equal(textField(error, "runId"), undefined);
+    assert.equal(textField(error, "category"), "INTERRUPTED"); assert.equal(textField(error, "code"), "INTERRUPTED");
+    assert.equal(textField(error, "workspaceId"), "w"); assert.equal(typeof textField(error, "clientRequestId"), "string"); assert.ok(textField(error, "clientRequestId")!.length > 0);
   } finally { child?.kill("SIGKILL"); await server.close(); }
 });
 
@@ -148,13 +148,13 @@ test("全面审查M2: real messages SIGINT/SIGTERM retain captured Run in stderr
     const child = launch(home, ["messages", "-w", "w", "-s", "s", "-n", "1", "-f"]); t.after(() => { child.kill("SIGKILL"); });
     let metadataSeen!: () => void; const metadata = new Promise<void>((resolve) => { metadataSeen = resolve; });
     let stdout = ""; let stderr = "";
-    child.stdout.on("data", (chunk) => { stdout += chunk; if (stdout.includes('"type":"metadata"')) metadataSeen(); });
+    child.stdout.on("data", (chunk) => { stdout += chunk; if (stdout.includes("Run ID：")) metadataSeen(); });
     child.stderr.on("data", (chunk) => { stderr += chunk; }); child.stdin.end();
     await Promise.all([body, metadata]); child.stdout.destroy(); child.kill(signal);
     const [code, terminatedBy] = await finish(child);
     assert.equal(terminatedBy, null); assert.equal(code, signal === "SIGINT" ? 130 : 143, stderr);
-    const error = JSON.parse(stderr).error;
-    assert.equal(error.category, "INTERRUPTED"); assert.equal(error.code, "INTERRUPTED"); assert.equal(error.phase, "follow"); assert.equal(error.effect, "not_applicable");
-    assert.deepEqual(error.context, { workspaceId: "w", sessionId: "s", runId: "target-run" }); assert.equal(cancels, 0);
+    const error = stderr;
+    assert.equal(textField(error, "category"), "INTERRUPTED"); assert.equal(textField(error, "code"), "INTERRUPTED"); assert.equal(textField(error, "phase"), "follow"); assert.equal(textField(error, "effect"), "not_applicable");
+    for (const [key, value] of Object.entries({ workspaceId: "w", sessionId: "s", runId: "target-run" })) assert.equal(textField(error, key), String(value)); assert.equal(cancels, 0);
   }
 });

@@ -126,8 +126,7 @@ export async function downloadFile(options: DownloadOptions, dependencies: Downl
     try { await disk.unlink(temporary!); temporary = undefined; }
     catch { throw localError("完整文件已发布，但本次临时文件清理失败。"); }
     lifetime.check();
-    const summary = { workspaceId: options.workspaceId, path: options.path, output: options.output, ...received, published: true };
-    await lifetime.wait(writeSuccess(dependencies.io, dependencies.json ?? false, "file download", summary,
+    await lifetime.wait(writeSuccess(dependencies.io,
       `下载完成：${escapeDisplayText(options.output)}（${received.format}，${received.bytes} bytes，published=true）\n`, { phase, effect: "not_applicable", context }));
   } catch (error) {
     throw withErrorDetails(lifetime.failure(error), { phase, effect: "not_applicable", context });

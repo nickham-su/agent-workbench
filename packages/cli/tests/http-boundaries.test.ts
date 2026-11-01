@@ -10,7 +10,7 @@ test("A-PARSE-ID-ENCODING: opaque path IDs encode once without normalization or 
   for (const id of ["%2e%2e", "a/../b", "a/?#中文", "opaque-not-uuid"]) {
     const capture = captureIO();
     let requests = 0;
-    const code = await runCli(["agent", "list", "-w", id, "--json"], { io: capture.io,
+    const code = await runCli(["agent", "list", "-w", id], { io: capture.io,
       createConfigStore: () => ({ load: async () => ({ version: 1, apiOrigin: "http://example.test", cookie: null }), save: async () => {} }), http: {
         request: async (_origin, path) => {
           requests++;
@@ -21,7 +21,7 @@ test("A-PARSE-ID-ENCODING: opaque path IDs encode once without normalization or 
     });
     assert.equal(code, 0);
     assert.equal(requests, 1);
-    assert.equal(JSON.parse(capture.output()).data.workspaceId, id);
+    assert.match(capture.output(), /Workspace：/); assert.ok(capture.output().includes(id.replaceAll("\\", "\\\\")));
   }
   assert.equal(apiUrl("http://example.test", "/api/workspaces/%252e%252e/agents/available?surface=user").pathname, "/api/workspaces/%252e%252e/agents/available");
 });
@@ -90,8 +90,10 @@ test("external AbortSignal stops complete body reads, is never retried, and pre-
   const running = new HttpClient().request(server.origin, "/api/hang", { signal: controller.signal });
   await dispatched;
   controller.abort();
-  await assert.rejects(running, errorCode(5, "TRANSPORT_FAILED"));
+  await assert.rejects(running, (error: unknown) => errorCode(5, "TRANSPORT_FAILED")(error)
+    && error instanceof CliError && error.retryEvidence?.kind === "blocked");
   assert.equal(calls, 1);
-  await assert.rejects(new HttpClient().request(server.origin, "/api/not-dispatched", { signal: controller.signal }), (error: unknown) => error instanceof CliError && error.details.effect === "not_sent");
+  await assert.rejects(new HttpClient().request(server.origin, "/api/not-dispatched", { signal: controller.signal }),
+    (error: unknown) => error instanceof CliError && error.details.effect === "not_sent" && error.retryEvidence?.kind === "blocked");
   assert.equal(calls, 1);
 });

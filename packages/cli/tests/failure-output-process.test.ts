@@ -1,3 +1,4 @@
+import { textField } from "./helpers.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import fs from "node:fs/promises";
@@ -22,7 +23,7 @@ test("全面审查H1: unread full stderr cannot prevent deadline/SIGINT/SIGTERM 
       else response.end(JSON.stringify(page([msg("a", 0, null)])));
     }); t.after(server.close);
     await new FileConfigStore(home).save({ version: 1, apiOrigin: server.origin, cookie: null });
-    const child = spawn(process.execPath, ["--require", preload, join(repository, "packages/cli/dist/cli.cjs"), "session", "messages", "-w", "w", "-s", "s", "-n", "1", "-f", "--follow-timeout", "1s", "--json"], {
+    const child = spawn(process.execPath, ["--require", preload, join(repository, "packages/cli/dist/cli.cjs"), "session", "messages", "-w", "w", "-s", "s", "-n", "1", "-f", "--follow-timeout", "1s"], {
       cwd: home, env: { HOME: home, USERPROFILE: home, TMPDIR: home, PATH: dirname(process.execPath), NODE_PATH: "" }, stdio: ["pipe", "pipe", "pipe"]
     });
     t.after(() => { child.kill("SIGKILL"); child.stderr.destroy(); });
@@ -33,8 +34,8 @@ test("全面审查H1: unread full stderr cannot prevent deadline/SIGINT/SIGTERM 
       const [code, signal] = await Promise.race([execution, new Promise<never>((_resolve, reject) => { timer = setTimeout(() => { child.kill("SIGKILL"); reject(Error("CLI stayed alive behind unread stderr")); }, 4000); })]);
       child.stderr.destroy();
       assert.equal(signal, null); assert.equal(code, reason === "deadline" ? 10 : reason === "SIGINT" ? 130 : 143);
-      const terminal = JSON.parse(stdout.trim().split("\n").at(-1)!);
-      assert.equal(terminal.type, "terminal"); assert.equal(terminal.complete, false); assert.equal(terminal.exitCode, code);
+      const terminal = stdout;
+      assert.equal(textField(terminal, "complete"), "false"); assert.equal(textField(terminal, "exitCode"), String(code));
       assert.equal(requests.some((request) => request.startsWith("POST") || request.includes("/cancel")), false);
     } finally { clearTimeout(timer); }
   }

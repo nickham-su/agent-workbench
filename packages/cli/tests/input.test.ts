@@ -1,3 +1,4 @@
+import { textField } from "./helpers.js";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import * as fs from "node:fs/promises";
@@ -110,13 +111,13 @@ test("A-HELP-PRIORITY / local input failures precede configuration and HTTP", as
     ["--image", "private-nonexistent-path"], ["--prompt", "\u0001".repeat(200_000)]
   ]) {
     const capture = captureIO(); let factories = 0; let requests = 0;
-    const code = await runCli(["session", "send", "-w", "w", ...args, "--json"], { io: capture.io,
+    const code = await runCli(["session", "send", "-w", "w", ...args], { io: capture.io,
       createConfigStore: () => { factories++; throw Error("should not load"); }, http: { request: async () => { requests++; throw Error("should not dispatch"); } } });
     assert.equal(code, 2); assert.equal(factories, 0); assert.equal(requests, 0); assert.equal(capture.output(), "");
     assert.equal(capture.diagnostic().includes("private-nonexistent-path"), false);
-    assert.equal(JSON.parse(capture.diagnostic()).error.phase, "input");
+    assert.equal(textField(capture.diagnostic(), "phase"), "input");
   }
   const capture = captureIO(); capture.io.stdin.read = () => { throw Error("must not read"); };
-  assert.equal(await runCli(["session", "send", "-h", "--stdin", "--image", "missing", "--json"], { io: capture.io, createConfigStore: () => { throw Error("must not construct"); } }), 0);
+  assert.equal(await runCli(["session", "send", "-h", "--stdin", "--image", "missing"], { io: capture.io, createConfigStore: () => { throw Error("must not construct"); } }), 0);
   assert.match(capture.output(), /纯图/);
 });

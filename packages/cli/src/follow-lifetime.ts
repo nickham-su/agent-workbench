@@ -36,7 +36,7 @@ export class FollowLifetime {
   }
   private stop(error: CliError): void {
     if (this.stopped) return;
-    this.stopped = error;
+    this.stopped = new CliError(error.exitCode, error.message, error.details, { kind: "blocked" });
     this.controller.abort();
   }
   check(): void {
@@ -49,7 +49,7 @@ export class FollowLifetime {
       ...(error instanceof CliError ? error.details : {}), ...this.stopped.details,
       // Resolve an absent stop code from errors.ts, never inherit the superseded cause's code.
       code: this.stopped.details.code
-    });
+    }, { kind: "blocked" });
   }
   async wait<T>(operation: Promise<T>): Promise<T> {
     try { this.check(); } catch (error) { void operation.catch(() => {}); throw error; }

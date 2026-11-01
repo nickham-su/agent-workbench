@@ -27,22 +27,28 @@ export function paged(messages: RawMessage[], url: URL, revision = 10, extra: Re
   return page(messages.slice(start, end), revision, { session: agentSession({ headMessageId: messages.at(-1)?.id ?? null, revision }), hasMore: start > 0, ...extra });
 }
 export type Handler = (url: URL, request: HttpRequest) => HttpResult | Promise<HttpResult>;
-export async function executeFollow(args: string[], handler: Handler, json = true, signal?: AbortSignal) {
+export async function executeFollow(args: string[], handler: Handler, signal?: AbortSignal) {
   const capture = captureIO(); const requests: { url: URL; request: HttpRequest }[] = [];
   const before = { int: process.listenerCount("SIGINT"), term: process.listenerCount("SIGTERM") };
-  const code = await runCli(["session", ...args, ...(json ? ["--json"] : [])], { io: capture.io, createConfigStore: () => connectionStore(), ...(signal ? { signal } : {}),
+  const code = await runCli(["session", ...args], { io: capture.io, createConfigStore: () => connectionStore(), ...(signal ? { signal } : {}),
     http: { request: async (_origin, path, request = {}) => { const url = new URL(path, "http://fixture.test"); requests.push({ url, request }); return handler(url, request); } } });
   assert.equal(process.listenerCount("SIGINT"), before.int); assert.equal(process.listenerCount("SIGTERM"), before.term);
-  return { code, stdout: capture.output(), stderr: capture.diagnostic(), requests, events: json ? capture.output().trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)) as Record<string, unknown>[] : [] };
+  return { code, stdout: capture.output(), stderr: capture.diagnostic(), requests };
 }
 export function idleHandler(first: RawMessage[], final: RawMessage[], extra?: Handler): Handler {
-  let snapshots = 0;
+  let closing = false;
   return (url, request) => {
     if (url.pathname.endsWith("/run-state")) return jsonResult(state());
     if (url.pathname.endsWith("/timeline")) {
       const mode = url.searchParams.get("mode");
-      if (mode === "snapshot") { snapshots++; return jsonResult(paged(snapshots === 1 ? first : final, url, snapshots === 1 ? 10 : 20)); }
-      assert.equal(mode, "before"); return jsonResult(paged(snapshots === 1 ? first : final, url, snapshots === 1 ? 10 : 20));
+      if (mode === "snapshot") return jsonResult(paged(first, url, 10));
+      if (mode === "delta") {
+        closing = true;
+        return jsonResult(Number(url.searchParams.get("sinceRevision")) >= 20
+          ? page([], 20, { session: agentSession({ revision: 20, headMessageId: final.at(-1)?.id ?? null }) })
+          : paged(final, url, 20, { timelineReset: true }));
+      }
+      assert.equal(mode, "before"); return jsonResult(paged(closing ? final : first, url, closing ? 20 : 10));
     }
     if (extra) return extra(url, request);
     assert.fail(`unexpected fixture route ${url.pathname}`);

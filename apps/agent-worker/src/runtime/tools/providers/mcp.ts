@@ -30,7 +30,10 @@ export class McpToolProvider implements ToolProvider {
   async execute(toolName: string, args: Record<string, unknown>, ctx: ToolExecutionContext): Promise<unknown> {
     // TODO(plugin-phase2): 当前 MCP SDK client.callTool 未见显式 AbortSignal 接口；先保留向下透传的扩展点，
     // 待上游 SDK 或本地封装支持取消后继续接入真正的 abort/cancel。
-    const result = await this.mcpManager.callTool(toolName, args, { signal: ctx.signal });
+    const result = await this.mcpManager.callTool(toolName, args, {
+      signal: ctx.signal,
+      allowedServerIds: ctx.profile.agent.mcpServers,
+    });
     return {
       serverId: result.serverId,
       toolName: result.toolName,

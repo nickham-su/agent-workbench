@@ -152,6 +152,54 @@ test("PluginRuntimeManager lists debug-tools fixture tool", async () => {
   assert.equal(tools[0]?.source, "plugin");
 });
 
+test("PluginRuntimeManager skips snapshot requests and module loading without authorized tools", async (t) => {
+  const manager = new PluginRuntimeManager({ info() {}, warn() {}, error() {} });
+  const context = createContext();
+  context.profile.agent.pluginTools = [];
+  const snapshots = t.mock.method(context.apiClient, "getPluginRuntimeSnapshots");
+  const load = t.mock.method(manager as any, "loadPlugin");
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    assert.deepEqual(await manager.listTools(context as any), []);
+  }
+
+  assert.equal(snapshots.mock.callCount(), 0);
+  assert.equal(load.mock.callCount(), 0);
+});
+
+test("PluginRuntimeManager retains snapshot discovery for nonempty unmatched authorization", async (t) => {
+  const manager = new PluginRuntimeManager({ info() {}, warn() {}, error() {} });
+  const context = createContext();
+  context.profile.agent.pluginTools = ["plugin_other_tool"];
+  const snapshots = t.mock.method(context.apiClient, "getPluginRuntimeSnapshots");
+  const load = t.mock.method(manager as any, "loadPlugin");
+
+  assert.deepEqual(await manager.listTools(context as any), []);
+  assert.equal(snapshots.mock.callCount(), 1);
+  assert.equal(load.mock.callCount(), 0);
+});
+
+test("PluginRuntimeManager does not expose cached tools across agents with different authorization", async (t) => {
+  const manager = new PluginRuntimeManager({ info() {}, warn() {}, error() {} });
+  const authorized = createContext();
+  const empty = { ...authorized, profile: { agent: { ...authorized.profile.agent, pluginTools: [] } } };
+  const other = { ...authorized, profile: { agent: { ...authorized.profile.agent, pluginTools: ["plugin_other_tool"] } } };
+  const snapshots = t.mock.method(authorized.apiClient, "getPluginRuntimeSnapshots");
+  const load = t.mock.method(manager as any, "loadPlugin");
+
+  assert.equal((await manager.listTools(authorized as any))[0]?.name, "plugin_debug-tools_echo_inspect");
+  assert.equal(snapshots.mock.callCount(), 1);
+  assert.deepEqual(await manager.listTools(empty as any), []);
+  assert.equal(snapshots.mock.callCount(), 1);
+  assert.deepEqual(await manager.listTools(other as any), []);
+  assert.equal(snapshots.mock.callCount(), 2);
+  assert.equal((await manager.listTools(authorized as any))[0]?.name, "plugin_debug-tools_echo_inspect");
+  assert.equal(snapshots.mock.callCount(), 3);
+  assert.deepEqual(await manager.listTools(empty as any), []);
+  assert.equal(snapshots.mock.callCount(), 3);
+  assert.equal(load.mock.callCount(), 1);
+});
+
 test("PluginRuntimeManager executes debug-tools fixture ok branch", async () => {
   const manager = new PluginRuntimeManager({
     info() {},
