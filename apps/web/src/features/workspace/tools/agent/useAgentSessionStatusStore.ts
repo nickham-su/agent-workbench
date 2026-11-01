@@ -7,6 +7,7 @@ import agentSessionTerminalSoundUrl from "@/shared/assets/audio/agent-session-te
 
 const ACTIVE_RUNNING_POLL_MS = 850;
 const BACKGROUND_NON_IDLE_POLL_MS = 2400;
+const OPEN_IDLE_POLL_MS = 5000;
 const WARMUP_POLL_MS = 420;
 const WARMUP_POLL_COUNT = 4;
 const ERROR_RETRY_MS = 1600;
@@ -128,6 +129,9 @@ function nextPollDelayOf(params: {
   }
   if (visibleSessionIds.has(entry.sessionId) && entry.errorRetryAt != null) {
     return ERROR_RETRY_MS;
+  }
+  if (visibleSessionIds.has(entry.sessionId)) {
+    return OPEN_IDLE_POLL_MS;
   }
   return Number.POSITIVE_INFINITY;
 }
@@ -498,6 +502,7 @@ export function createAgentSessionStatusStore() {
     registeredSessionIds?: string[];
     sessionKinds?: Record<string, "primary" | "subtask">;
   }) {
+    const previousVisibleSessionIds = state.visibleSessionIds;
     state.visibleSessionIds = new Set(params.visibleSessionIds.map((id) => String(id || "").trim()).filter(Boolean));
     if (Array.isArray(params.registeredSessionIds)) {
       state.registeredSessionIds = new Set(params.registeredSessionIds.map((id) => String(id || "").trim()).filter(Boolean));
@@ -511,7 +516,11 @@ export function createAgentSessionStatusStore() {
     }
     state.activeSessionId = String(params.activeSessionId || "").trim() || null;
     for (const sessionId of state.visibleSessionIds) {
-      ensureEntry(sessionId);
+      const entry = ensureEntry(sessionId);
+      // Reopening must refresh cached idle state, without resetting ordinary tab switches.
+      if (entry && !previousVisibleSessionIds.has(sessionId)) {
+        entry.nextPollAt = 0;
+      }
     }
     for (const sessionId of state.registeredSessionIds) {
       const entry = ensureEntry(sessionId);
