@@ -24,6 +24,9 @@ test("built CLI initializes auth-off connection then returns every 165 Session a
   payload.items[1].userMessageCount = 0;
   payload.items[1].completedAssistantMessageCount = 0;
   payload.items[2].status = "running";
+  payload.items[0].agent = { id: "agent-xxx", name: "编程专家" };
+  payload.items[1].agent = { id: "deleted-agent", name: null };
+  payload.items[2].agent = { id: "escaped-agent", name: "专家\n不能形成字段\u001b[31m" };
   const requests: string[] = [];
   const server = await httpServer((request, response) => {
     requests.push(request.url!);
@@ -46,6 +49,11 @@ test("built CLI initializes auth-off connection then returns every 165 Session a
   assert.equal(result.stderr, "");
   assert.equal((result.stdout.match(/^Session ID：/gm) ?? []).length, 165);
   for (const item of payload.items) assert.ok(result.stdout.includes(`Session ID：${item.id}\n`));
+  assert.ok(result.stdout.includes("Agent：编程专家（ID: agent-xxx）\n"));
+  assert.ok(result.stdout.includes("Agent：未知/已删除（ID: deleted-agent）\n"));
+  assert.ok(result.stdout.includes("Agent：专家\\n不能形成字段\\u001b[31m（ID: escaped-agent）\n"));
+  assert.equal((result.stdout.match(/^Agent：无记录$/gm) ?? []).length, 162);
+  assert.equal(result.stdout.includes("Agent 来源"), false);
   assert.match(result.stdout, /标题：（空标题）/);
   assert.match(result.stdout, /标题：任意名称\\n不能形成新字段\\t\\u001b\[31m/);
   assert.match(result.stdout, /用户消息累计数：0\n已完成助手消息累计数：0/);

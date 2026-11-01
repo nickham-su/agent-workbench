@@ -179,6 +179,7 @@ function mountPane(options?: {
       sessionTitle: "Session A",
       sessionReady: options?.sessionReady ?? false,
       active: options?.active ?? false,
+      agentSelectionState: "ready",
       modelValue: options?.modelValue ?? "agent-b",
       agentOptions: [
         { value: "agent-a", label: "Agent A" },
@@ -302,6 +303,7 @@ function mountCachedPane() {
             sessionTitle: "Session A",
             sessionReady: false,
             active: true,
+            agentSelectionState: "ready",
             modelValue: "agent-b",
             agentOptions: [],
             sessionModelStates: {},
@@ -1400,7 +1402,7 @@ function mountForkPane(forkSession: NonNullable<Parameters<typeof mountPane>[0]>
     attachTo: document.body,
     props: {
       workspaceId: "ws-a", toolId: "agent-tool", sessionId: "session-a", sessionKind: "primary", sessionTitle: "Session A",
-      sessionReady: false, active: true, agentOptions: [], sessionModelStates: {}, sessionModelStateLoading: false,
+      sessionReady: false, active: true, agentSelectionState: "ready", agentOptions: [], sessionModelStates: {}, sessionModelStateLoading: false,
       sessionModelMutationPending: false, modelOpenIntent: null, forkSession,
     },
     global: {
@@ -1894,3 +1896,76 @@ for (const pending of [false, true]) {
     }
   });
 }
+
+
+test("真实 AgentClientPane：Agent 初始化中/失败禁止普通发送和 compact，失败可重试", async () => {
+  const http = mockContextRequests();
+  let ensured = 0;
+  const { wrapper } = mountPane({ initialDraft: "Hello", ensureSession: async (id) => { ensured += 1; return id; } });
+  const vm = wrapper.vm as any;
+  try {
+    for (const state of ["loading", "error"] as const) {
+      await wrapper.setProps({ agentSelectionState: state });
+      assert.equal(wrapper.find('[data-testid="agent-selection-status"]').exists(), true);
+      vm.draft = "Hello"; await vm.onSend();
+      vm.draft = "/compact"; await vm.onSend();
+      assert.equal(http.requests.length, 0);
+      assert.equal(ensured, 0);
+    }
+    await wrapper.get('[data-testid="agent-selection-retry"]').trigger("click");
+    assert.equal(wrapper.emitted("retry-agent-selection")?.length, 1);
+    await wrapper.setProps({ agentSelectionState: "ready", agentOptions: [] });
+    vm.draft = "Hello"; await vm.onSend();
+    vm.draft = "/compact"; await vm.onSend();
+    assert.equal(http.requests.length, 0, "no available Agent also blocks all sends");
+    await wrapper.setProps({ agentOptions: [{ value: "agent-b", label: "Agent B" }] });
+    vm.draft = "Hello";
+    const send = vm.onSend();
+    const request = await http.waitFor(0);
+    assert.match(request.url || "", /messages/);
+    http.respond(0, { runId: "selection-ready-run" }); await send;
+  } finally {
+    panePendingRuns(wrapper).remove({ workspaceId: "ws-a", sessionId: "session-a", runKind: "user", runId: "selection-ready-run" });
+    wrapper.unmount(); http.restore();
+  }
+});
+
+
+for (const text of ["Hello", "/compact"]) {
+  test(`真实 AgentClientPane：${text} 等待 Session 创建期间 Agent 状态失效时不发送`, async () => {
+    const ensured = deferred<string>();
+    const http = mockContextRequests();
+    const { wrapper } = mountPane({ initialDraft: text, ensureSession: () => ensured.promise });
+    const vm = wrapper.vm as any;
+    try {
+      await wrapper.setProps({ agentSelectionState: "ready" });
+      vm.promptSettingsLoaded = true;
+      const send = vm.onSend();
+      await nextTick();
+      await wrapper.setProps({ agentSelectionState: "error" });
+      ensured.resolve("session-a"); await send;
+      assert.equal(http.requests.length, 0);
+    } finally { wrapper.unmount(); http.restore(); }
+  });
+}
+
+test("真实 AgentClientPane：初始化完成后 compact 使用已恢复的 Agent；初始化前 Enter 不触发", async () => {
+  const http = mockContextRequests();
+  const { wrapper } = mountPane({ initialDraft: "/compact", modelValue: "agent-c" });
+  const vm = wrapper.vm as any;
+  try {
+    vm.promptSettingsLoaded = true;
+    await wrapper.setProps({ agentSelectionState: "loading" });
+    wrapper.get("a-textarea").element.dispatchEvent(createKeyboardEvent("Enter")); await nextTick();
+    assert.equal(http.requests.length, 0);
+    await wrapper.setProps({ agentSelectionState: "ready" });
+    const send = vm.onSend();
+    const request = await http.waitFor(0);
+    assert.match(request.url || "", /compact/);
+    assert.equal(JSON.parse(String(request.data)).agentId, "agent-c");
+    http.respond(0, { runId: "compact-selection-run" }); await send;
+  } finally {
+    panePendingRuns(wrapper).remove({ workspaceId: "ws-a", sessionId: "session-a", runKind: "manual_compaction", runId: "compact-selection-run" });
+    wrapper.unmount(); http.restore();
+  }
+});

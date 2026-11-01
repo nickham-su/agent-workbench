@@ -395,6 +395,9 @@ export default {
     client: {
       tabStateLoading: "正在加载会话…",
       tabStateLoadFailed: "加载会话失败，请重试。",
+      agentSelectionLoading: "正在恢复 Agent 选择…",
+      agentSelectionLoadFailed: "Agent 选择加载失败，重试后可发送",
+      retryAgentSelection: "重试",
       retryTabStateLoad: "重试",
       tabStateUpdateFailed: "更新会话可见性失败",
       tabLabel: "会话 {index}",

@@ -133,7 +133,7 @@ async function mountPane(stat: (path: string) => FileStatResponse | Promise<File
     attachTo: document.body,
     props: {
       workspaceId: "ws-a", toolId: "agent-tool", sessionId: "session-a", sessionKind: "primary",
-      sessionReady: false, active: false, agentOptions: [], sessionModelStates: {},
+      sessionReady: false, active: false, agentSelectionState: "ready", agentOptions: [], sessionModelStates: {},
       sessionModelStateLoading: false, sessionModelMutationPending: false, modelOpenIntent: null,
     },
     global: {

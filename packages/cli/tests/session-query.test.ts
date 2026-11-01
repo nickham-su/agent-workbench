@@ -94,7 +94,7 @@ test("DTO rejects corrupt items, duplicate IDs, unsafe counts and mismatched fil
     change(value.items[0] as unknown as Record<string, unknown>);
     assert.throws(() => validateSessionQueryResponse(value, query), exitCode(6));
   };
-  for (const key of ["id", "title", "kind", "status", "createdAt", "updatedAt", "userMessageCount", "completedAssistantMessageCount"]) mutateItem((value) => { delete value[key]; });
+  for (const key of ["id", "title", "kind", "status", "agent", "createdAt", "updatedAt", "userMessageCount", "completedAssistantMessageCount"]) mutateItem((value) => { delete value[key]; });
   for (const [key, invalid] of [
     ["id", ""], ["id", 1], ["title", null], ["kind", "all"], ["kind", "subtask"],
     ["status", "all"], ["status", "running"], ["updatedAt", Date.UTC(2026, 0, 2) + 1],
@@ -125,7 +125,7 @@ test("fixed text has UTC dates, visible control escapes, complete IDs and a zero
     "更新时间范围：2026-01-01T00:00:00.000Z 至 2026-01-02T00:00:00.000Z（含两端）", "匹配总数：1", "",
     "Session ID：a-complete-session-identifier-that-is-not-truncated",
     "标题：第一行\\n第二行\\t\\\\n\\r\\u001b[31m\\u0085\\u2028\\u2029",
-    "类型：primary", "状态：idle", "创建时间：2025-12-31T00:00:00.000Z",
+    "类型：primary", "状态：idle", "Agent：无记录", "创建时间：2025-12-31T00:00:00.000Z",
     "最近更新时间：2026-01-02T00:00:00.000Z",
     "用户消息累计数：2", "已完成助手消息累计数：8", "", "查询结束：已输出 1 个 Session。", ""
   ].join("\n");
@@ -138,4 +138,31 @@ test("fixed text has UTC dates, visible control escapes, complete IDs and a zero
   assert.match(renderSessionList(response, "24h"), /标题：（空标题）/);
   assert.equal(escapeDisplayText("\0\b\f\x7f"), "\\u0000\\b\\f\\u007f");
   assert.equal(escapeDisplayText("id\nfield"), "id\\nfield");
+});
+
+test("DTO requires a closed Agent object or null and renders name/ID without terminal injection", () => {
+  for (const agent of [null, { id: "agent-xxx", name: "编程专家" }, { id: "deleted", name: null }]) {
+    const response = queryResponse();
+    response.items[0].agent = agent;
+    assert.deepEqual(validateSessionQueryResponse(response, defaultQuery), response);
+  }
+  for (const agent of [undefined, "agent-id", [], {}, { id: "a" }, { name: "name" },
+    { id: "", name: "name" }, { id: " ", name: "name" }, { id: 1, name: "name" },
+    { id: "a", name: "" }, { id: "a", name: 1 }, { id: "a", name: "name", source: "current" }]) {
+    const response = queryResponse();
+    (response.items[0] as unknown as Record<string, unknown>).agent = agent;
+    assert.throws(() => validateSessionQueryResponse(response, defaultQuery), exitCode(6));
+  }
+  const response = queryResponse();
+  response.items[0].agent = { id: "agent-xxx", name: "编程专家" };
+  assert.ok(renderSessionList(response, "24h").includes("Agent：编程专家（ID: agent-xxx）\n"));
+  assert.equal(renderSessionList(response, "24h").includes("Agent 来源"), false);
+  response.items[0].agent = { id: "deleted", name: null };
+  assert.ok(renderSessionList(response, "24h").includes("Agent：未知/已删除（ID: deleted）\n"));
+  response.items[0].agent = { id: "agent-xxx", name: "名称\t\r\u2028\\" };
+  const parsed = validateSessionQueryResponse(response, defaultQuery);
+  assert.ok(renderSessionList(parsed, "24h").includes("Agent：名称\\t\\r\\u2028\\\\（ID: agent-xxx）\n"));
+  response.items[0].agent.id = "id\n\u001b[31m";
+  assert.throws(() => validateSessionQueryResponse(response, defaultQuery), exitCode(6));
+  assert.ok(renderSessionList(response, "24h").includes("（ID: id\\n\\u001b[31m）\n"));
 });

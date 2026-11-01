@@ -397,6 +397,9 @@ export default {
     client: {
       tabStateLoading: "Loading sessions…",
       tabStateLoadFailed: "Failed to load sessions. Please try again.",
+      agentSelectionLoading: "Restoring Agent selection…",
+      agentSelectionLoadFailed: "Failed to load Agent selection. Retry before sending.",
+      retryAgentSelection: "Retry",
       retryTabStateLoad: "Retry",
       tabStateUpdateFailed: "Failed to update session visibility",
       tabLabel: "Session {index}",

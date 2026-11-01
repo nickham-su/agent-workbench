@@ -12,6 +12,7 @@ type SessionSeed = {
   forkedFromSessionId?: string | null;
   // null deliberately creates a missing RunState; arbitrary strings exercise corruption handling.
   status?: string | null;
+  activeRunId?: string | null;
 };
 type MessageSeed = {
   id: string;
@@ -24,7 +25,7 @@ type MessageSeed = {
   updatedAt?: number;
 };
 
-/** Separate in-memory read-side fixture: no Parts, Run, model or Analytics tables. */
+/** Separate in-memory activity fixture: no Parts, model configuration or Analytics tables. */
 export function createSessionActivityFixture() {
   const db = new Database(":memory:");
   db.exec(`
@@ -35,8 +36,12 @@ export function createSessionActivityFixture() {
       forked_from_session_id text, forked_from_message_id text, created_at integer, updated_at integer
     );
     create table session_run_state (
-      workspace_id text, session_id text, status text,
+      workspace_id text, session_id text, status text, active_run_id text,
       primary key (workspace_id, session_id)
+    );
+    create table agent_run (
+      run_id text primary key, workspace_id text, session_id text, agent_id text,
+      status text, run_kind text, created_at integer, updated_at integer
     );
     create table agent_message (
       id text primary key, workspace_id text, origin_session_id text, origin_run_id text,
@@ -49,7 +54,7 @@ export function createSessionActivityFixture() {
     (id, workspace_id, title, kind, head_message_id, context_root_message_id, revision,
       forked_from_session_id, forked_from_message_id, created_at, updated_at)
     values (?, ?, ?, ?, ?, ?, 0, ?, null, ?, ?)`);
-  const stateInsert = db.prepare("insert into session_run_state (workspace_id, session_id, status) values (?, ?, ?)");
+  const stateInsert = db.prepare("insert into session_run_state (workspace_id, session_id, status, active_run_id) values (?, ?, ?, ?)");
   const messageInsert = db.prepare(`insert into agent_message
     (id, workspace_id, origin_session_id, origin_run_id, type, status, created_at, updated_at)
     values (?, ?, ?, ?, ?, ?, ?, ?)`);
@@ -60,7 +65,17 @@ export function createSessionActivityFixture() {
       sessionInsert.run(seed.id, workspaceId, seed.title ?? "", seed.kind ?? "primary",
         seed.headMessageId ?? null, seed.contextRootMessageId ?? null, seed.forkedFromSessionId ?? null,
         seed.createdAt ?? 1, seed.updatedAt ?? 10);
-      if (seed.status !== null) stateInsert.run(workspaceId, seed.id, seed.status ?? "idle");
+      if (seed.status !== null) stateInsert.run(workspaceId, seed.id, seed.status ?? "idle", seed.activeRunId ?? null);
+    },
+    insertRun(seed: {
+      id: string; sessionId: string; agentId: string; workspaceId?: string;
+      status?: string; kind?: "user" | "manual_compaction" | "subtask";
+      createdAt: number; updatedAt?: number;
+    }) {
+      db.prepare(`insert into agent_run
+        (run_id, workspace_id, session_id, agent_id, status, run_kind, created_at, updated_at)
+        values (?, ?, ?, ?, ?, ?, ?, ?)`).run(seed.id, seed.workspaceId ?? "a", seed.sessionId,
+        seed.agentId, seed.status ?? "completed", seed.kind ?? "user", seed.createdAt, seed.updatedAt ?? seed.createdAt);
     },
     insertMessage(seed: MessageSeed) {
       messageInsert.run(seed.id, seed.workspaceId ?? "a", seed.originSessionId, seed.originRunId ?? null,

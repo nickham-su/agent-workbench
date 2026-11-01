@@ -83,6 +83,7 @@ async function getRunState(app: FastifyInstance, workspaceId: string, sessionId:
   return res.json() as {
     status: "idle" | "running";
     activeRunId: string | null;
+    selectionAgentId: string | null;
     runNoticeText: string;
     lastResponseTotalTokens?: number | null;
     contextTokenRatio?: number | null;
@@ -705,4 +706,24 @@ test("internal message-timeline-snapshot 拒绝 workspace 与 session 不匹配"
   const res = await getMessageTimelineSnapshot(fixture.app, fixture.internalToken, "ws_other", session.id);
   assert.equal(res.statusCode, 404);
   assert.equal(res.json().code, "SESSION_NOT_FOUND");
+});
+
+
+test("public run-state and timeline expose Agent selection without token statistics, independently of context ratio", async (t: TestContext) => {
+  const fixture = await createP4Fixture(t, { agentWorkerConcurrency: 0 });
+  const session = await createSession(fixture.app, fixture.workspaceId);
+  assert.equal((await getRunState(fixture.app, fixture.workspaceId, session.id)).selectionAgentId, null);
+  const oldRun = createMessageRunFixture({ fixture, sessionId: session.id, agentId: "old-agent", createdAt: 10 });
+  createMessageRunRecord(fixture.db, { runId: "new-manual", workspaceId: fixture.workspaceId, sessionId: session.id, triggerMessageId: null, agentId: "manual-agent", providerId: "ppchat", modelId: "gpt-5.2", status: "failed", runKind: "manual_compaction", createdAt: 20 });
+  const current = await getRunState(fixture.app, fixture.workspaceId, session.id);
+  assert.equal(current.selectionAgentId, "old-agent");
+  assert.equal(current.lastResponseTotalTokens, null);
+  assert.equal(current.contextTokenRatio, null);
+  const completed = await convergeCompletedRun({ app: fixture.app, internalToken: fixture.internalToken, workspaceId: fixture.workspaceId, sessionId: session.id, runId: oldRun.runId, updatedAt: 100 });
+  assert.equal(completed.statusCode, 200, completed.body);
+  const idle = await getRunState(fixture.app, fixture.workspaceId, session.id);
+  assert.equal(idle.selectionAgentId, "manual-agent", "latest creation, not latest terminal update");
+  const response = await getMessageTimelineSnapshot(fixture.app, fixture.internalToken, fixture.workspaceId, session.id);
+  assert.equal(response.statusCode, 200, response.body);
+  assert.equal(response.json().runState.selectionAgentId, "manual-agent");
 });

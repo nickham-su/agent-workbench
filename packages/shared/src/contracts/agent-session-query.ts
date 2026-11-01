@@ -35,6 +35,15 @@ export const AgentSessionQueryItemSchema = Type.Object({
   title: Type.String(),
   kind: SessionKindSchema,
   status: SessionStatusSchema,
+  /** Current Run's Agent, otherwise latest-created Run's Agent; null means no Run history. */
+  agent: Type.Union([
+    Type.Object({
+      id: Type.String({ minLength: 1 }),
+      /** Current configuration name, not a historical snapshot; null if configuration was deleted. */
+      name: Type.Union([Type.String({ minLength: 1 }), Type.Null()])
+    }, { additionalProperties: false }),
+    Type.Null()
+  ]),
   /** This Session's own creation time, independent of the update window and fork source. */
   createdAt: TimestampSchema,
   updatedAt: TimestampSchema,

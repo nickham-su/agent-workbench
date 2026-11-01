@@ -49,6 +49,7 @@ awb file download -w workspace-id --path reports --output ./reports.zip
 - Workspace 和最近更新时间窗口必须显式提供；窗口为正整数 `s/m/h/d`，最多90天。
 - 会话列表仅查主会话（包含 Fork 主会话），默认 `kind=primary`。`--kind primary` 是不再展示在帮助中的弃用兼容写法；`--kind subtask/all` 本地退出2且不联网，属于有意收缩旧CLI行为。已知子会话仍可用 show/status读取，不改原API。
 - 列表的 `--status` 为 `idle/running/all`，缺省 `all`；`session status` 返回当前忙闲状态 `idle/running`。
+- 每项显示 `Agent：编程专家（ID: agent-xxx）`：当前 Run 优先，否则取最近创建的 Run（含失败、取消和手动压缩）；无历史显示 `Agent：无记录`。名称来自当前配置，禁用不影响历史展示；已删除时显示 `未知/已删除` 并保留 ID，Fork 不继承来源会话的 Run 记录。
 - `-w/--workspace`、`-s/--session` 同义；同一单值参数不能重复，包括短长别名。ID不猜UUID，但禁止空白边界和控制字符，路径段拒绝字面点段。
 - `--timeout` 可放在根、组或动作位置；单请求完整 body 时限默认 30s，范围 1s..24h。仅 `-f` 只读请求按下文规则有限重试。所有层级 `--help/-h` 都离线且无副作用。
 - 旧 `--json` 在任何位置（包括与 help 同用）均为参数错误，退出 2，不联网、不加载或修改配置。没有隐藏兼容模式；文本不承诺与旧 JSON 逐字段等价，内部 HTTP/schema/config JSON 保留。

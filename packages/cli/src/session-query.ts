@@ -49,7 +49,15 @@ function isCount(value: unknown): value is number {
 }
 
 const responseKeys = ["workspaceId", "updatedWithinSeconds", "updatedFrom", "updatedTo", "kind", "status", "total", "items"];
-const itemKeys = ["id", "title", "kind", "status", "createdAt", "updatedAt", "userMessageCount", "completedAssistantMessageCount"];
+const itemKeys = ["id", "title", "kind", "status", "agent", "createdAt", "updatedAt", "userMessageCount", "completedAssistantMessageCount"];
+
+function isAgent(value: unknown): value is AgentSessionQueryItem["agent"] {
+  return value === null || (
+    isRecord(value) && hasExactKeys(value, ["id", "name"])
+    && isId(value.id)
+    && (value.name === null || (typeof value.name === "string" && value.name.length > 0))
+  );
+}
 
 /** Validate both the closed DTO structure and its relationship to this request. */
 export function validateSessionQueryResponse(value: unknown, query: SessionListQuery): AgentSessionQueryResponse {
@@ -70,6 +78,7 @@ export function validateSessionQueryResponse(value: unknown, query: SessionListQ
       || typeof item.title !== "string"
       || (item.kind !== "primary" && item.kind !== "subtask")
       || (item.status !== "idle" && item.status !== "running")
+      || !isAgent(item.agent)
       || (query.kind !== "all" && item.kind !== query.kind)
       || (query.status !== "all" && item.status !== query.status)
       || !isTimestamp(item.createdAt) || !isTimestamp(item.updatedAt) || item.updatedAt < from || item.updatedAt > to
@@ -78,7 +87,7 @@ export function validateSessionQueryResponse(value: unknown, query: SessionListQ
     }
     ids.add(item.id);
     return {
-      id: item.id, title: item.title, kind: item.kind, status: item.status,
+      id: item.id, title: item.title, kind: item.kind, status: item.status, agent: item.agent,
       createdAt: item.createdAt, updatedAt: item.updatedAt,
       userMessageCount: item.userMessageCount, completedAssistantMessageCount: item.completedAssistantMessageCount
     };

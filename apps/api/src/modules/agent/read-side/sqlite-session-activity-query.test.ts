@@ -41,7 +41,7 @@ test("activity query includes both window ends and preserves empty titles/headle
     assert.equal(item.title, "");
     assert.equal(item.userMessageCount, 0);
     assert.equal(item.completedAssistantMessageCount, 0);
-    assert.deepEqual(Object.keys(item), ["id", "title", "kind", "status", "createdAt", "updatedAt", "userMessageCount", "completedAssistantMessageCount"]);
+    assert.deepEqual(Object.keys(item), ["id", "title", "kind", "status", "agent", "createdAt", "updatedAt", "userMessageCount", "completedAssistantMessageCount"]);
   }
 });
 
@@ -94,8 +94,19 @@ test("activity query returns 160+ items in BINARY order and runs in a read-only 
   const f = fixture(t);
   for (let i = 0; i < 160; i++) f.insertSession({ id: `session-${String(i).padStart(3, "0")}`, updatedAt: NOW });
   for (const id of ["Z", "a", "é", "中", "😀"]) f.insertSession({ id, updatedAt: NOW });
+  const sessions = f.db.prepare("select id from agent_session").all() as { id: string }[];
+  for (const { id } of sessions) f.insertRun({ id: `run-${id}`, sessionId: id, agentId: `agent-${id}`, createdAt: 1 });
   f.db.pragma("query_only = ON");
+  const prepare = f.db.prepare.bind(f.db);
+  let preparedQueries = 0;
+  const tracked = t.mock.method(f.db, "prepare", (sql: string) => {
+    preparedQueries++;
+    return prepare(sql);
+  });
   const result = f.query.querySessions(input);
+  tracked.mock.restore();
+  assert.equal(preparedQueries, 3, "Workspace/candidates/counts are batched, not one Run query per Session");
+  assert.ok(result.items.every((item) => item.agent?.id === `agent-${item.id}`));
   assert.equal(result.total, 165);
   assert.equal(new Set(result.items.map((item) => item.id)).size, 165);
   const sorted = f.db.prepare("select id from agent_session order by updated_at desc, id collate binary desc").all() as { id: string }[];
@@ -122,7 +133,7 @@ test("activity counts retained native completed messages, independently of time 
   assert.deepEqual(result.items.map((item) => [item.id, item.userMessageCount, item.completedAssistantMessageCount]), [
     ["zero", 0, 0], ["two", 1, 0], ["one", 2, 3]
   ]);
-  assert.equal(f.db.prepare("select 1 from sqlite_master where name in ('agent_run', 'agent_message_part', 'analytics')").get(), undefined);
+  assert.equal(f.db.prepare("select 1 from sqlite_master where name in ('agent_message_part', 'analytics')").get(), undefined);
 });
 
 test("activity counts do not inherit fork history or shrink after compaction/revert pointers", (t) => {
@@ -160,7 +171,7 @@ test("activity checks only time/kind candidates and joins RunState in the same W
   f.insertSession({ id: "old-bad", updatedAt: 1, status: null });
   f.insertSession({ id: "subtask-bad", kind: "subtask", updatedAt: NOW, status: null });
   assert.equal(f.query.querySessions({ ...input, kind: "primary" }).total, 1);
-  f.db.prepare("insert into session_run_state values ('b', 'subtask-bad', 'idle')").run();
+  f.db.prepare("insert into session_run_state values ('b', 'subtask-bad', 'idle', null)").run();
   assert.throws(() => f.query.querySessions(input), stateError);
 });
 
@@ -195,4 +206,41 @@ test("activity accepts a safe-integer SQLite connection without serializing bigi
   assert.equal(result.items[0].createdAt, 1);
   assert.equal(result.items[0].completedAssistantMessageCount, 1);
   assert.doesNotThrow(() => JSON.stringify(result));
+});
+
+test("activity Agent uses active Run first, then latest creation including failed/cancelled/manual runs", (t) => {
+  const f = fixture(t);
+  f.insertSession({ id: "one", updatedAt: NOW, status: "running", activeRunId: "active" });
+  f.insertRun({ id: "active", sessionId: "one", agentId: "active-agent", createdAt: 1, status: "running" });
+  f.insertRun({ id: "latest", sessionId: "one", agentId: "latest-agent", createdAt: 2, status: "failed" });
+  const agent = () => f.query.querySessions(input).items[0].agent;
+  assert.deepEqual(agent(), { id: "active-agent", name: null });
+  f.db.prepare("update session_run_state set active_run_id = null, status = 'idle'").run();
+  f.db.prepare("update agent_run set updated_at = 100 where run_id = 'active'").run();
+  assert.deepEqual(agent(), { id: "latest-agent", name: null }, "updated_at is not last-use order");
+  f.insertRun({ id: "manual", sessionId: "one", agentId: "manual-agent", createdAt: 3, status: "cancelled", kind: "manual_compaction" });
+  assert.equal(agent()?.id, "manual-agent");
+  f.insertRun({ id: "tie-z", sessionId: "one", agentId: "tie-agent", createdAt: 3, status: "failed" });
+  assert.equal(agent()?.id, "tie-agent", "run_id breaks creation-time ties descending");
+  f.db.prepare("update session_run_state set active_run_id = 'missing'").run();
+  assert.equal(agent()?.id, "tie-agent", "a missing active record falls back to history");
+});
+
+test("activity Agent isolates Run ownership, leaves empty/Fork history null and does not inherit child Agent", (t) => {
+  const f = fixture(t);
+  f.insertSession({ id: "parent", updatedAt: NOW, activeRunId: "foreign" });
+  f.insertSession({ id: "child", kind: "subtask", updatedAt: NOW });
+  f.insertSession({ id: "fork", updatedAt: NOW, forkedFromSessionId: "parent" });
+  f.insertSession({ id: "empty", updatedAt: NOW });
+  f.insertRun({ id: "own", sessionId: "parent", agentId: "parent-agent", createdAt: 1 });
+  f.insertRun({ id: "child-run", sessionId: "child", agentId: "child-agent", kind: "subtask", createdAt: 2 });
+  f.insertRun({ id: "foreign", sessionId: "parent", workspaceId: "b", agentId: "foreign-agent", createdAt: 3 });
+  const agents = () => new Map(f.query.querySessions(input).items.map((item) => [item.id, item.agent]));
+  assert.deepEqual(agents().get("parent"), { id: "parent-agent", name: null });
+  assert.deepEqual(agents().get("child"), { id: "child-agent", name: null });
+  assert.equal(agents().get("fork"), null);
+  assert.equal(agents().get("empty"), null);
+  f.db.prepare("update session_run_state set active_run_id = 'child-run' where session_id = 'parent'").run();
+  assert.equal(agents().get("parent")?.id, "parent-agent", "even active pointers must match Session ownership");
+  assert.equal(f.query.querySessions({ ...input, kind: "primary" }).items.some((item) => item.id === "child"), false);
 });

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 import { effectScope, nextTick } from "vue";
 
 /** Exercise the real Axios wrapper and store with explicitly completed requests. */
@@ -199,4 +199,171 @@ test("StatusStore settings requests obey the same workspace generation and relea
     f.settings[2]!.respond(500, {}); await late;
     assert.equal(f.store.state.runtimeSettings.loading, true, "disposed response must not update the old UI state");
   } finally { f.cleanup(); }
+});
+
+function pollingFixture(t: TestContext) {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 100_000 });
+  // Happy DOM owns its timers; route the store's window timers through the same clock as Date.
+  t.mock.method(window, "setTimeout", (callback: () => void, delay?: number) => setTimeout(callback, delay));
+  t.mock.method(window, "clearTimeout", (id: ReturnType<typeof setTimeout>) => clearTimeout(id));
+  const f = fixture();
+  t.after(() => { f.cleanup(); t.mock.timers.reset(); t.mock.restoreAll(); });
+  const advance = async (ms: number) => { t.mock.timers.tick(ms); await settle(); };
+  const sync = (open = true, active = false) => f.store.syncSessions({
+    registeredSessionIds: ["same-id"], visibleSessionIds: open ? ["same-id"] : [],
+    activeSessionId: open && active ? "same-id" : null
+  });
+  return { ...f, advance, sync,
+    async start(active = false) { f.bind("a"); sync(true, active); await advance(0); },
+    async respond(status: "idle" | "running", httpStatus = 200) {
+      f.requests.at(-1)!.respond(httpStatus, runState("a", status, Date.now()));
+      await settle();
+    }
+  };
+}
+
+for (const active of [true, false]) {
+  test(`StatusStore ${active ? "active" : "background"} open session: idle polling continues and restores running frequency`, async (t) => {
+    const f = pollingFixture(t);
+    await f.start(active);
+    assert.equal(f.requests.length, 1);
+    await f.respond("idle");
+    for (let count = 1; count <= 2; count += 1) {
+      await f.advance(4999);
+      assert.equal(f.requests.length, count);
+      await f.advance(1);
+      assert.equal(f.requests.length, count + 1);
+      await f.respond(count === 2 ? "running" : "idle");
+    }
+    const runningDelay = active ? 850 : 2400;
+    await f.advance(runningDelay - 1);
+    assert.equal(f.requests.length, 3);
+    await f.advance(1);
+    assert.equal(f.requests.length, 4);
+    await f.respond("idle");
+    const terminalAt = f.store.getEntry("same-id").lastTerminalAt;
+    assert.equal(f.played(), 1);
+    assert.equal(f.store.getIndicator("same-id").value.showDot, !active);
+    for (let count = 4; count <= 5; count += 1) {
+      await f.advance(4999);
+      assert.equal(f.requests.length, count);
+      await f.advance(1);
+      assert.equal(f.requests.length, count + 1);
+      await f.respond("idle");
+    }
+    assert.equal(f.played(), 1, "repeated idle responses must not replay completion sound");
+    assert.equal(f.store.getEntry("same-id").lastTerminalAt, terminalAt);
+    assert.equal(f.store.getIndicator("same-id").value.showDot, !active);
+  });
+}
+
+test("StatusStore metadata sync and ordinary tab switches preserve the idle polling deadline", async (t) => {
+  const f = pollingFixture(t);
+  await f.start();
+  await f.respond("idle");
+  const deadline = f.store.getEntry("same-id").nextPollAt;
+  await f.advance(1000);
+  f.sync(true, true);
+  await f.advance(1000);
+  f.sync(true, false);
+  f.sync();
+  await f.advance(2999);
+  assert.equal(f.store.getEntry("same-id").nextPollAt, deadline);
+  assert.equal(f.requests.length, 1);
+  await f.advance(1);
+  assert.equal(f.requests.length, 2);
+});
+
+test("StatusStore close stops scheduled idle polling and reopen immediately refreshes cached state", async (t) => {
+  const f = pollingFixture(t);
+  await f.start();
+  await f.respond("idle");
+  await f.advance(1000);
+  f.sync(false);
+  await f.advance(10_000);
+  assert.equal(f.requests.length, 1, "registered but closed sessions must not poll");
+  f.sync();
+  await f.advance(0);
+  assert.equal(f.requests.length, 2);
+  await f.respond("idle");
+  await f.advance(4999);
+  assert.equal(f.requests.length, 2);
+  await f.advance(1);
+  assert.equal(f.requests.length, 3);
+});
+
+for (const response of ["idle", "running", "failure"] as const) {
+  test(`StatusStore slow request deduplicates; late ${response} after close cannot restart polling`, async (t) => {
+    const f = pollingFixture(t);
+    await f.start();
+    await f.advance(10_000);
+    f.sync();
+    await f.store.refreshSessionNow("same-id");
+    await f.advance(0);
+    assert.equal(f.requests.length, 1, "a pending request owns the session slot");
+    f.sync(false);
+    await f.respond(response === "running" ? "running" : "idle", response === "failure" ? 500 : 200);
+    await f.advance(10_000);
+    assert.equal(f.requests.length, 1);
+    if (response === "idle") {
+      assert.equal(f.store.getEntry("same-id").nextPollAt, Number.POSITIVE_INFINITY);
+    }
+    f.sync();
+    await f.advance(0);
+    assert.equal(f.requests.length, 2, "reopening resets even an infinite or stale deadline");
+  });
+}
+
+for (const action of ["dispose", "workspace"] as const) {
+  for (const response of ["success", "failure"] as const) {
+    test(`StatusStore late ${response} after ${action} cannot restart timers`, async (t) => {
+      const f = pollingFixture(t);
+      await f.start();
+      if (action === "dispose") f.store.dispose();
+      else f.store.bindWorkspace("b");
+      await f.respond("idle", response === "failure" ? 500 : 200);
+      await f.advance(10_000);
+      assert.equal(f.requests.length, 1);
+    });
+  }
+}
+
+test("StatusStore idle warmup keeps four checks before returning to low frequency", async (t) => {
+  const f = pollingFixture(t);
+  await f.start();
+  await f.respond("idle");
+  f.store.bumpPollHint("same-id", { warmup: true, immediate: true });
+  await f.advance(0);
+  assert.equal(f.requests.length, 2);
+  await f.respond("idle");
+  for (let count = 2; count <= 4; count += 1) {
+    await f.advance(419);
+    assert.equal(f.requests.length, count);
+    await f.advance(1);
+    assert.equal(f.requests.length, count + 1);
+    await f.respond("idle");
+  }
+  assert.equal(f.store.getEntry("same-id").warmupRemaining, 0);
+  await f.advance(4999);
+  assert.equal(f.requests.length, 5);
+  await f.advance(1);
+  assert.equal(f.requests.length, 6);
+});
+
+test("StatusStore failed idle checks retry at 1600ms and successful idle returns to 5000ms", async (t) => {
+  const f = pollingFixture(t);
+  await f.start();
+  await f.respond("idle", 500);
+  for (let count = 1; count <= 2; count += 1) {
+    await f.advance(1599);
+    assert.equal(f.requests.length, count);
+    await f.advance(1);
+    assert.equal(f.requests.length, count + 1);
+    await f.respond("idle", count === 1 ? 500 : 200);
+  }
+  assert.equal(f.store.getEntry("same-id").errorRetryAt, null);
+  await f.advance(4999);
+  assert.equal(f.requests.length, 3);
+  await f.advance(1);
+  assert.equal(f.requests.length, 4);
 });

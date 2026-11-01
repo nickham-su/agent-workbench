@@ -4,7 +4,8 @@ import { fileURLToPath } from "node:url";
 import { test, type TestContext } from "node:test";
 import type { AgentSessionQueryResponse } from "@agent-workbench/shared/contracts/agent-session-query";
 import { AUTH_COOKIE_NAME, createSessionCookieValue } from "../../../infra/auth/sessionCookie.js";
-import { createMessageSession } from "../agent-message.store.js";
+import { createMessageRunRecord, createMessageSession } from "../agent-message.store.js";
+import { setSettingJson } from "../../settings/settings.store.js";
 import { createAgentTestFixture, createTestWorkspace } from "../testkit/agent-testkit.js";
 
 const repoRoot = fileURLToPath(new URL("../../../../../../", import.meta.url));
@@ -199,4 +200,47 @@ test("activity HTTP uses only the existing public Cookie auth, not internal toke
   if (!cookie) throw new Error("test login did not produce a Cookie");
   const result = await body(await fetch(f.queryUrl, { headers: { cookie } }));
   assert.equal(result.total, 0);
+});
+
+test("activity HTTP exposes current/latest Agent with current names despite disabled scope, and retains deleted IDs", async (t) => {
+  const f = await createFixture(t);
+  for (const id of ["current", "recent", "empty", "fork"]) f.seedSession(id);
+  f.seedSession("child", "subtask");
+  f.db.prepare("update agent_session set forked_from_session_id = 'current' where id = 'fork'").run();
+  const settings = (activeName: string) => setSettingJson(f.db, "agent_agents_v1", {
+    agents: [
+      { id: "active-agent", name: activeName, scope: "subtask" },
+      { id: "child-agent", name: "子任务专家", scope: "subtask" }
+    ]
+  }, Date.now());
+  settings("编程专家");
+  setSettingJson(f.db, "workspace_agent_enablement_v1", {
+    workspaces: { [f.workspaceId]: { mode: "subset", enabledAgentIds: [], updatedAt: Date.now() } }
+  }, Date.now());
+  const run = (runId: string, sessionId: string, agentId: string, createdAt: number,
+    status: "running" | "failed" | "cancelled" = "failed", runKind: "user" | "manual_compaction" | "subtask" = "user") => {
+    createMessageRunRecord(f.db, { runId, workspaceId: f.workspaceId, sessionId, agentId, createdAt,
+      status, runKind, triggerMessageId: null, providerId: "missing-provider", modelId: "missing-model" });
+  };
+  run("active", "current", "active-agent", 1, "running");
+  run("newer-not-active", "current", "not-active-agent", 2);
+  f.db.prepare("update session_run_state set status = 'running', active_run_id = 'active' where session_id = 'current'").run();
+  run("older", "recent", "active-agent", 1);
+  run("manual", "recent", "deleted-agent", 3, "cancelled", "manual_compaction");
+  f.db.prepare("update agent_run set updated_at = 100 where run_id = 'older'").run();
+  run("child-run", "child", "child-agent", 100, "failed", "subtask");
+  const result = await body(await fetch(f.queryUrl));
+  const items = new Map(result.items.map((item) => [item.id, item]));
+  assert.deepEqual(items.get("current")?.agent, { id: "active-agent", name: "编程专家" });
+  assert.deepEqual(items.get("recent")?.agent, { id: "deleted-agent", name: null });
+  assert.deepEqual(items.get("child")?.agent, { id: "child-agent", name: "子任务专家" });
+  assert.equal(items.get("empty")?.agent, null);
+  assert.equal(items.get("fork")?.agent, null);
+  assert.equal(result.total, 5);
+  assert.ok(result.items.every((item) => item.userMessageCount === 0 && item.completedAssistantMessageCount === 0));
+  assert.deepEqual(Object.keys(items.get("current")!.agent!).sort(), ["id", "name"]);
+  settings("已改名专家");
+  const renamed = await body(await fetch(`${f.queryUrl}&kind=primary&status=running`));
+  assert.equal(renamed.total, 1);
+  assert.deepEqual(renamed.items[0].agent, { id: "active-agent", name: "已改名专家" });
 });

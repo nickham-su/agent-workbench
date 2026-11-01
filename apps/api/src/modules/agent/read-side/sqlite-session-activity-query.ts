@@ -5,6 +5,7 @@ import {
 } from "@agent-workbench/shared/contracts/agent-session-query";
 import { HttpError } from "../../../app/errors.js";
 import type { Db } from "../../../infra/db/db.js";
+import { sessionSelectionAgentIdSql } from "../agent-run-selection.js";
 import type { SessionActivityQuery } from "./session-activity-query.js";
 
 const DATE_LIMIT = 8_640_000_000_000_000;
@@ -13,7 +14,7 @@ const CANDIDATE_CONDITION = `s.workspace_id = @workspaceId
   and (@kind = 'all' or s.kind = @kind)`;
 const invalidState = () => new HttpError(500, "invalid session query state", AGENT_SESSION_QUERY_ERROR_CODES.stateInvalid);
 
-type CandidateRow = { id: unknown; title: unknown; kind: unknown; status: unknown; createdAt: unknown; updatedAt: unknown };
+type CandidateRow = { id: unknown; title: unknown; kind: unknown; status: unknown; agentId: unknown; createdAt: unknown; updatedAt: unknown };
 type CountRow = { sessionId: string; userMessageCount: unknown; completedAssistantMessageCount: unknown };
 
 function safeInteger(value: unknown): number {
@@ -35,7 +36,7 @@ function count(value: unknown): number {
   return number;
 }
 
-/** Independent read side: metadata, current state and retained native message counts only. */
+/** Independent activity read side: metadata, Run Agent, current state and retained native message counts. */
 export class SqliteSessionActivityQuery {
   constructor(private readonly db: Db, private readonly now: () => number = Date.now) {}
 
@@ -48,7 +49,8 @@ export class SqliteSessionActivityQuery {
       const updatedFrom = timestamp(updatedTo - input.updatedWithinSeconds * 1000);
       const params = { ...input, updatedFrom, updatedTo };
       const rows = this.db.prepare(`select s.id, s.title, s.kind,
-          s.created_at as createdAt, s.updated_at as updatedAt, r.status
+          s.created_at as createdAt, s.updated_at as updatedAt, r.status,
+          ${sessionSelectionAgentIdSql("s.workspace_id", "s.id", "r.active_run_id")} as agentId
         from agent_session s left join session_run_state r
           on r.workspace_id = s.workspace_id and r.session_id = s.id
         where ${CANDIDATE_CONDITION}
@@ -58,9 +60,11 @@ export class SqliteSessionActivityQuery {
       const candidates: AgentSessionQueryItem[] = rows.map((row) => {
         if (typeof row.id !== "string" || row.id.length === 0 || typeof row.title !== "string"
           || (row.kind !== "primary" && row.kind !== "subtask")
-          || (row.status !== "idle" && row.status !== "running")) throw invalidState();
+          || (row.status !== "idle" && row.status !== "running")
+          || (row.agentId !== null && (typeof row.agentId !== "string" || row.agentId.length === 0))) throw invalidState();
         return {
           id: row.id, title: row.title, kind: row.kind, status: row.status,
+          agent: row.agentId === null ? null : { id: row.agentId, name: null },
           createdAt: timestamp(row.createdAt), updatedAt: timestamp(row.updatedAt),
           userMessageCount: 0, completedAssistantMessageCount: 0
         };
