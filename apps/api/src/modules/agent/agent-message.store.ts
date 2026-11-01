@@ -1397,6 +1397,15 @@ export function getRunRecord(db: Db, runId: string): AgentRunRecord | null {
   return row ? toRunRecord(row) : null;
 }
 
+/** Agent selection is derived from Run history, never a persisted UI preference. */
+export function getSessionSelectionAgentId(db: Db, params: { workspaceId: string; sessionId: string; activeRunId: string | null }): string | null {
+  if (params.activeRunId) {
+    const active = getRunRecord(db, params.activeRunId);
+    if (active?.workspaceId === params.workspaceId && active.sessionId === params.sessionId) return active.agentId;
+  }
+  return getLatestMessageRunRecordBySession(db, params)?.agentId ?? null;
+}
+
 export function getLatestMessageRunRecordBySession(db: Db, params: { workspaceId: string; sessionId: string }): AgentRunRecord | null {
   const row = db.prepare(`
     select run_id as runId, workspace_id as workspaceId, session_id as sessionId,

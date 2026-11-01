@@ -145,7 +145,7 @@ function respondDefaults(request: FakeXMLHttpRequest, workspaceId = "ws-a") {
   return request.respond(200, {});
 }
 
-function mountView(workspaceId = "ws-a", openSessionRequest?: { sessionId: string; sequence: number }, options: { renderPicker?: boolean } = {}) {
+function mountView(workspaceId = "ws-a", openSessionRequest?: { sessionId: string; sequence: number }, options: { renderPicker?: boolean; renderRealPane?: boolean } = {}) {
   const i18n = createI18n({ legacy: false, locale: "en-US", messages: { "en-US": enUS.default, "zh-CN": zhCN.default } });
   return mount(AgentToolView, {
     attachTo: document.body,
@@ -167,7 +167,14 @@ function mountView(workspaceId = "ws-a", openSessionRequest?: { sessionId: strin
         "a-list": options.renderPicker ? { props: ["dataSource"], template: "<div><slot v-for='item in dataSource' name='renderItem' :item='item' /></div>" } : true,
         "a-list-item": options.renderPicker ? { emits: ["click"], template: "<div @click='$emit(\"click\")'><slot /></div>" } : true,
         "a-input": true,
-        AgentClientPane: true,
+        ...(options.renderRealPane ? {
+          "a-select": true,
+          "a-textarea": true,
+          "a-checkbox": true,
+          "a-checkbox-group": true,
+          "a-tag": true,
+        } : {}),
+        AgentClientPane: options.renderRealPane ? false : true,
         CloseOutlined: { template: "<button class='close-icon' @click='$emit(\"click\")' />" },
         MinusOutlined: true,
         PlusOutlined: true,
@@ -2183,5 +2190,286 @@ for (const cause of ["snapshot", "notFound", "close"] as const) {
       assert.equal(vm.tabNoMap[vm.draftSessions[0].id], 2);
       assert.equal(vm.tabNoMap.a, 1);
     } finally { wrapper.unmount(); }
+  });
+}
+
+
+const selectionAgents = ["agent-a", "agent-b", "agent-c"].map((id) => ({ id, name: id, scope: "user", resolvedModel: null }));
+function selectionRunState(workspaceId = "ws-a", sessionId = "primary-a", selectionAgentId: string | null = "agent-b") {
+  return { workspaceId, sessionId, status: "idle", activeRunId: null, selectionAgentId, runNoticeText: "", retryCount: 0, nextRetryAt: null, activeAssistantMessageId: null, nonTerminalMessageIds: [], nonTerminalToolExecutionIds: [], updatedAt: 1 };
+}
+
+for (const first of ["agents", "run-state"] as const) {
+  test(`Agent selection: ${first} arrives first; initialization waits for both and ignores legacy localStorage`, async () => {
+    let agents: FakeXMLHttpRequest | undefined;
+    let state: FakeXMLHttpRequest | undefined;
+    const key = "agent-workbench.workspace.agent.pickBySession.v1.ws-a";
+    const legacy = JSON.stringify({ "primary-a": "agent-c" });
+    const previousStorage = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+    Object.defineProperty(globalThis, "localStorage", { configurable: true, writable: true, value: window.localStorage });
+    localStorage.setItem(key, legacy);
+    FakeXMLHttpRequest.responder = (request) => {
+      if ((request.url.includes("/agent/available") || request.url.includes("/agents/available"))) { agents = request; return; }
+      if (request.url.includes("/run-state")) { state = request; return; }
+      return respondDefaults(request);
+    };
+    const wrapper = mountView();
+    try {
+      await settle();
+      const vm = wrapper.vm as any;
+      void vm.statusStore.refreshSessionNow("primary-a");
+      await settle();
+      assert.ok(agents); assert.ok(state);
+      assert.equal(vm.agentSelectionState(vm.visibleSessions[0]), "loading");
+      if (first === "agents") agents.respond(200, { agents: selectionAgents });
+      else state.respond(200, selectionRunState());
+      await settle();
+      assert.equal(vm.agentSelectionState(vm.visibleSessions[0]), "loading");
+      if (first === "agents") state.respond(200, selectionRunState());
+      else agents.respond(200, { agents: selectionAgents });
+      await settle();
+      assert.equal(vm.selectedAgentBySession["primary-a"], "agent-b");
+      assert.equal(vm.agentSelectionState(vm.visibleSessions[0]), "ready");
+      vm.setSessionAgent("primary-a", "agent-c");
+      const refresh = vm.statusStore.refreshSessionNow("primary-a");
+      await settle();
+      state.respond(200, selectionRunState("ws-a", "primary-a", "agent-a"));
+      await refresh; await settle();
+      vm.onChangeTab("primary-a");
+      assert.equal(vm.selectedAgentBySession["primary-a"], "agent-c", "polling/Tab switching cannot replace hand selection");
+      assert.equal(localStorage.getItem(key), legacy, "Agent choice no longer writes localStorage");
+    } finally {
+      wrapper.unmount(); localStorage.removeItem(key);
+      if (previousStorage) Object.defineProperty(globalThis, "localStorage", previousStorage);
+      else Reflect.deleteProperty(globalThis, "localStorage");
+    }
+  });
+}
+
+test("Agent selection: late initial history preserves user choice; failed initial state stays blocked and can retry", async () => {
+  let state: FakeXMLHttpRequest | undefined;
+  FakeXMLHttpRequest.responder = (request) => {
+    if ((request.url.includes("/agent/available") || request.url.includes("/agents/available"))) return request.respond(200, { agents: selectionAgents });
+    if (request.url.includes("/run-state")) { state = request; return; }
+    return respondDefaults(request);
+  };
+  const wrapper = mountView();
+  try {
+    await settle();
+    const vm = wrapper.vm as any;
+    void vm.statusStore.refreshSessionNow("primary-a"); await settle();
+    vm.setSessionAgent("primary-a", "agent-c");
+    state!.respond(500, {}); await settle();
+    assert.equal(vm.agentSelectionState(vm.visibleSessions[0]), "error");
+    vm.retryAgentSelection(vm.visibleSessions[0]); await settle();
+    assert.equal(vm.agentSelectionState(vm.visibleSessions[0]), "error", "in-flight retry is not a successful initialization");
+    state!.respond(200, selectionRunState()); await settle();
+    assert.equal(vm.selectedAgentBySession["primary-a"], "agent-c");
+    assert.equal(vm.agentSelectionState(vm.visibleSessions[0]), "ready");
+  } finally { wrapper.unmount(); }
+});
+
+for (const history of [null, "deleted-agent", "subtask-only-agent"] as const) {
+  test(`Agent selection: missing/unavailable history ${history} falls back to first user Agent`, async () => {
+    FakeXMLHttpRequest.responder = (request) => {
+      if ((request.url.includes("/agent/available") || request.url.includes("/agents/available"))) return request.respond(200, { agents: [...selectionAgents, { id: "subtask-only-agent", name: "child", scope: "subtask" }] });
+      if (request.url.includes("/run-state")) return request.respond(200, selectionRunState("ws-a", "primary-a", history));
+      return respondDefaults(request);
+    };
+    const wrapper = mountView();
+    try {
+      await settle();
+      const vm = wrapper.vm as any;
+      await vm.statusStore.refreshSessionNow("primary-a"); await settle();
+      assert.equal(vm.selectedAgentBySession["primary-a"], "agent-a");
+      assert.equal(vm.agentSelectionState(vm.visibleSessions[0]), "ready");
+    } finally { wrapper.unmount(); }
+  });
+}
+
+test("Agent selection: options failure is retryable, stale options do not initialize, empty list stays empty", async () => {
+  let fail = true;
+  FakeXMLHttpRequest.responder = (request) => {
+    if ((request.url.includes("/agent/available") || request.url.includes("/agents/available"))) return request.respond(fail ? 500 : 200, { agents: [] });
+    if (request.url.includes("/run-state")) return request.respond(200, selectionRunState());
+    return respondDefaults(request);
+  };
+  const wrapper = mountView();
+  try {
+    await settle();
+    const vm = wrapper.vm as any;
+    await vm.statusStore.refreshSessionNow("primary-a"); await settle();
+    assert.equal(vm.agentSelectionState(vm.visibleSessions[0]), "error");
+    assert.equal(vm.selectedAgentBySession["primary-a"], undefined);
+    fail = false; vm.retryAgentSelection(vm.visibleSessions[0]); await settle();
+    assert.equal(vm.selectedAgentBySession["primary-a"], null);
+    assert.equal(vm.agentOptions.length, 0);
+    assert.equal(vm.agentSelectionState(vm.visibleSessions[0]), "ready");
+  } finally { wrapper.unmount(); }
+});
+
+
+test("Agent selection: workspace switch ignores old options and run-state responses, including reused Session IDs", async () => {
+  const states: FakeXMLHttpRequest[] = [];
+  const options: FakeXMLHttpRequest[] = [];
+  FakeXMLHttpRequest.responder = (request) => {
+    const workspaceId = request.url.includes("ws-b") ? "ws-b" : "ws-a";
+    if (request.url.includes("/agents/available") || request.url.includes("/agent/available")) { options.push(request); return; }
+    if (request.url.includes("/run-state")) { states.push(request); return; }
+    return respondDefaults(request, workspaceId);
+  };
+  const wrapper = mountView();
+  try {
+    await settle();
+    const vm = wrapper.vm as any;
+    void vm.statusStore.refreshSessionNow("primary-a"); await settle();
+    assert.equal(states.length, 1); assert.equal(options.length, 1);
+    await wrapper.setProps({ workspaceId: "ws-b" }); await settle();
+    void vm.statusStore.refreshSessionNow("primary-a"); await settle();
+    assert.equal(states.length, 2); assert.equal(options.length, 2);
+    options[1]!.respond(200, { agents: selectionAgents });
+    states[1]!.respond(200, selectionRunState("ws-b", "primary-a", "agent-c")); await settle();
+    assert.equal(vm.selectedAgentBySession["primary-a"], "agent-c");
+    options[0]!.respond(200, { agents: [] });
+    states[0]!.respond(200, selectionRunState("ws-a", "primary-a", "agent-b")); await settle();
+    assert.equal(vm.selectedAgentBySession["primary-a"], "agent-c");
+    assert.equal(vm.agentSelectionState(vm.visibleSessions[0]), "ready");
+    assert.equal(vm.agentOptions.length, 3);
+  } finally { wrapper.unmount(); }
+});
+
+test("Agent selection: draft hand selection migrates to new Session and is not reset by no-history response; Fork uses its own history", async () => {
+  FakeXMLHttpRequest.responder = (request) => {
+    if (request.url.includes("/agents/available") || request.url.includes("/agent/available")) return request.respond(200, { agents: selectionAgents });
+    if (request.url.includes("/run-state")) {
+      const sessionId = request.url.split("/sessions/")[1]!.split("/")[0]!;
+      return request.respond(200, selectionRunState("ws-a", sessionId, sessionId === "primary-a" ? "agent-b" : null));
+    }
+    if (request.method === "POST" && request.url.endsWith("/agent/sessions")) return request.respond(200, session("new-session", "ws-a"));
+    return respondDefaults(request);
+  };
+  const wrapper = mountView();
+  try {
+    await settle();
+    const vm = wrapper.vm as any;
+    await vm.statusStore.refreshSessionNow("primary-a"); await settle();
+    assert.equal(vm.selectedAgentBySession["primary-a"], "agent-b");
+    await vm.createOneSession(); await settle();
+    const draftId = vm.draftSessions[0].id;
+    assert.equal(vm.agentSelectionState(vm.draftSessions[0]), "ready");
+    vm.setSessionAgent(draftId, "agent-c");
+    assert.equal(await vm.ensureSessionCreated(draftId), "new-session"); await settle();
+    await vm.statusStore.refreshSessionNow("new-session"); await settle();
+    assert.equal(vm.selectedAgentBySession["new-session"], "agent-c");
+    assert.equal(vm.agentSelectionState(vm.visibleSessions.find((item: Session) => item.id === "new-session")), "ready");
+    const fork = { ...session("fork-session", "ws-a"), forkedFromSessionId: "primary-a" };
+    vm.onSessionForked(fork); await settle();
+    await vm.statusStore.refreshSessionNow("fork-session"); await settle();
+    assert.equal(vm.selectedAgentBySession["fork-session"], "agent-a", "Fork cannot inherit parent's selection without its own Run");
+  } finally { wrapper.unmount(); }
+});
+
+test("Agent selection: missing history projection is not a successful no-history response", async () => {
+  FakeXMLHttpRequest.responder = (request) => {
+    if (request.url.includes("/agents/available") || request.url.includes("/agent/available")) return request.respond(200, { agents: selectionAgents });
+    if (request.url.includes("/run-state")) {
+      const { selectionAgentId: _omitted, ...legacy } = selectionRunState();
+      return request.respond(200, legacy);
+    }
+    return respondDefaults(request);
+  };
+  const wrapper = mountView();
+  try {
+    await settle(); const vm = wrapper.vm as any;
+    await vm.statusStore.refreshSessionNow("primary-a"); await settle();
+    assert.equal(vm.agentSelectionState(vm.visibleSessions[0]), "error");
+    assert.equal(vm.selectedAgentBySession["primary-a"], undefined);
+  } finally { wrapper.unmount(); }
+});
+
+
+// happy-dom's XMLHttpRequest does not implement timeout scheduling. Exercise real
+// Axios transport timeouts with its Node HTTP adapter and an isolated loopback server.
+for (const stalled of ["agents", "run-state"] as const) {
+  test(`Agent selection: pending ${stalled} times out after 15s, blocks sends, releases inFlight and retries successfully`, { timeout: 25_000 }, async () => {
+    const { createServer } = await import("node:http");
+    const { apiClient } = await import("@/shared/api/api");
+    let stalledReads = 0;
+    let sends = 0;
+    const server = createServer((request, response) => {
+      const path = new URL(request.url!, "http://localhost").pathname;
+      const reply = (body: unknown) => {
+        response.writeHead(200, { "Content-Type": "application/json" });
+        response.end(JSON.stringify(body));
+      };
+      const isAgents = path.endsWith("/agents/available");
+      const isRunState = path.endsWith("/run-state");
+      if ((stalled === "agents" && isAgents) || (stalled === "run-state" && isRunState)) {
+        stalledReads += 1;
+        if (stalledReads === 1) return; // Leave the initial response open until Axios times out.
+      }
+      if (isAgents) return reply({ agents: selectionAgents });
+      if (isRunState) return reply(selectionRunState());
+      if (path.endsWith("/timeline")) return reply({ session: session("primary-a", "ws-a"), timelineReset: false, messages: [], toolExecutions: [] });
+      if (path.endsWith("/agent/sessions")) return reply({ scope: "tabs", items: [session("primary-a", "ws-a")], tabState: tabState("ws-a") });
+      if (request.method === "POST" && /\/(messages|compact)$/.test(path)) sends += 1;
+      return reply({});
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    const previous = { adapter: apiClient.defaults.adapter, baseURL: apiClient.defaults.baseURL, proxy: apiClient.defaults.proxy, timeout: apiClient.defaults.timeout };
+    apiClient.defaults.adapter = "http";
+    apiClient.defaults.baseURL = `http://127.0.0.1:${address.port}/api`;
+    apiClient.defaults.proxy = false;
+    const timeouts: Array<{ code: string; timeout: number }> = [];
+    const interceptor = apiClient.interceptors.response.use(undefined, (error) => {
+      if (error.code === "ECONNABORTED" || error.code === "ETIMEDOUT") timeouts.push({ code: error.code, timeout: error.config.timeout });
+      return Promise.reject(error);
+    });
+    const waitUntil = async (condition: () => boolean, description: string) => {
+      const deadline = Date.now() + 19_000;
+      while (!condition() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+      assert.ok(condition(), description);
+      await settle();
+    };
+    let wrapper: ReturnType<typeof mountView> | undefined;
+    try {
+      wrapper = mountView("ws-a", undefined, { renderRealPane: true });
+      const mounted = wrapper;
+      const vm = mounted.vm as any;
+      await waitUntil(() => stalledReads === 1 && mounted.findComponent({ name: "AgentClientPane" }).exists(), "initial request and Pane must start");
+      const pane = mounted.findComponent({ name: "AgentClientPane" });
+      const paneVm = pane.vm as any;
+      const assertBlocked = async (expected: "loading" | "error") => {
+        assert.equal(pane.props("agentSelectionState"), expected);
+        assert.equal(mounted.find("main").exists(), true, "Agent initialization does not hide conversation history");
+        paneVm.draft = "Hello"; await paneVm.onSend();
+        paneVm.draft = "/compact"; await paneVm.onSend();
+        assert.equal(sends, 0, "ordinary sends and compact remain blocked");
+      };
+      await assertBlocked("loading");
+      if (stalled === "run-state") assert.equal(vm.statusStore.getEntry("primary-a").inFlight, true);
+      await waitUntil(() => vm.agentSelectionState(vm.visibleSessions[0]) === "error", "Axios timeout must become a retryable initialization error");
+      assert.equal(timeouts.length, 1, "a real transport timeout must occur, not a synthetic HTTP error");
+      assert.equal(timeouts[0]!.timeout, 15_000);
+      if (stalled === "run-state") assert.equal(vm.statusStore.getEntry("primary-a").inFlight, false, "timeout must release the status store request fence");
+      await assertBlocked("error");
+      await mounted.get('[data-testid="agent-selection-retry"]').trigger("click");
+      await waitUntil(() => vm.agentSelectionState(vm.visibleSessions[0]) === "ready", "explicit retry must recover initialization");
+      assert.equal(stalledReads, 2, "retry issues a fresh request instead of remaining stuck inFlight");
+      assert.equal(pane.props("agentSelectionState"), "ready");
+      assert.equal(vm.selectedAgentBySession["primary-a"], "agent-b");
+      if (stalled === "run-state") assert.equal(vm.statusStore.getEntry("primary-a").inFlight, false);
+      assert.equal(apiClient.defaults.timeout, previous.timeout, "request-local timeouts must not change Axios defaults");
+    } finally {
+      wrapper?.unmount();
+      apiClient.interceptors.response.eject(interceptor);
+      apiClient.defaults.adapter = previous.adapter;
+      apiClient.defaults.baseURL = previous.baseURL;
+      apiClient.defaults.proxy = previous.proxy;
+      server.closeAllConnections();
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
   });
 }

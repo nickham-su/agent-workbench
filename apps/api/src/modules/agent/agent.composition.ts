@@ -63,6 +63,7 @@ import {
   findMessageClientRequestDedup,
   insertMessageClientRequestDedup,
   getRunRecord,
+  getSessionSelectionAgentId,
   getMessageSessionById,
   getMessageRunState,
   getSessionAgentModelOverride,
@@ -2223,7 +2224,11 @@ function createAgentApplications(
         }
       }
     }
-    return { ...state, contextTokenRatio };
+    return {
+      ...state,
+      contextTokenRatio,
+      selectionAgentId: getSessionSelectionAgentId(environment.db, { ...params, activeRunId: state.activeRunId }),
+    };
   }
 
   function getMessageTimelineSnapshot(params: { workspaceId: string; sessionId: string; sinceRevision?: number }) {

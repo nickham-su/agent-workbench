@@ -20,7 +20,7 @@ async function mountPane(realPreview = false, text?: string) {
     attachTo: document.body,
     props: {
       workspaceId: "ws-a", toolId: "agent-tool", sessionId: "session-a", sessionKind: "primary", sessionTitle: "Session A",
-      sessionReady: false, active: false, modelValue: "agent-a", agentOptions: [],
+      sessionReady: false, active: false, agentSelectionState: "ready", modelValue: "agent-a", agentOptions: [],
       sessionModelStates: {}, sessionModelStateLoading: false, sessionModelMutationPending: false, modelOpenIntent: null,
     },
     global: {

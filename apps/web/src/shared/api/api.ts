@@ -591,7 +591,7 @@ export async function updateWorkspaceAgentEnablementSettings(
 
 export async function listWorkspaceAvailableAgents(workspaceId: string, surface: "user" | "subtask" | "all" = "user") {
   try {
-    const res = await client.get<WorkspaceAvailableAgentsResponse>(`/workspaces/${workspaceId}/agents/available`, { params: { surface } });
+    const res = await client.get<WorkspaceAvailableAgentsResponse>(`/workspaces/${workspaceId}/agents/available`, { params: { surface }, timeout: 15_000 });
     return res.data;
   } catch (err) {
     throw toApiError(err);
@@ -1323,6 +1323,7 @@ export async function getAgentRunState(sessionId: string, workspaceId?: string) 
   try {
     const res = await client.get<AgentMessageSessionRunState>(`/agent/sessions/${sessionId}/run-state`, {
       params: workspaceId ? { workspaceId } : undefined,
+      timeout: 15_000,
     });
     return res.data;
   } catch (err) {

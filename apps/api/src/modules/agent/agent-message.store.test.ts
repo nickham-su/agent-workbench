@@ -25,6 +25,7 @@ import {
   hasCommittedCompactionArtifact,
   getMessageRunState,
   getRunRecord,
+  getSessionSelectionAgentId,
   getMessageSession,
   getToolExecution,
   isAncestor,
@@ -1577,4 +1578,33 @@ test("terminal convergence 的 stale active-run fence 不产生部分写入", ()
   assert.throws(() => convergeRunTerminal(db, { workspaceId: "ws-a", sessionId: "s-a", runId: "run-a", updatedAt: 4 }), /fence/);
   assert.equal(getRunRecord(db, "run-a")?.executionPhase, "terminal_intent_persisted");
   assert.equal(getMessageRunState(db, "ws-a", "s-a")?.activeRunId, "new-run");
+});
+
+
+test("Session Agent selection prefers active Run, otherwise latest creation including failed/cancelled/manual runs", () => {
+  const db = createDb();
+  try {
+    session(db);
+    session(db, "child");
+    session(db, "other", "ws-b");
+    const query = (activeRunId: string | null = null) => getSessionSelectionAgentId(db, { workspaceId: "ws-a", sessionId: "s-a", activeRunId });
+    const add = (runId: string, createdAt: number, status: "running" | "completed" | "failed" | "cancelled", runKind: "user" | "manual_compaction" | "subtask" = "user", sessionId = "s-a", workspaceId = "ws-a") => createMessageRunRecord(db, {
+      runId, workspaceId, sessionId, triggerMessageId: null, agentId: runId, providerId: "provider", modelId: "model", status, runKind, createdAt,
+    });
+    assert.equal(query(), null);
+    add("old", 1, "completed");
+    add("new", 2, "failed");
+    db.prepare("update agent_run set updated_at = 100 where run_id = 'old'").run();
+    assert.equal(query(), "new", "updated_at must not determine most recently used Agent");
+    assert.equal(query("old"), "old", "active Run wins even if older");
+    add("manual", 3, "cancelled", "manual_compaction");
+    assert.equal(query(), "manual");
+    add("tie-z", 3, "failed");
+    assert.equal(query(), "tie-z", "creation ties use descending run_id");
+    add("child-run", 4, "running", "subtask", "child");
+    add("foreign", 5, "completed", "user", "other", "ws-b");
+    assert.equal(query(), "tie-z", "child/other workspace history is excluded");
+    assert.equal(query("foreign"), "tie-z", "a foreign active Run cannot escape scope");
+    assert.equal(getSessionSelectionAgentId(db, { workspaceId: "ws-a", sessionId: "missing", activeRunId: null }), null);
+  } finally { db.close(); }
 });

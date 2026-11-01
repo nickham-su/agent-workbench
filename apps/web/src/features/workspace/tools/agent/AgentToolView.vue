@@ -63,6 +63,8 @@
             :model-value="selectedAgentBySession[session.id] ?? null"
             :tool-id="toolId"
             :agent-options="agentOptions"
+            :agent-selection-state="agentSelectionState(session)"
+            @retry-agent-selection="retryAgentSelection(session)"
             :subtask-agent-labels="subtaskAgentLabels"
             :session-model-states="sessionModelStates[session.id] ?? {}"
             :session-model-state-loading="!!sessionModelStateLoads[session.id]"
@@ -169,7 +171,7 @@ export default {
 import type { AgentSessionAgentModelState, AgentSessionMessageState, AgentSessionRecord } from "@agent-workbench/shared/internal-contracts/agent-api-session";
 import { CloseOutlined, MinusOutlined, PlusOutlined } from "@ant-design/icons-vue";
 import { message } from "ant-design-vue";
-import { computed, onActivated, onBeforeUnmount, onDeactivated, provide, reactive, ref, watch } from "vue";
+import { computed, onActivated, onBeforeUnmount, onDeactivated, provide, reactive, ref, watch, watchEffect } from "vue";
 import { useI18n } from "vue-i18n";
 import {
   ApiError,
@@ -249,7 +251,6 @@ type ChooseSessionItem = {
 
 const ADD_TAB_KEY = "__agent_add__";
 const ACTIVE_KEY_STORAGE_PREFIX = "agent-workbench.workspace.agent.activeClient";
-const AGENT_PICK_STORAGE_PREFIX = "agent-workbench.workspace.agent.pickBySession";
 
 const props = defineProps<{ workspaceId: string; toolId: string; openSessionRequest?: { sessionId: string; sequence: number } | null }>();
 const host = useWorkspaceHost(props.toolId);
@@ -266,6 +267,9 @@ const draftSessions = ref<DraftAgentSession[]>([]);
 const activeKey = ref<string>("");
 const selectedAgentBySession = reactive<Record<string, string | null>>({});
 const agentOptions = ref<AgentSelectionOption[]>([]);
+const agentOptionsLoadState = ref<"loading" | "ready" | "error">("loading");
+const initializedAgentSessions = reactive(new Set<string>());
+let agentOptionsRequestId = 0;
 const subtaskAgentLabels = ref<Record<string, string>>({});
 const draftVisibilityBySession = reactive<Record<string, boolean>>({});
 const tabVisibilityWriteStates = reactive<Record<string, SessionWriteState>>({});
@@ -458,12 +462,6 @@ function activeKeyStorageKey(workspaceId: string) {
   return `${ACTIVE_KEY_STORAGE_PREFIX}.v1.${id}`;
 }
 
-function agentPickStorageKey(workspaceId: string) {
-  const id = String(workspaceId || "").trim();
-  if (!id) return `${AGENT_PICK_STORAGE_PREFIX}.v1`;
-  return `${AGENT_PICK_STORAGE_PREFIX}.v1.${id}`;
-}
-
 function reconcileTabNoMap(params: { workspaceId: string; sessions: AgentSessionTab[] }) {
   const id = String(params.workspaceId || "").trim();
   if (!id) return;
@@ -534,29 +532,11 @@ function restorePersistedState() {
   } catch {
     // ignore
   }
-  try {
-    const raw = localStorage.getItem(agentPickStorageKey(props.workspaceId));
-    if (!raw) return;
-    const parsed = JSON.parse(raw) as Record<string, string | null>;
-    for (const [key, value] of Object.entries(parsed)) {
-      selectedAgentBySession[key] = typeof value === "string" && value.trim() ? value : null;
-    }
-  } catch {
-    // ignore
-  }
 }
 
 function persistActiveKey(key: string) {
   try {
     localStorage.setItem(activeKeyStorageKey(props.workspaceId), key);
-  } catch {
-    // ignore
-  }
-}
-
-function persistAgentPick() {
-  try {
-    localStorage.setItem(agentPickStorageKey(props.workspaceId), JSON.stringify(selectedAgentBySession));
   } catch {
     // ignore
   }
@@ -751,10 +731,43 @@ function truncatePreview(text: string, maxLen = 50) {
 
 function setSessionAgent(sessionId: string, value: string | null) {
   selectedAgentBySession[sessionId] = value;
-  persistAgentPick();
+}
+
+// The in-memory selection survives polling and Tab switches, but not page reloads.
+// Do not turn the default idle state or an unfinished options request into history.
+watchEffect(() => {
+  if (agentOptionsLoadState.value !== "ready") return;
+  for (const session of allSessions.value) {
+    if (initializedAgentSessions.has(session.id)) continue;
+    const entry = statusStore.getEntry(session.id);
+    if (!isDraftSession(session) && (!entry.fetchedAt
+      || entry.runState.workspaceId !== props.workspaceId || entry.runState.sessionId !== session.id
+      || entry.runState.selectionAgentId === undefined)) continue;
+    if (!Object.prototype.hasOwnProperty.call(selectedAgentBySession, session.id)) {
+      const historical = isDraftSession(session) ? null : entry.runState.selectionAgentId;
+      selectedAgentBySession[session.id] = agentOptions.value.some((agent) => agent.value === historical)
+        ? historical ?? null : agentOptions.value[0]?.value ?? null;
+    }
+    initializedAgentSessions.add(session.id);
+  }
+});
+
+function agentSelectionState(session: AgentSessionTab): "loading" | "ready" | "error" {
+  if (agentOptionsLoadState.value !== "ready") return agentOptionsLoadState.value;
+  if (initializedAgentSessions.has(session.id)) return "ready";
+  const entry = statusStore.getEntry(session.id);
+  if (entry.errorRetryAt !== null || (entry.fetchedAt > 0 && entry.runState.selectionAgentId === undefined)) return "error";
+  return "loading";
+}
+
+function retryAgentSelection(session: AgentSessionTab) {
+  if (agentOptionsLoadState.value === "error") void refreshAgents();
+  if (!isDraftSession(session) && !initializedAgentSessions.has(session.id)) void statusStore.refreshSessionNow(session.id);
 }
 
 async function refreshAgents() {
+  const requestId = ++agentOptionsRequestId;
+  agentOptionsLoadState.value = "loading";
   const requestGeneration = workspaceGeneration;
   const requestWorkspaceId = props.workspaceId;
   try {
@@ -768,9 +781,11 @@ async function refreshAgents() {
     })) {
       return;
     }
+    if (requestId !== agentOptionsRequestId) return;
     const presentation = splitAvailableAgents(res.agents);
     agentOptions.value = presentation.agentOptions;
     subtaskAgentLabels.value = presentation.subtaskAgentLabels;
+    agentOptionsLoadState.value = "ready";
   } catch (err) {
     if (isRequestResponseWritable({
       disposed,
@@ -779,6 +794,8 @@ async function refreshAgents() {
       currentWorkspaceId: props.workspaceId,
       requestWorkspaceId
     })) {
+      if (requestId !== agentOptionsRequestId) return;
+      agentOptionsLoadState.value = "error";
       message.error(err instanceof Error ? err.message : String(err));
     }
   }
@@ -1015,8 +1032,9 @@ async function ensureSessionCreated(sessionId: string) {
 
       const picked = selectedAgentBySession[sessionId] ?? null;
       selectedAgentBySession[created.id] = picked;
+      initializedAgentSessions.add(created.id);
+      initializedAgentSessions.delete(sessionId);
       delete selectedAgentBySession[sessionId];
-      persistAgentPick();
       clearSessionModelStates(sessionModelStates, sessionId);
       migrateSessionModelOpenIntent(pendingModelOpenIntentBySession, sessionId, created.id);
 
@@ -1217,7 +1235,6 @@ function replaceDraftWithSession(params: { fromSessionId: string; targetSessionI
   tabNoMap.value = nextMap;
 
   delete selectedAgentBySession[fromSessionId];
-  persistAgentPick();
 
   invalidateOpenParentIntent();
   activeKey.value = target.id;
@@ -1535,6 +1552,8 @@ watch(
     activeSnapshotAbort = null;
     serverSessionsLoaded.value = false;
     draftSessions.value = [];
+    initializedAgentSessions.clear();
+    agentOptionsLoadState.value = "loading";
     const emptyAgentPresentation = createEmptyAgentPresentation();
     agentOptions.value = emptyAgentPresentation.agentOptions;
     subtaskAgentLabels.value = emptyAgentPresentation.subtaskAgentLabels;

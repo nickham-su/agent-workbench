@@ -226,6 +226,11 @@ export const AgentMessageSessionRunStateSchema = Type.Object({
   sessionId: IdSchema,
   status: Type.Union([Type.Literal("idle"), Type.Literal("running")]),
   activeRunId: NullableIdSchema,
+  /**
+   * Initialization candidate: active Run Agent, otherwise latest created Run Agent; null when no history.
+   * Public run-state/timeline projections supply it; internal control states may omit it.
+   */
+  selectionAgentId: Type.Optional(NullableIdSchema),
   runNoticeText: Type.String(),
   retryCount: Type.Integer({ minimum: 0 }),
   lastResponseTotalTokens: Type.Optional(Type.Union([Type.Number({ minimum: 0 }), Type.Null()])),

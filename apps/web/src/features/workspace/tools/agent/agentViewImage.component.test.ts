@@ -108,7 +108,7 @@ test("真实 Pane：历史 view_image 复用 write 的 hover 样式，仅点击�
     attachTo: document.body,
     props: {
       workspaceId: "ws-a", toolId: "agent-tool", sessionId: "session-a", sessionKind: "primary",
-      sessionReady: false, active: false, agentOptions: [], sessionModelStates: {},
+      sessionReady: false, active: false, agentSelectionState: "ready", agentOptions: [], sessionModelStates: {},
       sessionModelStateLoading: false, sessionModelMutationPending: false, modelOpenIntent: null,
     },
     global: {

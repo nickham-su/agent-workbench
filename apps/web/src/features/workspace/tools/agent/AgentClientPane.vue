@@ -199,6 +199,21 @@
       >
         {{ runState.runNoticeText }}
       </div>
+      <div
+        v-if="!agentSelectionReady"
+        data-testid="agent-selection-status"
+        class="mb-2 text-[0.85em] text-[color:var(--text-tertiary)]"
+      >
+        {{ t(props.agentSelectionState === "error" ? "agent.client.agentSelectionLoadFailed" : "agent.client.agentSelectionLoading") }}
+        <a-button
+          v-if="props.agentSelectionState === 'error'"
+          data-testid="agent-selection-retry"
+          size="small"
+          @click="emit('retry-agent-selection')"
+        >
+          {{ t("agent.client.retryAgentSelection") }}
+        </a-button>
+      </div>
       <div v-if="pendingImages.length" class="mb-2 flex flex-wrap gap-2">
         <a-tag
           v-for="image in pendingImages"
@@ -589,6 +604,7 @@ const props = defineProps<{
   canChooseSession?: boolean;
   active: boolean;
   modelValue?: string | null;
+  agentSelectionState: "loading" | "ready" | "error";
   agentOptions: AgentOption[];
   subtaskAgentLabels?: Record<string, string>;
   sessionModelStates: Record<string, AgentSessionAgentModelState>;
@@ -604,6 +620,7 @@ const metadataReadContext = inject(agentSessionMetadataReadContextKey, null);
 const workspaceContext = inject(workspaceContextKey, null);
 const workspaceHost = inject(workspaceHostKey, null);
 const emit = defineEmits<{
+  "retry-agent-selection": [];
   "update:modelValue": [value: string | null];
   forked: [session: AgentSessionRecord, mayActivate: boolean];
   "open-subtask": [sessionId: string];
@@ -631,6 +648,7 @@ const isSubtaskSession = computed(() => props.sessionKind === "subtask");
 const sessionTitleText = computed(
   () => String(props.sessionTitle || "").trim() || props.sessionId,
 );
+const agentSelectionReady = computed(() => props.agentSelectionState === "ready");
 const hasAvailableAgents = computed(() => props.agentOptions.length > 0);
 const effectiveAgentId = computed(() =>
   props.agentOptions.some((item) => item.value === props.modelValue)
@@ -1473,6 +1491,7 @@ function removePendingImage(id: string) {
 }
 async function onSend() {
   if (
+    !agentSelectionReady.value ||
     !hasAvailableAgents.value ||
     isSubtaskSession.value ||
     sending.value ||
@@ -1501,10 +1520,12 @@ async function onSend() {
   }
   sending.value = true;
   try {
+    if (!agentSelectionReady.value || !effectiveAgentId.value) return;
     const ensuredId = props.ensureSession
       ? await props.ensureSession(sendScope.sessionId)
       : sendScope.sessionId;
     if (!isCurrentAgentRequestScope(requestScope, sendScope)) return;
+    if (!agentSelectionReady.value || !effectiveAgentId.value) return;
     if (action.kind === "compact") {
       const fingerprint = createAgentCompactAttemptFingerprint({
         sessionId: ensuredId,
