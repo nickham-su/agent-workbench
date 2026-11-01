@@ -3,7 +3,7 @@ import type { AgentApi } from "./agent-api.js";
 import { CliError, responseError } from "./errors.js";
 import { assertFinal, assertSameRecord, incomplete, ordered, timelineChanged } from "./follow-chain.js";
 import type { FollowOutput } from "./follow-output.js";
-import { isTimelineLookupMissing, projectMessage, readTimeline, selectHistory, type HistoryFrame, type MessageSelection, type MessageView, type TimelineMessage, type TimelinePage } from "./messages.js";
+import { isMessageAheadOfSession, isTimelineLookupMissing, projectMessage, readTimeline, selectHistory, type HistoryFrame, type MessageSelection, type MessageView, type TimelineMessage, type TimelinePage } from "./messages.js";
 import type { ObservedRun } from "./run-status.js";
 
 /** A structural response must yield to the fixed Run before another coordination read. */
@@ -350,7 +350,7 @@ export class FollowState {
     next.relocate = false;
     // A reset tail which does not contain the required range needs the next pass, not more CHECKs.
     if (this.needsMore(next)) next.relocate = true;
-    if ([...frame.messages.values()].some((message) => message.updatedRevision > page.session.revision)) next.relocate = true;
+    if ([...frame.messages.values()].some((message) => isMessageAheadOfSession(message, page.session))) next.relocate = true;
     if (!next.relocate) this.validate(next);
     this.retainRequired(next);
     return next;
@@ -448,7 +448,7 @@ export class FollowState {
     const page = await this.delta(api, this.committed);
     const stage = this.stage(page, this.committed, this.frame, source);
     await this.build(api, stage);
-    if (stage.relocate || [...stage.frame.messages.values()].some((message) => message.updatedRevision > page.session.revision)) throw incomplete();
+    if (stage.relocate || [...stage.frame.messages.values()].some((message) => isMessageAheadOfSession(message, page.session))) throw incomplete();
     this.validate(stage);
     return stage.frame;
   }

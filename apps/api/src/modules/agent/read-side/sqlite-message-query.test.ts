@@ -10,6 +10,7 @@ import {
   completeAssistantWithExecutions,
   createMessageSession,
   flushStreamingParts,
+  forkMessageSession,
   startMessageRun,
   settleMessageRunIfCurrent,
   updateToolExecution
@@ -26,6 +27,51 @@ function createFixture() {
   createMessageSession(db, { id: "session", workspaceId: "ws", title: "Session", kind: "primary", createdAt: 1 });
   return { db, query: new SqliteMessageQuery(db) };
 }
+
+test("real Fork timeline snapshot and history pages remain readable by CLI with session-local revisions", async () => {
+  // Runtime-only test import keeps CLI source outside the API production build's rootDir.
+  const { parseTimeline } = await import(new URL("../../../../../../packages/cli/src/messages.ts", import.meta.url).href);
+  const { db, query } = createFixture();
+  try {
+    for (let index = 1; index <= 2; index++) appendMessage(db, {
+      id: `source-${index}`, workspaceId: "ws", sessionId: "session",
+      expectedHeadMessageId: index === 1 ? null : "source-1", expectedRevision: index - 1,
+      type: "user", status: "completed", parts: [], createdAt: index + 1,
+    });
+    forkMessageSession(db, {
+      id: "first-fork", workspaceId: "ws", sourceSessionId: "session", expectedHeadMessageId: "source-2",
+      expectedRevision: 2, targetMessageId: "source-2", title: "First fork", kind: "primary", createdAt: 4,
+    });
+    appendMessage(db, {
+      id: "fork-local", workspaceId: "ws", sessionId: "first-fork", expectedHeadMessageId: "source-2", expectedRevision: 0,
+      type: "user", status: "completed", parts: [], createdAt: 5,
+    });
+    forkMessageSession(db, {
+      id: "second-fork", workspaceId: "ws", sourceSessionId: "first-fork", expectedHeadMessageId: "fork-local",
+      expectedRevision: 1, targetMessageId: "fork-local", title: "Second fork", kind: "primary", createdAt: 6,
+    });
+    const tail = query.getTimeline({ workspaceId: "ws", sessionId: "second-fork", mode: "snapshot", limit: 2 });
+    assert.equal(tail.session.revision, 0);
+    assert.deepEqual(tail.messages.map((message) => [message.id, message.originSessionId, message.updatedRevision]),
+      [["source-2", "session", 2], ["fork-local", "first-fork", 1]]);
+    assert.equal(tail.hasMore, true);
+    assert.equal(parseTimeline(tail, "ws", "second-fork").messages.length, 2);
+    const previous = query.getTimeline({ workspaceId: "ws", sessionId: "second-fork", mode: "before",
+      beforeMessageId: tail.nextBeforeMessageId!, limit: 2 });
+    assert.deepEqual(previous.messages.map((message) => message.id), ["source-1"]);
+    assert.equal(parseTimeline(previous, "ws", "second-fork").messages.length, 1);
+
+    appendMessage(db, {
+      id: "second-fork-local", workspaceId: "ws", sessionId: "second-fork", expectedHeadMessageId: "fork-local", expectedRevision: 0,
+      type: "user", status: "completed", parts: [], createdAt: 7,
+    });
+    const updated = query.getTimeline({ workspaceId: "ws", sessionId: "second-fork", mode: "snapshot" });
+    assert.equal(updated.session.revision, 1);
+    assert.equal(parseTimeline(updated, "ws", "second-fork").messages.length, 4);
+  } finally {
+    db.close();
+  }
+});
 
 test("Message timeline follows current Session ancestry and projects lightweight executions", () => {
   const { db, query } = createFixture();

@@ -66,6 +66,11 @@ export function projectMessage(message: TimelineMessage): MessageView | null {
   const { replacesMessageId: _replaced, ...view } = message;
   return view;
 }
+/** Revisions are session-local. Inherited (or deleted-origin) messages have no comparable session watermark. */
+export function isMessageAheadOfSession(message: TimelineMessage, session: Pick<AgentSessionRecord, "id" | "revision">): boolean {
+  return message.originSessionId === session.id && message.updatedRevision > session.revision;
+}
+
 export function parseTimeline(value: unknown, workspaceId: string, sessionId: string): TimelinePage {
   if (!isRecord(value) || typeof value.timelineReset !== "boolean" || !Array.isArray(value.messages) || !Array.isArray(value.toolExecutions)
     || typeof value.hasMore !== "boolean" || !nullableId(value.nextBeforeMessageId)) throw responseError("消息分页响应结构无效。");
@@ -74,7 +79,9 @@ export function parseTimeline(value: unknown, workspaceId: string, sessionId: st
   const ids = new Set<string>();
   for (let i = 0; i < messages.length; i++) {
     const message = messages[i];
-    if (message.updatedRevision > session.revision || ids.has(message.id) || (i > 0 && message.depth <= messages[i - 1].depth)) throw responseError("消息页包含重复 ID 或顺序异常。");
+    if (isMessageAheadOfSession(message, session)) throw responseError("消息版本高于所属会话版本。");
+    if (ids.has(message.id)) throw responseError("消息页包含重复 ID。");
+    if (i > 0 && message.depth <= messages[i - 1].depth) throw responseError("消息页顺序异常：depth 必须严格递增。");
     ids.add(message.id);
   }
   if (value.hasMore && (!messages.length || value.nextBeforeMessageId !== messages[0].id)) throw responseError("消息分页缺少有效的前进游标。");
