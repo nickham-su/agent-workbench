@@ -2140,7 +2140,13 @@ function createAgentApplications(
   const sessionQuery = new SqliteSessionQuery(environment.db);
   const sessionActivityQuery = new SqliteSessionActivityQuery(environment.db);
   function querySessionRecords(params: Parameters<SqliteSessionActivityQuery["querySessions"]>[0]) {
-    return sessionActivityQuery.querySessions(params);
+    const result = sessionActivityQuery.querySessions(params);
+    // Use all current configurations: disabled/out-of-scope Agents still describe historical use.
+    const names = new Map(environment.getAgentSettings().agents.map((agent) => [agent.id, agent.name]));
+    for (const item of result.items) {
+      if (item.agent) item.agent.name = names.get(item.agent.id) ?? null;
+    }
+    return result;
   }
 
   function listSessionRecords(params: Parameters<SqliteSessionQuery["listSessions"]>[0]) {

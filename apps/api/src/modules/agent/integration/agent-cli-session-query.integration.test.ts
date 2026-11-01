@@ -7,7 +7,8 @@ import path from "node:path";
 import { test, type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import { AUTH_REMEMBER_TTL_MS, createSessionCookieValue, readSessionCookiePayload } from "../../../infra/auth/sessionCookie.js";
-import { appendMessage, createMessageSession } from "../agent-message.store.js";
+import { appendMessage, createMessageRunRecord, createMessageSession } from "../agent-message.store.js";
+import { setSettingJson } from "../../settings/settings.store.js";
 import { createAgentTestFixture, createTestWorkspace } from "../testkit/agent-testkit.js";
 
 const repoRoot = fileURLToPath(new URL("../../../../../../", import.meta.url));
@@ -74,6 +75,19 @@ test("production CLI initializes auth-off API and returns primary records and na
       (id, workspace_id, depth, type, status, origin_session_id, updated_revision, created_at, updated_at)
       values (?, ?, 0, ?, 'completed', 'cli-session-000', 0, 1, 1)`).run(id, f.workspaceId, type);
   }
+  setSettingJson(f.db, "agent_agents_v1", { agents: [{ id: "agent-xxx", name: "编程专家", scope: "subtask" }] }, Date.now());
+  setSettingJson(f.db, "workspace_agent_enablement_v1", {
+    workspaces: { [f.workspaceId]: { mode: "subset", enabledAgentIds: [], updatedAt: Date.now() } }
+  }, Date.now());
+  for (const [runId, sessionId, agentId, createdAt] of [
+    ["active", "cli-session-000", "agent-xxx", 1],
+    ["newer", "cli-session-000", "not-active", 2],
+    ["deleted", "cli-session-002", "deleted-agent", 3]
+  ] as const) {
+    createMessageRunRecord(f.db, { runId, workspaceId: f.workspaceId, sessionId, agentId, createdAt,
+      status: runId === "active" ? "running" : "failed", triggerMessageId: null, providerId: "unused", modelId: "unused" });
+  }
+  f.db.prepare("update session_run_state set status = 'running', active_run_id = 'active' where session_id = 'cli-session-000'").run();
   const initialized = await runCli(f.home, ["login", "--url", f.origin]);
   assert.equal(initialized.code, 0);
   assert.equal(initialized.stderr, "");
@@ -86,6 +100,10 @@ test("production CLI initializes auth-off API and returns primary records and na
   assert.match(result.stdout, /匹配总数：83/);
   assert.match(result.stdout, /标题：（空标题）/);
   assert.match(result.stdout, /用户消息累计数：1\n已完成助手消息累计数：1/);
+  assert.ok(result.stdout.includes("Agent：编程专家（ID: agent-xxx）\n"));
+  assert.ok(result.stdout.includes("Agent：未知/已删除（ID: deleted-agent）\n"));
+  assert.equal((result.stdout.match(/^Agent：无记录$/gm) ?? []).length, 81);
+  assert.equal(result.stdout.includes("Agent 来源"), false);
   assert.equal(result.stdout.split(`创建时间：${createdIso}\n`).length - 1, 83);
   assert.ok(result.stdout.includes(`创建时间：${createdIso}\n最近更新时间：`));
   assert.match(result.stdout, /最近更新时间：[^\n]+Z\n/);

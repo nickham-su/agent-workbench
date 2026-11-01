@@ -32,6 +32,7 @@ import {
   NoStableContextError,
 } from "./read-side/model-context-resolver.js";
 import { indexEligibleCompletedTextParts } from "./archive/agent-archive-store.js";
+import { LATEST_CREATED_RUN_ORDER_SQL, sessionSelectionAgentIdSql } from "./agent-run-selection.js";
 
 const TERMINAL_MESSAGE_STATUSES = new Set<AgentMessageStatus>(["completed", "failed", "cancelled", "superseded"]);
 const TERMINAL_EXECUTION_STATUSES = new Set<AgentToolExecutionStatus>(["completed", "failed", "cancelled", "unknown"]);
@@ -1399,11 +1400,10 @@ export function getRunRecord(db: Db, runId: string): AgentRunRecord | null {
 
 /** Agent selection is derived from Run history, never a persisted UI preference. */
 export function getSessionSelectionAgentId(db: Db, params: { workspaceId: string; sessionId: string; activeRunId: string | null }): string | null {
-  if (params.activeRunId) {
-    const active = getRunRecord(db, params.activeRunId);
-    if (active?.workspaceId === params.workspaceId && active.sessionId === params.sessionId) return active.agentId;
-  }
-  return getLatestMessageRunRecordBySession(db, params)?.agentId ?? null;
+  const row = db.prepare(`select ${sessionSelectionAgentIdSql(
+    "@workspaceId", "@sessionId", "@activeRunId"
+  )} as agentId`).get(params) as { agentId: string | null };
+  return row.agentId;
 }
 
 export function getLatestMessageRunRecordBySession(db: Db, params: { workspaceId: string; sessionId: string }): AgentRunRecord | null {
@@ -1417,7 +1417,7 @@ export function getLatestMessageRunRecordBySession(db: Db, params: { workspaceId
       terminal_result_code as terminalResultCode, terminal_result_detail as terminalResultDetail,
       created_at as createdAt, updated_at as updatedAt
     from agent_run where workspace_id = @workspaceId and session_id = @sessionId
-    order by created_at desc, run_id desc limit 1
+    order by ${LATEST_CREATED_RUN_ORDER_SQL} limit 1
   `).get(params) as Record<string, unknown> | undefined;
   return row ? toRunRecord(row) : null;
 }
