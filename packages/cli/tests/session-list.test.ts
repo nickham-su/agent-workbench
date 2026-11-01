@@ -27,20 +27,58 @@ test("invalid query values fail before configuration creation or network and nev
   for (const bad of [
     ["--workspace", " ", "--updated-within", "1s"], ["--workspace", "id", "--updated-within", "1h\n"],
     ["--workspace", "id", "--updated-within", "91d"], ["--workspace", "id", "--updated-within", "1s", "--kind", "test-secret"],
+    ...["subtask", "all"].flatMap((kind) => [
+      ["--workspace", "id", "--updated-within", "1s", "--kind", kind],
+      ["--workspace", "id", "--updated-within", "1s", `--kind=${kind}`]
+    ]),
+    ["--workspace", "id", "--updated-within", "1s", "--kind", "primary", "--kind=primary"],
     ["--workspace", "id", "--updated-within", "1s", "--status", ""],
     ["--workspace", "id", "--updated-within", "1s", "--updated-within=2s"],
     ["--workspace", "id", "--updated-within", "1s", "--limit=2"]
   ]) {
     const capture = captureIO();
+    let factories = 0;
+    let requests = 0;
     const code = await runCli(["session", "list", ...bad], {
-      io: capture.io, createConfigStore: () => { throw new Error("Must not create config"); },
-      http: { request: async () => { throw new Error("Must not request"); } }
+      io: capture.io, createConfigStore: () => { factories++; throw new Error("Must not create config"); },
+      http: { request: async () => { requests++; throw new Error("Must not request"); } }
     });
     assert.equal(code, 2);
+    assert.equal(factories, 0);
+    assert.equal(requests, 0);
     assert.equal(capture.output(), "");
     assert.match(capture.diagnostic(), /^\[USAGE\]/);
     assert.ok(!capture.diagnostic().includes("test-secret"));
   }
+});
+
+test("hidden kind primary remains equivalent to the default in both registered option forms", async () => {
+  const outputs: string[] = [];
+  const paths: string[] = [];
+  for (const options of [[], ["--kind", "primary"], ["--kind=primary"]]) {
+    const capture = captureIO();
+    const memory = memoryConfig();
+    let requests = 0;
+    const code = await runCli([...args, ...options], {
+      io: capture.io, createConfigStore: () => memory.store,
+      http: { request: async (origin, path) => {
+        requests++;
+        paths.push(path);
+        const url = new URL(path, origin);
+        assert.equal(url.pathname, "/api/agent/sessions/query");
+        assert.equal(url.searchParams.get("kind"), "primary");
+        return response(200, JSON.stringify(queryResponse()));
+      } }
+    });
+    assert.equal(code, 0);
+    assert.equal(requests, 1);
+    assert.equal(memory.writes(), 0);
+    assert.equal(capture.diagnostic(), "");
+    assert.match(capture.output(), /Session ID：/);
+    outputs.push(capture.output());
+  }
+  assert.equal(new Set(paths).size, 1);
+  assert.equal(new Set(outputs).size, 1);
 });
 
 test("successful query sends only normalized server parameters, saves renewal before any output, and does not read stdin", async () => {

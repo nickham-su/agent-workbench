@@ -28,13 +28,13 @@ async function execute(args: string[], body: unknown, status = 200) {
   return { code, requests, stdout: capture.output(), stderr: capture.diagnostic() };
 }
 
-test("A-DISCOVER-WORKSPACE: stable code-point sorting, narrow projections and empty lists", async () => {
-  const data = [{ id: "z", title: "same", repos: [{ url: "private-repo-url" }], dirName: "private-path" },
-    { id: "b", title: "\u{10000}" }, { id: "a", title: "same" }, { id: "c", title: "\ue000" }, { id: "empty", title: "" }];
+test("A-DISCOVER-WORKSPACE: server order, narrow projections and empty lists", async () => {
+  const data = [{ id: "z", title: "same", repos: [{ url: "private-repo-url" }], dirName: "private-path", updatedAt: 1 },
+    { id: "b", title: "\u{10000}", updatedAt: 2 }, { id: "a", title: "same", updatedAt: 3 }, { id: "c", title: "\ue000", updatedAt: 4 }, { id: "empty", title: "", updatedAt: 5 }];
   const output = await execute(["workspace", "list"], data);
   assert.equal(output.code, 0);
   assert.deepEqual(output.requests, ["/api/workspaces"]);
-  assert.deepEqual([...output.stdout.matchAll(/^Workspace ID：(.+)$/gm)].map((item) => item[1]), ["empty", "a", "z", "c", "b"]);
+  assert.deepEqual([...output.stdout.matchAll(/^Workspace ID：(.+)$/gm)].map((item) => item[1]), ["z", "b", "a", "c", "empty"]);
   assert.match(output.stdout, /工作区总数：5/);
   assert.doesNotMatch(output.stdout, /private-/);
   const empty = await execute(["workspace", "list"], []);
@@ -91,6 +91,10 @@ test("A-CONTROL-STATUS: only busy/idle, no activeRunId, runtime notice or succes
 
 test("strict discovery/detail/status DTO errors publish no partial list or guessed identity", async () => {
   const cases: [string[], unknown][] = [
+    [["workspace", "list"], null],
+    [["workspace", "list"], { items: [] }],
+    [["workspace", "list"], [{ id: "a", title: "valid" }, null]],
+    [["workspace", "list"], [{ id: "a", title: "valid" }, { id: "", title: "invalid" }]],
     [["workspace", "list"], [{ id: "a", title: "valid" }, { id: "a", title: "duplicate" }]],
     [["workspace", "list"], [{ id: "a", title: 1 }]],
     [["agent", "list", "-w", "w"], { agents: [{ id: "a", name: "a", summary: "" }, { id: "a", name: "b", summary: "" }] }],

@@ -45,8 +45,9 @@ awb file download -w workspace-id --path reports --output ./reports.zip
 开启认证时，`login` 默认从终端隐藏读取 token；非交互环境可用安全输入提供方通过管道配合 `--token-stdin`。不要把 token 放进命令参数、任务文本、日志或 shell 历史。关闭认证时，无需终端或 token，初始化不读取 stdin。
 
 - URL 只接受 HTTP(S) origin，不支持代理子路径、用户口令、query 或 fragment。
+- `workspace list` 最近使用优先，保留服务端返回顺序，与网页一致；CLI 不按名称、ID 或更新时间重新排序。
 - Workspace 和最近更新时间窗口必须显式提供；窗口为正整数 `s/m/h/d`，最多90天。
-- 列表仅查主会话（包含 Fork 主会话），默认 `kind=primary`。`--kind primary` 是弃用兼容写法；`--kind subtask/all` 本地退出2且不联网，属于有意收缩旧CLI行为。已知子会话仍可用 show/status读取，不改原API。
+- 会话列表仅查主会话（包含 Fork 主会话），默认 `kind=primary`。`--kind primary` 是不再展示在帮助中的弃用兼容写法；`--kind subtask/all` 本地退出2且不联网，属于有意收缩旧CLI行为。已知子会话仍可用 show/status读取，不改原API。
 - 列表的 `--status` 为 `idle/running/all`，缺省 `all`；`session status` 返回当前忙闲状态 `idle/running`。
 - `-w/--workspace`、`-s/--session` 同义；同一单值参数不能重复，包括短长别名。ID不猜UUID，但禁止空白边界和控制字符，路径段拒绝字面点段。
 - `--timeout` 可放在根、组或动作位置；单请求完整 body 时限默认 30s，范围 1s..24h。仅 `-f` 只读请求按下文规则有限重试。所有层级 `--help/-h` 都离线且无副作用。

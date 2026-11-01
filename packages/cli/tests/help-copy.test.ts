@@ -30,6 +30,19 @@ test("normal help describes usage without speculative availability or result dis
   }
 });
 
+test("workspace help describes server order and session list hides only the compatibility kind option", async () => {
+  const workspace = await help(["workspace", "list"]);
+  assert.ok(workspace.includes("最近使用优先（按服务端顺序）"));
+  assert.doesNotMatch(workspace, /按名称排序/);
+  for (const options of [[], ["--kind", "primary"], ["--kind=primary"], ["--kind", "subtask"], ["--kind", "all"], ["--kind"]]) {
+    const output = await help(["session", "list", ...options]);
+    assert.doesNotMatch(output, /--kind|已弃用|subtask\/all/);
+    for (const visible of ["--workspace<ID>", "--updated-within<duration>", "--status<status>", "--timeout<duration>"]) {
+      assert.ok(output.includes(visible), visible);
+    }
+  }
+});
+
 test("positive help retains input, follow, cancellation and download operation rules", async () => {
   const agent = await help(["agent", "list"]);
   assert.ok(agent.includes("当前工作区的可选Agent"));

@@ -4,7 +4,7 @@ import { readResponseCookie } from "./cookie.js";
 import { CliError, errorDiagnostic, isRecord, responseError, withErrorDetails, type ErrorContext, type ErrorPhase, type OperationEffect } from "./errors.js";
 import type { FollowReadRetry } from "./follow-read-retry.js";
 import { apiUrl, httpStatusError, parseJson, type HttpRequest, type HttpResult, type HttpStreamResult, type HttpTransport } from "./http.js";
-import { compareCodePoints, encodeId, isCount, isId, isTimestamp } from "./validation.js";
+import { encodeId, isCount, isId, isTimestamp } from "./validation.js";
 
 export interface ApiDependencies { config: ConfigStore; http: HttpTransport; timeoutMs?: number; signal?: AbortSignal;
   followReadRetry?: FollowReadRetry; }
@@ -128,7 +128,7 @@ export function workspaceViews(value: unknown): WorkspaceView[] {
     if (!isRecord(item) || !isId(item.id) || typeof item.title !== "string") throw responseError("工作区列表条目结构无效。");
     return { id: item.id, name: item.title };
   });
-  return uniqueIds(items).sort((a, b) => compareCodePoints(a.name, b.name) || compareCodePoints(a.id, b.id));
+  return uniqueIds(items);
 }
 export function agentViews(value: unknown): AgentView[] {
   if (!isRecord(value) || !Array.isArray(value.agents)) throw responseError("Agent 列表响应结构无效。");

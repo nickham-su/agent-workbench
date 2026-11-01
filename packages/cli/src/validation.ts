@@ -24,9 +24,3 @@ export function isTimestamp(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && Math.abs(value) <= 8_640_000_000_000_000;
 }
 export function isCount(value: unknown): value is number { return typeof value === "number" && Number.isSafeInteger(value) && value >= 0; }
-export function compareCodePoints(left: string, right: string): number {
-  const a = Array.from(left, (character) => character.codePointAt(0)!);
-  const b = Array.from(right, (character) => character.codePointAt(0)!);
-  for (let i = 0; i < Math.min(a.length, b.length); i++) if (a[i] !== b[i]) return a[i] - b[i];
-  return a.length - b.length;
-}

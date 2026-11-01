@@ -66,3 +66,8 @@
 - [Worker 重试：replaceAssistantForRetry](../../../apps/agent-worker/src/runtime/runner.ts)
 - [共享消息契约](../../../packages/shared/src/contracts/agent-message.ts)
 - [原 CLI 设计](../0035-awb-cli-agent/README.md)
+
+## 后续调整（已实施，不属于原验收范围）
+
+- `awb workspace list` 已改为“最近使用优先”：保留 API 返回顺序，取消 CLI 按名称重排，并同步帮助与排序测试。不修改 API／Web；本次调整替代原工作区名称排序行为，不改写 0036 原 95 项历史验收。
+- `awb session list --kind` 已从帮助中隐藏；仍接受 `--kind primary` 兼容写法，`subtask/all` 仍在本地以参数错误拒绝，不修改 API 的 kind 筛选或 Session 分类。上述两项均为后续最小调整，不计入原 95 项验收。

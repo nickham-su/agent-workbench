@@ -1,4 +1,4 @@
-import { Command, CommanderError } from "commander";
+import { Command, CommanderError, Option } from "commander";
 import metadata from "../package.json" with { type: "json" };
 import { commandName, inspectArguments } from "./arguments.js";
 import { FileConfigStore, type ConfigStore } from "./config.js";
@@ -55,7 +55,7 @@ export async function runCli(args: readonly string[], dependencies: CliDependenc
       .addHelpText("after", "\n例：awb login --url https://awb.example.test --token-stdin\n通过终端隐藏输入或 --token-stdin 提供 token。\n")
       .action(async (options: { url: string; tokenStdin?: boolean }) => { await login(options, commandDependencies()); });
     const workspace = program.command("workspace").description("发现已有工作区").allowExcessArguments(false);
-    workspace.command("list").description("列出工作区 ID 和名称，按名称排序").allowExcessArguments(false)
+    workspace.command("list").description("列出工作区 ID 和名称，最近使用优先（按服务端顺序）").allowExcessArguments(false)
       .addHelpText("after", "\n例：awb workspace list\n")
       .action(async () => { await listWorkspaces(commandDependencies()); });
     const agent = program.command("agent").description("查看工作区的可选 user Agent").allowExcessArguments(false);
@@ -66,7 +66,7 @@ export async function runCli(args: readonly string[], dependencies: CliDependenc
     session.command("list").description("查询最近更新的主会话，保留原生累计计数")
       .requiredOption("-w, --workspace <ID>", "Workspace ID")
       .requiredOption("--updated-within <duration>", "最近更新时间窗口，正整数 s/m/h/d，最大 90d")
-      .option("--kind <kind>", "已弃用，仅支持 primary，可省略；subtask/all 请迁移到已知 ID 查询")
+      .addOption(new Option("--kind <kind>", "已弃用，仅支持 primary，可省略；subtask/all 请迁移到已知 ID 查询").hideHelp())
       .option("--status <status>", "idle、running 或 all", "all").allowExcessArguments(false)
       .addHelpText("after", "\n例：awb session list -w <ID> --updated-within 24h --status idle\n列出时间窗口内更新的主会话（包含 Fork 主会话）。\n")
       .action(async (options: SessionListOptions) => { const query = parseSessionListOptions(options); await listSessions(query, commandDependencies()); });
