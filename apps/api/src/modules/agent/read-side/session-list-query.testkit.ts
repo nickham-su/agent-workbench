@@ -1,5 +1,6 @@
 import Database from "better-sqlite3";
 import { registerAgentQueryFunctions } from "../../../infra/db/agent-query-functions.js";
+import { initialAgentSessionTabVisible } from "../../../infra/db/agent-session-tab-state.js";
 import { SqliteSessionQuery } from "./sqlite-session-query.js";
 
 export function createSessionListFixture(filename = ":memory:") {
@@ -8,14 +9,19 @@ export function createSessionListFixture(filename = ":memory:") {
   db.exec(`create table workspaces(id text primary key);
     create table agent_session(id text primary key, workspace_id text, title text, kind text,
       head_message_id text, context_root_message_id text, revision integer,
-      forked_from_session_id text, forked_from_message_id text, created_at integer, updated_at integer);
+      forked_from_session_id text, forked_from_message_id text, created_at integer, updated_at integer, visibility text);
     create table workspace_session_tab_state(workspace_id text,session_id text,visible integer,updated_at integer,primary key(workspace_id,session_id));
     create index idx_agent_session_workspace_updated on agent_session(workspace_id,updated_at desc);
     insert into workspaces values ('a'),('b');`);
-  const insert = db.prepare(`insert into agent_session values (@id,@workspaceId,@title,@kind,@head,null,0,null,null,1,@time)`);
-  const add = (id: string, options: { title?: string; kind?: string; head?: string | null; time?: number; workspaceId?: string } = {}) => insert.run({
-    id, workspaceId: options.workspaceId ?? "a", title: options.title ?? id, kind: options.kind ?? "primary", head: options.head === undefined ? "head" : options.head, time: options.time ?? 1
-  });
+  const insert = db.prepare(`insert into agent_session values (@id,@workspaceId,@title,@kind,@head,null,0,null,null,1,@time,@visibility)`);
+  const add = (id: string, options: { title?: string; kind?: "primary" | "subtask"; visibility?: "listed" | "unlisted"; head?: string | null; time?: number; workspaceId?: string } = {}) => db.transaction(() => {
+    const input = { id, workspaceId: options.workspaceId ?? "a", title: options.title ?? id,
+      kind: options.kind ?? "primary", visibility: options.visibility ?? "listed",
+      head: options.head === undefined ? "head" : options.head, time: options.time ?? 1 } as const;
+    insert.run(input);
+    db.prepare("insert into workspace_session_tab_state values (?,?,?,1)")
+      .run(input.workspaceId, id, Number(initialAgentSessionTabVisible(input.kind, input.visibility)));
+  })();
   const query = new SqliteSessionQuery(db);
   return { db, add, query };
 }

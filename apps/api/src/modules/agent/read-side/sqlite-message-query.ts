@@ -467,7 +467,7 @@ export class SqliteMessageQuery {
 
   private requireSession(workspaceId: string, sessionId: string): AgentSessionMessageState {
     const row = this.db.prepare(`
-      select id, workspace_id as workspaceId, title, kind,
+      select id, workspace_id as workspaceId, title, kind, visibility,
              head_message_id as headMessageId, context_root_message_id as contextRootMessageId,
              revision, forked_from_session_id as forkedFromSessionId,
              forked_from_message_id as forkedFromMessageId, created_at as createdAt, updated_at as updatedAt

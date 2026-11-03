@@ -88,6 +88,7 @@ type Session = {
   workspaceId: string;
   title: string;
   kind: "primary" | "subtask";
+  visibility: "listed" | "unlisted";
   headMessageId: string | null;
   contextRootMessageId: null;
   revision: number;
@@ -103,6 +104,7 @@ function session(id: string, workspaceId: string, kind: Session["kind"] = "prima
     workspaceId,
     title: id,
     kind,
+    visibility: "listed",
     headMessageId: null,
     contextRootMessageId: null,
     revision: 1,
@@ -113,8 +115,8 @@ function session(id: string, workspaceId: string, kind: Session["kind"] = "prima
   };
 }
 
-function tabState(workspaceId: string, overrides: Partial<{ closedSessionIds: string[]; openedSubtaskSessionIds: string[] }> = {}) {
-  return { workspaceId, closedSessionIds: [], openedSubtaskSessionIds: [], ...overrides };
+function tabState(workspaceId: string, overrides: Partial<{ openedSessionIds: string[]; closedSessionIds: string[]; openedSubtaskSessionIds: string[] }> = {}) {
+  return { workspaceId, openedSessionIds: [] as string[], closedSessionIds: [], openedSubtaskSessionIds: [], ...overrides };
 }
 
 /** Scoped fixtures: tabs restore effective members; picker does not populate the cache. */
@@ -127,8 +129,22 @@ function respondSessions(request: FakeXMLHttpRequest, records: Session[], overri
   }
   assert.equal(query.get("scope"), "tabs", "list fixtures require explicit scope");
   const state = tabState(workspaceId, overrides);
-  const items = records.filter((record) => record.kind === "primary" ? !state.closedSessionIds.includes(record.id) : state.openedSubtaskSessionIds.includes(record.id));
+  // Defaults here model server-side creation only. Explicit opened IDs can
+  // represent either kind or visibility; the client never uses legacy arrays.
+  const opened = overrides.openedSessionIds ?? records.filter((record) => record.kind === "primary"
+    ? record.visibility === "listed" && !state.closedSessionIds.includes(record.id)
+    : state.openedSubtaskSessionIds.includes(record.id)).map((record) => record.id);
+  const items = records.filter((record) => opened.includes(record.id));
+  state.openedSessionIds = [...opened].sort();
   return request.respond(200, { scope: "tabs", items, tabState: state });
+}
+
+
+/** A full Tab read after metadata was cached can prove a known target closed. */
+function cacheConfirmedClosedTarget(vm: any) {
+  vm.applyLocalSession(metadataRecord("target"));
+  vm.tabVisibilityController.applyInitializationSnapshot([], tabState("ws-a"));
+  assert.equal(vm.tabVisibilityController.getState("target").confirmed, false);
 }
 
 function flush() {
@@ -896,6 +912,7 @@ test("picker取消在途打开：保留草稿并通过同一队列恢复原隐�
   try {
     await settle();
     const vm = wrapper.vm as any;
+      cacheConfirmedClosedTarget(vm);
     const draftId = vm.draftSessions[0].id;
     await vm.openChooseSessionModal(draftId);
     const choosing = vm.chooseSession("target");
@@ -1059,6 +1076,7 @@ test("picker确认UI期限只结束来源提交，并在原PUT队列补偿；晚
   try {
     await settle();
     const vm = wrapper.vm as any;
+      cacheConfirmedClosedTarget(vm);
     const draft = vm.draftSessions[0].id;
     await vm.openChooseSessionModal(draft);
     notices.length = 0; // Non-critical initial options errors belong to initialization, not this operation.
@@ -1340,6 +1358,7 @@ for (const phase of ["verification", "confirmation"] as const) {
     try {
       await settle();
       const vm = wrapper.vm as any;
+      cacheConfirmedClosedTarget(vm);
       const draft = vm.draftSessions[0].id;
       await vm.openChooseSessionModal(draft);
       t.mock.timers.enable({ apis: ["setTimeout"] });
@@ -1399,6 +1418,7 @@ test("M2：确认期间真实timeline改变证明，取消补偿后仍可显式�
   try {
     await settle();
     const vm = wrapper.vm as any;
+      cacheConfirmedClosedTarget(vm);
     const draft = vm.draftSessions[0].id;
     await vm.openChooseSessionModal(draft);
     await pickerRow(wrapper, "target").trigger("click");
@@ -2040,6 +2060,7 @@ for (const stage of ["page", "target", "visibility", "failed"] as const) {
     const { wrapper, setActive } = mountKeepAliveView();
     try {
       await settle(); const vm = wrapper.findComponent(AgentToolView).vm as any;
+      cacheConfirmedClosedTarget(vm);
       const source = vm.draftSessions[0].id;
       const opening = vm.openChooseSessionModal(source);
       if (stage !== "page") await opening;
@@ -2098,7 +2119,8 @@ for (const terminal of ["confirmed", "failed", "transportTimeout", "uiTimeout", 
     message.error = ((...args: unknown[]) => { notices.push(args); }) as typeof message.error;
     const wrapper = mountView();
     try {
-      await settle(); const vm = wrapper.vm as any; const source = vm.draftSessions[0].id;
+      await settle(); const vm = wrapper.vm as any;
+      cacheConfirmedClosedTarget(vm); const source = vm.draftSessions[0].id;
       await vm.openChooseSessionModal(source); notices.length = 0;
       if (terminal === "uiTimeout") t.mock.timers.enable({ apis: ["setTimeout"] });
       const choosing = vm.chooseSession("target"); await settle();
@@ -2411,7 +2433,7 @@ for (const stalled of ["agents", "run-state"] as const) {
       if (isAgents) return reply({ agents: selectionAgents });
       if (isRunState) return reply(selectionRunState());
       if (path.endsWith("/timeline")) return reply({ session: session("primary-a", "ws-a"), timelineReset: false, messages: [], toolExecutions: [] });
-      if (path.endsWith("/agent/sessions")) return reply({ scope: "tabs", items: [session("primary-a", "ws-a")], tabState: tabState("ws-a") });
+      if (path.endsWith("/agent/sessions")) return reply({ scope: "tabs", items: [session("primary-a", "ws-a")], tabState: tabState("ws-a", { openedSessionIds: ["primary-a"] }) });
       if (request.method === "POST" && /\/(messages|compact)$/.test(path)) sends += 1;
       return reply({});
     });
@@ -2473,3 +2495,239 @@ for (const stalled of ["agents", "run-state"] as const) {
     }
   });
 }
+
+for (const invalid of ["missing-opened", "duplicate-opened", "empty-id", "whitespace-id", "mismatched-members", "duplicate-items", "missing-visibility", "invalid-visibility", "wrong-workspace"] as const) {
+  test(`0037 tabs 非法 ${invalid} 必须进入错误态，不能解释为空或按 kind 回退`, async () => {
+    FakeXMLHttpRequest.requests = [];
+    FakeXMLHttpRequest.responder = (request) => {
+      if (!request.url.includes("scope=tabs")) return respondDefaults(request);
+      const item = session("opened", "ws-a");
+      const body: any = { scope: "tabs", items: [item], tabState: tabState("ws-a", { openedSessionIds: [item.id] }) };
+      if (invalid === "missing-opened") delete body.tabState.openedSessionIds;
+      if (invalid === "duplicate-opened") body.tabState.openedSessionIds = [item.id, item.id];
+      if (invalid === "empty-id") body.tabState.openedSessionIds = [""];
+      if (invalid === "whitespace-id") body.tabState.openedSessionIds = [" "];
+      if (invalid === "mismatched-members") body.tabState.openedSessionIds = ["other"];
+      if (invalid === "duplicate-items") body.items = [item, item];
+      if (invalid === "missing-visibility") delete body.items[0].visibility;
+      if (invalid === "invalid-visibility") body.items[0].visibility = "private";
+      if (invalid === "wrong-workspace") body.items[0].workspaceId = "ws-b";
+      request.respond(200, body);
+    };
+    const wrapper = mountView();
+    try {
+      await settle(); const vm = wrapper.vm as any;
+      assert.equal(vm.initializationState, "error");
+      assert.equal(wrapper.find('[data-testid="agent-tab-state-error"]').exists(), true);
+      assert.equal(vm.serverSessions.length, 0);
+      assert.equal(vm.draftSessions.length, 0);
+      assert.equal(FakeXMLHttpRequest.requests.filter((request) => request.method === "PUT").length, 0);
+    } finally { wrapper.unmount(); }
+  });
+}
+
+test("0037 unlisted 沿普通 Tab 打开、另一个客户端刷新恢复、关闭确认后不恢复且不改变 visibility", async () => {
+  const origin = session("origin", "ws-a");
+  const hidden = { ...session("hidden", "ws-a"), visibility: "unlisted" as const };
+  let opened = [origin.id];
+  const puts: boolean[] = [];
+  FakeXMLHttpRequest.requests = [];
+  FakeXMLHttpRequest.responder = (request) => {
+    if (request.url.includes("scope=tabs")) return respondSessions(request, [origin, hidden], { openedSessionIds: opened });
+    if (request.url.includes("scope=continuable")) return request.respond(200, { scope: "continuable", items: [], nextCursor: null });
+    if (request.url.includes("/agent/sessions/hidden?")) return request.respond(200, hidden);
+    if (request.method === "PUT" && request.url.includes("/hidden")) {
+      const visible = JSON.parse(String(request.requestBody)).visible;
+      puts.push(visible); opened = visible ? [origin.id, hidden.id] : [origin.id];
+      return request.respond(200, { workspaceId: "ws-a", sessionId: hidden.id, visible });
+    }
+    return respondDefaults(request);
+  };
+  let wrapper = mountView();
+  try {
+    await settle(); let vm = wrapper.vm as any;
+    assert.deepEqual(vm.visibleSessions.map((record: Session) => record.id), [origin.id]);
+    await vm.openTargetSession(hidden.id); await settle();
+    assert.equal(vm.effectiveActiveKey, hidden.id);
+    assert.equal(vm.tabVisibilityController.getState(hidden.id).confirmed, true);
+    const pane = wrapper.findAllComponents({ name: "AgentClientPane" }).find((item) => item.props("sessionId") === hidden.id);
+    assert.ok(pane, "hidden uses the same ordinary Agent pane, not a viewer");
+    assert.equal(pane.props("sessionKind"), "primary");
+    assert.equal(pane.props("sessionReady"), true);
+    assert.deepEqual(puts, [true]);
+    wrapper.unmount(); wrapper = mountView(); await settle(); vm = wrapper.vm as any;
+    assert.equal(vm.visibleSessions.some((record: Session) => record.id === hidden.id), true);
+    assert.equal(vm.serverSessions.find((record: Session) => record.id === hidden.id).visibility, "unlisted");
+    vm.closeSessionTab(hidden.id); await settle();
+    assert.equal(vm.tabVisibilityController.getState(hidden.id).confirmed, false);
+    assert.deepEqual(puts, [true, false]);
+    wrapper.unmount(); wrapper = mountView(); await settle(); vm = wrapper.vm as any;
+    assert.equal(vm.visibleSessions.some((record: Session) => record.id === hidden.id), false);
+    assert.equal(hidden.visibility, "unlisted");
+    assert.equal(FakeXMLHttpRequest.requests.some((request) => /\/(cancel|messages|compact)$/.test(request.url)), false);
+  } finally { wrapper.unmount(); }
+});
+
+test("0037 旧快照遗漏后学到的元信息缓存不安装 confirmed=false，也不丢弃缓存", async () => {
+  let deferred: FakeXMLHttpRequest | undefined;
+  let hold = false;
+  FakeXMLHttpRequest.requests = [];
+  FakeXMLHttpRequest.responder = (request) => {
+    if (hold && request.url.includes("scope=tabs")) { deferred = request; return; }
+    return respondDefaults(request);
+  };
+  const wrapper = mountView();
+  try {
+    await settle(); const vm = wrapper.vm as any;
+    hold = true; const reading = vm.initializeWorkspace(); await settle();
+    const hidden = { ...session("late-cache", "ws-a"), visibility: "unlisted" as const };
+    vm.applyLocalSession(hidden);
+    assert.equal(vm.tabVisibilityController.getState(hidden.id).confirmed, undefined);
+    respondSessions(deferred!, [session("primary-a", "ws-a")]); await reading; await settle();
+    assert.ok(vm.serverSessions.some((record: Session) => record.id === hidden.id));
+    assert.equal(vm.tabVisibilityController.getState(hidden.id).confirmed, undefined);
+    assert.equal(vm.visibleSessions.some((record: Session) => record.id === hidden.id), false);
+    hold = false; await vm.initializeWorkspace(); await settle();
+    assert.equal(vm.tabVisibilityController.getState(hidden.id).confirmed, false);
+    assert.ok(vm.serverSessions.some((record: Session) => record.id === hidden.id));
+  } finally { wrapper.unmount(); }
+});
+
+for (const visible of [true, false]) {
+  test(`0037 草稿真实化显式 PUT ${visible}，只有成功确认才安装状态且迟到快照不覆盖`, async () => {
+    let createRequest: FakeXMLHttpRequest | undefined;
+    let put: FakeXMLHttpRequest | undefined;
+    let oldSnapshot: FakeXMLHttpRequest | undefined;
+    let holdSnapshot = false;
+    FakeXMLHttpRequest.requests = [];
+    FakeXMLHttpRequest.responder = (request) => {
+      if (request.method === "POST" && request.url.endsWith("/agent/sessions")) { createRequest = request; return; }
+      if (request.method === "PUT") { put = request; return; }
+      if (request.url.includes("scope=tabs")) {
+        if (holdSnapshot) { oldSnapshot = request; return; }
+        return respondSessions(request, []);
+      }
+      return respondDefaults(request);
+    };
+    const wrapper = mountView();
+    try {
+      await settle(); const vm = wrapper.vm as any;
+      const draft = vm.draftSessions[0].id;
+      const creating = vm.ensureSessionCreated(draft);
+      if (!visible) vm.closeSessionTab(draft);
+      await settle();
+      holdSnapshot = true; const reading = vm.initializeWorkspace(); await settle();
+      createRequest!.respond(201, session("created", "ws-a")); await creating; await settle();
+      assert.ok(put); assert.deepEqual(JSON.parse(String(put.requestBody)), { visible });
+      assert.equal(vm.tabVisibilityController.getState("created").confirmed, undefined);
+      assert.equal(vm.visibleSessions.some((record: Session) => record.id === "created"), visible);
+      put.respond(200, { workspaceId: "ws-a", sessionId: "created", visible }); await settle();
+      assert.equal(vm.tabVisibilityController.getState("created").confirmed, visible);
+      respondSessions(oldSnapshot!, []); await reading; await settle();
+      assert.equal(vm.tabVisibilityController.getState("created").confirmed, visible);
+      assert.equal(vm.visibleSessions.some((record: Session) => record.id === "created"), visible);
+      assert.equal(FakeXMLHttpRequest.requests.filter((request) => request.method === "POST").length, 1);
+      assert.equal(FakeXMLHttpRequest.requests.filter((request) => request.method === "PUT").length, 1);
+      assert.equal(FakeXMLHttpRequest.requests.some((request) => request.method === "PUT" && request.url.includes(encodeURIComponent(draft))), false);
+    } finally { wrapper.unmount(); }
+  });
+}
+
+for (const outcome of ["rejected", "timeout-before-commit", "timeout-after-commit"] as const) {
+  test(`0037 草稿关闭 ${outcome} 只提示一次未确认，读取真实状态协调且不重建或后台补偿`, async () => {
+    let createRequest: FakeXMLHttpRequest | undefined;
+    let put: FakeXMLHttpRequest | undefined;
+    let exists = false; let savedVisible = true;
+    const errors: unknown[] = []; const oldError = message.error;
+    message.error = ((...args: unknown[]) => { errors.push(args); }) as typeof message.error;
+    FakeXMLHttpRequest.requests = [];
+    FakeXMLHttpRequest.responder = (request) => {
+      if (request.method === "POST" && request.url.endsWith("/agent/sessions")) { createRequest = request; return; }
+      if (request.method === "PUT") { put = request; return; }
+      if (request.url.includes("scope=tabs")) return respondSessions(request, exists ? [session("created", "ws-a")] : [], { openedSessionIds: exists && savedVisible ? ["created"] : [] });
+      return respondDefaults(request);
+    };
+    const wrapper = mountView();
+    try {
+      await settle(); const vm = wrapper.vm as any;
+      const draft = vm.draftSessions[0].id; const creating = vm.ensureSessionCreated(draft);
+      vm.closeSessionTab(draft); exists = true;
+      createRequest!.respond(201, session("created", "ws-a")); await creating; await settle();
+      errors.length = 0;
+      if (outcome === "rejected") put!.respond(500, { code: "AGENT_TAB_STATE_INVALID", message: "fixture rejected" });
+      else { savedVisible = outcome !== "timeout-after-commit"; put!.ontimeout!(); }
+      await settle();
+      assert.equal(vm.tabVisibilityController.getState("created").confirmed, undefined);
+      assert.equal(vm.tabVisibilityController.getState("created").uncertainCommit, true);
+      assert.equal(errors.length, 1); assert.match(String(errors[0]), /unconfirmed/);
+      await vm.initializeWorkspace(); await settle();
+      assert.equal(vm.tabVisibilityController.getState("created").confirmed, savedVisible);
+      assert.equal(vm.visibleSessions.some((record: Session) => record.id === "created"), savedVisible);
+      assert.equal(FakeXMLHttpRequest.requests.filter((request) => request.method === "POST").length, 1);
+      assert.equal(FakeXMLHttpRequest.requests.filter((request) => request.method === "PUT").length, 1);
+    } finally { wrapper.unmount(); message.error = oldError; }
+  });
+}
+
+for (const invalidation of ["workspace", "unmount"] as const) {
+  for (const responseAt of ["create", "put"] as const) {
+    test(`0037 草稿在 ${responseAt} 响应前 ${invalidation}：无迁移污染、旧提示或额外关闭意图`, async () => {
+      let createRequest: FakeXMLHttpRequest | undefined;
+      let put: FakeXMLHttpRequest | undefined;
+      const notices: unknown[] = []; const oldError = message.error; const oldWarning = message.warning;
+      message.error = ((...args: unknown[]) => { notices.push(args); }) as typeof message.error;
+      message.warning = ((...args: unknown[]) => { notices.push(args); }) as typeof message.warning;
+      FakeXMLHttpRequest.requests = [];
+      FakeXMLHttpRequest.responder = (request) => {
+        if (request.method === "POST" && request.url.endsWith("/agent/sessions")) { createRequest = request; return; }
+        if (request.method === "PUT") { put = request; return; }
+        if (request.url.includes("scope=tabs")) {
+          const workspace = new URL(request.url, "http://local").searchParams.get("workspaceId")!;
+          return respondSessions(request, workspace === "ws-a" ? [] : [session("b", "ws-b")]);
+        }
+        return respondDefaults(request);
+      };
+      const wrapper = mountView(); let unmounted = false;
+      try {
+        await settle(); const vm = wrapper.vm as any;
+        const draft = vm.draftSessions[0].id; const creating = vm.ensureSessionCreated(draft);
+        vm.closeSessionTab(draft);
+        if (responseAt === "put") { createRequest!.respond(201, session("created-a", "ws-a")); await creating; await settle(); assert.ok(put); }
+        if (invalidation === "workspace") { await wrapper.setProps({ workspaceId: "ws-b" }); await settle(); }
+        else { wrapper.unmount(); unmounted = true; }
+        notices.length = 0;
+        const before = JSON.stringify({ records: vm.serverSessions, states: vm.tabVisibilityWriteStates, active: vm.activeKey });
+        if (responseAt === "create") { createRequest!.respond(201, session("created-a", "ws-a")); await creating; }
+        else put!.ontimeout!(); // The server may still have committed; no compensation is legal here.
+        await settle();
+        assert.equal(JSON.stringify({ records: vm.serverSessions, states: vm.tabVisibilityWriteStates, active: vm.activeKey }), before);
+        assert.equal(notices.length, 0);
+        assert.equal(FakeXMLHttpRequest.requests.filter((request) => request.method === "PUT").length, responseAt === "put" ? 1 : 0);
+        assert.equal(FakeXMLHttpRequest.requests.filter((request) => request.method === "POST").length, 1);
+      } finally { if (!unmounted) wrapper.unmount(); message.error = oldError; message.warning = oldWarning; }
+    });
+  }
+}
+
+test("0037 picker 取消未知开闭目标不臆造 false 补偿；显式读取可协调最终状态", async () => {
+  const puts: FakeXMLHttpRequest[] = [];
+  FakeXMLHttpRequest.requests = [];
+  FakeXMLHttpRequest.responder = (request) => {
+    if (request.method === "PUT") { puts.push(request); return; }
+    if (request.url.includes("/agent/sessions/target?")) return request.respond(200, metadataRecord("target"));
+    if (isListRead(request)) return respondSessions(request, [metadataRecord("target")], { openedSessionIds: [] });
+    return respondDefaults(request);
+  };
+  const wrapper = mountView();
+  try {
+    await settle(); const vm = wrapper.vm as any; const draft = vm.draftSessions[0].id;
+    await vm.openChooseSessionModal(draft);
+    const choosing = vm.chooseSession("target"); await settle();
+    assert.equal(vm.pickerSelection.receipt.previousEffectiveVisibility, undefined);
+    vm.closeChooseSessionModal(); await choosing;
+    puts[0]!.respond(200, { workspaceId: "ws-a", sessionId: "target", visible: true }); await settle();
+    assert.equal(puts.length, 1, "unknown is not a known closed state and cannot authorize a false restore");
+    assert.equal(vm.tabVisibilityController.getState("target").confirmed, true);
+    assert.equal(vm.draftSessions.some((record: Session) => record.id === draft), true);
+  } finally { wrapper.unmount(); }
+});

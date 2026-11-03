@@ -12,7 +12,7 @@ import {
 
 const request = { workspaceId: "a", updatedWithinSeconds: 86400 };
 const item = {
-  id: "session-a", title: "", kind: "primary", status: "idle", createdAt: -1, updatedAt: 1000,
+  id: "session-a", title: "", kind: "primary", status: "idle", agent: null, createdAt: -1, updatedAt: 1000,
   userMessageCount: 0, completedAssistantMessageCount: 0
 } as const;
 const response: AgentSessionQueryResponse = {

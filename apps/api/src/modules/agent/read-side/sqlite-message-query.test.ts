@@ -48,7 +48,7 @@ test("real Fork timeline snapshot and history pages remain readable by CLI with 
     });
     forkMessageSession(db, {
       id: "second-fork", workspaceId: "ws", sourceSessionId: "first-fork", expectedHeadMessageId: "fork-local",
-      expectedRevision: 1, targetMessageId: "fork-local", title: "Second fork", kind: "primary", createdAt: 6,
+      expectedRevision: 1, targetMessageId: "fork-local", title: "Second fork", kind: "primary", visibility: "unlisted", createdAt: 6,
     });
     const tail = query.getTimeline({ workspaceId: "ws", sessionId: "second-fork", mode: "snapshot", limit: 2 });
     assert.equal(tail.session.revision, 0);
@@ -56,6 +56,7 @@ test("real Fork timeline snapshot and history pages remain readable by CLI with 
       [["source-2", "session", 2], ["fork-local", "first-fork", 1]]);
     assert.equal(tail.hasMore, true);
     assert.equal(parseTimeline(tail, "ws", "second-fork").messages.length, 2);
+    assert.equal(parseTimeline(tail, "ws", "second-fork").session.visibility, "unlisted");
     const previous = query.getTimeline({ workspaceId: "ws", sessionId: "second-fork", mode: "before",
       beforeMessageId: tail.nextBeforeMessageId!, limit: 2 });
     assert.deepEqual(previous.messages.map((message) => message.id), ["source-1"]);

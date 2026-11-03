@@ -75,7 +75,7 @@ test("activity HTTP uniformly rejects raw unknown/duplicate/noncanonical paramet
     "workspaceId=%20%09&updatedWithinSeconds=10",
     ...["0", "-1", "%2B1", "01", "1.5", "1e2", "", "true", "%2010", "10%20", "7776001", "9007199254740992"].map((seconds) => `${workspace}&updatedWithinSeconds=${seconds}`),
     `${workspace}&updatedWithinSeconds=10&limit=1`, `${workspace}&updatedWithinSeconds=10&cursor=x`,
-    `${workspace}&updatedWithinSeconds=10&unknown=x`, `${workspace}&updatedWithinSeconds=10&kind=`,
+    `${workspace}&updatedWithinSeconds=10&unknown=x`, `${workspace}&updatedWithinSeconds=10&includeUnlisted=true`, `${workspace}&updatedWithinSeconds=10&kind=`,
     `${workspace}&updatedWithinSeconds=10&kind=Primary`, `${workspace}&updatedWithinSeconds=10&status=`,
     `${workspace}&updatedWithinSeconds=10&status=failed`, `${workspace}&${workspace}&updatedWithinSeconds=10`,
     `${workspace}&updatedWithinSeconds=10&updatedWithinSeconds=20`,
@@ -97,7 +97,7 @@ test("activity HTTP returns all 165 records, current state and counts independen
   const updatedAt = Date.now() - 1000;
   f.db.prepare("update agent_session set updated_at = ? where workspace_id = ?").run(updatedAt, f.workspaceId);
   f.db.prepare("update session_run_state set status = 'running' where workspace_id = ? and session_id = 'session-000'").run(f.workspaceId);
-  f.db.prepare("insert into workspace_session_tab_state (workspace_id,session_id,visible,updated_at) values (?, ?, 0, ?)").run(f.workspaceId, "session-001", updatedAt);
+  f.db.prepare("update workspace_session_tab_state set visible=0,updated_at=? where workspace_id=? and session_id=?").run(updatedAt, f.workspaceId, "session-001");
   f.seedMessage("user-one", "session-000", "user");
   f.seedMessage("user-two", "session-000", "user");
   for (let i = 0; i < 3; i++) f.seedMessage(`assistant-${i}`, "session-000", "assistant");

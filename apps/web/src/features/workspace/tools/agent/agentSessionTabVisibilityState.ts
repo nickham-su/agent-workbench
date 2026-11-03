@@ -41,7 +41,7 @@ export type VisibilityIntentOutcome =
   | { status: "superseded" | "contextInvalidated" | "uiTimeout" | "cancelled"; sessionId: string; intentSeq: number };
 export type VisibilityIntentReceipt = {
   intentSeq: number;
-  previousEffectiveVisibility: boolean;
+  previousEffectiveVisibility: boolean | undefined;
   result: Promise<VisibilityIntentOutcome>;
   cancel(): void;
 };
@@ -65,10 +65,6 @@ export type AgentSessionTabVisibilityControllerOptions = {
   /** An optional caller-owned object, useful when a Vue adapter needs reactivity. */
   writeStates?: Record<string, SessionWriteState>;
 };
-
-export function defaultAgentSessionTabVisibility(kind: AgentSessionTabKind) {
-  return kind === "primary";
-}
 
 function responseMatchesRequest(
   response: WorkspaceAgentSessionTabVisibilityMutation,
@@ -101,9 +97,15 @@ export class AgentSessionTabVisibilityController {
     return this.writeStates[sessionId];
   }
 
+  /** Metadata alone proves neither open nor closed. Track when it was learned. */
+  rememberSession(session: AgentSessionTabVisibilitySession) {
+    this.sessions.set(session.id, session);
+    this.ensureState(session.id);
+  }
+
   getEffectiveVisibility(session: AgentSessionTabVisibilitySession) {
     const state = this.writeStates[session.id];
-    return state?.desired?.visible ?? state?.confirmed ?? defaultAgentSessionTabVisibility(session.kind);
+    return state?.desired?.visible ?? state?.confirmed;
   }
 
   /**
@@ -116,30 +118,26 @@ export class AgentSessionTabVisibilityController {
     tabState: WorkspaceAgentTabState,
     snapshot?: VisibilitySnapshot
   ) {
-    const closed = new Set(tabState.closedSessionIds);
-    const openedSubtasks = new Set(tabState.openedSubtaskSessionIds);
-
-    const known = new Map(sessions.map((session) => [session.id, session]));
-    for (const id of closed) if (!known.has(id)) known.set(id, { id, kind: "primary" });
-    for (const id of openedSubtasks) if (!known.has(id)) known.set(id, { id, kind: "subtask" });
+    const opened = new Set(tabState.openedSessionIds);
+    const known = new Map(this.sessions);
+    for (const session of sessions) known.set(session.id, session);
     for (const session of known.values()) {
-      this.sessions.set(session.id, session);
-      const state = this.ensureState(session.id);
-      if (state.desired || state.inFlight || (snapshot && this.isSnapshotProtected(session.id, snapshot))) continue;
+      // Check before registering snapshot-only IDs: those are not late cache additions.
+      const protectedState = snapshot && this.isSnapshotProtected(session.id, snapshot);
+      this.rememberSession(session);
+      const state = this.writeStates[session.id]!;
+      if (state.desired || state.inFlight || protectedState) continue;
       state.uncertainCommit = false;
-
-      state.confirmed = session.kind === "primary"
-        ? !closed.has(session.id)
-        : openedSubtasks.has(session.id);
+      state.confirmed = opened.has(session.id);
     }
     this.notify();
   }
 
-  /** A partial snapshot is never evidence that an absent Session was deleted. */
+  /** A complete Tab snapshot is not an inventory or deletion signal. */
   isSnapshotProtected(sessionId: string, snapshot: VisibilitySnapshot): boolean {
     const state = this.writeStates[sessionId];
     const captured = snapshot.get(sessionId);
-    return !!(captured?.wasPending || state?.desired || state?.inFlight
+    return !!((!captured && state) || captured?.wasPending || state?.desired || state?.inFlight
       || (state?.nextIntentSeq ?? 0) !== (captured?.intentSeq ?? 0)
       || (state?.confirmationEpoch ?? 0) !== (captured?.confirmationEpoch ?? 0));
   }
@@ -169,7 +167,7 @@ export class AgentSessionTabVisibilityController {
       let settled = false;
       const deadline = performance.now() + 30000;
       const timer = setTimeout(() => settle({ status: "uiTimeout", sessionId: session.id, intentSeq }), 30000);
-      // Register before notify/pump, including the synchronous no-op case.
+      // Register before notify/pump, including synchronously resolving transports.
       settle = (outcome) => {
         if (settled) return;
         settled = true;
@@ -199,13 +197,7 @@ export class AgentSessionTabVisibilityController {
     old?.settle({ status: "superseded", sessionId: session.id, intentSeq: old.intentSeq });
     const intentSeq = ++state.nextIntentSeq;
     if (receipt) this.subscriptions.set(session.id, receipt);
-    const noOp = receipt && !state.desired && !state.inFlight && !state.uncertainCommit
-      && state.confirmed === visible;
-    if (noOp) {
-      receipt.settle({ status: "confirmed", sessionId: session.id, intentSeq });
-      this.notify();
-      return;
-    }
+    // A prior snapshot/PUT is not a receipt for this new shared-Workspace intent.
     state.desired = { visible, intentSeq };
     this.notify();
     void this.pump(session.id, context);
@@ -220,23 +212,14 @@ export class AgentSessionTabVisibilityController {
 
   /**
    * Drafts themselves have no persisted identity and must not call the API.
-   * Once creation returns a real Session, transfer only a non-default draft
-   * visibility intent into the normal single-flight queue.
+   * Creation returns metadata, not a Tab-state confirmation. Always submit the
+   * draft's current intent once a real ID exists in a still-valid context.
    */
   transferDraftVisibility(
     session: AgentSessionTabVisibilitySession,
     draftVisible: boolean,
     context: AgentSessionTabVisibilityContext
   ) {
-    if (draftVisible === defaultAgentSessionTabVisibility(session.kind)) {
-      if (this.options.isContextCurrent(context)) {
-        this.sessions.set(session.id, session);
-        const state = this.ensureState(session.id);
-        state.confirmed = defaultAgentSessionTabVisibility(session.kind);
-        state.confirmationEpoch += 1;
-      }
-      return false;
-    }
     return this.requestVisibility(session, draftVisible, context);
   }
 

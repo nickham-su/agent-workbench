@@ -33,6 +33,7 @@ test("fork uses the observed head without a message argument and prints confirme
     assert.equal(textField(result.stdout, "sessionId"), "new-session");
     assert.equal(textField(result.stdout, "来源 Session ID"), "s");
     assert.equal(textField(result.stdout, "Fork 消息 ID"), "latest");
+    assert.equal(textField(result.stdout, "会话可见性"), "listed");
   }
 });
 
@@ -41,7 +42,9 @@ test("fork invalid arguments fail before config or network, including unsupporte
     ["fork"], ["fork", "-w", "w"], ["fork", "-s", "s"],
     [...args, "--message-id", "hidden-value"], [...args, "--title", "hidden-value"], [...args, "hidden-value"],
     [...args, "--session", "hidden-value"], ["fork", "-w", "w", "-s", ".."],
-    ["fork", "-w", " w", "-s", "s"], [...args, "--json"], [...args, "-f"]
+    ["fork", "-w", " w", "-s", "s"], [...args, "--json"], [...args, "-f"],
+    [...args, "--unlisted=false"], [...args, "--unlisted=true"], [...args, "--unlisted", "true"],
+    [...args, "--unlisted", "--unlisted"]
   ]) {
     const capture = captureIO(); let configs = 0; let requests = 0;
     const code = await runCli(["session", ...invocation], {
@@ -124,7 +127,8 @@ test("fork POST network failure preserves unknown effect and is not retried", as
 test("fork validates new primary session identity and exact source boundary before success", async () => {
   for (const overrides of [
     { id: "s" }, { id: ".." }, { workspaceId: "other" }, { kind: "subtask" },
-    { forkedFromSessionId: "other" }, { forkedFromMessageId: "other" }, { headMessageId: "other" }
+    { forkedFromSessionId: "other" }, { forkedFromMessageId: "other" }, { headMessageId: "other" },
+    { visibility: "unlisted" }, { visibility: undefined }, { visibility: "invalid" }
   ]) {
     const result = await executeFollow(args, (url) => jsonResult(url.pathname === "/api/agent/sessions/s" ? source() : fork(overrides)));
     assert.equal(result.code, 6); assert.equal(result.requests.length, 2); assert.equal(result.stdout, "");
@@ -134,18 +138,18 @@ test("fork validates new primary session identity and exact source boundary befo
 });
 
 test("fork retains accepted new identity if cookie persistence or stdout fails", async () => {
-  for (const failure of ["cookie", "stdout"]) {
+  for (const failure of ["cookie", "stdout"]) for (const unlisted of [false, true]) {
     const capture = captureIO(); let posts = 0;
     const stdout = failure === "stdout" ? new Writable({ write(_chunk, _encoding, done) {
       done(Object.assign(Error("fixture output closed"), { code: "EPIPE" }));
     } }) : capture.io.stdout;
     const store = connectionStore();
-    const code = await runCli(["session", ...args], {
+    const code = await runCli(["session", ...args, ...(unlisted ? ["--unlisted"] : [])], {
       io: { ...capture.io, stdout },
       createConfigStore: () => ({ load: () => store.load(), save: async () => { throw Error("private-save-error"); } }),
       http: { request: async (_origin, path) => {
         if (new URL(path, "http://fixture.test").pathname === "/api/agent/sessions/s") return jsonResult(source());
-        posts++; return jsonResult(fork(), 201, failure === "cookie" ? [cookieHeader] : []);
+        posts++; return jsonResult(fork({ visibility: unlisted ? "unlisted" : "listed" }), 201, failure === "cookie" ? [cookieHeader] : []);
       } }
     });
     assert.equal(code, failure === "cookie" ? 7 : 141); assert.equal(posts, 1);
@@ -154,5 +158,54 @@ test("fork retains accepted new identity if cookie persistence or stdout fails",
     assert.equal(textField(capture.diagnostic(), "phase"), "fork");
     assert.equal(textField(capture.diagnostic(), "sessionId"), "new-session");
     assert.doesNotMatch(capture.diagnostic(), /private-save-error/);
+  }
+});
+
+test("fork unlisted intent and immutable source visibility determine exact result without changing observed head", async () => {
+  for (const sourceVisibility of ["listed", "unlisted"] as const) {
+    for (const unlisted of [false, true]) {
+      const visibility = unlisted || sourceVisibility === "unlisted" ? "unlisted" : "listed";
+      const invocation = unlisted ? [...args, "--unlisted"] : args;
+      const result = await executeFollow(invocation, (url, request) => {
+        if (url.pathname === "/api/agent/sessions/s") return jsonResult({ ...source(), visibility: sourceVisibility });
+        assert.deepEqual(request.body, { fromSessionId: "s", fromMessageId: "latest", ...(unlisted ? { visibility: "unlisted" } : {}) });
+        return jsonResult(fork({ visibility }), 201);
+      });
+      assert.equal(result.code, 0, result.stderr);
+      assert.equal(result.requests.length, 2);
+      assert.equal(textField(result.stdout, "会话可见性"), visibility);
+      assert.equal(textField(result.stdout, "sessionId"), "new-session");
+    }
+  }
+});
+
+test("fork refuses an unexpected visibility as unknown and never retries POST", async () => {
+  for (const unlisted of [false, true]) {
+    const result = await executeFollow(unlisted ? [...args, "--unlisted"] : args, (url) => {
+      if (url.pathname === "/api/agent/sessions/s") return jsonResult({ ...source(), visibility: "unlisted" });
+      return jsonResult(fork({ visibility: "listed" }), 201);
+    });
+    assert.equal(result.code, 6, result.stderr);
+    assert.equal(result.requests.length, 2);
+    assert.equal(result.stdout, "");
+    assert.equal(textField(result.stderr, "effect"), "unknown");
+    assert.equal(textField(result.stderr, "phase"), "fork");
+  }
+});
+
+
+test("unlisted fork preserves server rejection and network unknown without reselecting or retrying", async () => {
+  for (const failure of ["reject", "network"] as const) {
+    const result = await executeFollow([...args, "--unlisted"], (url, request) => {
+      if (url.pathname === "/api/agent/sessions/s") return jsonResult(source());
+      assert.deepEqual(request.body, { fromSessionId: "s", fromMessageId: "latest", visibility: "unlisted" });
+      if (failure === "network") throw Error("fixture transport lost after submission");
+      return jsonResult({ code: "FORK_TARGET_HAS_NON_TERMINAL_EXECUTIONS" }, 409);
+    });
+    assert.equal(result.code, failure === "network" ? 5 : 6);
+    assert.equal(result.requests.length, 2);
+    assert.equal(textField(result.stderr, "effect"), failure === "network" ? "unknown" : "rejected");
+    assert.equal(textField(result.stderr, "phase"), "fork");
+    assert.equal(result.stdout, "");
   }
 });

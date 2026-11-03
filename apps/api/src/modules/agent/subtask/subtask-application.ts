@@ -18,6 +18,7 @@ import type {
   SubtaskRunRecord,
   SubtaskSession,
 } from "./subtask-ports.js";
+import { assertSubtaskSessionVisibility } from "../session/session-visibility.js";
 import { workspaceDeletingFence } from "../lifecycle/workspace-deleting-fence.js";
 
 const SUBTASK_PREFORK_SUMMARY_MAX_CHARS = 20_000;
@@ -104,7 +105,7 @@ export class SubtaskApplication implements SubtaskApplicationPort {
       request = { ...request, session: { ...request.session, sourceSessionId: source.sourceSessionId } };
     }
     workspaceDeletingFence.assertWritable(request.workspaceId);
-    const { parentRun, parentUiLocale, anchor } =
+    const { parentSession, parentRun, parentUiLocale, anchor } =
       this.dependencies.parentAnchorReader.resolve({
         workspaceId: request.workspaceId,
         parentSessionId: request.parentSessionId,
@@ -204,7 +205,7 @@ export class SubtaskApplication implements SubtaskApplicationPort {
       },
     );
     if (existing) {
-      const reusedSourceSessionId = this.ensureExistingSessionMatches(request, existing, boundSourceSessionId);
+      const reusedSourceSessionId = this.ensureExistingSessionMatches(request, existing, boundSourceSessionId, parentSession.visibility);
       const workspace = this.dependencies.workspaceReader.get(
         request.workspaceId,
       );
@@ -254,6 +255,7 @@ export class SubtaskApplication implements SubtaskApplicationPort {
       await this.dependencies.sessionMaterializer.resolveForStart({
         workspaceId: request.workspaceId,
         parentSessionId: request.parentSessionId,
+        parentRunId: parentRun.runId,
         parentToolExecutionId: request.parentToolExecutionId,
         session: request.session,
         subtaskTitleBase: description,
@@ -264,6 +266,7 @@ export class SubtaskApplication implements SubtaskApplicationPort {
     let workspacePath = "";
     try {
       const createdSourceSessionId = this.sourceFromChildSession(session, request.workspaceId, boundSourceSessionId);
+      assertSubtaskSessionVisibility(parentSession.visibility, session.visibility);
       const state = this.dependencies.parentRunStateReader.get(
         session.workspaceId,
         session.id,
@@ -354,7 +357,7 @@ export class SubtaskApplication implements SubtaskApplicationPort {
           parentToolExecutionId: request.parentToolExecutionId,
         });
         const winnerSource = this.bindSource(source.sourceSessionId, latestAnchor.anchor.toolInputJson);
-        const reusedSource = this.ensureExistingSessionMatches(request, winner, winnerSource);
+        const reusedSource = this.ensureExistingSessionMatches(request, winner, winnerSource, latestAnchor.parentSession.visibility);
         const workspace = this.dependencies.workspaceReader.get(request.workspaceId);
         if (!workspace) throw new HttpError(404, "workspace not found");
         return this.toReusedResponse(winner, workspace.path, reusedSource);
@@ -487,6 +490,7 @@ export class SubtaskApplication implements SubtaskApplicationPort {
     request: AgentApiSubtaskStartRequest,
     existing: SubtaskRunRecord,
     boundSourceSessionId: string | undefined,
+    parentVisibility: SubtaskSession["visibility"],
   ) {
     if (
       request.session.mode === "existing" &&
@@ -500,7 +504,9 @@ export class SubtaskApplication implements SubtaskApplicationPort {
     }
     const session = this.dependencies.runQuery.findSession(existing.sessionId);
     if (!session) throw new HttpError(404, "subtask session not found", AgentSubtaskErrorCode.SessionNotFound);
-    return this.sourceFromChildSession(session, request.workspaceId, boundSourceSessionId);
+    const source = this.sourceFromChildSession(session, request.workspaceId, boundSourceSessionId);
+    assertSubtaskSessionVisibility(parentVisibility, session.visibility);
+    return source;
   }
 
   private toReusedResponse(

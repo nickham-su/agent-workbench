@@ -173,13 +173,14 @@ test("declaration advances slot without touching config timestamp, overlaps skip
       executionId: "e1", sessionId: "s1" })!;
     assert.equal(first.status, "starting");
     assert.deepEqual(first.snapshot, { taskName: "task", triggerMode: "new_session", prompt: "Do work", agentId: "agent",
-      sourceSessionId: null, sourceMessageId: null });
+      sourceSessionId: null, sourceMessageId: null, sessionVisibility: "unlisted" });
     assert.equal(readScheduledTask(db, "one", "task")!.updatedAt, original.updatedAt);
     assert.equal(declareScheduledSlot(db, { workspaceId: "one", taskId: "task", scheduledFor: forTime, nowMs: forTime }), null);
     const secondSlot = readScheduledTask(db, "one", "task")!.nextRunAt!;
     const skip = declareScheduledSlot(db, { workspaceId: "one", taskId: "task", scheduledFor: secondSlot, nowMs: secondSlot,
       executionId: "e2" })!;
     assert.equal(skip.status, "skipped");
+    assert.equal(skip.snapshot.sessionVisibility, "unlisted");
     assert.equal(skip.sessionId, null);
     assert.equal(skip.reasonCode, "previous_execution_running");
     const replaced = replaceScheduledTask(db, { workspaceId: "one", taskId: "task", nowMs: secondSlot + 1,

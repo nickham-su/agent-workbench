@@ -10,7 +10,7 @@ function deferred<T>() {
   const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
   return { promise, resolve, reject };
 }
-const record: AgentSessionRecord = { id: "s", workspaceId: "ws", kind: "primary", title: "Title", headMessageId: "head", contextRootMessageId: null, revision: 0, forkedFromSessionId: null, forkedFromMessageId: null, createdAt: 1, updatedAt: 1 };
+const record: AgentSessionRecord = { id: "s", workspaceId: "ws", kind: "primary", visibility: "listed" as const, title: "Title", headMessageId: "head", contextRootMessageId: null, revision: 0, forkedFromSessionId: null, forkedFromMessageId: null, createdAt: 1, updatedAt: 1 };
 function fixture() {
   let generation = 1;
   let confirmationEpoch = 0;
@@ -142,4 +142,16 @@ test("only matching real 404 classifies unavailable; incomplete metadata never c
   assert.equal(result.status, "failed");
   if (result.status === "failed") assert.equal(result.classification, "protocol");
   assert.equal(f.committed.length, 0);
+});
+
+
+test("session metadata rejects missing or invalid visibility without a listed fallback", async () => {
+  for (const visibility of [undefined, null, "private"]) {
+    const f = fixture(); const pending = f.loader.read("s", { valid: () => true }); await Promise.resolve();
+    const value: Record<string, unknown> = { ...record, visibility }; if (visibility === undefined) delete value.visibility;
+    f.requests[0]!.resolve(value as AgentSessionRecord);
+    const result = await pending; assert.equal(result.status, "failed");
+    if (result.status === "failed") assert.equal(result.classification, "protocol");
+    assert.equal(f.committed.length, 0);
+  }
 });

@@ -1,5 +1,6 @@
 import type { Db } from "../../../infra/db/db.js";
 import type { AgentImageMediaType } from "@agent-workbench/shared/internal-contracts/agent-api-session";
+import { assertSubtaskSessionVisibility } from "../session/session-visibility.js";
 import { HttpError } from "../../../app/errors.js";
 import { assertAgentImageByteSize } from "../attachments/agent-attachment-storage.js";
 import { assertAgentAttachmentId, assertAgentAttachmentTempId, assertAgentAttachmentStorageKey } from "../attachments/agent-attachment-paths.js";
@@ -80,7 +81,16 @@ export class SqliteRunLifecyclePersistence
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
         clientRequestId: input.clientRequestId,
+        expectedSessionVisibility: input.expectedSessionVisibility,
       });
+      // Visibility is stable identity, unlike pristine head/title/revision.
+      // Check it even on an accepted replay, before the idempotency shortcut.
+      const scheduledSession = input.expectedSessionVisibility == null ? null :
+        getMessageSession(this.db, input.workspaceId, input.sessionId);
+      if (input.expectedSessionVisibility != null && (!scheduledSession || scheduledSession.kind !== "primary" ||
+          scheduledSession.visibility !== input.expectedSessionVisibility)) {
+        throw new HttpError(409, "Scheduled session identity changed before Run activation", "SESSION_ID_CONFLICT");
+      }
       if (dedup) return { kind: "deduplicated" as const, ...dedup };
       const runState = getMessageRunState(
         this.db,
@@ -89,7 +99,7 @@ export class SqliteRunLifecyclePersistence
       );
       if (!runState || runState.status !== "idle")
         return { kind: "session-running" as const };
-      const session = getMessageSession(
+      const session = scheduledSession ?? getMessageSession(
         this.db,
         input.workspaceId,
         input.sessionId,
@@ -230,16 +240,13 @@ export class SqliteRunLifecyclePersistence
 
   activate(input: SubtaskChildActivationInput): SubtaskChildActivationResult {
     const transaction = this.db.transaction(() => {
-      const state = getMessageRunState(
-        this.db,
-        input.workspaceId,
-        input.sessionId,
-      );
-      if (!state || state.status !== "idle")
-        return { kind: "session-running" as const };
+      const state = getMessageRunState(this.db, input.workspaceId, input.sessionId);
+      if (!state || state.status !== "idle") return { kind: "session-running" as const };
       const parentFence = this.db.prepare(`
-        select 1
+        select parent_session.visibility
         from agent_run parent_run
+        join agent_session parent_session
+          on parent_session.id = parent_run.session_id and parent_session.workspace_id = parent_run.workspace_id
         join session_run_state parent_state
           on parent_state.workspace_id = parent_run.workspace_id
           and parent_state.session_id = parent_run.session_id
@@ -256,8 +263,13 @@ export class SqliteRunLifecyclePersistence
           and parent_state.active_run_id = parent_run.run_id
           and execution.status = 'running'
         limit 1
-      `).get(input);
+      `).get(input) as { visibility: "listed" | "unlisted" } | undefined;
       if (!parentFence) return { kind: "parent-not-active" as const };
+      const session = getMessageSession(this.db, input.workspaceId, input.sessionId);
+      if (!session) throw new Error("agent session not found");
+      // Authoritative reuse check precedes every message/Run write, including
+      // callers racing the application-level materialization/shortcut reads.
+      assertSubtaskSessionVisibility(parentFence.visibility, session.visibility);
       let head = getMessageSessionHead(this.db, input);
       if (!head) throw new Error("agent session not found");
       for (let index = 0; index < input.systemTexts.length; index += 1) {
@@ -326,7 +338,7 @@ export class SqliteRunLifecyclePersistence
       });
       return { kind: "activated" as const, promptMessageId: prompt.id };
     });
-    return transaction();
+    return transaction.immediate();
   }
 
   failRunAfterEnqueueFailureIfCurrent(

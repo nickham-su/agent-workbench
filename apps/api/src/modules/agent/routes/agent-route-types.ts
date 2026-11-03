@@ -39,6 +39,6 @@ export type AgentPeripheralRouteDependencies = InternalRouteDependencies & {
 };
 
 export type AgentStatusSseRouteDependencies = InternalRouteDependencies & {
-  service: Pick<AgentService, "getMessageTimelineSnapshot">;
+  service: Pick<AgentService, "getMessageTimelineSnapshot" | "getSessionRecord">;
   runCompletedEventHub: AgentRunCompletedEventHub;
 };

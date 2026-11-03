@@ -2,9 +2,9 @@ import { Type } from "@sinclair/typebox";
 import type { Static } from "@sinclair/typebox";
 import { AgentItemViewSchema } from "./settings.js";
 import { WorkspaceAgentTabStateSchema } from "./workspaces.js";
-import { AgentContextToolNameSchema, AgentImageMediaTypeSchema, AgentMcpToolNameSchema, AgentSessionKindSchema } from "./agent-primitives.js";
-export { AgentContextToolNameSchema, AgentImageMediaTypeSchema, AgentMcpToolNameSchema, AgentSessionKindSchema } from "./agent-primitives.js";
-export type { AgentContextToolName, AgentImageMediaType, AgentSessionKind } from "./agent-primitives.js";
+import { AgentContextToolNameSchema, AgentImageMediaTypeSchema, AgentMcpToolNameSchema, AgentSessionKindSchema, AgentSessionVisibilitySchema } from "./agent-primitives.js";
+export { AgentContextToolNameSchema, AgentImageMediaTypeSchema, AgentMcpToolNameSchema, AgentSessionKindSchema, AgentSessionVisibilitySchema } from "./agent-primitives.js";
+export type { AgentContextToolName, AgentImageMediaType, AgentSessionKind, AgentSessionVisibility } from "./agent-primitives.js";
 
 export const AgentUiLocaleSchema = Type.Union([Type.Literal("zh-CN"), Type.Literal("en-US")]);
 export type AgentUiLocale = Static<typeof AgentUiLocaleSchema>;
@@ -126,6 +126,7 @@ export const AgentSessionRecordSchema = Type.Object({
   workspaceId: Type.String({ minLength: 1 }),
   title: Type.String({ minLength: 1 }),
   kind: AgentSessionKindSchema,
+  visibility: AgentSessionVisibilitySchema,
   forkedFromSessionId: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
   forkedFromMessageId: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
   headMessageId: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
@@ -382,6 +383,7 @@ export type AgentRevertSessionRequest = Static<typeof AgentRevertSessionRequestS
 export const AgentForkSessionRequestSchema = Type.Object({
   fromSessionId: Type.String({ minLength: 1 }),
   fromMessageId: Type.String({ minLength: 1 }),
+  visibility: Type.Optional(AgentSessionVisibilitySchema),
   title: Type.Optional(Type.String({ minLength: 1 }))
 }, { additionalProperties: false });
 export type AgentForkSessionRequest = Static<typeof AgentForkSessionRequestSchema>;

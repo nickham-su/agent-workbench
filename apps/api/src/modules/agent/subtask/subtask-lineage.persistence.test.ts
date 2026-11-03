@@ -238,7 +238,14 @@ test("P5 real SQLite: maintenance adapter keeps Message-populated and orphan fen
   );
   assert.equal(maintenance.deleteSuspectIfStillEligible({ workspaceId: workspace.id, sessionId: oldNoForkSessionId, olderThan }), false);
   assert.equal(maintenance.deleteSuspectIfStillEligible({ workspaceId: workspace.id, sessionId: youngForkSessionId, olderThan }), false);
+  fixture.db.exec("create trigger fail_orphan_tab_delete before delete on workspace_session_tab_state begin select raise(abort, 'injected orphan failure'); end");
+  assert.throws(() => maintenance.deleteSuspectIfStillEligible({ workspaceId: workspace.id, sessionId: oldForkSessionId, olderThan }), /injected orphan failure/);
+  assert.ok(fixture.db.prepare("select 1 from agent_session where id=?").get(oldForkSessionId));
+  assert.ok(fixture.db.prepare("select 1 from workspace_session_tab_state where session_id=?").get(oldForkSessionId));
+  fixture.db.exec("drop trigger fail_orphan_tab_delete");
   assert.equal(maintenance.deleteSuspectIfStillEligible({ workspaceId: workspace.id, sessionId: oldForkSessionId, olderThan }), true);
+  assert.equal(fixture.db.prepare("select 1 from workspace_session_tab_state where session_id=?").get(oldForkSessionId), undefined);
+  for (const id of [oldNoForkSessionId, youngForkSessionId]) assert.ok(fixture.db.prepare("select 1 from workspace_session_tab_state where session_id=?").get(id));
 });
 
 test("M9 real SQLite: compensation deletes a request-owned fork with a shared head but preserves the shared graph", async () => {

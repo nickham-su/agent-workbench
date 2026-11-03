@@ -9,7 +9,7 @@ import { sessionSelectionAgentIdSql } from "../agent-run-selection.js";
 import type { SessionActivityQuery } from "./session-activity-query.js";
 
 const DATE_LIMIT = 8_640_000_000_000_000;
-const CANDIDATE_CONDITION = `s.workspace_id = @workspaceId
+const CANDIDATE_CONDITION = `s.workspace_id = @workspaceId and s.visibility = 'listed'
   and s.updated_at >= @updatedFrom and s.updated_at <= @updatedTo
   and (@kind = 'all' or s.kind = @kind)`;
 const invalidState = () => new HttpError(500, "invalid session query state", AGENT_SESSION_QUERY_ERROR_CODES.stateInvalid);

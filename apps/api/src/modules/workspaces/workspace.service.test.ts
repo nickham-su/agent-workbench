@@ -456,6 +456,8 @@ test("workspace delete: 仅清理目标 Workspace 的 Agent 图与 FTS 数据", 
     });
     db.prepare("insert into agent_session (id, workspace_id, title, kind, created_at, updated_at) values (?, ?, ?, 'primary', ?, ?)")
       .run(`session-${workspaceId}`, workspaceId, "Session", now, now);
+    db.prepare("insert into workspace_session_tab_state values (?, ?, ?, ?)")
+      .run(workspaceId, `session-${workspaceId}`, Number(workspaceId === "ws-delete-a"), now);
     db.prepare(`insert into agent_message (id, workspace_id, depth, type, status, updated_revision, created_at, updated_at)
       values (?, ?, 0, 'assistant', 'completed', 1, ?, ?)`)
       .run(`message-${workspaceId}`, workspaceId, now, now);
@@ -468,11 +470,14 @@ test("workspace delete: 仅清理目标 Workspace 的 Agent 图与 FTS 数据", 
       .run(`part-${workspaceId}`, workspaceId === "ws-delete-a" ? 601 : 602, now);
   }
 
+  db.prepare("update agent_session set visibility='unlisted' where workspace_id='ws-delete-a'").run();
   const registration = { runtime: { async cancelSessionAndWait() { return true; } }, handoffCoordinator: new SessionRuntimeHandoffCoordinator(), settleWorkspaceRunsForDeletion: () => [] };
   registerWorkspaceRuntime(registration);
   try {
     await deleteWorkspace(fixture.ctx, logger, "ws-delete-a");
     assert.equal(getWorkspace(db, "ws-delete-a"), null);
+    assert.deepEqual(db.prepare("select * from workspace_session_tab_state where workspace_id='ws-delete-a'").all(), []);
+    assert.deepEqual(db.prepare("select visible,updated_at from workspace_session_tab_state where workspace_id='ws-delete-b'").all(), [{ visible: 0, updated_at: now }]);
     assert.equal((db.prepare("select count(*) as c from agent_message where workspace_id = 'ws-delete-a'").get() as { c: number }).c, 0);
     assert.equal((db.prepare("select count(*) as c from agent_message_part where id = 'part-ws-delete-a'").get() as { c: number }).c, 0);
     assert.equal((db.prepare("select count(*) as c from agent_text_part_fts_map where part_id = 'part-ws-delete-a'").get() as { c: number }).c, 0);
@@ -506,6 +511,7 @@ test("workspace delete: Agent 清理失败时整个删除事务回滚", async ()
   const db = fixture.ctx.db;
   db.prepare("insert into agent_session (id, workspace_id, title, kind, created_at, updated_at) values ('session-rollback', ?, 'Session', 'primary', ?, ?)")
     .run(workspaceId, now, now);
+  db.prepare("insert into workspace_session_tab_state values (?, 'session-rollback', 1, ?)").run(workspaceId, now);
   db.prepare(`insert into agent_message (id, workspace_id, depth, type, status, updated_revision, created_at, updated_at)
     values ('message-rollback', ?, 0, 'assistant', 'completed', 1, ?, ?)`)
     .run(workspaceId, now, now);
@@ -530,6 +536,7 @@ test("workspace delete: Agent 清理失败时整个删除事务回滚", async ()
     assert.notEqual(getWorkspace(db, workspaceId), null);
     assert.notEqual(db.prepare("select workspace_id from workspace_deletion where workspace_id = ?").get(workspaceId), undefined);
     assert.equal((db.prepare("select count(*) as c from agent_session where workspace_id = ?").get(workspaceId) as { c: number }).c, 1);
+    assert.deepEqual(db.prepare("select visible,updated_at from workspace_session_tab_state where session_id='session-rollback'").get(), { visible: 1, updated_at: now });
     assert.equal((db.prepare("select count(*) as c from agent_message where workspace_id = ?").get(workspaceId) as { c: number }).c, 1);
     assert.equal((db.prepare("select count(*) as c from agent_message_part where id = 'part-rollback'").get() as { c: number }).c, 1);
     assert.equal((db.prepare("select count(*) as c from agent_text_part_fts_map where part_id = 'part-rollback'").get() as { c: number }).c, 1);

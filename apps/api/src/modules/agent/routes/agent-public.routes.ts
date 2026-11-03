@@ -356,7 +356,7 @@ export async function registerAgentPublicRoutes(
           limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
           cursor: Type.Optional(Type.String({ minLength: 1, maxLength: 8192 }))
         }),
-        response: { 200: AgentSessionListResponseSchema, 400: ErrorResponseSchema, 404: ErrorResponseSchema }
+        response: { 200: AgentSessionListResponseSchema, 400: ErrorResponseSchema, 404: ErrorResponseSchema, 500: ErrorResponseSchema }
       }
     },
     async (req) => dependencies.service.listSessionRecords(parseSessionListQuery(req.raw.url ?? ""))
@@ -574,6 +574,7 @@ export async function registerAgentPublicRoutes(
         fromSessionId: string;
         fromMessageId: string;
         title?: string;
+        visibility?: "listed" | "unlisted";
       };
       const session = await dependencies.service.forkPrimarySession(body);
       return reply.code(201).send(session);

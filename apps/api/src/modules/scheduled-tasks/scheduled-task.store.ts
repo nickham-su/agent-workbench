@@ -15,6 +15,8 @@ export type TaskConfiguration = {
 export type ExecutionSnapshot = {
   taskName: string; triggerMode: ScheduledTriggerMode; prompt: string; agentId: string;
   sourceSessionId: string | null; sourceMessageId: string | null;
+  /** Immutable internal policy marker. Absence is the pre-v24 listed policy. */
+  sessionVisibility?: "unlisted";
 };
 export type TaskRow = TaskConfiguration & {
   id: string; workspaceId: string; enabled: boolean; nextRunAt: number | null;
@@ -50,9 +52,28 @@ function taskFrom(row: RawTask): TaskRow {
     }, createdAt: row.createdAt, updatedAt: row.updatedAt
   };
 }
+function parseExecutionSnapshot(json: string): ExecutionSnapshot {
+  let value: unknown;
+  try { value = JSON.parse(json); }
+  catch { throw new ScheduledStoreError("SCHEDULED_EXECUTION_SNAPSHOT_INVALID"); }
+  const invalid = () => { throw new ScheduledStoreError("SCHEDULED_EXECUTION_SNAPSHOT_INVALID"); };
+  if (!value || typeof value !== "object" || Array.isArray(value)) return invalid();
+  const record = value as Record<string, unknown>;
+  const nonempty = (item: unknown): item is string => typeof item === "string" && item.trim().length > 0;
+  if (!nonempty(record.taskName) || !nonempty(record.prompt) || record.prompt.length > 20_000 || !nonempty(record.agentId) ||
+      (record.triggerMode !== "new_session" && record.triggerMode !== "fork_message") ||
+      (record.triggerMode === "new_session" && (record.sourceSessionId !== null || record.sourceMessageId !== null)) ||
+      (record.triggerMode === "fork_message" && (!nonempty(record.sourceSessionId) || !nonempty(record.sourceMessageId))) ||
+      (Object.hasOwn(record, "sessionVisibility") && record.sessionVisibility !== "unlisted")) return invalid();
+  return {
+    taskName: record.taskName, triggerMode: record.triggerMode, prompt: record.prompt, agentId: record.agentId,
+    sourceSessionId: record.sourceSessionId as string | null, sourceMessageId: record.sourceMessageId as string | null,
+    ...(Object.hasOwn(record, "sessionVisibility") ? { sessionVisibility: "unlisted" as const } : {})
+  };
+}
 function executionFrom(row: RawExecution): ExecutionRow {
   const { snapshotJson, ...rest } = row;
-  return { ...rest, snapshot: JSON.parse(snapshotJson) as ExecutionSnapshot };
+  return { ...rest, snapshot: parseExecutionSnapshot(snapshotJson) };
 }
 export function toScheduledExecution(db: Db, workspaceId: string, row: ExecutionRow): ScheduledExecution {
   const { snapshot: _snapshot, clientRequestId: _clientRequestId, updatedAt: _updatedAt, ...publicRow } = row;
@@ -62,9 +83,14 @@ export function toScheduledExecution(db: Db, workspaceId: string, row: Execution
   const sessionAvailable = row.reasonCode !== "session_id_conflict" && !!row.sessionId &&
     !!db.prepare(`select 1 from agent_client_request r
       join agent_session s on s.id=r.session_id and s.workspace_id=r.workspace_id
+      join agent_run run on run.run_id=r.run_id and run.workspace_id=r.workspace_id
+        and run.session_id=r.session_id and run.trigger_message_id=r.message_id and run.run_kind='user'
       where r.workspace_id=? and r.session_id=? and r.client_request_id=?
+        and s.kind='primary' and s.visibility=?
+        and s.forked_from_session_id is ? and s.forked_from_message_id is ?
         and (? is null or r.run_id=?) limit 1`).get(
-      workspaceId, row.sessionId, row.clientRequestId, row.runId, row.runId);
+      workspaceId, row.sessionId, row.clientRequestId, row.snapshot.sessionVisibility ?? "listed",
+      row.snapshot.sourceSessionId, row.snapshot.sourceMessageId, row.runId, row.runId);
   return { ...publicRow, sessionAvailable };
 }
 function validatedConfiguration(config: TaskConfiguration): TaskConfiguration {
@@ -83,7 +109,7 @@ function ensureWorkspaceWritable(db: Db, workspaceId: string): void {
   if (row.deleting) throw new ScheduledStoreError("WORKSPACE_DELETING");
 }
 export class ScheduledStoreError extends Error {
-  constructor(readonly code: "SCHEDULED_TASK_NOT_FOUND" | "WORKSPACE_DELETING" | "TASK_EXECUTION_ALREADY_ACTIVE" | "TASK_DELETE_EXECUTION_ACTIVE") {
+  constructor(readonly code: "SCHEDULED_TASK_NOT_FOUND" | "WORKSPACE_DELETING" | "TASK_EXECUTION_ALREADY_ACTIVE" | "TASK_DELETE_EXECUTION_ACTIVE" | "SCHEDULED_EXECUTION_SNAPSHOT_INVALID") {
     super(code);
   }
 }
@@ -169,7 +195,8 @@ export function readScheduledExecution(db: Db, workspaceId: string, executionId:
 }
 function snapshot(task: TaskRow): ExecutionSnapshot {
   return { taskName: task.name, triggerMode: task.triggerMode, prompt: task.prompt, agentId: task.agentId,
-    sourceSessionId: task.source?.sessionId ?? null, sourceMessageId: task.source?.messageId ?? null };
+    sourceSessionId: task.source?.sessionId ?? null, sourceMessageId: task.source?.messageId ?? null,
+    sessionVisibility: "unlisted" };
 }
 function insertExecution(db: Db, task: TaskRow, input: {
   id: string; triggerType: "scheduled" | "manual"; scheduledFor: number | null; status: "starting" | "skipped";

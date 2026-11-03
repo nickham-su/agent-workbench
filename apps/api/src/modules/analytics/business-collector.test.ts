@@ -4,6 +4,9 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
+import type { AnalyticsSignalEvent } from "@agent-workbench/shared";
+import { createMessageSession, createMessageRunRecord } from "../agent/agent-message.store.js";
+import { acceptAnalyticsSignal, analyticsFingerprint } from "./signal-store.js";
 import { openDb } from "../../infra/db/db.js";
 import { dbPath } from "../../infra/fs/paths.js";
 import {
@@ -79,6 +82,55 @@ function watermark(db: Database.Database, domain: string) {
     .prepare("SELECT * FROM analytics_collector_watermark WHERE domain = ?")
     .get(domain) as Record<string, unknown>;
 }
+
+test("unlisted background Sessions, Runs and model token facts remain measurable without a Tab join", async (t) => {
+  const { fixture, workspaceId } = await createFixture();
+  const analytics = await openAnalyticsDb(fixture.dataDir, 1);
+  t.after(() => closeAnalyticsDb(analytics));
+  collector(analytics, fixture.dataDir, 100).collectAll();
+  createMessageSession(fixture.db, { id: "hidden-cost", workspaceId, title: "background", kind: "primary", visibility: "unlisted", createdAt: 101 });
+  createMessageRunRecord(fixture.db, { runId: "hidden-cost-run", workspaceId, sessionId: "hidden-cost", triggerMessageId: null,
+    agentId: "agent", providerId: "provider", modelId: "model", status: "running", createdAt: 102 });
+  assert.deepEqual(fixture.db.prepare("select visible from workspace_session_tab_state where session_id='hidden-cost'").get(), { visible: 0 });
+  collector(analytics, fixture.dataDir, 200).collectAll();
+  assert.ok(analytics.prepare("select session_id from analytics_session_fact where session_id='hidden-cost'").get());
+  assert.ok(analytics.prepare("select run_id from analytics_run_fact where run_id='hidden-cost-run'").get());
+  // Even presentation corruption must not erase execution/cost evidence.
+  fixture.db.prepare("delete from workspace_session_tab_state where session_id='hidden-cost'").run();
+  fixture.db.prepare("update agent_run set updated_at=201 where run_id='hidden-cost-run'").run();
+  assert.equal(collector(analytics, fixture.dataDir, 300).collectAll().every((result) => !result.degraded), true);
+
+  assert.equal(acceptAnalyticsSignal(analytics, {
+    kind: "expected_slots_config", sentAt: 0, requestId: "hidden-model-enable", sourceConfigVersion: 1, effectiveAt: 0,
+    enabledFactDomains: ["run", "session", "model"],
+    slots: [
+      { domain: "worker", producerNamespace: "worker_observer", producerId: "process_manager" },
+      { domain: "execution", producerNamespace: "agent_worker", producerId: "agent_runner" },
+      { domain: "model", producerNamespace: "agent_worker", producerId: "agent_runner" }
+    ]
+  }, 0).accepted, true);
+  assert.equal(acceptAnalyticsSignal(analytics, {
+    kind: "register", domain: "model", producerNamespace: "agent_worker", producerId: "agent_runner", producerGeneration: "hidden-generation",
+    sentAt: 1, controlSequence: 1, finalSequence: null, committedSequence: 0, maxObservedAt: 1,
+    earliestOpenStartedAt: null, openExecutionCount: 0, openModelCount: 0, knownDrop: false,
+    droppedSinceSequence: null, outboxPending: 0, oldestPendingAt: null, lossEpoch: 0
+  }, 1).accepted, true);
+  const unsigned = {
+    kind: "event", domain: "model", producerNamespace: "agent_worker", producerId: "agent_runner", producerGeneration: "hidden-generation",
+    sequence: 1, eventId: "hidden-cost-event", payloadVersion: 1, eventType: "model_finished", subjectIdentity: "model:hidden-model-call", observedAt: 202,
+    payload: {
+      modelCallId: "hidden-model-call", executionId: "hidden-execution", runId: "hidden-cost-run", attemptNo: 1,
+      providerId: "provider", modelId: "model", startedAt: 101, endedAt: 202, status: "completed", completionQuality: "observed",
+      timeoutKind: null, inputTokens: 2, outputTokens: 3, totalTokens: 5, totalSource: "reported",
+      cacheReadTokens: null, cacheWriteTokens: null, cacheComparable: false, cacheWriteVerified: false, failureKind: null
+    }
+  } as const;
+  const signal: AnalyticsSignalEvent = { ...unsigned, fingerprint: analyticsFingerprint(unsigned) };
+  assert.equal(acceptAnalyticsSignal(analytics, signal, 203).accepted, true);
+  assert.deepEqual(analytics.prepare(`select fact.run_id, fact.input_tokens, fact.output_tokens, fact.total_tokens
+    from analytics_model_call_fact fact join analytics_run_fact run on run.run_id=fact.run_id
+    where fact.model_call_id='hidden-model-call'`).get(), { run_id: "hidden-cost-run", input_tokens: 2, output_tokens: 3, total_tokens: 5 });
+});
 
 test("empty source baseline performs no collection until a formal source establishes prospective floors", async (t) => {
   const { fixture, workspaceId } = await createFixture();

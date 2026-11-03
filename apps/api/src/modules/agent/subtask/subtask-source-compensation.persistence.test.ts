@@ -44,6 +44,7 @@ test("source!=caller compensation removes only a request-owned empty shell and i
   assert.equal(maintenance.deleteCreatedSessionIfStillSafe(input), true);
   assert.equal(getMessageSession(db, "ws", "child"), null);
   assert.equal(getMessageRunState(db, "ws", "child"), null);
+  assert.equal(db.prepare("select 1 from workspace_session_tab_state where session_id='child'").get(), undefined);
   assertSharedGraph(db);
   assert.ok(getMessageSession(db, "ws", "parent"));
 });
@@ -57,6 +58,7 @@ for (const change of [
     const { db, input, maintenance } = fixture(t);
     assert.equal(maintenance.deleteCreatedSessionIfStillSafe({ ...input, ...change }), false);
     assert.ok(getMessageSession(db, "ws", "child"));
+    assert.deepEqual(db.prepare("select visible from workspace_session_tab_state where session_id='child'").get(), { visible: 0 });
     assertSharedGraph(db);
   });
 }
@@ -108,6 +110,17 @@ for (const protection of ["revision", "root", "kind", "running", "active-run", "
     }
     assert.equal(maintenance.deleteCreatedSessionIfStillSafe(input), false);
     assert.ok(getMessageSession(db, "ws", "child"));
+    assert.deepEqual(db.prepare("select visible from workspace_session_tab_state where session_id='child'").get(), { visible: 0 });
     assertSharedGraph(db);
   });
 }
+
+
+test("compensation Tab delete failure rolls Session and RunState deletion back", (t) => {
+  const { db, input, maintenance } = fixture(t);
+  db.exec("create trigger fail_tab_delete before delete on workspace_session_tab_state begin select raise(abort, 'injected tab failure'); end");
+  assert.throws(() => maintenance.deleteCreatedSessionIfStillSafe(input), /injected tab failure/);
+  assert.ok(getMessageSession(db, "ws", "child")); assert.ok(getMessageRunState(db, "ws", "child"));
+  assert.deepEqual(db.prepare("select visible from workspace_session_tab_state where session_id='child'").get(), { visible: 0 });
+  assertSharedGraph(db);
+});

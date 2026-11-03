@@ -29,6 +29,8 @@ export function inspectArguments(args: readonly string[], root: Command): Argume
         if (!attachedShort) option = undefined;
       }
       if (!option) { invalid = true; continue; }
+      // Boolean flags cannot silently discard an attached value (e.g. --unlisted=false).
+      if (equals >= 0 && !option.required && !option.optional) invalid = true;
       const key = option.attributeName();
       if (seen.has(key) && key !== "image") duplicate = true;
       seen.add(key);

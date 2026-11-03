@@ -1,5 +1,5 @@
 import { Type, type Static } from "@sinclair/typebox";
-import { AgentContextToolNameSchema, AgentImageMediaTypeSchema, AgentSessionKindSchema } from "./agent-primitives.js";
+import { AgentContextToolNameSchema, AgentImageMediaTypeSchema, AgentSessionKindSchema, AgentSessionVisibilitySchema } from "./agent-primitives.js";
 
 export const AGENT_TIMELINE_TEXT_MAX_LENGTH = 3_000;
 
@@ -211,6 +211,7 @@ export const AgentSessionMessageStateSchema = Type.Object({
   workspaceId: IdSchema,
   title: Type.String({ minLength: 1 }),
   kind: AgentSessionKindSchema,
+  visibility: AgentSessionVisibilitySchema,
   headMessageId: NullableIdSchema,
   contextRootMessageId: NullableIdSchema,
   revision: Type.Integer({ minimum: 0 }),

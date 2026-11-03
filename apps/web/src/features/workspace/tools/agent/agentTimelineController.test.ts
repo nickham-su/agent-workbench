@@ -23,7 +23,7 @@ function response(params: {
       id: "session",
       workspaceId: "workspace",
       title: "session",
-      kind: "primary",
+      kind: "primary", visibility: "listed" as const,
       headMessageId: params.ids.at(-1) ?? null,
       contextRootMessageId: params.ids[0] ?? null,
       revision: params.revision,

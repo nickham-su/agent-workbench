@@ -24,7 +24,8 @@ export function classifyTargetReadError(error: unknown): TargetReadFailureClassi
 
 export function isCompleteSessionRecord(record: AgentSessionRecord | null | undefined): record is AgentSessionRecord {
   if (!record || typeof record.id !== "string" || !record.id || typeof record.workspaceId !== "string" || !record.workspaceId
-    || typeof record.title !== "string" || !record.title || (record.kind !== "primary" && record.kind !== "subtask")) return false;
+    || typeof record.title !== "string" || !record.title || (record.kind !== "primary" && record.kind !== "subtask")
+    || (record.visibility !== "listed" && record.visibility !== "unlisted")) return false;
   if (![record.createdAt, record.updatedAt, record.revision].every((value) => typeof value === "number" && Number.isFinite(value))
     || !Number.isInteger(record.revision) || record.revision < 0) return false;
   return [record.headMessageId, record.contextRootMessageId, record.forkedFromSessionId, record.forkedFromMessageId]

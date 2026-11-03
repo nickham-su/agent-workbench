@@ -118,9 +118,10 @@ export async function runCli(args: readonly string[], dependencies: CliDependenc
       });
     session.command("fork").description("从读取时的最新消息创建 Fork 主会话")
       .requiredOption("-w, --workspace <ID>", "Workspace ID").requiredOption("-s, --session <ID>", "来源主 Session ID")
-      .allowExcessArguments(false).addHelpText("after", "\n例：awb session fork -w <ID> -s <ID>\n自动使用读取源会话时的最新消息，无需指定消息 ID；选点不可 Fork 时直接失败，不等待、不回退旧消息。\n仅创建对话分支，不复制或隔离工作区文件、不继承运行状态、不取消源任务；写操作不自动重试。\n")
-      .action(async (options: { workspace: string; session: string }) => {
-        await forkSession(validateId(options.workspace), validateId(options.session, true), commandDependencies());
+      .option("--unlisted", "创建不进入常规会话列表的 Fork；隐藏来源始终继承隐藏")
+      .allowExcessArguments(false).addHelpText("after", "\n例：awb session fork -w <ID> -s <ID> [--unlisted]\n自动使用读取源会话时的最新消息，无需指定消息 ID；选点不可 Fork 时直接失败，不等待、不回退旧消息。\n隐藏不是权限隔离，不自动删除；已知 ID 可正常读写及主动打开普通 Agent Tab。Tab 开闭状态在 Workspace 内共享。\n仅创建对话分支，不复制或隔离工作区文件、不继承运行状态、不取消源任务；写操作不自动重试。\n")
+      .action(async (options: { workspace: string; session: string; unlisted?: boolean }) => {
+        await forkSession(validateId(options.workspace), validateId(options.session, true), commandDependencies(), options.unlisted === true);
       });
     session.command("cancel").description("取消主会话的当前执行及活动后代")
       .requiredOption("-w, --workspace <ID>", "Workspace ID").requiredOption("-s, --session <ID>", "主 Session ID")

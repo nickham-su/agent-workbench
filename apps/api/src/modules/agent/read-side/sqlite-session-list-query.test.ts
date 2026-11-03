@@ -45,7 +45,7 @@ test("SQL filters before LIMIT and preserves JS trim, head, kind and closed-prim
     add("fork", { head: "source-message" });
     add("closed");
     add("other-workspace", { workspaceId: "b" });
-    db.prepare("insert into workspace_session_tab_state values ('a','closed',0,1)").run();
+    db.prepare("update workspace_session_tab_state set visible = 0 where session_id = 'closed'").run();
     const page = query.listSessions({ workspaceId: "a", scope: "continuable", limit: 100 });
     if (page.scope !== "continuable") throw new Error("unexpected scope");
     assert.deepEqual(new Set(page.items.map((record) => record.id)), new Set(["unicode-\u200b", "unicode-title  internal", "unicode-\t valid\u00a0", "fork", "closed"]));
@@ -58,18 +58,18 @@ test("SQL filters before LIMIT and preserves JS trim, head, kind and closed-prim
   } finally { db.close(); }
 });
 
-test("tabs restore all default primary plus opened subtask, ignoring meaningless/cross-workspace/orphan overrides", () => {
+test("tabs restore actual state independent of kind and visibility", () => {
   const { db, add, query } = createSessionListFixture();
   try {
     for (let i = 0; i < 150; i++) add(`primary-${i}`);
     add("closed"); add("opened", { kind: "subtask" }); add("hidden", { kind: "subtask" }); add("foreign", { workspaceId: "b" });
-    db.exec(`insert into workspace_session_tab_state values ('a','closed',0,1),('a','opened',1,1),('a','hidden',0,1),('a','primary-0',1,1),('a','orphan',0,1),('a','foreign',0,1)`);
+    db.exec(`update workspace_session_tab_state set visible = 0 where session_id = 'closed'; update workspace_session_tab_state set visible = 1 where session_id = 'opened'`);
     const result = query.listSessions({ workspaceId: "a", scope: "tabs" });
     if (result.scope !== "tabs") throw new Error("unexpected scope");
     assert.equal(result.items.length, 151);
-    assert.deepEqual(result.tabState, { workspaceId: "a", closedSessionIds: ["closed"], openedSubtaskSessionIds: ["opened"] });
+    assert.deepEqual(result.tabState, { workspaceId: "a", openedSessionIds: result.items.map((item) => item.id).sort(), closedSessionIds: ["closed"], openedSubtaskSessionIds: ["opened"] });
     assert.equal(result.items.some((item) => item.id === "hidden" || item.id === "closed" || item.id === "foreign"), false);
-    assert.equal((db.prepare("select count(*) n from workspace_session_tab_state").get() as { n: number }).n, 6);
+    assert.equal((db.prepare("select count(*) n from workspace_session_tab_state").get() as { n: number }).n, 154);
   } finally { db.close(); }
 });
 
@@ -104,7 +104,7 @@ test("WAL two-connection snapshot sees one database view for both items and over
         const get = statement.get.bind(statement);
         statement.get = ((...args: unknown[]) => {
           const result = get(...args);
-          if (!changed) { changed = true; writer.exec("insert into workspace_session_tab_state values ('a','primary',0,1)"); }
+          if (!changed) { changed = true; writer.exec("update workspace_session_tab_state set visible = 0 where session_id = 'primary'"); }
           return result;
         }) as typeof statement.get;
       }

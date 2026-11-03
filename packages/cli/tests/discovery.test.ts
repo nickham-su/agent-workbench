@@ -13,7 +13,7 @@ const connection: CliConfigV1 = { version: 1, apiOrigin: "http://example.test", 
 const result = (value: unknown, status = 200, setCookies: string[] = []): HttpResult => ({ status, body: JSON.stringify(value), setCookies });
 function store(): ConfigStore { return { load: async () => structuredClone(connection), save: async () => {} }; }
 function sessionFixture(kind: "primary" | "subtask" = "primary") {
-  return { id: "s", workspaceId: "w", title: "标题\n\u001b[31m", kind, forkedFromSessionId: "parent", forkedFromMessageId: "fork",
+  return { id: "s", workspaceId: "w", title: "标题\n\u001b[31m", kind, visibility: "listed", forkedFromSessionId: "parent", forkedFromMessageId: "fork",
     headMessageId: "head", contextRootMessageId: "root", revision: 1, createdAt: 1, updatedAt: 2 };
 }
 function stateFixture(status: "idle" | "running" = "idle") {
@@ -216,4 +216,15 @@ test("config failures carry CONFIG phase/code without leaking raw exceptions or 
   assert.equal(textField(error, "code"), "CONFIG_INVALID");
   assert.equal(textField(error, "phase"), "config");
   assert.equal(capture.diagnostic().includes("private-config-error"), false);
+});
+
+
+test("Session metadata visibility is required and validated rather than defaulted", async () => {
+  for (const visibility of [undefined, null, "private"]) {
+    const response: Record<string, unknown> = { ...sessionFixture(), visibility }; if (visibility === undefined) delete response.visibility;
+    const output = await execute(["session", "show", "-w", "w", "-s", "s"], response);
+    assert.equal(output.code, 6);
+  }
+  const hidden = await execute(["session", "show", "-w", "w", "-s", "s"], { ...sessionFixture(), visibility: "unlisted" });
+  assert.equal(hidden.code, 0);
 });

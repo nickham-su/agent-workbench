@@ -125,6 +125,7 @@ export const ScheduledTaskErrorCodeSchema = Type.Union([
   Type.Literal("SOURCE_MESSAGE_INVALID"), Type.Literal("SOURCE_UNAVAILABLE"),
   Type.Literal("SCHEDULED_TASK_NOT_FOUND"), Type.Literal("CURSOR_INVALID"),
   Type.Literal("TASK_EXECUTION_ALREADY_ACTIVE"), Type.Literal("TASK_DELETE_EXECUTION_ACTIVE"),
+  Type.Literal("SCHEDULED_EXECUTION_SNAPSHOT_INVALID"),
   Type.Literal("WORKSPACE_DELETING"), Type.Literal("AGENT_NOT_READY"), Type.Literal("SESSION_ID_CONFLICT"),
   Type.Literal("AGENT_WORKER_UNAVAILABLE")
 ]);

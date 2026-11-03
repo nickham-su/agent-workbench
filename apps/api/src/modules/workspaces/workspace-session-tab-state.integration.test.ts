@@ -18,69 +18,26 @@ function tabStateRows(db: { prepare(sql: string): { all(...params: unknown[]): u
   return db.prepare("select session_id as sessionId, visible from workspace_session_tab_state where workspace_id = ? order by session_id asc").all(workspaceId);
 }
 
-test("Workspace Agent Tab State GET returns an empty state and PUT normalizes visibility overrides", async (t: TestContext) => {
+test("Workspace Agent Tab State stores actual visibility for every kind and lists opened IDs", async (t: TestContext) => {
   const fixture = await createIntegrationFixture(t, { agentWorkerConcurrency: 0 });
   const primary = await createSession(fixture.app, fixture.workspaceId);
   const subtask = createSubtaskSessionForTest(fixture);
-
-  const empty = await fixture.app.inject({ method: "GET", url: tabStateUrl(fixture.workspaceId) });
-  assert.equal(empty.statusCode, 200, empty.body);
-  assert.deepEqual(empty.json(), {
-    workspaceId: fixture.workspaceId,
-    closedSessionIds: [],
-    openedSubtaskSessionIds: []
-  });
-
-  const hiddenPrimary = await fixture.app.inject({
-    method: "PUT",
-    url: tabVisibilityUrl(fixture.workspaceId, primary.id),
-    payload: { visible: false }
-  });
-  assert.equal(hiddenPrimary.statusCode, 200, hiddenPrimary.body);
-  assert.deepEqual(hiddenPrimary.json(), { workspaceId: fixture.workspaceId, sessionId: primary.id, visible: false });
-  assert.deepEqual(tabStateRows(fixture.db, fixture.workspaceId), [{ sessionId: primary.id, visible: 0 }]);
-
-  const hiddenPrimaryAgain = await fixture.app.inject({
-    method: "PUT",
-    url: tabVisibilityUrl(fixture.workspaceId, primary.id),
-    payload: { visible: false }
-  });
-  assert.equal(hiddenPrimaryAgain.statusCode, 200, hiddenPrimaryAgain.body);
-  assert.deepEqual(hiddenPrimaryAgain.json(), { workspaceId: fixture.workspaceId, sessionId: primary.id, visible: false });
-  assert.deepEqual(tabStateRows(fixture.db, fixture.workspaceId), [{ sessionId: primary.id, visible: 0 }]);
-
-  const restoredPrimary = await fixture.app.inject({
-    method: "PUT",
-    url: tabVisibilityUrl(fixture.workspaceId, primary.id),
-    payload: { visible: true }
-  });
-  assert.equal(restoredPrimary.statusCode, 200, restoredPrimary.body);
-  assert.deepEqual(tabStateRows(fixture.db, fixture.workspaceId), []);
-
-  const openedSubtask = await fixture.app.inject({
-    method: "PUT",
-    url: tabVisibilityUrl(fixture.workspaceId, subtask.id),
-    payload: { visible: true }
-  });
-  assert.equal(openedSubtask.statusCode, 200, openedSubtask.body);
-  assert.deepEqual(openedSubtask.json(), { workspaceId: fixture.workspaceId, sessionId: subtask.id, visible: true });
-  assert.deepEqual(tabStateRows(fixture.db, fixture.workspaceId), [{ sessionId: subtask.id, visible: 1 }]);
-
-  const closedSubtask = await fixture.app.inject({
-    method: "PUT",
-    url: tabVisibilityUrl(fixture.workspaceId, subtask.id),
-    payload: { visible: false }
-  });
-  assert.equal(closedSubtask.statusCode, 200, closedSubtask.body);
-  assert.deepEqual(tabStateRows(fixture.db, fixture.workspaceId), []);
-
+  const rows = (primaryVisible: number, subtaskVisible: number) => [
+    { sessionId: primary.id, visible: primaryVisible }, { sessionId: subtask.id, visible: subtaskVisible }
+  ].sort((a, b) => a.sessionId.localeCompare(b.sessionId));
+  const initial = await fixture.app.inject({ method: "GET", url: tabStateUrl(fixture.workspaceId) });
+  assert.equal(initial.statusCode, 200, initial.body);
+  assert.deepEqual(initial.json(), { workspaceId: fixture.workspaceId, openedSessionIds: [primary.id], closedSessionIds: [], openedSubtaskSessionIds: [] });
+  assert.deepEqual(tabStateRows(fixture.db, fixture.workspaceId), rows(1, 0));
+  for (const target of [primary, subtask]) for (const visible of [false, false, true, true, false]) {
+    const response = await fixture.app.inject({ method: "PUT", url: tabVisibilityUrl(fixture.workspaceId, target.id), payload: { visible } });
+    assert.equal(response.statusCode, 200, response.body);
+    assert.deepEqual(response.json(), { workspaceId: fixture.workspaceId, sessionId: target.id, visible });
+    assert.equal(tabStateRows(fixture.db, fixture.workspaceId).length, 2, "open/close never deletes or creates a state row");
+  }
+  assert.deepEqual(tabStateRows(fixture.db, fixture.workspaceId), rows(0, 0));
   const state = await fixture.app.inject({ method: "GET", url: tabStateUrl(fixture.workspaceId) });
-  assert.equal(state.statusCode, 200, state.body);
-  assert.deepEqual(state.json(), {
-    workspaceId: fixture.workspaceId,
-    closedSessionIds: [],
-    openedSubtaskSessionIds: []
-  });
+  assert.deepEqual(state.json(), { workspaceId: fixture.workspaceId, openedSessionIds: [], closedSessionIds: [primary.id], openedSubtaskSessionIds: [] });
 });
 
 test("Workspace Agent Tab State validates PUT bodies before mutation", async (t: TestContext) => {
@@ -108,7 +65,7 @@ test("Workspace Agent Tab State validates PUT bodies before mutation", async (t:
     payload: { visible: "false" }
   });
   assert.equal(nonBooleanVisible.statusCode, 400, nonBooleanVisible.body);
-  assert.deepEqual(tabStateRows(fixture.db, fixture.workspaceId), []);
+  assert.deepEqual(tabStateRows(fixture.db, fixture.workspaceId), [{ sessionId: primary.id, visible: 1 }]);
 });
 
 test("Workspace Agent Tab State returns stable Workspace and Session ownership errors", async (t: TestContext) => {
@@ -151,7 +108,7 @@ test("Workspace Agent Tab State returns stable Workspace and Session ownership e
   });
   assert.equal(foreignSession.statusCode, 404, foreignSession.body);
   assert.equal(foreignSession.json().code, "AGENT_SESSION_NOT_FOUND_IN_WORKSPACE");
-  assert.deepEqual(tabStateRows(fixture.db, fixture.workspaceId), []);
+  assert.deepEqual(tabStateRows(fixture.db, fixture.workspaceId), [{ sessionId: primary.id, visible: 1 }]);
 });
 
 test("Workspace Agent Tab State inherits API authentication", async (t: TestContext) => {
@@ -195,6 +152,7 @@ test("Workspace Agent Tab State OpenAPI documents paths, schemas and declared er
   assert.ok(getOperation.parameters?.some((parameter) => parameter.name === "workspaceId" && parameter.in === "path" && parameter.required));
   assert.deepEqual(Object.keys(getOperation.responses?.["200"]?.content?.["application/json"]?.schema?.properties ?? {}).sort(), [
     "closedSessionIds",
+    "openedSessionIds",
     "openedSubtaskSessionIds",
     "workspaceId"
   ]);
@@ -217,7 +175,7 @@ test("Workspace Agent Tab State OpenAPI documents paths, schemas and declared er
     "visible",
     "workspaceId"
   ]);
-  for (const status of ["400", "404", "409"]) {
+  for (const status of ["400", "404", "409", "500"]) {
     assert.ok(putOperation.responses?.[status], `PUT must declare its ${status} error response`);
   }
 });
@@ -234,8 +192,48 @@ test("Workspace Agent Tab State PUT is rejected by the Workspace deleting fence"
     });
     assert.equal(response.statusCode, 409, response.body);
     assert.equal(response.json().code, "WORKSPACE_DELETING");
-    assert.deepEqual(tabStateRows(fixture.db, fixture.workspaceId), []);
+    assert.deepEqual(tabStateRows(fixture.db, fixture.workspaceId), [{ sessionId: primary.id, visible: 1 }]);
   } finally {
     workspaceDeletingFence.end(fixture.workspaceId);
   }
+});
+
+
+test("hidden sessions open in the same persistent Tab projection; closed hidden IDs are not enumerated", async (t: TestContext) => {
+  const fixture = await createIntegrationFixture(t, { agentWorkerConcurrency: 0 });
+  for (const kind of ["primary", "subtask"] as const) createMessageSession(fixture.db, {
+    id: `hidden-${kind}`, workspaceId: fixture.workspaceId, title: kind, kind, visibility: "unlisted", createdAt: 1
+  });
+  const get = () => fixture.app.inject({ method: "GET", url: tabStateUrl(fixture.workspaceId) });
+  assert.deepEqual((await get()).json(), { workspaceId: fixture.workspaceId, openedSessionIds: [], closedSessionIds: [], openedSubtaskSessionIds: [] });
+  for (const id of ["hidden-primary", "hidden-subtask"]) {
+    const put = await fixture.app.inject({ method: "PUT", url: tabVisibilityUrl(fixture.workspaceId, id), payload: { visible: true } });
+    assert.equal(put.statusCode, 200, put.body);
+  }
+  const tabs = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions?workspaceId=${fixture.workspaceId}&scope=tabs` });
+  assert.equal(tabs.statusCode, 200, tabs.body);
+  assert.deepEqual(tabs.json().tabState, (await get()).json());
+  assert.deepEqual(tabs.json().items.map((item: {id: string}) => item.id).sort(), ["hidden-primary", "hidden-subtask"]);
+  assert.ok(tabs.json().items.every((item: {visibility: string}) => item.visibility === "unlisted"));
+  for (const id of ["hidden-primary", "hidden-subtask"]) await fixture.app.inject({ method: "PUT", url: tabVisibilityUrl(fixture.workspaceId, id), payload: { visible: false } });
+  assert.deepEqual((await get()).json(), { workspaceId: fixture.workspaceId, openedSessionIds: [], closedSessionIds: [], openedSubtaskSessionIds: [] });
+  assert.equal(tabStateRows(fixture.db, fixture.workspaceId).length, 2);
+});
+
+test("missing Tab state returns a fixed 500 without repair while direct metadata/run-state reads remain usable", async (t: TestContext) => {
+  const fixture = await createIntegrationFixture(t, { agentWorkerConcurrency: 0 });
+  const primary = await createSession(fixture.app, fixture.workspaceId);
+  fixture.db.prepare("delete from workspace_session_tab_state where session_id=?").run(primary.id);
+  for (const request of [
+    { method: "GET" as const, url: tabStateUrl(fixture.workspaceId) },
+    { method: "GET" as const, url: `/api/agent/sessions?workspaceId=${fixture.workspaceId}&scope=tabs` },
+    { method: "PUT" as const, url: tabVisibilityUrl(fixture.workspaceId, primary.id), payload: { visible: false } }
+  ]) {
+    const response = await fixture.app.inject(request); assert.equal(response.statusCode, 500, response.body);
+    assert.equal(response.json().code, "AGENT_TAB_STATE_INVALID");
+  }
+  const metadata = await fixture.app.inject({ method: "GET", url: `/api/agent/sessions/${primary.id}?workspaceId=${fixture.workspaceId}` });
+  assert.equal(metadata.statusCode, 200, metadata.body);
+  assert.ok(fixture.db.prepare("select 1 from session_run_state where session_id=?").get(primary.id));
+  assert.deepEqual(tabStateRows(fixture.db, fixture.workspaceId), []);
 });

@@ -2100,7 +2100,7 @@ function createAgentApplications(
     return sessionInteractionApplication.createPrimarySession(params);
   }
 
-  function createPrimarySessionWithExpectedId(params: { workspaceId: string; sessionId: string; title: string }) {
+  function createPrimarySessionWithExpectedId(params: { workspaceId: string; sessionId: string; title: string; visibility?: "listed" | "unlisted" }) {
     return sessionInteractionApplication.createPrimarySessionWithExpectedId(params);
   }
 
@@ -2109,7 +2109,7 @@ function createAgentApplications(
   }
 
   function forkPrimarySessionFromHistoricalAnchorWithExpectedId(params: {
-    workspaceId: string; sessionId: string; sourceSessionId: string; targetMessageId: string; title: string;
+    workspaceId: string; sessionId: string; sourceSessionId: string; targetMessageId: string; title: string; visibility?: "listed" | "unlisted";
   }) {
     return sessionInteractionApplication.forkPrimarySessionFromHistoricalAnchorWithExpectedId(params);
   }
@@ -2132,6 +2132,7 @@ function createAgentApplications(
       | import("./session/session-interaction-ports.js").NormalizedAgentUserMessageInput;
     runtime: AgentRuntimePort;
     expectedHistoricalFork?: import("./lifecycle/run-lifecycle-ports.js").ExpectedHistoricalForkSession;
+    expectedSessionVisibility?: "listed" | "unlisted";
     expectedSessionTitle?: string;
   }): Promise<AgentSendMessageResponse> {
     return await sessionInteractionApplication.sendMessage(params);
@@ -2629,7 +2630,7 @@ function createAgentApplications(
     const parentSession = environment.db
       .prepare(
         `
-      select id, workspace_id as workspaceId, title, kind,
+      select id, workspace_id as workspaceId, title, kind, visibility,
              head_message_id as headMessageId, context_root_message_id as contextRootMessageId,
              forked_from_session_id as forkedFromSessionId,
              forked_from_message_id as forkedFromMessageId, revision
@@ -2642,6 +2643,7 @@ function createAgentApplications(
           workspaceId: string;
           title: string;
           kind: "primary" | "subtask";
+          visibility: "listed" | "unlisted";
           headMessageId: string | null;
           contextRootMessageId: string | null;
           forkedFromSessionId: string | null;

@@ -3,6 +3,7 @@ import type { AgentMessageControlResult } from "@agent-workbench/shared";
 import { AgentSubtaskErrorCode } from "@agent-workbench/shared/internal-contracts/agent-api";
 import { HttpError } from "../../../app/errors.js";
 import { AgentMessageDomainError, HistoricalForkSourceError, HistoricalForkSessionConflictError, StableForkSourceError } from "../agent-message.store.js";
+import { assertSubtaskSessionVisibility, type SessionVisibilityInput } from "./session-visibility.js";
 import { normalizeManualSessionTitle } from "./session-title.js";
 import type { AgentRuntimePort } from "../agent.runtime-port.js";
 import type {
@@ -28,7 +29,7 @@ export class SessionInteractionApplication {
   }
 
   /** Internal idempotent creation for an execution with a durable, preallocated Session ID. */
-  createPrimarySessionWithExpectedId(params: { workspaceId: string; sessionId: string; title: string }): AgentSessionRecord {
+  createPrimarySessionWithExpectedId(params: { workspaceId: string; sessionId: string; title: string; visibility?: "listed" | "unlisted" }): AgentSessionRecord {
     this.assertWorkspace(params.workspaceId);
     const normalized = normalizeManualSessionTitle(params.title);
     if (!normalized.ok || normalized.title !== params.title) {
@@ -38,7 +39,7 @@ export class SessionInteractionApplication {
       const existing = this.dependencies.store.getSession(params.sessionId);
       if (!existing) return null;
       if (existing.workspaceId !== params.workspaceId || existing.kind !== "primary" ||
-          existing.title !== params.title || existing.forkedFromSessionId !== null ||
+          existing.visibility !== (params.visibility ?? "listed") || existing.title !== params.title || existing.forkedFromSessionId !== null ||
           existing.forkedFromMessageId !== null || existing.headMessageId !== null ||
           existing.contextRootMessageId !== null || existing.revision !== 0) {
         throw new HttpError(409, "session ID is already in use", "SESSION_ID_CONFLICT");
@@ -50,7 +51,7 @@ export class SessionInteractionApplication {
     try {
       this.dependencies.store.createSession({
         id: params.sessionId, workspaceId: params.workspaceId, title: params.title,
-        kind: "primary", createdAt: this.dependencies.clock.nowMs(),
+        kind: "primary", visibility: params.visibility ?? "listed", createdAt: this.dependencies.clock.nowMs(),
         forkedFromSessionId: null, forkedFromMessageId: null, preserveTitle: true
       });
     } catch (error) {
@@ -76,7 +77,7 @@ export class SessionInteractionApplication {
 
   forkPrimarySessionFromHistoricalAnchorWithExpectedId(params: {
     workspaceId: string; sessionId: string; sourceSessionId: string;
-    targetMessageId: string; title: string;
+    targetMessageId: string; title: string; visibility?: "listed" | "unlisted";
   }): AgentSessionRecord {
     this.assertWorkspace(params.workspaceId);
     const normalized = normalizeManualSessionTitle(params.title);
@@ -87,7 +88,7 @@ export class SessionInteractionApplication {
       return this.dependencies.store.forkHistoricalSource({
         id: params.sessionId, workspaceId: params.workspaceId,
         sourceSessionId: params.sourceSessionId, targetMessageId: params.targetMessageId,
-        title: params.title, createdAt: this.dependencies.clock.nowMs(),
+        title: params.title, visibility: params.visibility, createdAt: this.dependencies.clock.nowMs(),
       });
     } catch (error) {
       if (error instanceof HistoricalForkSessionConflictError) {
@@ -143,6 +144,7 @@ export class SessionInteractionApplication {
         id: this.dependencies.ids.newSessionId(),
         fromSession,
         fromMessageId: params.fromMessageId,
+        ...(params.visibility === undefined ? {} : { visibility: params.visibility }),
         title: params.title,
         targetKind: "primary",
         boundaryPolicy: "public-user-assistant"
@@ -170,6 +172,7 @@ export class SessionInteractionApplication {
   async sendMessage(params: { sessionId: string; body: import("./session-interaction-ports.js").NormalizedAgentUserMessageInput;
     runtime: AgentRuntimePort;
     expectedHistoricalFork?: import("../lifecycle/run-lifecycle-ports.js").ExpectedHistoricalForkSession;
+    expectedSessionVisibility?: "listed" | "unlisted";
     expectedSessionTitle?: string }): Promise<AgentSendMessageResponse> {
     const session = this.dependencies.store.getSession(params.sessionId);
     if (!session) throw new HttpError(404, "session not found");
@@ -186,8 +189,10 @@ export class SessionInteractionApplication {
     const dedup = this.dependencies.store.findClientRequestDedup({
       workspaceId: session.workspaceId,
       sessionId: session.id,
-      clientRequestId: params.body.clientRequestId
+      clientRequestId: params.body.clientRequestId,
+      expectedSessionVisibility: params.expectedSessionVisibility
     });
+    // Store validates stable scheduled identity before this accepted shortcut.
     if (dedup) return { sessionId: session.id, messageId: dedup.messageId, runId: dedup.runId, deduplicated: true };
     if (this.dependencies.store.getRunState(session.workspaceId, session.id).status !== "idle") {
       throw new HttpError(409, "session is running");
@@ -212,6 +217,7 @@ export class SessionInteractionApplication {
         uiLocale: this.dependencies.normalizeUiLocale(params.body.uiLocale),
         runtime: params.runtime,
         expectedHistoricalFork: params.expectedHistoricalFork,
+        expectedSessionVisibility: params.expectedSessionVisibility,
         expectedSessionTitle: params.expectedSessionTitle
       });
     } catch (error) {
@@ -275,6 +281,7 @@ export class SessionInteractionApplication {
   }
 
   async resolveSubtaskSessionForStart(command: SubtaskSessionMaterializationCommand) {
+    const executionParent = { sessionId: command.parentSessionId, runId: command.parentRunId, toolExecutionId: command.parentToolExecutionId };
     const requestedSessionId = String(command.session.sessionId || "").trim();
     if (command.session.mode === "existing") {
       if (!requestedSessionId) throw new HttpError(400, "existing sessionId is required", AgentSubtaskErrorCode.ExistingSessionRequired);
@@ -282,6 +289,9 @@ export class SessionInteractionApplication {
       if (!session) throw new HttpError(404, "subtask session not found", AgentSubtaskErrorCode.SessionNotFound);
       if (session.workspaceId !== command.workspaceId) throw new HttpError(400, "subtask session workspace mismatch", AgentSubtaskErrorCode.WorkspaceMismatch);
       if (session.kind !== "subtask") throw new HttpError(400, "existing session must be subtask", AgentSubtaskErrorCode.KindMismatch);
+      const parent = this.dependencies.store.getSession(command.parentSessionId);
+      if (!parent || parent.workspaceId !== command.workspaceId) throw new HttpError(400, "invalid subtask parent", AgentSubtaskErrorCode.AnchorRunMismatch);
+      assertSubtaskSessionVisibility(parent.visibility, session.visibility);
       return { session, createdSessionId: null };
     }
     if (requestedSessionId) {
@@ -292,6 +302,7 @@ export class SessionInteractionApplication {
         workspaceId: command.workspaceId,
         title: command.subtaskTitleBase,
         kind: "subtask",
+        executionParent,
         forkedFromSessionId: command.parentSessionId,
         forkedFromMessageId: null
       });
@@ -303,6 +314,7 @@ export class SessionInteractionApplication {
           id: this.dependencies.ids.newSessionId(),
           workspaceId: command.workspaceId,
           sourceSessionId: command.session.sourceSessionId,
+          executionParent,
           title: `${command.subtaskTitleBase} (fork)`,
           createdAt: this.dependencies.clock.nowMs()
         });
@@ -323,6 +335,7 @@ export class SessionInteractionApplication {
         workspaceId: command.workspaceId,
         title: `${command.subtaskTitleBase} (fork)`,
         kind: "subtask",
+        executionParent,
         ...(command.shouldUsePreforkSummary ? {
           forkedFromSessionId: command.parentSessionId,
           forkedFromMessageId: null
@@ -340,12 +353,13 @@ export class SessionInteractionApplication {
       title: `${command.subtaskTitleBase} (fork)`,
       targetKind: "subtask",
       allowSourceWithActiveRun: true,
-      boundaryPolicy: "internal-resolved"
+      boundaryPolicy: "internal-resolved",
+      executionParent
     });
     return { session, createdSessionId: session.id };
   }
 
-  private createSession(params: { workspaceId: string; title?: string; kind: "primary" | "subtask"; forkedFromSessionId?: string | null; forkedFromMessageId?: string | null }) {
+  private createSession(params: { workspaceId: string; title?: string; kind: "primary" | "subtask"; forkedFromSessionId?: string | null; forkedFromMessageId?: string | null } & SessionVisibilityInput) {
     this.assertWorkspace(params.workspaceId);
     const createdAt = this.dependencies.clock.nowMs();
     const id = this.dependencies.ids.newSessionId();
@@ -354,6 +368,9 @@ export class SessionInteractionApplication {
       workspaceId: params.workspaceId,
       title: titleOrDefault(params.title, "新会话"),
       kind: params.kind,
+      ...(params.visibility === undefined ? {} : { visibility: params.visibility }),
+      ...(params.executionParent ? { executionParent: params.executionParent } : {}),
+      ...(params.contentSourceSessionId === undefined ? {} : { contentSourceSessionId: params.contentSourceSessionId }),
       createdAt,
       forkedFromSessionId: params.forkedFromSessionId ?? null,
       forkedFromMessageId: params.forkedFromMessageId ?? null

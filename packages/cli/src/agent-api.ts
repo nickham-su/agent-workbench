@@ -146,10 +146,11 @@ const nullableId = (value: unknown): value is string | null => value === null ||
 export function sessionRecord(value: unknown, workspaceId: string, sessionId: string): AgentSessionRecord {
   if (!isRecord(value) || value.id !== sessionId || value.workspaceId !== workspaceId
     || typeof value.title !== "string" || (value.kind !== "primary" && value.kind !== "subtask")
+    || (value.visibility !== "listed" && value.visibility !== "unlisted")
     || !nullableId(value.forkedFromSessionId) || !nullableId(value.forkedFromMessageId)
     || !nullableId(value.headMessageId) || !nullableId(value.contextRootMessageId)
     || !isCount(value.revision) || !isTimestamp(value.createdAt) || !isTimestamp(value.updatedAt)) throw responseError("会话详情响应身份或结构无效。");
-  return { id: sessionId, workspaceId, title: value.title, kind: value.kind,
+  return { id: sessionId, workspaceId, title: value.title, kind: value.kind, visibility: value.visibility,
     forkedFromSessionId: value.forkedFromSessionId, forkedFromMessageId: value.forkedFromMessageId,
     headMessageId: value.headMessageId, contextRootMessageId: value.contextRootMessageId,
     revision: value.revision, createdAt: value.createdAt, updatedAt: value.updatedAt };

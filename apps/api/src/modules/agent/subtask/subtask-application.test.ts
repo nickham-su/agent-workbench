@@ -59,7 +59,7 @@ function dependencies(overrides: Partial<SubtaskApplicationDependencies> = {}) {
             id: parentSessionId,
             workspaceId,
             title: "parent",
-            kind: "primary",
+            kind: "primary", visibility: "listed" as const,
             headMessageId: null,
             contextRootMessageId: null,
             forkedFromSessionId: null,
@@ -100,7 +100,7 @@ function dependencies(overrides: Partial<SubtaskApplicationDependencies> = {}) {
             id: "new-session",
             workspaceId,
             title: "child",
-            kind: "subtask",
+            kind: "subtask", visibility: "listed" as const,
             headMessageId: null,
             contextRootMessageId: null,
             forkedFromSessionId: parentSessionId,
@@ -143,7 +143,7 @@ function dependencies(overrides: Partial<SubtaskApplicationDependencies> = {}) {
       },
     },
     runQuery: {
-      findSession: (id) => ({ id, workspaceId, title: "child", kind: "subtask",
+      findSession: (id) => ({ id, workspaceId, title: "child", kind: "subtask", visibility: "listed" as const,
         headMessageId: null, contextRootMessageId: null, revision: 0,
         forkedFromSessionId: parentSessionId, forkedFromMessageId: "message-boundary" }),
       findRunInSession: () => null,
@@ -345,7 +345,7 @@ test("P3 application: original failure wins when no race winner; existing sessio
           id: "existing",
           workspaceId,
           title: "existing",
-          kind: "subtask",
+          kind: "subtask", visibility: "listed" as const,
           createdAt: 1,
           updatedAt: 1,
           forkedFromSessionId: null,
@@ -435,7 +435,7 @@ test("P4 application: result/status fence ownership and preserve assistant-first
             id: sessionId,
             workspaceId,
             title: "child",
-            kind: "subtask",
+            kind: "subtask", visibility: "listed" as const,
             headMessageId: null,
             contextRootMessageId: null,
             forkedFromSessionId: null,
@@ -472,7 +472,7 @@ test("P4 application: result falls back to system text, then empty text", () => 
   const { result } = dependencies({
     runQuery: {
       findSession: () => ({
-        id: sessionId, workspaceId, title: "child", kind: "subtask", headMessageId: null, contextRootMessageId: null, forkedFromSessionId: null, forkedFromMessageId: null, revision: 0,
+        id: sessionId, workspaceId, title: "child", kind: "subtask", visibility: "listed" as const, headMessageId: null, contextRootMessageId: null, forkedFromSessionId: null, forkedFromMessageId: null, revision: 0,
       }),
       findRunInSession: () => childRun({ runId, sessionId, status: "cancelled" }),
       listMessageTextsByRun: () => [],
@@ -637,3 +637,81 @@ for (const session of [
     assert.deepEqual(base.calls, []);
   });
 }
+
+function setParentVisibility(base: ReturnType<typeof dependencies>, visibility: "listed" | "unlisted") {
+  const resolve = base.result.parentAnchorReader.resolve;
+  base.result.parentAnchorReader.resolve = (input) => {
+    const anchor = resolve(input);
+    return { ...anchor, parentSession: { ...anchor.parentSession, visibility } };
+  };
+}
+
+function setTargetVisibility(base: ReturnType<typeof dependencies>, visibility: "listed" | "unlisted") {
+  const findSession = base.result.runQuery.findSession;
+  base.result.runQuery.findSession = (id) => {
+    const session = findSession(id);
+    return session ? { ...session, visibility } : null;
+  };
+}
+
+test("unlisted parent cannot bypass reuse policy through the existing child Run fast-return", async () => {
+  const base = dependencies();
+  setParentVisibility(base, "unlisted");
+  base.setExisting(childRun());
+  await assert.rejects(() => new SubtaskApplication(base.result).startSubtask(request()),
+    (error: unknown) => error instanceof HttpError && error.statusCode === 409 && error.code === "SUBTASK_SESSION_VISIBILITY_MISMATCH");
+  assert.deepEqual(base.calls, ["anchor", "lineage"]);
+});
+
+test("listed parent may return an already accepted unlisted child without resetting it", async () => {
+  const base = dependencies();
+  setTargetVisibility(base, "unlisted");
+  base.setExisting(childRun());
+  const result = await new SubtaskApplication(base.result).startSubtask(request());
+  assert.equal(result.reused, true);
+  assert.equal(result.sessionId, "winner-session");
+  assert.deepEqual(base.calls, ["anchor", "lineage"]);
+});
+
+test("unlisted parent rejects a listed materialized existing target before activation", async () => {
+  const base = dependencies();
+  setParentVisibility(base, "unlisted");
+  const materialize = base.result.sessionMaterializer.resolveForStart;
+  base.result.sessionMaterializer.resolveForStart = async (input) => ({ ...(await materialize(input)), createdSessionId: null });
+  await assert.rejects(() => new SubtaskApplication(base.result).startSubtask(request({ session: { mode: "existing", sessionId: "new-session" } })),
+    (error: unknown) => error instanceof HttpError && error.code === "SUBTASK_SESSION_VISIBILITY_MISMATCH");
+  assert.equal(base.calls.includes("activate"), false);
+  assert.equal(base.calls.includes("compensate"), false);
+  assert.equal(base.calls.includes("profile"), false);
+});
+
+test("unlisted parent's activation race rechecks a listed winner and compensates only its own unused child", async () => {
+  const base = dependencies();
+  setParentVisibility(base, "unlisted");
+  const materialize = base.result.sessionMaterializer.resolveForStart;
+  base.result.sessionMaterializer.resolveForStart = async (input) => {
+    const value = await materialize(input);
+    return { ...value, session: { ...value.session, visibility: "unlisted" } };
+  };
+  let reads = 0;
+  base.result.lineagePersistence.findChildByParentToolExecution = () => {
+    base.calls.push("lineage");
+    return ++reads === 1 ? null : childRun();
+  };
+  let activations = 0;
+  base.result.childRunActivator.activate = () => {
+    activations += 1;
+    throw Object.assign(new Error("unique"), { code: "SQLITE_CONSTRAINT_UNIQUE" });
+  };
+  let compensatedId: string | undefined;
+  base.result.localCompensationPersistence.deleteCreatedSessionIfStillSafe = (input) => {
+    compensatedId = input.createdSessionId;
+    base.calls.push("compensate");
+    return true;
+  };
+  await assert.rejects(() => new SubtaskApplication(base.result).startSubtask(request({ session: { mode: "new" } })),
+    (error: unknown) => error instanceof HttpError && error.code === "SUBTASK_SESSION_VISIBILITY_MISMATCH");
+  assert.equal(activations, 1);
+  assert.equal(compensatedId, "new-session");
+  assert.deepEqual(base.calls.slice(-3), ["compensate", "lineage", "anchor"]);
+});

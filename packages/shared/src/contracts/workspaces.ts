@@ -39,6 +39,7 @@ export type WorkspaceDetail = Static<typeof WorkspaceDetailSchema>;
 
 export const WorkspaceAgentTabStateSchema = Type.Object({
   workspaceId: Type.String({ minLength: 1 }),
+  openedSessionIds: Type.Array(Type.String({ minLength: 1 }), { uniqueItems: true }),
   closedSessionIds: Type.Array(Type.String({ minLength: 1 })),
   openedSubtaskSessionIds: Type.Array(Type.String({ minLength: 1 }))
 });
@@ -192,3 +193,6 @@ export const AgentPromptContextExternalSkillSchema = Type.Object({
   skillDirectoryPath: Type.String({ minLength: 1 })
 });
 export type AgentPromptContextExternalSkill = Static<typeof AgentPromptContextExternalSkillSchema>;
+
+/** Tab persistence invariant failures are limited to presentation endpoints. */
+export const WorkspaceAgentTabStateErrorCode = { Invalid: "AGENT_TAB_STATE_INVALID" } as const;

@@ -3,7 +3,6 @@ import test from "node:test";
 import type { WorkspaceAgentSessionTabVisibilityMutation } from "@agent-workbench/shared";
 import {
   createAgentSessionTabVisibilityController,
-  defaultAgentSessionTabVisibility,
   type AgentSessionTabVisibilityContext,
   type AgentSessionTabVisibilitySession
 } from "./agentSessionTabVisibilityState";
@@ -54,15 +53,17 @@ function createHarness() {
   return { controller, calls, errors, setCurrent: (value: boolean) => { current = value; } };
 }
 
-test("默认可见性与初始化覆盖：primary 默认打开，subtask 默认关闭", () => {
+test("开闭初始未知，完整 opened 集合是唯一事实，不按 kind 或旧数组推断", () => {
   const { controller } = createHarness();
-  assert.equal(defaultAgentSessionTabVisibility("primary"), true);
-  assert.equal(defaultAgentSessionTabVisibility("subtask"), false);
-  assert.equal(controller.getEffectiveVisibility(primary), true);
-  assert.equal(controller.getEffectiveVisibility(subtask), false);
+  assert.equal(controller.getEffectiveVisibility(primary), undefined);
+  assert.equal(controller.getEffectiveVisibility(subtask), undefined);
+  controller.rememberSession(primary);
+  controller.rememberSession(subtask);
+  assert.equal(controller.getEffectiveVisibility(primary), undefined);
 
-  controller.applyInitializationSnapshot([primary, subtask], {
+  controller.applyInitializationSnapshot([subtask], {
     workspaceId: "ws-a",
+    openedSessionIds: [subtask.id],
     closedSessionIds: [primary.id],
     openedSubtaskSessionIds: [subtask.id]
   });
@@ -104,7 +105,7 @@ test("不同 Session 的写入可并行", async () => {
 test("旧失败后仍按新 intent 补偿，同值不同 intent 也不能跳过", async () => {
   const { controller, calls, errors } = createHarness();
   controller.applyInitializationSnapshot([primary], {
-    workspaceId: "ws-a", closedSessionIds: [], openedSubtaskSessionIds: []
+    workspaceId: "ws-a", openedSessionIds: [primary.id], closedSessionIds: [], openedSubtaskSessionIds: []
   });
   controller.requestVisibility(primary, false, context);
   controller.requestVisibility(primary, true, context);
@@ -118,10 +119,10 @@ test("旧失败后仍按新 intent 补偿，同值不同 intent 也不能跳过"
   assert.equal(controller.getEffectiveVisibility(primary), true);
 });
 
-test("最终失败回滚到明确 confirmed/default，并且仅提示一次", async () => {
+test("最终失败回滚到已知 confirmed，保留 uncertain commit 并仅提示一次", async () => {
   const { controller, calls, errors } = createHarness();
   controller.applyInitializationSnapshot([primary], {
-    workspaceId: "ws-a", closedSessionIds: [], openedSubtaskSessionIds: []
+    workspaceId: "ws-a", openedSessionIds: [primary.id], closedSessionIds: [], openedSubtaskSessionIds: []
   });
   controller.requestVisibility(primary, false, context);
   await flush();
@@ -146,7 +147,7 @@ test("一个 Session 的 404 只回滚自身，不会阻塞或重置另一条队
   primaryCall.deferred.reject({ code: "AGENT_SESSION_NOT_FOUND_IN_WORKSPACE" });
   await flush();
 
-  assert.equal(controller.getEffectiveVisibility(primary), true);
+  assert.equal(controller.getEffectiveVisibility(primary), undefined);
   assert.equal(controller.getState(primary.id)?.desired, undefined);
   assert.equal(controller.getState(subtask.id)?.inFlight?.visible, true);
   assert.deepEqual(errors.map((entry) => entry.sessionId), [primary.id]);
@@ -163,7 +164,7 @@ test("2xx 回显的 Workspace、Session 或可见值不一致时按失败处理"
   await flush();
   calls[0].deferred.resolve({ workspaceId: "ws-other", sessionId: subtask.id, visible: true });
   await flush();
-  assert.equal(controller.getEffectiveVisibility(subtask), false);
+  assert.equal(controller.getEffectiveVisibility(subtask), undefined);
   assert.equal(errors.length, 1);
 });
 
@@ -185,7 +186,7 @@ test("初始化快照不会覆盖 pending 状态", async () => {
   controller.requestVisibility(primary, false, context);
   await flush();
   controller.applyInitializationSnapshot([primary], {
-    workspaceId: "ws-a", closedSessionIds: [], openedSubtaskSessionIds: []
+    workspaceId: "ws-a", openedSessionIds: [primary.id], closedSessionIds: [], openedSubtaskSessionIds: []
   });
   assert.equal(controller.getEffectiveVisibility(primary), false);
   assert.equal(controller.getState(primary.id)?.inFlight?.visible, false);
@@ -193,25 +194,27 @@ test("初始化快照不会覆盖 pending 状态", async () => {
   await flush();
 });
 
-test("草稿仅在获得真实 Session 后转交非默认可见性 intent", async () => {
-  const { controller, calls } = createHarness();
-  assert.equal(controller.transferDraftVisibility(primary, true, context), false);
-  await flush();
-  assert.equal(calls.length, 0);
-
-  assert.equal(controller.transferDraftVisibility(primary, false, context), true);
-  await flush();
-  assert.deepEqual(calls.map((call) => call.visible), [false]);
-  calls[0].deferred.resolve(response(primary.id, false));
-  await flush();
+test("草稿真实化总是显式提交当前意图，创建响应不构成开闭确认", async () => {
+  for (const visible of [true, false]) {
+    const { controller, calls } = createHarness();
+    assert.equal(controller.transferDraftVisibility(primary, visible, context), true);
+    await flush();
+    assert.deepEqual(calls.map((call) => call.visible), [visible]);
+    assert.equal(controller.getState(primary.id)?.confirmed, undefined);
+    assert.equal(controller.getEffectiveVisibility(primary), visible);
+    calls[0].deferred.resolve(response(primary.id, visible));
+    await flush();
+    assert.equal(controller.getState(primary.id)?.confirmed, visible);
+  }
 });
 
-test("receipt registration is atomic, same-direction intents supersede and no-op resolves immediately", async () => {
+test("receipt registration is atomic; each explicit intent needs its own PUT even after a matching snapshot", async () => {
   const { controller, calls } = createHarness();
-  controller.applyInitializationSnapshot([primary], { workspaceId: "ws-a", closedSessionIds: [], openedSubtaskSessionIds: [] });
-  const noOp = controller.requestVisibilityWithResult(primary, true, context);
-  assert.equal((await noOp.result).status, "confirmed");
-  assert.equal(calls.length, 0);
+  controller.applyInitializationSnapshot([primary], { workspaceId: "ws-a", openedSessionIds: [primary.id], closedSessionIds: [], openedSubtaskSessionIds: [] });
+  const opening = controller.requestVisibilityWithResult(primary, true, context);
+  assert.equal(calls.length, 1);
+  calls.shift()!.deferred.resolve(response(primary.id, true));
+  assert.equal((await opening.result).status, "confirmed");
   const first = controller.requestVisibilityWithResult(subtask, true, context);
   const second = controller.requestVisibilityWithResult(subtask, true, context);
   assert.equal((await first.result).status, "superseded");
@@ -228,13 +231,13 @@ test("snapshot protects PUT issued before snapshot and completed before its resp
     const { controller, calls } = createHarness();
     const receipt = controller.requestVisibilityWithResult(subtask, visible, context);
     if (!calls.length) { // For close use a known-open subtask so a PUT is necessary.
-      controller.applyInitializationSnapshot([subtask], { workspaceId: "ws-a", closedSessionIds: [], openedSubtaskSessionIds: [subtask.id] });
+      controller.applyInitializationSnapshot([subtask], { workspaceId: "ws-a", openedSessionIds: [subtask.id], closedSessionIds: [], openedSubtaskSessionIds: [subtask.id] });
       controller.requestVisibility(subtask, visible, context);
     }
     const snapshot = controller.captureSnapshot();
     calls[0]!.deferred.resolve(response(subtask.id, visible));
     await flush();
-    controller.applyInitializationSnapshot([subtask], { workspaceId: "ws-a", closedSessionIds: [], openedSubtaskSessionIds: visible ? [] : [subtask.id] }, snapshot);
+    controller.applyInitializationSnapshot([subtask], { workspaceId: "ws-a", openedSessionIds: visible ? [] : [subtask.id], closedSessionIds: [], openedSubtaskSessionIds: visible ? [] : [subtask.id] }, snapshot);
     assert.equal(controller.getEffectiveVisibility(subtask), visible);
     assert.ok(controller.getState(subtask.id)!.confirmationEpoch > 0);
     receipt.cancel();
@@ -278,8 +281,8 @@ test("timeout keeps uncertain commit and failed open cannot be revived by its st
   calls[0]!.deferred.reject({ code: "AGENT_TAB_VISIBILITY_TIMEOUT" });
   assert.equal((await receipt.result).status, "failed");
   await flush();
-  controller.applyInitializationSnapshot([subtask], { workspaceId: "ws-a", closedSessionIds: [], openedSubtaskSessionIds: [subtask.id] }, snapshot);
-  assert.equal(controller.getEffectiveVisibility(subtask), false);
+  controller.applyInitializationSnapshot([subtask], { workspaceId: "ws-a", openedSessionIds: [subtask.id], closedSessionIds: [], openedSubtaskSessionIds: [subtask.id] }, snapshot);
+  assert.equal(controller.getEffectiveVisibility(subtask), undefined);
   assert.equal(controller.getState(subtask.id)?.uncertainCommit, true);
 });
 
@@ -291,25 +294,28 @@ test("unknown primary defaults are not a persistence receipt: target GET cannot 
   assert.equal((await receipt.result).status, "confirmed");
 });
 
-test("partial snapshots install minimal overrides without deleting settled hidden state", () => {
+test("兼容数组不创建假会话，完整快照可协调已知缓存的关闭而不删除元信息", () => {
   const { controller } = createHarness();
-  controller.applyInitializationSnapshot([], { workspaceId: "ws-a", closedSessionIds: [primary.id], openedSubtaskSessionIds: [] });
-  assert.equal(controller.getState(primary.id)?.confirmed, false);
+  controller.applyInitializationSnapshot([], { workspaceId: "ws-a", openedSessionIds: [], closedSessionIds: [primary.id], openedSubtaskSessionIds: [] });
+  assert.equal(controller.getState(primary.id), undefined);
+  controller.rememberSession(primary);
+  controller.applyInitializationSnapshot([primary], { workspaceId: "ws-a", openedSessionIds: [primary.id], closedSessionIds: [], openedSubtaskSessionIds: [] });
+  assert.equal(controller.getState(primary.id)?.confirmed, true);
   const snapshot = controller.captureSnapshot();
-  controller.applyInitializationSnapshot([], { workspaceId: "ws-a", closedSessionIds: [], openedSubtaskSessionIds: [] }, snapshot);
-  assert.equal(controller.getState(primary.id)?.confirmed, false, "unknown absent record is not a deletion or default reset");
+  controller.applyInitializationSnapshot([], { workspaceId: "ws-a", openedSessionIds: [], closedSessionIds: [], openedSubtaskSessionIds: [] }, snapshot);
+  assert.equal(controller.getState(primary.id)?.confirmed, false);
 });
 
 test("snapshot before queued open/close completion protects settled confirmation even without pending", async () => {
   for (const visible of [true, false]) {
     const { controller, calls } = createHarness();
-    controller.applyInitializationSnapshot([primary], { workspaceId: "ws-a", closedSessionIds: visible ? [primary.id] : [], openedSubtaskSessionIds: [] });
+    controller.applyInitializationSnapshot([primary], { workspaceId: "ws-a", openedSessionIds: visible ? [] : [primary.id], closedSessionIds: visible ? [primary.id] : [], openedSubtaskSessionIds: [] });
     controller.requestVisibility(primary, visible, context);
     const snapshot = controller.captureSnapshot();
     calls[0]!.deferred.resolve(response(primary.id, visible));
     await flush();
     assert.equal(controller.isSnapshotProtected(primary.id, snapshot), true);
-    controller.applyInitializationSnapshot([primary], { workspaceId: "ws-a", closedSessionIds: visible ? [primary.id] : [], openedSubtaskSessionIds: [] }, snapshot);
+    controller.applyInitializationSnapshot([primary], { workspaceId: "ws-a", openedSessionIds: visible ? [] : [primary.id], closedSessionIds: visible ? [primary.id] : [], openedSubtaskSessionIds: [] }, snapshot);
     assert.equal(controller.getState(primary.id)?.confirmed, visible);
     assert.equal(controller.getState(primary.id)?.desired, undefined);
   }
@@ -318,12 +324,12 @@ test("snapshot before queued open/close completion protects settled confirmation
 test("snapshot captured during a failed PUT preserves rollback and uncertain commit", async () => {
   for (const visible of [true, false]) {
     const { controller, calls } = createHarness();
-    controller.applyInitializationSnapshot([primary], { workspaceId: "ws-a", closedSessionIds: visible ? [primary.id] : [], openedSubtaskSessionIds: [] });
+    controller.applyInitializationSnapshot([primary], { workspaceId: "ws-a", openedSessionIds: visible ? [] : [primary.id], closedSessionIds: visible ? [primary.id] : [], openedSubtaskSessionIds: [] });
     controller.requestVisibility(primary, visible, context);
     const snapshot = controller.captureSnapshot();
     calls[0]!.deferred.reject(new Error("transport failure"));
     await flush();
-    controller.applyInitializationSnapshot([primary], { workspaceId: "ws-a", closedSessionIds: visible ? [] : [primary.id], openedSubtaskSessionIds: [] }, snapshot);
+    controller.applyInitializationSnapshot([primary], { workspaceId: "ws-a", openedSessionIds: visible ? [primary.id] : [], closedSessionIds: visible ? [] : [primary.id], openedSubtaskSessionIds: [] }, snapshot);
     assert.equal(controller.getState(primary.id)?.confirmed, !visible);
     assert.equal(controller.getState(primary.id)?.uncertainCommit, true);
     assert.equal(controller.isSnapshotProtected(primary.id, snapshot), true);
@@ -347,4 +353,60 @@ test("ending a context releases identities, write states and receipts without re
   calls[1]!.deferred.resolve(response(subtask.id, false));
   assert.equal((await fresh.result).status, "confirmed");
   assert.equal(errors.length, 0);
+});
+
+test("快照采集后新学到的缓存保持未知；后续完整读取才可确认关闭", () => {
+  const { controller } = createHarness();
+  const beforeCache = controller.captureSnapshot();
+  controller.rememberSession(primary);
+  assert.equal(controller.getEffectiveVisibility(primary), undefined);
+  assert.equal(controller.isSnapshotProtected(primary.id, beforeCache), true);
+  controller.applyInitializationSnapshot([], { workspaceId: "ws-a", openedSessionIds: [], closedSessionIds: [], openedSubtaskSessionIds: [] }, beforeCache);
+  assert.equal(controller.getState(primary.id)?.confirmed, undefined);
+  const fresh = controller.captureSnapshot();
+  controller.applyInitializationSnapshot([], { workspaceId: "ws-a", openedSessionIds: [], closedSessionIds: [], openedSubtaskSessionIds: [] }, fresh);
+  assert.equal(controller.getState(primary.id)?.confirmed, false);
+});
+
+test("完整快照新出现的成员安装 true；旧兼容数组即使矛盾也不是权威", () => {
+  const { controller } = createHarness();
+  const captured = controller.captureSnapshot();
+  controller.applyInitializationSnapshot([primary, subtask], {
+    workspaceId: "ws-a", openedSessionIds: [primary.id, subtask.id], closedSessionIds: [primary.id], openedSubtaskSessionIds: []
+  }, captured);
+  assert.equal(controller.getState(primary.id)?.confirmed, true);
+  assert.equal(controller.getState(subtask.id)?.confirmed, true);
+});
+
+for (const saved of [true, false]) {
+  test(`草稿关闭超时不伪造确认，后续完整读取按实际提交${saved}协调且无补偿`, async () => {
+    const { controller, calls, errors } = createHarness();
+    controller.transferDraftVisibility(primary, false, context);
+    assert.equal(controller.getState(primary.id)?.confirmed, undefined);
+    const stale = controller.captureSnapshot();
+    calls[0]!.deferred.reject({ code: "AGENT_TAB_VISIBILITY_TIMEOUT" });
+    await flush();
+    assert.equal(controller.getState(primary.id)?.confirmed, undefined);
+    assert.equal(controller.getState(primary.id)?.uncertainCommit, true);
+    assert.equal(errors.length, 1);
+    controller.applyInitializationSnapshot([], { workspaceId: "ws-a", openedSessionIds: [], closedSessionIds: [], openedSubtaskSessionIds: [] }, stale);
+    assert.equal(controller.getState(primary.id)?.confirmed, undefined);
+    const fresh = controller.captureSnapshot();
+    controller.applyInitializationSnapshot(saved ? [primary] : [], {
+      workspaceId: "ws-a", openedSessionIds: saved ? [primary.id] : [], closedSessionIds: [], openedSubtaskSessionIds: []
+    }, fresh);
+    assert.equal(controller.getState(primary.id)?.confirmed, saved);
+    assert.equal(controller.getState(primary.id)?.uncertainCommit, false);
+    assert.equal(calls.length, 1);
+  });
+}
+
+test("草稿创建响应上下文已失效时不迁移、不安装确认、不提交任何显隐意图", () => {
+  const { controller, calls, setCurrent } = createHarness();
+  setCurrent(false);
+  for (const visible of [true, false]) {
+    assert.equal(controller.transferDraftVisibility(primary, visible, context), false);
+    assert.equal(controller.getState(primary.id), undefined);
+  }
+  assert.equal(calls.length, 0);
 });
