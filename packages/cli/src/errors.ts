@@ -1,7 +1,7 @@
 import { escapeDisplayText } from "./session-list-output.js";
 
 export type CliExitCode = 0 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 130 | 141 | 143;
-export type ErrorPhase = "parse" | "input" | "config" | "discover" | "create" | "send" | "history" | "follow" | "status" | "cancel" | "compact" | "download" | "publish";
+export type ErrorPhase = "parse" | "input" | "config" | "discover" | "create" | "fork" | "send" | "history" | "follow" | "status" | "cancel" | "compact" | "download" | "publish";
 export type OperationEffect = "not_applicable" | "not_sent" | "rejected" | "accepted" | "unknown";
 export interface ErrorContext {
   workspaceId?: string;

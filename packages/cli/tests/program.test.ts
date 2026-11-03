@@ -10,7 +10,7 @@ import { CliError } from "../src/errors.js";
 import { captureIO, healthBody, httpServer, repository, temporaryDirectory } from "./helpers.js";
 
 test("layered help/version and bare groups succeed without config or network", async () => {
-  for (const args of [[], ["--help"], ["--version"], ["login", "--help"], ["session"], ["session", "--help"], ["session", "list", "--help"]]) {
+  for (const args of [[], ["--help"], ["--version"], ["login", "--help"], ["session"], ["session", "--help"], ["session", "list", "--help"], ["session", "fork", "--help"]]) {
     const capture = captureIO();
     let reads = 0;
     const result = await runCli(args, {
@@ -75,7 +75,7 @@ test("built CommonJS entry has a single shebang and usable help/version without 
   const bundle = await fs.readFile(file, "utf8");
   assert.ok(bundle.startsWith("#!/usr/bin/env node\n"));
   assert.equal((bundle.match(/#!\/usr\/bin\/env node/g) ?? []).length, 1);
-  for (const args of [["--help"], ["--version"], ["session", "list", "--help"]]) {
+  for (const args of [["--help"], ["--version"], ["session", "list", "--help"], ["session", "fork", "--help"]]) {
     const child = spawnSync(process.execPath, [file, ...args], { encoding: "utf8", cwd: home, env: { ...process.env, HOME: home, NODE_PATH: "" } });
     assert.equal(child.status, 0);
     assert.equal(child.stderr, "");

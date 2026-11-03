@@ -13,6 +13,8 @@
             repo.dirName === selectedRepoDirName ? 'bg-[color-mix(in_srgb,var(--info-color)_20%,var(--panel-bg))] border-l-2 border-l-[var(--info-color)]' : 'hover:bg-[var(--hover-bg)] border-l-2 border-l-transparent'
           ]"
           :data-repo="repo.dirName"
+          @mousedown.right.stop
+          @contextmenu.prevent.stop="openRepoContextMenu(repo.dirName, index, $event)"
         >
           <button
             type="button"
@@ -49,7 +51,6 @@
               aria-haspopup="menu"
               :aria-expanded="menuRepoDirName === repo.dirName"
               :aria-controls="menuRepoDirName === repo.dirName ? menuId(index) : undefined"
-              :disabled="gitBusy"
               @click="rememberMenuTrigger"
               @keydown.down.prevent="openMenuFromKeyboard(repo.dirName, index, $event)"
               @keydown.esc.stop.prevent="closeMenu(true)"
@@ -59,6 +60,8 @@
                 <a-menu-item key="checkout" :disabled="gitBusy || !checkout">{{ t("workspace.actions.checkout") }}</a-menu-item>
                 <a-menu-item key="pull" :disabled="gitBusy || !pull">{{ t("workspace.actions.pull") }}</a-menu-item>
                 <a-menu-item key="push" :disabled="gitBusy || !push">{{ t("workspace.actions.push") }}</a-menu-item>
+                <a-menu-divider />
+                <a-menu-item key="copyName">{{ t("files.actions.copyName") }}</a-menu-item>
               </a-menu>
             </template>
           </a-dropdown>
@@ -110,6 +113,7 @@ import { EllipsisOutlined } from "@ant-design/icons-vue";
 import { useI18n } from "vue-i18n";
 import type { GitPushRequest, GitTarget, WorkspaceDetail, WorkspaceGitStatusResponse } from "@agent-workbench/shared";
 import CodeReviewPanel from "./CodeReviewPanel.vue";
+import { copyTextWithFeedback } from "./copyText";
 import { useWorkspaceHost } from "@/features/workspace/host";
 
 const props = withDefaults(defineProps<{
@@ -298,6 +302,11 @@ function openMenuFromKeyboard(dirName: string, index: number, event: Event) {
   setMenuOpen(dirName, index, true);
 }
 
+function openRepoContextMenu(dirName: string, index: number, event: Event) {
+  menuTrigger = (event.currentTarget as HTMLElement).querySelector<HTMLElement>(".review-repo-more");
+  setMenuOpen(dirName, index, true);
+}
+
 function closeMenu(restoreFocus = false) {
   menuRepoDirName.value = null;
   if (restoreFocus && menuTrigger?.isConnected) menuTrigger.focus();
@@ -326,6 +335,10 @@ function onMenuKeydown(event: KeyboardEvent) {
 function onRepoAction(repo: Repo, info: { key?: string | number }, restoreMenuFocus = true) {
   const action = info.key === "checkout" ? props.checkout : info.key === "pull" ? props.pull : info.key === "push" ? props.push : undefined;
   closeMenu(restoreMenuFocus);
+  if (info.key === "copyName") {
+    void copyTextWithFeedback(repo.dirName, t("files.copy.nameCopied"), t("files.copy.failed"));
+    return;
+  }
   if (props.gitBusy || !action) return;
   const target: GitTarget = { kind: "workspaceRepo", workspaceId: props.workspaceId, dirName: repo.dirName };
   void action(target).catch((error: unknown) => message.error(error instanceof Error ? error.message : String(error)));

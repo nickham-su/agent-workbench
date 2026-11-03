@@ -102,7 +102,9 @@
                 <a-menu-item key="stage" :disabled="gitBusy">{{ t('codeReview.actions.stage') }}</a-menu-item>
                 <a-menu-item key="discard" :disabled="gitBusy" danger>{{ discardOneLabel(f) }}</a-menu-item>
                 <a-menu-divider/>
-                <a-menu-item key="copyPath">{{ t('codeReview.actions.copyPath') }}</a-menu-item>
+                <a-menu-item key="copyName">{{ t('files.actions.copyName') }}</a-menu-item>
+                <a-menu-item key="copyRepoPath">{{ t('files.actions.copyRepoPath') }}</a-menu-item>
+                <a-menu-item key="copyWorkspacePath">{{ t('files.actions.copyWorkspacePath') }}</a-menu-item>
               </a-menu>
             </template>
           </a-dropdown>
@@ -187,7 +189,9 @@
                 <a-menu-divider/>
                 <a-menu-item key="unstage" :disabled="gitBusy">{{ t('codeReview.actions.unstage') }}</a-menu-item>
                 <a-menu-divider/>
-                <a-menu-item key="copyPath">{{ t('codeReview.actions.copyPath') }}</a-menu-item>
+                <a-menu-item key="copyName">{{ t('files.actions.copyName') }}</a-menu-item>
+                <a-menu-item key="copyRepoPath">{{ t('files.actions.copyRepoPath') }}</a-menu-item>
+                <a-menu-item key="copyWorkspacePath">{{ t('files.actions.copyWorkspacePath') }}</a-menu-item>
               </a-menu>
             </template>
           </a-dropdown>
@@ -269,6 +273,7 @@ import {
 import { inferLanguageFromPath } from "@/shared/monaco/languageUtils";
 import GitIdentityModal from "@/shared/components/GitIdentityModal.vue";
 import { useWorkspaceHost } from "@/features/workspace/host";
+import { copyTextWithFeedback } from "./copyText";
 
 type Selected = { mode: ChangeMode; path: string; oldPath?: string } | null;
 
@@ -622,40 +627,6 @@ async function openFileFromChange(f: ChangeItem) {
   }
 }
 
-async function copyPath(path: string) {
-  const content = String(path ?? "");
-  if (!content) return;
-  try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(content);
-      message.success(t("codeReview.actions.pathCopied"));
-      return;
-    }
-  } catch {
-    // fallback
-  }
-
-  try {
-    const ta = document.createElement("textarea");
-    ta.value = content;
-    ta.setAttribute("readonly", "");
-    ta.style.position = "fixed";
-    ta.style.left = "-9999px";
-    ta.style.top = "0";
-    document.body.appendChild(ta);
-    ta.select();
-    const ok = document.execCommand("copy");
-    ta.remove();
-    if (ok) {
-      message.success(t("codeReview.actions.pathCopied"));
-      return;
-    }
-  } catch {
-    // ignore
-  }
-  message.error(t("codeReview.actions.copyFailed"));
-}
-
 function onContextMenuAction(mode: ChangeMode, f: ChangeItem, info: { key?: string | number }) {
   const key = String(info?.key || "");
   if (!key) return;
@@ -669,8 +640,13 @@ function onContextMenuAction(mode: ChangeMode, f: ChangeItem, info: { key?: stri
     void openFileFromChange(f);
     return;
   }
-  if (key === "copyPath") {
-    void copyPath(f.path);
+  if (key === "copyName" || key === "copyRepoPath" || key === "copyWorkspacePath") {
+    const target = props.target;
+    if (key === "copyWorkspacePath" && !target) return;
+    const content = key === "copyName" ? fileBase(f.path.replace(/\/+$/, ""))
+      : key === "copyWorkspacePath" && target ? `${target.dirName}/${f.path}` : f.path;
+    const feedbackKey = key === "copyName" ? "nameCopied" : key === "copyWorkspacePath" ? "workspacePathCopied" : "repoPathCopied";
+    void copyTextWithFeedback(content, t(`files.copy.${feedbackKey}`), t("files.copy.failed"));
     return;
   }
   if (key === "stage" && mode === "unstaged") {

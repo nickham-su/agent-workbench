@@ -22,7 +22,7 @@ async function help(args: string[]) {
 
 test("normal help describes usage without speculative availability or result disclaimers", async () => {
   const commands = [[], ["login"], ["workspace"], ["workspace", "list"], ["agent"], ["agent", "list"], ["session"],
-    ...["list", "show", "status", "send", "messages", "cancel", "compact"].map((action) => ["session", action]),
+    ...["list", "show", "status", "send", "messages", "fork", "cancel", "compact"].map((action) => ["session", action]),
     ["file"], ["file", "download"]];
   for (const command of commands) {
     const output = await help(command);
@@ -56,6 +56,14 @@ test("positive help retains input, follow, cancellation and download operation r
   assert.ok(send.includes("主会话"));
   const messages = await help(["session", "messages"]);
   assert.ok(messages.includes("-n1返回最近一条普通消息"));
+  const fork = await help(["session", "fork"]);
+  for (const rule of ["读取源会话时的最新消息", "无需指定消息ID", "不等待、不回退旧消息", "不复制或隔离工作区文件", "不继承运行状态", "不取消源任务", "写操作不自动重试"]) {
+    assert.ok(fork.includes(rule), rule);
+  }
+  for (const option of ["--workspace<ID>", "--session<ID>"]) assert.ok(fork.includes(option), option);
+  assert.doesNotMatch(fork, /--message|--title|--follow/);
+  const session = await help(["session"]);
+  assert.ok(session.includes("fork"));
   const cancel = await help(["session", "cancel"]);
   assert.ok(cancel.includes("服务端处理请求时的当前执行及其活动后代"));
   assert.ok(cancel.includes("不回滚文件、不删除历史"));

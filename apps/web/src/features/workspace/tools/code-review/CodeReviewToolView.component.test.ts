@@ -47,6 +47,9 @@ const wrappers: VueWrapper[] = [];
 const originalAdapter = apiClient.defaults.adapter;
 const originalSuccess = message.success;
 const originalWarning = message.warning;
+const originalError = message.error;
+const originalClipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+const originalExecCommand = Object.getOwnPropertyDescriptor(document, "execCommand");
 const originalBodyStyle = { userSelect: document.body.style.userSelect, cursor: document.body.style.cursor };
 const repoWidthKey = (id = wsId) => `agent-workbench.workspace.codeReview.repoWidth.v1.${id}`;
 const requests: Array<{ path: string; body: any }> = [];
@@ -76,7 +79,7 @@ function mountTool(overrides: Record<string, unknown> = {}, renderPanel = false,
       checkout: async (target) => { calls.push({ action: "checkout", target }); },
       pull: async (target) => { calls.push({ action: "pull", target }); },
       push: async (target) => { calls.push({ action: "push", target }); }, ...overrides },
-    global: { plugins: [i18n()], components: { ADropdown: Dropdown, AMenu: Menu, AMenuItem: Menu.Item },
+    global: { plugins: [i18n()], components: { ADropdown: Dropdown, AMenu: Menu, AMenuItem: Menu.Item, AMenuDivider: Menu.Divider },
       stubs: renderPanel ? { ...stubs, "a-button": renderButtons ? Button : stubs["a-button"], GitIdentityModal: true, CodeReviewPanel: false } : { CodeReviewPanel: true }, provide: { [workspaceHostKey as symbol]: host } }
   });
   wrappers.push(wrapper);
@@ -136,6 +139,25 @@ function mountPanel(overrides: Record<string, unknown> = {}, locale = "zh-CN") {
   });
   wrappers.push(wrapper); return wrapper;
 }
+
+function mountPanelMenus() {
+  const wrapper = mount(Panel, {
+    attachTo: document.body,
+    props: { workspaceId: wsId, toolId: "codeReview", target: target("foo"), gitBusy: false, beginGitOp: () => () => {} },
+    global: { plugins: [i18n()], stubs: { ...stubs, "a-dropdown": Dropdown, "a-menu": Menu, "a-menu-item": Menu.Item, "a-menu-divider": Menu.Divider, GitIdentityModal: true }, provide: { [workspaceHostKey as symbol]: host } }
+  });
+  wrappers.push(wrapper); return wrapper;
+}
+
+function clipboard(writeText: (content: string) => Promise<void>) {
+  Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+}
+
+function visibleMenu() {
+  const menu = document.querySelector<HTMLElement>('.ant-dropdown:not(.ant-dropdown-hidden) [role="menu"]');
+  assert.ok(menu, "the actual dropdown overlay is visible");
+  return menu;
+}
 // vite-node transforms SFC scripts without browser CSS injection. Load the actual
 // scoped rules and compile their real Tailwind classes with the app config.
 // These are CSS contract checks, not browser layout or rendered pixel testing.
@@ -166,6 +188,11 @@ beforeEach(() => {
 afterEach(async () => {
   for (const wrapper of wrappers.splice(0)) wrapper.unmount();
   apiClient.defaults.adapter = originalAdapter; message.success = originalSuccess; message.warning = originalWarning;
+  message.error = originalError;
+  if (originalClipboard) Object.defineProperty(navigator, "clipboard", originalClipboard);
+  else Reflect.deleteProperty(navigator, "clipboard");
+  if (originalExecCommand) Object.defineProperty(document, "execCommand", originalExecCommand);
+  else Reflect.deleteProperty(document, "execCommand");
   mock.restoreAll();
   document.body.style.userSelect = originalBodyStyle.userSelect; document.body.style.cursor = originalBodyStyle.cursor;
   TestResizeObserver.instances = []; await settle();
@@ -270,6 +297,155 @@ for (const [key, label] of [["checkout", "切换分支"], ["pull", "拉取"], ["
     assert.deepEqual(selected, []); assert.equal(trigger.attributes("aria-expanded"), "false");
   });
 }
+
+for (const busy of [false, true]) {
+  test(`仓库按钮与整行右键共用含分割线的菜单，复制非选中仓库名称不受忙碌状态影响（${busy}）`, async () => {
+    const copied: string[] = [];
+    clipboard(async (content) => { copied.push(content); });
+    const { wrapper, calls, selected } = mountTool({ gitBusy: busy }); await settle();
+    const row = wrapper.get('[data-repo="repo-8"]');
+    const trigger = row.get(".review-repo-more");
+    assert.equal((trigger.element as HTMLButtonElement).disabled, false);
+    for (const openBy of ["click", "contextmenu"]) {
+      await (openBy === "click" ? trigger : row).trigger(openBy); await settle();
+      const menu = visibleMenu();
+      const items = [...menu.querySelectorAll<HTMLElement>('[role="menuitem"]')];
+      assert.deepEqual(items.map((item) => item.textContent), ["切换分支", "拉取", "推送", "复制名称"]);
+      const divider = menu.querySelector(".ant-dropdown-menu-item-divider");
+      assert.ok(divider); assert.equal(divider.previousElementSibling, items[2]); assert.equal(divider.nextElementSibling, items[3]);
+      for (const item of items.slice(0, 3)) assert.equal(item.getAttribute("aria-disabled") === "true", busy);
+      assert.notEqual(items[3]!.getAttribute("aria-disabled"), "true");
+      items[3]!.click(); await settle();
+      assert.equal(trigger.attributes("aria-expanded"), "false");
+      assert.equal(document.activeElement, trigger.element);
+    }
+    assert.deepEqual(copied, ["repo-8", "repo-8"]); assert.deepEqual(calls, []); assert.deepEqual(selected, []);
+  });
+}
+
+test("右键仓库子元素保留审查选择，Git动作绑定该仓库，Escape恢复本次右键仓库的焦点", async () => {
+  const { wrapper, calls, selected } = mountTool(); await settle();
+  await wrapper.get('[data-repo-menu="repo-2"]').trigger("click"); await settle();
+  for (const [action, label] of [["checkout", "切换分支"], ["pull", "拉取"], ["push", "推送"]]) {
+    await wrapper.get('[data-repo="repo-8"] .review-repo-name-text').trigger("contextmenu"); await settle();
+    const item = [...visibleMenu().querySelectorAll<HTMLElement>('[role="menuitem"]')].find((item) => item.textContent === label)!;
+    item.click(); await settle();
+    assert.deepEqual(calls.at(-1), { action, target: target("repo-8") });
+  }
+  assert.equal(calls.length, 3); assert.deepEqual(selected, []);
+  await wrapper.get('[data-repo="repo-8"]').trigger("contextmenu"); await settle();
+  visibleMenu().dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true })); await settle();
+  assert.equal(document.activeElement, wrapper.get('[data-repo-menu="repo-8"]').element);
+  await wrapper.get('[data-repo="repo-8"]').trigger("contextmenu"); await settle();
+  await wrapper.get(".review-repositories").trigger("scroll"); await settle();
+  assert.equal(wrapper.get('[data-repo-menu="repo-8"]').attributes("aria-expanded"), "false");
+});
+
+test("真实右键事件顺序不会延迟关闭同一行、重复或跨行仓库菜单，左键和外部点击仍可关闭", async () => {
+  const { wrapper, calls, selected } = mountTool(); await settle();
+  const waitForCloseTimer = async () => {
+    await new Promise((resolve) => setTimeout(resolve, 150)); await settle();
+  };
+  await wrapper.get('[data-repo-menu="repo-2"]').trigger("click"); await settle();
+  for (const [repo, child] of [["repo-2", " .review-repo-name-text"], ["repo-2", ""], ["repo-8", " .review-repo-name-text"], ["repo-8", ""]]) {
+    const row = wrapper.get(`[data-repo="${repo}"]${child}`);
+    // Browsers dispatch mousedown before contextmenu; Dropdown's outside handler runs on mousedown.
+    await row.trigger("mousedown", { button: 2 });
+    await row.trigger("contextmenu", { button: 2 }); await settle();
+    await waitForCloseTimer();
+    const trigger = wrapper.get(`[data-repo-menu="${repo}"]`);
+    assert.equal(trigger.attributes("aria-expanded"), "true", `${repo}${child} remains open after the outside-close delay`);
+    assert.equal(wrapper.findAll('[aria-expanded="true"]').length, 1);
+    assert.ok(document.getElementById(trigger.attributes("aria-controls")!));
+    assert.deepEqual(selected, []); assert.deepEqual(calls, []);
+  }
+  const trigger = wrapper.get('[data-repo-menu="repo-8"]');
+  const menu = document.getElementById(trigger.attributes("aria-controls")!)!;
+  [...menu.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((item) => item.textContent === "推送")!.click(); await settle();
+  assert.deepEqual(calls, [{ action: "push", target: target("repo-8") }]);
+  assert.equal(trigger.attributes("aria-expanded"), "false");
+
+  await trigger.trigger("click"); await settle();
+  const name = wrapper.get('[data-repo="repo-2"] .review-repo-select');
+  await name.trigger("mousedown", { button: 0 });
+  await name.trigger("click", { button: 0 });
+  await waitForCloseTimer();
+  assert.deepEqual(selected, ["repo-2"]);
+  assert.equal(trigger.attributes("aria-expanded"), "false", "left-click on the row still closes the menu");
+
+  await trigger.trigger("click"); await settle();
+  document.body.dispatchEvent(new window.MouseEvent("mousedown", { bubbles: true, button: 0 }));
+  await waitForCloseTimer();
+  assert.equal(trigger.attributes("aria-expanded"), "false", "outside clicks still close the menu");
+  assert.deepEqual(selected, ["repo-2"]);
+  assert.deepEqual(calls, [{ action: "push", target: target("repo-8") }]);
+});
+
+const copyCases: Array<{ file: ChangeItem; name: string }> = [
+  { file: { path: "foo/a.ts", status: "M" }, name: "a.ts" },
+  { file: { path: "src/new.ts", oldPath: "old.ts", status: "R" }, name: "new.ts" },
+  { file: { path: "src/deleted.ts", status: "D" }, name: "deleted.ts" },
+  { file: { path: "nested/folder/", status: "??", kind: "directory" }, name: "folder" },
+  { file: { path: "vendor/sub", status: "M", kind: "submodule" }, name: "sub" },
+  { file: { path: " space / file name .ts ", status: "M" }, name: " file name .ts " },
+  { file: { path: "src/back\\slash.ts", status: "M" }, name: "back\\slash.ts" }
+];
+
+for (const mode of ["unstaged", "staged"] as const) {
+  test(`${mode}实际右键菜单用三种复制项替换旧复制路径，保留路径原值与特殊变更语义`, async () => {
+    files = { unstaged: [], staged: [], [mode]: copyCases.map(({ file }) => file) };
+    const copied: string[] = [];
+    clipboard(async (content) => { copied.push(content); });
+    const panel = mountPanelMenus(); await settle();
+    const rows = panel.findAll(".review-file-list .group"); assert.equal(rows.length, copyCases.length);
+    for (const { file, name } of copyCases) {
+      const row = rows.find((row) => row.find(".font-mono[title]").attributes("title") === file.path)!;
+      const dropdown = panel.findAllComponents(Dropdown).find((dropdown) => dropdown.find(".font-mono[title]").attributes("title") === file.path)!;
+      for (const [label, expected] of [["复制名称", name], ["复制仓库内路径", file.path], ["复制工作区路径", `foo/${file.path}`]]) {
+        await row.trigger("contextmenu"); await settle();
+        // Closed dropdowns remain mounted during their leave animation; inspect this row's own overlay.
+        const menu = dropdown.findComponent(Menu);
+        assert.equal(menu.exists(), true);
+        const items = [...(menu.element as HTMLElement).querySelectorAll<HTMLElement>('[role="menuitem"]')];
+        assert.equal(items.some((item) => item.textContent === "复制路径"), false);
+        assert.deepEqual(items.slice(-3).map((item) => item.textContent), ["复制名称", "复制仓库内路径", "复制工作区路径"]);
+        const item = items.find((item) => item.textContent === label)!;
+        assert.notEqual(item.getAttribute("aria-disabled"), "true");
+        item.click(); await settle();
+        assert.equal(copied.at(-1), expected);
+      }
+    }
+    assert.equal(copied.length, copyCases.length * 3);
+    assert.equal(requests.some((request) => request.path === "/git/file-compare"), false, "right-click/copy must not open a diff");
+  });
+}
+
+test("仓库和文件复制可在剪贴板不可用时降级，失败反馈一次且始终清理textarea", async () => {
+  const { wrapper } = mountTool(); await settle();
+  const successes: string[] = []; const errors: string[] = []; const fallback: string[] = [];
+  message.success = ((text: string) => { successes.push(text); }) as typeof message.success;
+  message.error = ((text: string) => { errors.push(text); }) as typeof message.error;
+  clipboard(async () => { throw new Error("clipboard denied"); });
+  Object.defineProperty(document, "execCommand", { configurable: true, value: (command: string) => {
+    assert.equal(command, "copy"); fallback.push(document.querySelector("textarea")!.value); return true;
+  } });
+  await wrapper.get('[data-repo="repo-8"]').trigger("contextmenu"); await settle();
+  [...visibleMenu().querySelectorAll<HTMLElement>('[role="menuitem"]')].find((item) => item.textContent === "复制名称")!.click(); await settle();
+  assert.deepEqual(fallback, ["repo-8"]); assert.deepEqual(successes, ["已复制名称"]); assert.deepEqual(errors, []);
+  assert.equal(document.querySelector("textarea"), null);
+  const panel = mountPanelMenus(); await settle();
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: undefined });
+  for (const result of [false, "throw"]) {
+    Object.defineProperty(document, "execCommand", { configurable: true, value: () => {
+      if (result === "throw") throw new Error("copy unsupported");
+      return result;
+    } });
+    await panel.get(".review-file-list .group").trigger("contextmenu"); await settle();
+    [...visibleMenu().querySelectorAll<HTMLElement>('[role="menuitem"]')].find((item) => item.textContent === "复制仓库内路径")!.click(); await settle();
+    assert.equal(document.querySelector("textarea"), null);
+  }
+  assert.deepEqual(errors, ["复制失败", "复制失败"]); assert.deepEqual(successes, ["已复制名称"]);
+});
 
 test("仓库菜单支持方向键打开和Escape关闭并恢复焦点", async () => {
   const { wrapper } = mountTool(); await settle();
@@ -791,7 +967,7 @@ test("KeepAlive停用时取消拖动，重新显示恢复原宽度且不遗留�
   const wrapper = mount(defineComponent({ setup: () => () => h(KeepAlive, () => active.value ? h(Tool, {
     workspaceId: wsId, toolId: "codeReview", target: target(), gitBusy: false, beginGitOp: () => () => {}, repos
   }) : null) }), {
-    attachTo: document.body, global: { plugins: [i18n()], stubs: { CodeReviewPanel: true, ADropdown: true, AMenu: true, AMenuItem: true }, provide: { [workspaceHostKey as symbol]: host } }
+    attachTo: document.body, global: { plugins: [i18n()], stubs: { CodeReviewPanel: true, ADropdown: true, AMenu: true, AMenuItem: true, AMenuDivider: true }, provide: { [workspaceHostKey as symbol]: host } }
   });
   wrappers.push(wrapper); await settle();
   const tool = wrapper.findComponent(Tool); resize(tool, 1000); await nextTick();
