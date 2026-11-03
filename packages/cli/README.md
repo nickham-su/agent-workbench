@@ -1,6 +1,6 @@
 # AWB CLI
 
-独立的 Node.js HTTP 客户端（运行要求 Node.js 22+，本仓库使用 Node.js 24 开发与验证），不读取 API 数据库，也不依赖 Worker 注入身份。提供分层命令帮助、安全登录、工作区/Agent发现、主会话发送和主/子会话消息查询；统一自然语言输出，不提供外部 JSON/JSONL 模式。支持固定一次 Run 的有限跟随、主会话取消及手动压缩；支持工作区文件和目录 ZIP 的流式无覆盖下载。
+独立的 Node.js HTTP 客户端（运行要求 Node.js 22+，本仓库使用 Node.js 24 开发与验证），不读取 API 数据库，也不依赖 Worker 注入身份。提供分层命令帮助、安全登录、工作区/Agent发现、主会话发送和主/子会话消息查询；统一自然语言输出，不提供外部 JSON/JSONL 模式。支持固定一次 Run 的有限跟随、主会话 Fork、取消及手动压缩；支持工作区文件和目录 ZIP 的流式无覆盖下载。
 
 ## 本地安装
 
@@ -37,6 +37,7 @@ awb session messages -w workspace-id -s session-id -n 1
 awb session messages -w workspace-id -s session-id --after message-id
 awb session send -w workspace-id --prompt '请检查项目' -f --follow-timeout 10m
 awb session messages -w workspace-id -s session-id -n 1 -f
+awb session fork -w workspace-id -s session-id
 awb session cancel -w workspace-id -s session-id
 awb session compact -w workspace-id -s session-id -f
 awb file download -w workspace-id --path reports --output ./reports.zip
@@ -115,6 +116,7 @@ stdout 正常输出始终等待写入回调和背压。最终诊断及读请求�
 - 仅监听初始化、分页、轮询、终态补读的逻辑 GET，在网络中断、单请求超时或 HTTP 429/502/503/504 时最多重试三次，依次等待 1/2/4 秒；每请求独立预算、相同业务参数、不重放已成功步骤。HTTP500、认证、契约、分支、本地续签保存、输出错误及整体时限不重试；普通非 follow、下载、创建／发送／取消／压缩／登录写操作不增加重试。信号、EPIPE、整体时限可打断等待，本地停止不取消后台。
 - 唯一任务收尾中的 `complete` 表示消息范围是否读完，和 Run 是否成功独立：`run_completed/0`、`run_failed/8`、`run_cancelled/9` 均可 `complete=true`；`no_active_run/0` 表示查询捕获时没有活动Run。观察失败时 `complete=false`，认证4、传输或单请求超时5、契约/分支失效6、本地续签保存7、整体监听超时10优先于已知 Run 结果。
 - SIGINT/SIGTERM 分别130/143、stdout EPIPE为141，只停止本地请求/监听，绝不自动调用 cancel。stdout关闭或SIGKILL无法保证terminal，调用方须同时检查进程退出码。
+- `session fork` 仅允许主会话，自动使用读取源会话时的 `headMessageId`，无需且不支持指定消息 ID。后续追加不改变本次选点；若分支改变或选点不可 Fork，按服务端结果失败，不等待、不回退旧消息。空会话在本地拒绝；生成中消息、未结束工具及压缩节点等边界由服务端校验。成功输出新 Session ID、来源 Session ID 和实际 Fork 消息 ID。仅创建对话分支，不复制或隔离工作区文件、不继承运行状态、不取消源任务；创建写请求不自动重试，响应丢失时保留 `effect=unknown`，不要盲目重发。
 - `session cancel` 仅允许主会话，取消服务端处理请求时的当前执行及其活动后代，不回滚已写文件、不删除历史。正常输出“取消请求已处理”及返回的会话状态；空闲会话同样按实际状态展示。
 - `session compact` 仅空闲主会话，默认首个 user Agent，不公开 `-a`；busy冲突不排队。默认只返回受理，`-f` 从 Run 终态区分完成、无需压缩/无进展/尾部过大/需重发媒体和失败；空会话保留 `AGENT_COMPACTION_EMPTY` 错误。压缩不删除原始历史或工作区文件。
 - 每次发送/压缩使用独立随机请求 ID，不跨调用恢复。无法证明原 Agent 的意外去重会保留可信身份并失败，不假造成功或把去重当成无需压缩。

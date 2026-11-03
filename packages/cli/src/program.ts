@@ -12,6 +12,7 @@ import { parseSessionListOptions, type SessionListOptions } from "./session-quer
 import { listMessages, parseMessageSelection } from "./messages.js";
 import { prepareSend, sendMessage } from "./send.js";
 import { followMessages, followSend } from "./follow.js";
+import { forkSession } from "./fork.js";
 import { parseFollowOptions } from "./follow-lifetime.js";
 import { cancelSession, compactSession } from "./control.js";
 import { downloadFile, validateDownloadOptions } from "./download.js";
@@ -114,6 +115,12 @@ export async function runCli(args: readonly string[], dependencies: CliDependenc
         const follow = parseFollowOptions(options);
         if (follow.follow) commandExitCode = await followMessages(workspaceId, sessionId, selection, follow, commandDependencies());
         else await listMessages(workspaceId, sessionId, selection, commandDependencies());
+      });
+    session.command("fork").description("从读取时的最新消息创建 Fork 主会话")
+      .requiredOption("-w, --workspace <ID>", "Workspace ID").requiredOption("-s, --session <ID>", "来源主 Session ID")
+      .allowExcessArguments(false).addHelpText("after", "\n例：awb session fork -w <ID> -s <ID>\n自动使用读取源会话时的最新消息，无需指定消息 ID；选点不可 Fork 时直接失败，不等待、不回退旧消息。\n仅创建对话分支，不复制或隔离工作区文件、不继承运行状态、不取消源任务；写操作不自动重试。\n")
+      .action(async (options: { workspace: string; session: string }) => {
+        await forkSession(validateId(options.workspace), validateId(options.session, true), commandDependencies());
       });
     session.command("cancel").description("取消主会话的当前执行及活动后代")
       .requiredOption("-w, --workspace <ID>", "Workspace ID").requiredOption("-s, --session <ID>", "主 Session ID")
