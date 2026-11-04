@@ -753,7 +753,9 @@ test("runModelStep: modelRequestMaxRetries 为 0 时首次 Provider 失败直接
 
     await assert.rejects(started.promise, (error) => error === providerError);
     assert.equal(started.streamRequests.length, 1);
-    assert.equal(started.runNoticeUpdates.length, 0);
+    assert.equal(started.runNoticeUpdates.length, 1);
+    assert.match(String(started.runNoticeUpdates[0]!.runNoticeText), /^Request failed:/);
+    assert.equal(started.runNoticeUpdates[0]!.nextRetryAt, null);
     assert.deepEqual(scheduledDelays, []);
     assert.equal(started.discardRequests.length, 0);
   } finally {

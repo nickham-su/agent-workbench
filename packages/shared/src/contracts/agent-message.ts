@@ -222,6 +222,16 @@ export const AgentSessionMessageStateSchema = Type.Object({
 }, { additionalProperties: false });
 export type AgentSessionMessageState = Static<typeof AgentSessionMessageStateSchema>;
 
+/** Sanitized, bounded diagnostics for the latest failed model request; never model context. */
+export const AGENT_MODEL_ERROR_BODY_MAX_LENGTH = 32_768;
+export const AgentModelRequestErrorSchema = Type.Object({
+  statusCode: Type.Union([Type.Integer({ minimum: 100, maximum: 599 }), Type.Null()]),
+  responseBody: Type.Union([Type.String({ maxLength: AGENT_MODEL_ERROR_BODY_MAX_LENGTH }), Type.Null()]),
+  message: Type.String({ maxLength: 1000 }),
+  truncated: Type.Boolean()
+}, { additionalProperties: false });
+export type AgentModelRequestError = Static<typeof AgentModelRequestErrorSchema>;
+
 export const AgentMessageSessionRunStateSchema = Type.Object({
   workspaceId: IdSchema,
   sessionId: IdSchema,
@@ -233,6 +243,8 @@ export const AgentMessageSessionRunStateSchema = Type.Object({
    */
   selectionAgentId: Type.Optional(NullableIdSchema),
   runNoticeText: Type.String(),
+  /** Optional for legacy snapshots and callers; current servers return null when cleared. */
+  modelRequestError: Type.Optional(Type.Union([AgentModelRequestErrorSchema, Type.Null()])),
   retryCount: Type.Integer({ minimum: 0 }),
   lastResponseTotalTokens: Type.Optional(Type.Union([Type.Number({ minimum: 0 }), Type.Null()])),
   contextTokenRatio: Type.Optional(Type.Union([Type.Number({ minimum: 0 }), Type.Null()])),

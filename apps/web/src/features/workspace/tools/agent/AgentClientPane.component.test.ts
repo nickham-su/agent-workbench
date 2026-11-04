@@ -1969,3 +1969,83 @@ test("真实 AgentClientPane：初始化完成后 compact 使用已恢复的 Age
     wrapper.unmount(); http.restore();
   }
 });
+
+test("错误提示单行截断，详情固定尾部；弹窗用纯文本快照且切换会话清理", async () => {
+  const detail = { statusCode: 503, responseBody: '<script>not executable</script>\n{"error":"busy"}', message: "upstream failed", truncated: true };
+  const { wrapper, setRunState } = mountPane({
+    runState: baseRunState({ runNoticeText: "Request failed, retrying in 4s: Error", modelRequestError: detail }),
+    contextLocale: "zh-CN", renderModalSlots: true,
+  });
+  try {
+    const notice = wrapper.get('[data-testid="run-notice"]');
+    assert.ok(notice.get("span").classes().includes("truncate"));
+    const button = wrapper.get('[data-testid="model-error-details-button"]');
+    assert.ok(button.classes().includes("shrink-0"));
+    assert.equal(button.text(), "详情");
+    await button.trigger("click");
+    const body = wrapper.get('[data-testid="model-error-response-body"]');
+    assert.equal(body.text(), detail.responseBody);
+    assert.equal(body.find("script").exists(), false);
+    assert.match(wrapper.get('[data-testid="visible-modal"]').text(), /HTTP 503/);
+    assert.match(wrapper.get('[data-testid="visible-modal"]').text(), /已截断/);
+    setRunState({ runNoticeText: "next retry", modelRequestError: { ...detail, responseBody: "new response" } });
+    await nextTick();
+    assert.equal(body.text(), detail.responseBody, "polling must not replace the open failure snapshot");
+    setRunState({ runNoticeText: "", modelRequestError: null });
+    await nextTick();
+    assert.equal(wrapper.find('[data-testid="model-error-details-button"]').exists(), false);
+    assert.equal(body.text(), detail.responseBody, "recovery must not erase a dialog already being read");
+    await wrapper.setProps({ sessionId: "session-b" });
+    assert.equal(wrapper.find('[data-testid="visible-modal"]').exists(), false);
+    assert.equal((wrapper.vm as unknown as { modelErrorSnapshot: unknown }).modelErrorSnapshot, null);
+  } finally { wrapper.unmount(); }
+});
+
+test("没有响应体时详情明确提示原因，普通运行提示没有详情按钮", async () => {
+  const { wrapper, setRunState } = mountPane({ contextLocale: "zh-CN", renderModalSlots: true,
+    runState: baseRunState({ runNoticeText: "Request failed", modelRequestError: { statusCode: null, responseBody: null, message: "Model idle timeout after 60000ms", truncated: false } }),
+  });
+  try {
+    await wrapper.get('[data-testid="model-error-details-button"]').trigger("click");
+    const modal = wrapper.get('[data-testid="visible-modal"]');
+    assert.match(modal.text(), /未收到响应体/);
+    assert.match(modal.text(), /idle timeout after 60000ms/);
+    assert.equal(modal.find("pre").exists(), false);
+    setRunState({ runNoticeText: "正在压缩上下文", modelRequestError: null }); await nextTick();
+    assert.equal(wrapper.find('[data-testid="model-error-details-button"]').exists(), false);
+  } finally { wrapper.unmount(); }
+});
+
+
+test("错误详情复制使用当前弹窗快照", async () => {
+  const descriptor = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+  const copied: string[] = [];
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async (value: string) => { copied.push(value); } } });
+  const { wrapper, setRunState } = mountPane({ contextLocale: "zh-CN", renderModalSlots: true,
+    runState: baseRunState({ runNoticeText: "Request failed", modelRequestError: { statusCode: 429, responseBody: "rate limited", message: "HTTP 429", truncated: false } }),
+  });
+  try {
+    await wrapper.get('[data-testid="model-error-details-button"]').trigger("click");
+    setRunState({ modelRequestError: null, runNoticeText: "" }); await nextTick();
+    await (wrapper.vm as unknown as { copyModelErrorDetails: () => Promise<void> }).copyModelErrorDetails();
+    assert.equal(copied.length, 1); assert.match(copied[0]!, /HTTP 429/); assert.match(copied[0]!, /rate limited/);
+  } finally {
+    wrapper.unmount();
+    if (descriptor) Object.defineProperty(navigator, "clipboard", descriptor);
+    else delete (navigator as { clipboard?: unknown }).clipboard;
+  }
+});
+
+
+test("切换会话 Tab 即使保留 Pane 实例，也关闭错误详情并清空快照", async () => {
+  const { wrapper } = mountPane({ active: true, contextLocale: "zh-CN", renderModalSlots: true,
+    runState: baseRunState({ runNoticeText: "Request failed", modelRequestError: { statusCode: 503, responseBody: "busy", message: "HTTP 503", truncated: false } }),
+  });
+  try {
+    await wrapper.get('[data-testid="model-error-details-button"]').trigger("click");
+    assert.equal(wrapper.find('[data-testid="visible-modal"]').exists(), true);
+    await wrapper.setProps({ active: false });
+    assert.equal(wrapper.find('[data-testid="visible-modal"]').exists(), false);
+    assert.equal((wrapper.vm as unknown as { modelErrorSnapshot: unknown }).modelErrorSnapshot, null);
+  } finally { wrapper.unmount(); }
+});

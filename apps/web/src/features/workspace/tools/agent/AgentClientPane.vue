@@ -195,9 +195,18 @@
     >
       <div
         v-if="runState.runNoticeText"
-        class="mb-1 text-[0.85em] text-[color:var(--text-tertiary)]"
+        data-testid="run-notice"
+        class="mb-1 flex min-w-0 items-center gap-1 text-[0.85em] text-[color:var(--text-tertiary)]"
       >
-        {{ runState.runNoticeText }}
+        <span class="min-w-0 flex-1 truncate">{{ runState.runNoticeText }}</span>
+        <a-button
+          v-if="runState.modelRequestError"
+          data-testid="model-error-details-button"
+          type="link"
+          size="small"
+          class="shrink-0 !px-1"
+          @click="openModelErrorDetails"
+        >{{ t("agent.client.modelErrorDetails") }}</a-button>
       </div>
       <div
         v-if="!agentSelectionReady"
@@ -338,6 +347,31 @@
       </div>
     </footer>
 
+    <a-modal
+      v-model:open="modelErrorModalVisible"
+      :title="t('agent.client.modelErrorTitle')"
+      :footer="null"
+      :width="760"
+    >
+      <template v-if="modelErrorSnapshot">
+        <div class="mb-2 text-sm">
+          {{ modelErrorSnapshot.message }}
+          <span v-if="modelErrorSnapshot.statusCode != null"> · HTTP {{ modelErrorSnapshot.statusCode }}</span>
+        </div>
+        <div v-if="modelErrorSnapshot.responseBody === null" class="mb-2">{{ t("agent.client.modelErrorNoBody") }}</div>
+        <pre
+          v-else
+          data-testid="model-error-response-body"
+          class="max-h-[60vh] overflow-auto whitespace-pre-wrap break-words rounded bg-[var(--panel-bg)] p-3 text-xs"
+        >{{ modelErrorSnapshot.responseBody }}</pre>
+        <div v-if="modelErrorSnapshot.truncated" class="mt-2 text-sm text-amber-600">{{ t("agent.client.modelErrorTruncated") }}</div>
+        <a-button class="mt-3" size="small" @click="copyModelErrorDetails">
+          <template #icon><CopyOutlined /></template>
+          {{ t("agent.client.modelErrorCopy") }}
+        </a-button>
+      </template>
+    </a-modal>
+
     <AgentAttachmentPreviewModal
       :open="attachmentPreviewVisible"
       :loading="previewLoading"
@@ -444,6 +478,7 @@
 import type {
   AgentImagePart,
   AgentMessage,
+  AgentModelRequestError,
   AgentSessionMessageState,
   AgentSessionRecord,
   AgentTimelineToolExecution,
@@ -644,6 +679,31 @@ const emit = defineEmits<{
 const { t } = useI18n();
 const statusStore = useAgentSessionStatusStore();
 const runState = computed(() => statusStore.getRunState(props.sessionId).value);
+const modelErrorModalVisible = ref(false);
+const modelErrorSnapshot = ref<AgentModelRequestError | null>(null);
+function openModelErrorDetails() {
+  const error = runState.value.modelRequestError;
+  if (!error) return;
+  // Keep the selected failure readable even if polling replaces or clears it.
+  modelErrorSnapshot.value = { ...error };
+  modelErrorModalVisible.value = true;
+}
+function closeModelErrorDetails() {
+  modelErrorModalVisible.value = false;
+  modelErrorSnapshot.value = null;
+}
+watch(() => [props.workspaceId, props.sessionId, props.active], closeModelErrorDetails);
+async function copyModelErrorDetails() {
+  const error = modelErrorSnapshot.value;
+  if (!error) return;
+  const text = [
+    error.message,
+    error.statusCode == null ? null : `HTTP ${error.statusCode}`,
+    error.responseBody ?? t("agent.client.modelErrorNoBody"),
+    error.truncated ? t("agent.client.modelErrorTruncated") : null,
+  ].filter((part) => part != null).join("\n\n");
+  await copyTextWithFeedback(text, t("agent.client.modelErrorCopied"));
+}
 const isSubtaskSession = computed(() => props.sessionKind === "subtask");
 const sessionTitleText = computed(
   () => String(props.sessionTitle || "").trim() || props.sessionId,
@@ -2082,6 +2142,7 @@ watch(
   { immediate: true },
 );
 onDeactivated(() => {
+  closeModelErrorDetails();
   if (!savedByTab) saveScrollPosition();
 });
 onActivated(() => {

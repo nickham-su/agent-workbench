@@ -2,6 +2,7 @@ import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import {
   AgentMessageSchema,
+  AgentModelRequestErrorSchema,
   AgentOrdinaryMessageSchema,
   AgentMessagePartSchema,
   AgentSessionMessageStateSchema,
@@ -129,6 +130,7 @@ export const AgentApiReplaceStreamingAssistantRequestSchema = Type.Object({
   oldMessageId: IdSchema,
   newMessageId: IdSchema,
   runNoticeText: Type.String(),
+  modelRequestError: Type.Optional(Type.Union([AgentModelRequestErrorSchema, Type.Null()])),
   retryCount: Type.Integer({ minimum: 0 }),
   nextRetryAt: Type.Union([Type.Number(), Type.Null()]),
   createdAt: Type.Number()
@@ -199,6 +201,7 @@ export const AgentApiUpdateRunNoticeRequestSchema = Type.Object({
   sessionId: IdSchema,
   runId: IdSchema,
   runNoticeText: Type.String(),
+  modelRequestError: Type.Optional(Type.Union([AgentModelRequestErrorSchema, Type.Null()])),
   /** Only compaction progress/cleanup uses this CAS guard; ordinary notices omit it. */
   compactionExpectedRevision: Type.Optional(Type.Integer({ minimum: 0 })),
   retryCount: Type.Optional(Type.Integer({ minimum: 0 })),

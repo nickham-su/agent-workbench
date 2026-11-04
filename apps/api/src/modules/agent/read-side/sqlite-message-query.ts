@@ -15,7 +15,7 @@ import type {
   AgentToolExecution,
   AgentToolExecutionStatus
 } from "@agent-workbench/shared";
-import { AGENT_TIMELINE_TEXT_MAX_LENGTH, AgentMessageSchema } from "@agent-workbench/shared";
+import { AGENT_TIMELINE_TEXT_MAX_LENGTH, AgentMessageSchema, AgentModelRequestErrorSchema } from "@agent-workbench/shared";
 import { Value } from "@sinclair/typebox/value";
 import type { Db } from "../../../infra/db/db.js";
 import { HttpError } from "../../../app/errors.js";
@@ -61,6 +61,7 @@ type RunStateRow = {
   status: "idle" | "running";
   activeRunId: string | null;
   runNoticeText: string;
+  modelRequestErrorJson: string | null;
   retryCount: number;
   nextRetryAt: number | null;
   activeAssistantMessageId: string | null;
@@ -176,6 +177,7 @@ function toRunState(row: RunStateRow): AgentMessageSessionRunState {
     status: row.status,
     activeRunId: row.activeRunId,
     runNoticeText: row.runNoticeText,
+    modelRequestError: row.modelRequestErrorJson == null ? null : Value.Parse(AgentModelRequestErrorSchema, JSON.parse(row.modelRequestErrorJson)),
     retryCount: Number(row.retryCount),
     lastResponseTotalTokens: row.lastResponseTotalTokens == null ? null : Number(row.lastResponseTotalTokens),
     activeRunStartedAt: row.activeRunStartedAt == null ? null : Number(row.activeRunStartedAt),
@@ -481,6 +483,7 @@ export class SqliteMessageQuery {
     return this.db.prepare(`
       select state.workspace_id as workspaceId, state.session_id as sessionId, state.status,
              state.active_run_id as activeRunId, state.run_notice_text as runNoticeText,
+             state.model_request_error_json as modelRequestErrorJson,
              state.retry_count as retryCount, state.next_retry_at as nextRetryAt,
              state.active_assistant_message_id as activeAssistantMessageId,
              state.non_terminal_message_ids_json as nonTerminalMessageIdsJson,

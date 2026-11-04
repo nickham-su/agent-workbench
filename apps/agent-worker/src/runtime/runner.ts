@@ -24,6 +24,8 @@ import { createDeepSeek } from "@ai-sdk/deepseek";
 import { Value } from "@sinclair/typebox/value";
 import { generateSingleCallText } from "@agent-workbench/shared/llm-single-call";
 import { parseAiSdkCallSettings } from "@agent-workbench/shared/llm-ai-sdk-call-settings";
+import { buildModelRequestError } from "./modelRequestError.js";
+import type { AgentModelRequestError } from "@agent-workbench/shared";
 import { readSubtaskSourceSessionId } from "./subtaskSource.js";
 import { AgentApiClient, ApiConflictError, InternalRpcHttpError, InternalRpcInvalidResponseError, InternalRpcNetworkError, InternalRpcTimeoutError, type ExecutionProfile, type PromptContext } from "./apiClient.js";
 import { McpManager } from "./mcpManager.js";
@@ -3013,7 +3015,7 @@ export class AgentRunner {
       if (!retryNoticePendingClear) return;
       const request = {
         workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId,
-        runNoticeText: "", retryCount: 0, nextRetryAt: null, updatedAt: this.nowMsFn()
+        runNoticeText: "", modelRequestError: null, retryCount: 0, nextRetryAt: null, updatedAt: this.nowMsFn()
       };
       await this.retryControlWrite("clear retry notice", signal, async () =>
         await this.apiClient.updateRunNotice(request)
@@ -3080,12 +3082,12 @@ export class AgentRunner {
       pendingFlush = true;
     };
 
-    const replaceAssistantForRetry = async (notice: { runNoticeText: string; retryCount: number; nextRetryAt: number | null }) => {
+    const replaceAssistantForRetry = async (notice: { runNoticeText: string; modelRequestError: AgentModelRequestError; retryCount: number; nextRetryAt: number | null }) => {
       const oldMessageId = assistantMessageId;
       const newMessageId = newSortableId("message");
       const request = {
         workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId,
-        oldMessageId, newMessageId, runNoticeText: notice.runNoticeText,
+        oldMessageId, newMessageId, runNoticeText: notice.runNoticeText, modelRequestError: notice.modelRequestError,
         retryCount: notice.retryCount, nextRetryAt: notice.nextRetryAt, createdAt: this.nowMsFn()
       };
       await this.retryControlWrite("replace streaming assistant", signal, async () =>
@@ -3285,7 +3287,7 @@ export class AgentRunner {
             continue;
           }
           if (chunk.type === "error") {
-            throw chunk.error instanceof Error ? chunk.error : new Error(String(chunk.error || "stream error"));
+            throw chunk.error instanceof Error ? chunk.error : new Error("Model stream failed", { cause: chunk.error });
           }
           if (chunk.type === "abort") {
             throw new Error("model stream aborted");
@@ -3424,8 +3426,23 @@ export class AgentRunner {
           err = new Error(`model idle timeout after ${modelIdleTimeoutMs}ms`);
         }
         const message = safeErrorSummary(err);
+        const modelRequestError = buildModelRequestError(err, {
+          secrets: [profile.provider.options.apiKey ?? ""],
+          ...(totalTimedOut ? { timeout: { kind: "total" as const, durationMs: modelTotalTimeoutMs } }
+            : idleTimedOut ? { timeout: { kind: "idle" as const, durationMs: modelIdleTimeoutMs } } : {}),
+        });
 
         if (retryCount >= modelRequestMaxRetries) {
+          // Publish the actual final failure too (including zero-retry runs). The
+          // terminal transaction preserves this entry only for failed outcomes.
+          const request = {
+            workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId,
+            runNoticeText: `Request failed: ${message}`, modelRequestError,
+            retryCount, nextRetryAt: null, updatedAt: this.nowMsFn(),
+          };
+          await this.retryControlWrite("publish final model error", signal, async () =>
+            await this.apiClient.updateRunNotice(request)
+          );
           throw err;
         }
 
@@ -3439,13 +3456,14 @@ export class AgentRunner {
             await flushAssistant(true, false);
             await replaceAssistantForRetry({
               runNoticeText: noticeText,
+              modelRequestError,
               retryCount: retryAttempt,
               nextRetryAt
             });
           } else {
             const request = {
               workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId,
-              runNoticeText: noticeText, retryCount: retryAttempt, nextRetryAt, updatedAt: this.nowMsFn()
+              runNoticeText: noticeText, modelRequestError, retryCount: retryAttempt, nextRetryAt, updatedAt: this.nowMsFn()
             };
             await this.retryControlWrite("update retry notice", signal, async () =>
               await this.apiClient.updateRunNotice(request)

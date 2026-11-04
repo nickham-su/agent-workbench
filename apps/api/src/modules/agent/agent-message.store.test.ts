@@ -58,7 +58,7 @@ function activate(db: Database.Database, sessionId = "s-a", workspaceId = "ws-a"
 test("compaction notice uses the session revision, and atomic commit clears it before late RPCs", () => {
   const db = createDb(); session(db); activate(db);
   appendMessage(db, { id: "user", workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: null, expectedRevision: 0, type: "user", status: "completed", parts: [], createdAt: 2 });
-  const notice = { workspaceId: "ws-a", sessionId: "s-a", runId: "run-a", runNoticeText: "compaction retry", compactionExpectedRevision: 1, retryCount: 2, nextRetryAt: 30, updatedAt: 3 };
+  const notice = { workspaceId: "ws-a", sessionId: "s-a", runId: "run-a", runNoticeText: "compaction retry", modelRequestError: { statusCode: 503, responseBody: "previous failure", message: "HTTP 503", truncated: false }, compactionExpectedRevision: 1, retryCount: 2, nextRetryAt: 30, updatedAt: 3 };
   assert.equal(updateMessageRunNotice(db, notice), "updated");
   assert.deepEqual({ text: getMessageRunState(db, "ws-a", "s-a")!.runNoticeText, count: getMessageRunState(db, "ws-a", "s-a")!.retryCount }, { text: "compaction retry", count: 2 });
   assert.ok(commitCompactionMessageWithRunFence(db, {
@@ -66,7 +66,7 @@ test("compaction notice uses the session revision, and atomic commit clears it b
     expectedHeadMessageId: "user", expectedRevision: 1, textPartId: "part", text: "summary", createdAt: 4,
   }));
   const state = getMessageRunState(db, "ws-a", "s-a")!;
-  assert.equal(state.runNoticeText, ""); assert.equal(state.retryCount, 0); assert.equal(state.nextRetryAt, null);
+  assert.equal(state.runNoticeText, ""); assert.equal(state.retryCount, 0); assert.equal(state.nextRetryAt, null); assert.equal(state.modelRequestError, null);
   assert.equal(updateMessageRunNotice(db, { ...notice, updatedAt: 5 }), "updated", "stale revision is not a fence failure");
   assert.equal(getMessageRunState(db, "ws-a", "s-a")!.runNoticeText, "");
   db.prepare("update session_run_state set status='idle', active_run_id=null where workspace_id='ws-a' and session_id='s-a'").run();
@@ -723,7 +723,7 @@ test("cancel convergence cancels queued, marks running unknown, idles state and 
   assert.equal(persistRunTerminalIntent(db, { workspaceId: "ws-a", sessionId: "s-a", runId: "run-a", status: "cancelled", code: "run_cancelled", detail: null, updatedAt: 8 }), "updated");
   assert.deepEqual(convergeRunTerminal(db, { workspaceId: "ws-a", sessionId: "s-a", runId: "run-a", updatedAt: 8 }), { kind: "transitioned", finalStatus: "cancelled" });
   assert.equal(getMessage(db, "later")!.status, "cancelled"); assert.equal(getToolExecution(db, "q")!.status, "cancelled"); assert.equal(getToolExecution(db, "r")!.status, "unknown");
-  assert.deepEqual(getMessageRunState(db, "ws-a", "s-a"), { workspaceId: "ws-a", sessionId: "s-a", status: "idle", activeRunId: null, runNoticeText: "", retryCount: 0, nextRetryAt: null, lastResponseTotalTokens: null, activeRunStartedAt: null, lastRunDurationMs: 7, activeAssistantMessageId: null, nonTerminalMessageIds: [], nonTerminalToolExecutionIds: [], updatedAt: 8 });
+  assert.deepEqual(getMessageRunState(db, "ws-a", "s-a"), { workspaceId: "ws-a", sessionId: "s-a", status: "idle", activeRunId: null, runNoticeText: "", modelRequestError: null, retryCount: 0, nextRetryAt: null, lastResponseTotalTokens: null, activeRunStartedAt: null, lastRunDurationMs: 7, activeAssistantMessageId: null, nonTerminalMessageIds: [], nonTerminalToolExecutionIds: [], updatedAt: 8 });
   assert.equal(flushStreamingParts(db, { workspaceId: "ws-a", sessionId: "s-a", runId: "run-a", messageId: "later", parts: [{ id: "late", position: 0, type: "text", text: "no" }], updatedAt: 9 }), "ignored");
   assert.equal(updateMessageRunNotice(db, { workspaceId: "ws-a", sessionId: "s-a", runId: "run-a", runNoticeText: "late retry", retryCount: 99, nextRetryAt: 99, updatedAt: 9 }), "ignored");
   assert.equal(completeAssistantWithExecutions(db, { workspaceId: "ws-a", sessionId: "s-a", runId: "run-a", messageId: "later", executions: [], updatedAt: 9 }), "ignored");
@@ -752,7 +752,7 @@ test("run start and settlement are fenced against an active or late Run", () => 
   db.prepare("insert into agent_run (run_id,workspace_id,session_id,trigger_message_id,agent_id,provider_id,model_id,status,created_at,updated_at) values ('run-2','ws-a','s-a',null,'agent','provider','model','running',1,1)").run();
   startMessageRun(db, { workspaceId: "ws-a", sessionId: "s-a", runId: "run-1", updatedAt: 2, noticeText: "running" });
   assert.deepEqual(getMessageRunState(db, "ws-a", "s-a"), {
-    workspaceId: "ws-a", sessionId: "s-a", status: "running", activeRunId: "run-1", runNoticeText: "running",
+    workspaceId: "ws-a", sessionId: "s-a", status: "running", activeRunId: "run-1", runNoticeText: "running", modelRequestError: null,
     retryCount: 0, nextRetryAt: null, lastResponseTotalTokens: null, activeRunStartedAt: 1, lastRunDurationMs: null,
     activeAssistantMessageId: null, nonTerminalMessageIds: [], nonTerminalToolExecutionIds: [], updatedAt: 2
   });
@@ -1105,7 +1105,7 @@ test("failure recovery fences the active Run and atomically settles streaming Me
   assert.equal(getToolExecution(db, "recovery-queued")?.status, "unknown");
   assert.equal((db.prepare("select status from agent_run where run_id='run-a'").get() as { status: string }).status, "failed");
   assert.deepEqual(getMessageRunState(db, "ws-a", "s-a"), {
-    workspaceId: "ws-a", sessionId: "s-a", status: "idle", activeRunId: null, runNoticeText: "",
+    workspaceId: "ws-a", sessionId: "s-a", status: "idle", activeRunId: null, runNoticeText: "", modelRequestError: null,
     retryCount: 0, nextRetryAt: null, lastResponseTotalTokens: null, activeRunStartedAt: null, lastRunDurationMs: 7,
     activeAssistantMessageId: null, nonTerminalMessageIds: [], nonTerminalToolExecutionIds: [], updatedAt: 8
   });
@@ -1628,5 +1628,63 @@ test("Fork creates actual hidden Tab state atomically, and a state insertion fai
     assert.equal(db.prepare("select 1 from workspace_session_tab_state where session_id='failed-fork'").get(), undefined);
     assert.deepEqual(getMessageSession(db, "ws-a", "s-a"), source);
     assert.deepEqual(db.prepare("select count(*) n from agent_message").get(), { n: 1 });
+  } finally { db.close(); }
+});
+
+const modelErrorDetail = { statusCode: 503, responseBody: '{"error":"upstream unavailable"}', message: "Model request failed (HTTP 503)", truncated: false };
+
+test("model error detail follows notice fencing, replacement replay and recovery clearing", () => {
+  const db = createDb(); session(db); activate(db);
+  try {
+    const base = { workspaceId: "ws-a", sessionId: "s-a", runId: "run-a" };
+    appendStreamingAssistant(db, { ...base, id: "error-old", expectedHeadMessageId: null, expectedRevision: 0, createdAt: 2 });
+    const replace = { ...base, oldMessageId: "error-old", newMessageId: "error-new", expectedHeadMessageId: "error-old", expectedRevision: 1,
+      runNoticeText: "retrying", modelRequestError: modelErrorDetail, retryCount: 1, nextRetryAt: 99, createdAt: 3 };
+    assert.equal(replaceStreamingAssistant(db, replace).result, "updated");
+    assert.deepEqual(getMessageRunState(db, "ws-a", "s-a")!.modelRequestError, modelErrorDetail);
+    assert.equal(replaceStreamingAssistant(db, { ...replace, modelRequestError: { ...modelErrorDetail, responseBody: "different" } }).result, "ignored");
+    assert.equal(replaceStreamingAssistant(db, { ...replace, modelRequestError: { truncated: false, message: modelErrorDetail.message,
+      responseBody: modelErrorDetail.responseBody, statusCode: 503 } }).result, "updated", "object key order is not replay identity");
+    assert.equal(updateMessageRunNotice(db, { ...base, runId: "stale", runNoticeText: "wrong", modelRequestError: null, updatedAt: 4 }), "ignored");
+    assert.deepEqual(getMessageRunState(db, "ws-a", "s-a")!.modelRequestError, modelErrorDetail);
+    updateMessageRunNotice(db, { ...base, runNoticeText: "", modelRequestError: null, retryCount: 0, nextRetryAt: null, updatedAt: 5 });
+    assert.equal(getMessageRunState(db, "ws-a", "s-a")!.modelRequestError, null);
+    updateMessageRunNotice(db, { ...base, runNoticeText: "failed without body", modelRequestError: { ...modelErrorDetail, responseBody: null }, updatedAt: 6 });
+    assert.equal(getMessageRunState(db, "ws-a", "s-a")!.modelRequestError!.responseBody, null);
+    updateMessageRunNotice(db, { ...base, runNoticeText: "unrelated notice", updatedAt: 7 });
+    assert.equal(getMessageRunState(db, "ws-a", "s-a")!.modelRequestError, null, "a different notice cannot retain a mismatched body");
+  } finally { db.close(); }
+});
+
+for (const status of ["failed", "cancelled", "completed"] as const) test(`terminal ${status} ${status === "failed" ? "preserves final model failure" : "clears model failure"}; a new run clears retained details`, () => {
+  const db = createDb(); session(db); activate(db);
+  try {
+    const base = { workspaceId: "ws-a", sessionId: "s-a", runId: "run-a" };
+    updateMessageRunNotice(db, { ...base, runNoticeText: "Request failed", modelRequestError: modelErrorDetail, retryCount: 0, nextRetryAt: null, updatedAt: 2 });
+    const code = status === "failed" ? "run_failed" as const : status === "cancelled" ? "run_cancelled" as const : "run_completed" as const;
+    persistRunTerminalIntent(db, { ...base, status, code, detail: null, updatedAt: 3 });
+    convergeRunTerminal(db, { ...base, updatedAt: 3 });
+    const state = getMessageRunState(db, "ws-a", "s-a")!;
+    assert.equal(state.status, "idle");
+    assert.equal(state.runNoticeText, status === "failed" ? "Request failed" : "");
+    assert.deepEqual(state.modelRequestError, status === "failed" ? modelErrorDetail : null);
+    assert.equal(getRunRecord(db, "run-a")!.terminalResultDetail, null);
+    createMessageRunRecord(db, { ...base, runId: "next-run", triggerMessageId: null, agentId: "agent", providerId: "provider", modelId: "model", status: "running", createdAt: 4 });
+    startMessageRun(db, { ...base, runId: "next-run", updatedAt: 4 });
+    assert.equal(getMessageRunState(db, "ws-a", "s-a")!.modelRequestError, null);
+    assert.equal(updateMessageRunNotice(db, { ...base, runNoticeText: "late", modelRequestError: modelErrorDetail, updatedAt: 5 }), "ignored");
+    assert.equal(getMessageRunState(db, "ws-a", "s-a")!.modelRequestError, null);
+  } finally { db.close(); }
+});
+
+test("non-model failure during retry does not preserve an earlier retry response", () => {
+  const db = createDb(); session(db); activate(db);
+  try {
+    const base = { workspaceId: "ws-a", sessionId: "s-a", runId: "run-a" };
+    updateMessageRunNotice(db, { ...base, runNoticeText: "retrying", modelRequestError: modelErrorDetail, retryCount: 1, nextRetryAt: 99, updatedAt: 2 });
+    persistRunTerminalIntent(db, { ...base, status: "failed", code: "run_failed", detail: null, updatedAt: 3 });
+    convergeRunTerminal(db, { ...base, updatedAt: 3 });
+    assert.equal(getMessageRunState(db, "ws-a", "s-a")!.modelRequestError, null);
+    assert.equal(getMessageRunState(db, "ws-a", "s-a")!.runNoticeText, "");
   } finally { db.close(); }
 });

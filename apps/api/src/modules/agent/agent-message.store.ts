@@ -13,13 +13,14 @@ import type {
   AgentMessageType,
   AgentSessionMessageState,
   AgentMessageSessionRunState,
+  AgentModelRequestError,
   AgentToolExecution,
   AgentRunExecutionPhase,
   AgentTerminalResultCode,
   AgentTerminalRunStatus,
   AgentToolExecutionStatus
 } from "@agent-workbench/shared";
-import { AgentCompactionMessageSchema, AgentOrdinaryMessageSchema, isAgentTerminalCodeAllowed } from "@agent-workbench/shared";
+import { AgentCompactionMessageSchema, AgentOrdinaryMessageSchema, AgentModelRequestErrorSchema, isAgentTerminalCodeAllowed } from "@agent-workbench/shared";
 import { Value } from "@sinclair/typebox/value";
 import {
   assertAgentProviderReplayUpdateCompatible,
@@ -160,7 +161,7 @@ type SessionRow = {
 };
 type RunStateRow = {
   workspaceId: string; sessionId: string; status: "idle" | "running"; activeRunId: string | null;
-  runNoticeText: string; retryCount: number; nextRetryAt: number | null; activeAssistantMessageId: string | null;
+  runNoticeText: string; modelRequestErrorJson: string | null; retryCount: number; nextRetryAt: number | null; activeAssistantMessageId: string | null;
   nonTerminalMessageIdsJson: string; nonTerminalToolExecutionIdsJson: string; updatedAt: number;
   lastResponseTotalTokens: number | null; activeRunStartedAt: number | null;
   lastRunDurationMs: number | null;
@@ -188,7 +189,7 @@ function toSession(row: SessionRow): AgentSessionMessageState {
 function toRunState(row: RunStateRow): AgentMessageSessionRunState {
   return {
     workspaceId: row.workspaceId, sessionId: row.sessionId, status: row.status, activeRunId: row.activeRunId,
-    runNoticeText: row.runNoticeText, retryCount: Number(row.retryCount), nextRetryAt: row.nextRetryAt,
+    runNoticeText: row.runNoticeText, modelRequestError: row.modelRequestErrorJson == null ? null : Value.Parse(AgentModelRequestErrorSchema, JSON.parse(row.modelRequestErrorJson)), retryCount: Number(row.retryCount), nextRetryAt: row.nextRetryAt,
     lastResponseTotalTokens: row.lastResponseTotalTokens == null ? null : Number(row.lastResponseTotalTokens),
     activeRunStartedAt: row.activeRunStartedAt == null ? null : Number(row.activeRunStartedAt),
     lastRunDurationMs: row.lastRunDurationMs == null ? null : Number(row.lastRunDurationMs),
@@ -295,7 +296,7 @@ function terminalExecutionReplayMatches(execution: AgentToolExecution, input: { 
   };
   return executionReplayMatches(execution, request, input.updatedAt);
 }
-function replacementReplayMatches(db: Db, oldMessage: MessageRow, input: { workspaceId: string; sessionId: string; runId: string; oldMessageId: string; newMessageId: string; runNoticeText: string; retryCount: number; nextRetryAt: number | null; createdAt: number }) {
+function replacementReplayMatches(db: Db, oldMessage: MessageRow, input: { workspaceId: string; sessionId: string; runId: string; oldMessageId: string; newMessageId: string; runNoticeText: string; modelRequestError?: AgentModelRequestError | null; retryCount: number; nextRetryAt: number | null; createdAt: number }) {
   const replacement = messageRow(db, input.newMessageId);
   const session = sessionRow(db, input.workspaceId, input.sessionId);
   const state = getMessageRunState(db, input.workspaceId, input.sessionId);
@@ -305,6 +306,7 @@ function replacementReplayMatches(db: Db, oldMessage: MessageRow, input: { works
     && replacement.status === "streaming" && replacement.createdAt === input.createdAt && replacement.updatedAt === input.createdAt
     && session?.headMessageId === input.newMessageId && state?.activeAssistantMessageId === input.newMessageId
     && state.nonTerminalMessageIds.length === 1 && state.nonTerminalMessageIds[0] === input.newMessageId
+    && serializeModelRequestError(state.modelRequestError) === serializeModelRequestError(input.modelRequestError)
     && state.runNoticeText === input.runNoticeText && state.retryCount === input.retryCount && state.nextRetryAt === input.nextRetryAt && state.updatedAt === input.createdAt;
 }
 
@@ -359,20 +361,27 @@ function insertParts(db: Db, messageId: string, parts: AgentMessagePartInput[], 
     }
   }
 }
+function serializeModelRequestError(value: AgentModelRequestError | null | undefined) {
+  if (value == null) return null;
+  if (!Value.Check(AgentModelRequestErrorSchema, value)) throw new Error("invalid model request error detail");
+  return JSON.stringify({ statusCode: value.statusCode, responseBody: value.responseBody, message: value.message, truncated: value.truncated });
+}
+
 function writeRunState(db: Db, input: {
   workspaceId: string; sessionId: string; updatedAt: number;
   activeAssistantMessageId?: string | null; nonTerminalMessageIds?: string[];
-  nonTerminalToolExecutionIds?: string[]; runNoticeText?: string;
+  nonTerminalToolExecutionIds?: string[]; runNoticeText?: string; modelRequestError?: AgentModelRequestError | null;
   retryCount?: number; nextRetryAt?: number | null;
 }) {
   const current = getMessageRunState(db, input.workspaceId, input.sessionId);
   if (!current) throw new Error("agent session run state not found");
-  db.prepare(`update session_run_state set active_assistant_message_id=@activeAssistantMessageId, non_terminal_message_ids_json=@messages, non_terminal_tool_execution_ids_json=@executions, run_notice_text=@notice, retry_count=@retryCount, next_retry_at=@nextRetryAt, updated_at=@updatedAt where workspace_id=@workspaceId and session_id=@sessionId`).run({
+  db.prepare(`update session_run_state set active_assistant_message_id=@activeAssistantMessageId, non_terminal_message_ids_json=@messages, non_terminal_tool_execution_ids_json=@executions, run_notice_text=@notice, model_request_error_json=@modelRequestErrorJson, retry_count=@retryCount, next_retry_at=@nextRetryAt, updated_at=@updatedAt where workspace_id=@workspaceId and session_id=@sessionId`).run({
     ...input,
     activeAssistantMessageId: Object.hasOwn(input, "activeAssistantMessageId") ? input.activeAssistantMessageId ?? null : current.activeAssistantMessageId,
     messages: JSON.stringify(input.nonTerminalMessageIds ?? current.nonTerminalMessageIds),
     executions: JSON.stringify(input.nonTerminalToolExecutionIds ?? current.nonTerminalToolExecutionIds),
     notice: input.runNoticeText ?? current.runNoticeText,
+    modelRequestErrorJson: serializeModelRequestError(Object.hasOwn(input, "modelRequestError") ? input.modelRequestError : input.runNoticeText === undefined ? current.modelRequestError : null),
     retryCount: input.retryCount ?? current.retryCount,
     nextRetryAt: Object.hasOwn(input, "nextRetryAt") ? input.nextRetryAt ?? null : current.nextRetryAt
   });
@@ -418,7 +427,7 @@ export function getMessageRunState(db: Db, workspaceId: string, sessionId: strin
   const row = db.prepare(`
     select state.workspace_id as workspaceId, state.session_id as sessionId,
       state.status, state.active_run_id as activeRunId,
-      state.run_notice_text as runNoticeText, state.retry_count as retryCount,
+      state.run_notice_text as runNoticeText, state.model_request_error_json as modelRequestErrorJson, state.retry_count as retryCount,
       state.next_retry_at as nextRetryAt,
       state.active_assistant_message_id as activeAssistantMessageId,
       state.non_terminal_message_ids_json as nonTerminalMessageIdsJson,
@@ -447,21 +456,24 @@ export function startMessageRun(db: Db, input: { workspaceId: string; sessionId:
     update session_run_state
     set status='running', active_run_id=@runId, active_assistant_message_id=null,
       non_terminal_message_ids_json='[]', non_terminal_tool_execution_ids_json='[]',
-      retry_count=0, next_retry_at=null, run_notice_text=@noticeText, updated_at=@updatedAt
+      retry_count=0, next_retry_at=null, run_notice_text=@noticeText, model_request_error_json=null, updated_at=@updatedAt
     where workspace_id=@workspaceId and session_id=@sessionId and status='idle'
   `).run({ ...input, noticeText: input.noticeText ?? "" });
   if (result.changes !== 1) throw new Error("session is not idle");
 }
 
 /** 仅当前 active Run 可以收敛运行态，晚到写回不会覆盖新 Run。 */
-export function settleMessageRunIfCurrent(db: Db, input: { workspaceId: string; sessionId: string; runId: string; updatedAt: number; noticeText?: string }) {
+export function settleMessageRunIfCurrent(db: Db, input: { workspaceId: string; sessionId: string; runId: string; updatedAt: number; noticeText?: string; preserveModelRequestError?: boolean }) {
   return db.prepare(`
     update session_run_state
     set status='idle', active_run_id=null, active_assistant_message_id=null,
       non_terminal_message_ids_json='[]', non_terminal_tool_execution_ids_json='[]',
-      retry_count=0, next_retry_at=null, run_notice_text=@noticeText, updated_at=@updatedAt
+      retry_count=0, next_retry_at=null,
+      run_notice_text=case when @preserveError=1 and model_request_error_json is not null and next_retry_at is null then run_notice_text else @noticeText end,
+      model_request_error_json=case when @preserveError=1 and next_retry_at is null then model_request_error_json else null end,
+      updated_at=@updatedAt
     where workspace_id=@workspaceId and session_id=@sessionId and status='running' and active_run_id=@runId
-  `).run({ ...input, noticeText: input.noticeText ?? "" }).changes === 1;
+  `).run({ ...input, preserveError: input.preserveModelRequestError ? 1 : 0, noticeText: input.noticeText ?? "" }).changes === 1;
 }
 
 export function appendMessage(db: Db, input: { id: string; workspaceId: string; sessionId: string; expectedHeadMessageId: string | null; expectedRevision: number; type: AgentMessageType; status: AgentMessageStatus; originRunId?: string | null; replacesMessageId?: string | null; parts: AgentMessagePartInput[]; createdAt: number; contextRootMessageId?: string | null }): AgentMessage {
@@ -721,7 +733,7 @@ export function updateToolExecution(db: Db, input: { workspaceId: string; sessio
   })();
 }
 
-export function updateMessageRunNotice(db: Db, input: { workspaceId: string; sessionId: string; runId: string; runNoticeText: string; compactionExpectedRevision?: number; retryCount?: number; nextRetryAt?: number | null; updatedAt: number }): FencedWriteResult {
+export function updateMessageRunNotice(db: Db, input: { workspaceId: string; sessionId: string; runId: string; runNoticeText: string; modelRequestError?: AgentModelRequestError | null; compactionExpectedRevision?: number; retryCount?: number; nextRetryAt?: number | null; updatedAt: number }): FencedWriteResult {
   return db.transaction(() => {
     if (!assertFence(db, input)) return "ignored";
     // A delayed compaction progress RPC must not resurrect its notice after
@@ -736,8 +748,9 @@ export function updateMessageRunNotice(db: Db, input: { workspaceId: string; ses
       .slice(0, 1000);
     const current = getMessageRunState(db, input.workspaceId, input.sessionId);
     if (!current) return "missing";
-    db.prepare(`update session_run_state set run_notice_text=?, retry_count=?, next_retry_at=?, updated_at=? where workspace_id=? and session_id=? and active_run_id=? and status='running'`).run(
+    db.prepare(`update session_run_state set run_notice_text=?, model_request_error_json=?, retry_count=?, next_retry_at=?, updated_at=? where workspace_id=? and session_id=? and active_run_id=? and status='running'`).run(
       notice,
+      serializeModelRequestError(input.modelRequestError),
       input.retryCount ?? current.retryCount,
       Object.prototype.hasOwnProperty.call(input, "nextRetryAt") ? input.nextRetryAt ?? null : current.nextRetryAt,
       input.updatedAt,
@@ -749,7 +762,7 @@ export function updateMessageRunNotice(db: Db, input: { workspaceId: string; ses
   })();
 }
 
-export function replaceStreamingAssistant(db: Db, input: { workspaceId: string; sessionId: string; runId: string; oldMessageId: string; newMessageId: string; expectedHeadMessageId: string | null; expectedRevision: number; runNoticeText: string; retryCount: number; nextRetryAt: number | null; createdAt: number }): { result: FencedWriteResult; message: AgentOrdinaryMessage | null } {
+export function replaceStreamingAssistant(db: Db, input: { workspaceId: string; sessionId: string; runId: string; oldMessageId: string; newMessageId: string; expectedHeadMessageId: string | null; expectedRevision: number; runNoticeText: string; modelRequestError?: AgentModelRequestError | null; retryCount: number; nextRetryAt: number | null; createdAt: number }): { result: FencedWriteResult; message: AgentOrdinaryMessage | null } {
   return db.transaction((): { result: FencedWriteResult; message: AgentOrdinaryMessage | null } => {
     const old = messageRow(db, input.oldMessageId);
     if (!old) return { result: "missing", message: null };
@@ -771,6 +784,7 @@ export function replaceStreamingAssistant(db: Db, input: { workspaceId: string; 
       activeAssistantMessageId: input.newMessageId,
       nonTerminalMessageIds: [...new Set([...state.nonTerminalMessageIds.filter((id) => id !== input.oldMessageId), input.newMessageId])],
       runNoticeText: input.runNoticeText,
+      modelRequestError: input.modelRequestError ?? null,
       retryCount: input.retryCount,
       nextRetryAt: input.nextRetryAt
     });
@@ -883,7 +897,7 @@ function commitCompactionMessageCurrent(db: Db, input: { id: string; workspaceId
   insertParts(db, input.id, [{ id: input.textPartId, position: 0, type: "text", text: input.text }], revision, input.createdAt);
   indexEligibleCompletedTextParts(db, input.id, input.createdAt);
   updateSessionPointer(db, { workspaceId: input.workspaceId, sessionId: input.sessionId, headMessageId: input.id, contextRootMessageId: input.id, revision, now: input.createdAt });
-  db.prepare("update session_run_state set last_response_total_tokens=null, run_notice_text='', retry_count=0, next_retry_at=null, updated_at=? where workspace_id=? and session_id=?")
+  db.prepare("update session_run_state set last_response_total_tokens=null, run_notice_text='', model_request_error_json=null, retry_count=0, next_retry_at=null, updated_at=? where workspace_id=? and session_id=?")
     .run(input.createdAt, input.workspaceId, input.sessionId);
   return asCompactionMessage(getMessage(db, input.id)!);
 }
@@ -1687,7 +1701,7 @@ export function convergeRunTerminal(db: Db, input: {
     if (terminalRun?.status !== intent.status || terminalRun.executionPhase !== "terminal") {
       throw new Error("terminal convergence run transition failed");
     }
-    if (!settleMessageRunIfCurrent(db, input)) {
+    if (!settleMessageRunIfCurrent(db, { ...input, preserveModelRequestError: intent.status === "failed" })) {
       throw new Error("terminal convergence active run unexpectedly changed");
     }
     return { kind: "transitioned" as const, finalStatus: intent.status };
