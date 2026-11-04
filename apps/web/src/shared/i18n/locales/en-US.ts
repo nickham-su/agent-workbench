@@ -403,7 +403,6 @@ export default {
       retryTabStateLoad: "Retry",
       tabStateUpdateFailed: "Session Tab state is unconfirmed. Reload to check the saved state. The session will not be created again.",
       tabStateUnconfirmed: "Session Tab state is not confirmed yet. Reload to check the saved state.",
-      sharedTabNotice: "Close session Tab (shared across this Workspace; does not cancel runs or change session visibility)",
       tabLabel: "Session {index}",
       newTitle: "new session",
       cancel: "Cancel run",

@@ -39,13 +39,11 @@
               />
               <span v-if="statusStore.indicatorOf(session.id).showDot" class="agent-tab-terminal-dot" />
             </span>
-            <a-tooltip :title="t('agent.client.sharedTabNotice')">
-              <CloseOutlined
-                class="cursor-pointer text-[color:var(--text-tertiary)] hover:text-[color:var(--text-secondary)] !mr-0 text-[0.9em]"
-                @mousedown.stop.prevent
-                @click.stop.prevent="closeSessionTab(session.id)"
-              />
-            </a-tooltip>
+            <CloseOutlined
+              class="cursor-pointer text-[color:var(--text-tertiary)] hover:text-[color:var(--text-secondary)] !mr-0 text-[0.9em]"
+              @mousedown.stop.prevent
+              @click.stop.prevent="closeSessionTab(session.id)"
+            />
           </span>
         </template>
         <div class="h-full min-h-0">

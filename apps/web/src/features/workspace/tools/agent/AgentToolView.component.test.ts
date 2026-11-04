@@ -191,7 +191,7 @@ function mountView(workspaceId = "ws-a", openSessionRequest?: { sessionId: strin
           "a-tag": true,
         } : {}),
         AgentClientPane: options.renderRealPane ? false : true,
-        CloseOutlined: { template: "<button class='close-icon' @click='$emit(\"click\")' />" },
+        CloseOutlined: { emits: ["click"], template: "<button class='close-icon' @click='$emit(\"click\", $event)' />" },
         MinusOutlined: true,
         PlusOutlined: true,
       },
@@ -262,6 +262,35 @@ test("AgentToolView：一致性snapshot完成前保持loading，后台决定可�
     assert.equal((wrapper.vm as any).visibleSessions.map((item: Session) => item.id).join(","), "subtask-a");
     assert.equal(FakeXMLHttpRequest.requests.filter((value) => value.method === "GET" && value.url.includes("/agent-tab-state")).length, 0);
   } finally { wrapper.unmount(); }
+});
+
+test("AgentToolView：关闭图标不含 Tooltip 包装，点击仍只关闭会话 Tab", async () => {
+  FakeXMLHttpRequest.requests = [];
+  FakeXMLHttpRequest.responder = (request) => {
+    if (isListRead(request)) return respondSessions(request, [session("primary-a", "ws-a"), session("primary-b", "ws-a")]);
+    return respondDefaults(request);
+  };
+  const wrapper = mountView();
+  try {
+    await settle();
+    const sessionId = (wrapper.vm as any).visibleSessions[0].id as string;
+    const label = wrapper.get(".agent-tab-label");
+    const close = label.get(".close-icon");
+    assert.equal(close.element.parentElement, label.element, "关闭图标应直接渲染，不保留 Tooltip 包装");
+    assert.equal(close.attributes("title"), undefined);
+    assert.equal(label.find("[title]").exists(), false);
+    assert.equal(close.classes().includes("cursor-pointer"), true);
+
+    await close.trigger("click");
+    await settle();
+    assert.equal((wrapper.vm as any).visibleSessions.some((item: Session) => item.id === sessionId), false);
+    const writes = FakeXMLHttpRequest.requests.filter((request) => request.method !== "GET");
+    assert.equal(writes.length, 1, "关闭 Tab 不应取消运行或触发其他写入");
+    assert.equal(writes[0]!.url.split("/agent-tab-state/")[1], sessionId);
+    assert.deepEqual(JSON.parse(String(writes[0]!.requestBody)), { visible: false });
+  } finally {
+    wrapper.unmount();
+  }
 });
 
 test("AgentToolView：首次挂载带目标 Session 时等待初始化，并在第一次打开隐藏 Tab", async () => {

@@ -401,7 +401,6 @@ export default {
       retryTabStateLoad: "重试",
       tabStateUpdateFailed: "会话 Tab 开闭未确认，请重新加载核对实际状态。不会重复创建会话。",
       tabStateUnconfirmed: "会话 Tab 开闭尚未确认，请重新加载核对实际状态。",
-      sharedTabNotice: "关闭会话 Tab（开闭状态在工作区内共享；不会取消运行，也不改变会话可见性）",
       tabLabel: "会话 {index}",
       newTitle: "new session",
       cancel: "取消运行",
