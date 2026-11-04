@@ -119,7 +119,7 @@ test("timeline ToolExecution view excludes structured result and artifact detail
   assert.equal(Value.Check(AgentTimelineToolExecutionSchema, { ...view, resultArtifactPath: "/not-in-timeline" }), false);
   assert.equal(Value.Check(AgentTimelineToolExecutionSchema, { ...view, resultPreview: "x".repeat(3_001) }), false);
   assert.equal(Value.Check(AgentTimelineDeltaResponseSchema, {
-    session: { id: "session-1", workspaceId: "workspace-1", title: "Session", kind: "primary", headMessageId: null, contextRootMessageId: null, revision: 0, forkedFromSessionId: null, forkedFromMessageId: null, createdAt: 1, updatedAt: 1 },
+    session: { id: "session-1", workspaceId: "workspace-1", title: "Session", kind: "primary", visibility: "listed", headMessageId: null, contextRootMessageId: null, revision: 0, forkedFromSessionId: null, forkedFromMessageId: null, createdAt: 1, updatedAt: 1 },
     timelineReset: false, messages: [], toolExecutions: [view]
   }), true);
 });
@@ -136,7 +136,7 @@ test("user Message image Part carries only attachment metadata through timeline"
   assert.equal(Value.Check(AgentMessageSchema, userMessage), true);
   assert.equal(Value.Check(AgentMessagePartSchema, { ...image, mediaType: "image/svg+xml" }), false);
   assert.equal(Value.Check(AgentTimelineDeltaResponseSchema, {
-    session: { id: "session-1", workspaceId: "workspace-1", title: "Session", kind: "primary", headMessageId: "message-user", contextRootMessageId: "message-user", revision: 1, forkedFromSessionId: null, forkedFromMessageId: null, createdAt: 1, updatedAt: 1 },
+    session: { id: "session-1", workspaceId: "workspace-1", title: "Session", kind: "primary", visibility: "unlisted", headMessageId: "message-user", contextRootMessageId: "message-user", revision: 1, forkedFromSessionId: null, forkedFromMessageId: null, createdAt: 1, updatedAt: 1 },
     messages: [userMessage], toolExecutions: [], timelineReset: false
   }), true);
 });

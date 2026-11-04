@@ -78,7 +78,7 @@ export async function registerWorkspacesRoutes(app: FastifyInstance, ctx: AppCon
       schema: {
         tags: ["workspaces"],
         params: WorkspaceIdParamsSchema,
-        response: { 200: WorkspaceAgentTabStateSchema, 404: ErrorResponseSchema }
+        response: { 200: WorkspaceAgentTabStateSchema, 404: ErrorResponseSchema, 500: ErrorResponseSchema }
       }
     },
     async (req) => {
@@ -99,7 +99,8 @@ export async function registerWorkspacesRoutes(app: FastifyInstance, ctx: AppCon
           200: WorkspaceAgentSessionTabVisibilityMutationSchema,
           400: ErrorResponseSchema,
           404: ErrorResponseSchema,
-          409: ErrorResponseSchema
+          409: ErrorResponseSchema,
+          500: ErrorResponseSchema
         }
       }
     },

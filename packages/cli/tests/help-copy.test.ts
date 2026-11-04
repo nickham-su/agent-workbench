@@ -60,7 +60,7 @@ test("positive help retains input, follow, cancellation and download operation r
   for (const rule of ["读取源会话时的最新消息", "无需指定消息ID", "不等待、不回退旧消息", "不复制或隔离工作区文件", "不继承运行状态", "不取消源任务", "写操作不自动重试"]) {
     assert.ok(fork.includes(rule), rule);
   }
-  for (const option of ["--workspace<ID>", "--session<ID>"]) assert.ok(fork.includes(option), option);
+  for (const option of ["--workspace<ID>", "--session<ID>", "--unlisted", "隐藏不是权限隔离", "不自动删除", "Workspace内共享"]) assert.ok(fork.includes(option), option);
   assert.doesNotMatch(fork, /--message|--title|--follow/);
   const session = await help(["session"]);
   assert.ok(session.includes("fork"));

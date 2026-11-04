@@ -55,7 +55,7 @@ function execution(overrides: Partial<AgentTimelineToolExecution> & Pick<AgentTi
 function delta(params: Partial<AgentTimelineDeltaResponse>): AgentTimelineDeltaResponse {
   return {
     session: {
-      id: "session-a", workspaceId: "workspace-a", title: "Session", kind: "primary",
+      id: "session-a", workspaceId: "workspace-a", title: "Session", kind: "primary", visibility: "listed" as const,
       headMessageId: null, contextRootMessageId: null, revision: 1,
       forkedFromSessionId: null, forkedFromMessageId: null, createdAt: 1, updatedAt: 1,
     },

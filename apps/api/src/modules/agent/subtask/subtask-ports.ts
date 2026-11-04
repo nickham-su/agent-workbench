@@ -31,6 +31,7 @@ export type SubtaskSession = {
   id: string;
   workspaceId: string;
   title: string;
+  visibility: "listed" | "unlisted";
   kind: "primary" | "subtask";
   headMessageId: string | null;
   contextRootMessageId: string | null;
@@ -77,6 +78,7 @@ export type SubtaskSessionMaterializer = {
   resolveForStart(input: {
     workspaceId: string;
     parentSessionId: string;
+    parentRunId: string;
     parentToolExecutionId: string;
     session: AgentApiSubtaskStartRequest["session"];
     subtaskTitleBase: string;

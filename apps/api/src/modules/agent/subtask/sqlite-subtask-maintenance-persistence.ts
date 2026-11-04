@@ -28,8 +28,8 @@ export class SqliteSubtaskMaintenancePersistence
     expectedHeadMessageId: string | null;
     expectedContextRootMessageId: string | null;
   }) {
-    const transaction = this.db.transaction(() =>
-      this.db.prepare(`
+    const transaction = this.db.transaction(() => {
+      const deleted = this.db.prepare(`
         delete from agent_session
         where id = @createdSessionId
           and workspace_id = @workspaceId
@@ -83,8 +83,11 @@ export class SqliteSubtaskMaintenancePersistence
             where descendant.workspace_id = @workspaceId
               and descendant.forked_from_session_id = @createdSessionId
           )
-      `).run(input).changes,
-    );
+      `).run(input).changes;
+      if (deleted) this.db.prepare("delete from workspace_session_tab_state where workspace_id = ? and session_id = ?")
+        .run(input.workspaceId, input.createdSessionId);
+      return deleted;
+    });
     return transaction() > 0;
   }
 
@@ -127,8 +130,8 @@ export class SqliteSubtaskMaintenancePersistence
     olderThan: number | null;
     requireForkLineage: boolean;
   }) {
-    const transaction = this.db.transaction(() =>
-      this.db
+    const transaction = this.db.transaction(() => {
+      const deleted = this.db
         .prepare(
           `
             delete from agent_session
@@ -144,8 +147,11 @@ export class SqliteSubtaskMaintenancePersistence
               )
           `,
         )
-        .run({ ...input, requireForkLineage: input.requireForkLineage ? 1 : 0 }).changes,
-    );
+        .run({ ...input, requireForkLineage: input.requireForkLineage ? 1 : 0 }).changes;
+      if (deleted) this.db.prepare("delete from workspace_session_tab_state where workspace_id = ? and session_id = ?")
+        .run(input.workspaceId, input.sessionId);
+      return deleted;
+    });
     return transaction() > 0;
   }
 }

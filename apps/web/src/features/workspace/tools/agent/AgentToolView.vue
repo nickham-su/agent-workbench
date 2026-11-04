@@ -39,13 +39,11 @@
               />
               <span v-if="statusStore.indicatorOf(session.id).showDot" class="agent-tab-terminal-dot" />
             </span>
-            <a-tooltip :title="t('agent.actions.closeClient')">
-              <CloseOutlined
-                class="cursor-pointer text-[color:var(--text-tertiary)] hover:text-[color:var(--text-secondary)] !mr-0 text-[0.9em]"
-                @mousedown.stop.prevent
-                @click.stop.prevent="closeSessionTab(session.id)"
-              />
-            </a-tooltip>
+            <CloseOutlined
+              class="cursor-pointer text-[color:var(--text-tertiary)] hover:text-[color:var(--text-secondary)] !mr-0 text-[0.9em]"
+              @mousedown.stop.prevent
+              @click.stop.prevent="closeSessionTab(session.id)"
+            />
           </span>
         </template>
         <div class="h-full min-h-0">
@@ -337,6 +335,7 @@ provide(agentSessionMetadataReadContextKey, {
 
 function upsertSession(record: AgentSessionRecord) {
   unavailableSessionIds.delete(record.id);
+  tabVisibilityController.rememberSession(record);
   serverSessions.value = [record, ...serverSessions.value.filter((item) => item.id !== record.id)].sort((a, b) => b.updatedAt - a.updatedAt);
 }
 function applyLocalSession(record: AgentSessionRecord) {
@@ -394,7 +393,7 @@ function notifyVisibilityTimeout(sessionId: string, receipt: VisibilityIntentRec
     if (origin.prompted || !origin.isCurrent()) return;
     origin.prompted = true;
   }
-  message.warning(t("agent.client.sessionLoadFailed"));
+  message.warning(t("agent.client.tabStateUnconfirmed"));
 }
 function notifyPickerVisibilityUncertain(origin: VisibilityOperationOrigin) {
   if (origin.prompted || !origin.isCurrent()) return;
@@ -410,7 +409,7 @@ const tabVisibilityController = createAgentSessionTabVisibilityController({
     // Picker receipts own their uncertainty feedback, including a late PUT failure.
     if (origin && (origin.kind !== "opening" || !origin.isCurrent() || origin.prompted)) return;
     if (origin) origin.prompted = true;
-    message.error(t("agent.client.tabStateUpdateFailed") + (error instanceof Error ? `: ${error.message}` : ""));
+    message.error(t("agent.client.tabStateUpdateFailed"));
   },
   onStateChange: () => {
     reconcileTabNoMap({ workspaceId: props.workspaceId, sessions: allSessions.value });
@@ -434,7 +433,7 @@ const effectiveActiveKey = computed(() => {
 function isSessionTabVisible(item: AgentSessionTab) {
   if (isDraftSession(item)) return draftVisibilityBySession[item.id] ?? true;
   return visibleServerSessionIds.value.has(item.id) && !unavailableSessionIds.has(item.id)
-    && tabVisibilityController.getEffectiveVisibility(item as AgentSessionTabVisibilitySession);
+    && tabVisibilityController.getEffectiveVisibility(item as AgentSessionTabVisibilitySession) === true;
 }
 
 const visibleSessions = computed(() => {
@@ -1019,6 +1018,9 @@ async function ensureSessionCreated(sessionId: string) {
       // A late create response has no right to migrate a draft or register a
       // Session in a different Workspace (or after component disposal).
       if (!isResponseWritable()) return created.id;
+      if (!isCompleteSessionRecord(created) || created.workspaceId !== requestWorkspaceId || created.kind !== "primary") {
+        throw new Error("invalid session creation response");
+      }
 
       const draftVisible = draftVisibilityBySession[sessionId] ?? true;
       draftSessions.value = draftSessions.value.filter((item) => item.id !== sessionId);
@@ -1126,7 +1128,7 @@ function closeSessionTab(sessionId: string, userIntent = true) {
 }
 
 function onSessionForked(record: AgentSessionRecord, mayActivate = true) {
-  if (record.workspaceId !== props.workspaceId || disposed) return;
+  if (!isCompleteSessionRecord(record) || record.workspaceId !== props.workspaceId || disposed) return;
   applyLocalSession(record);
   if (!mayActivate) return;
   invalidateOpenParentIntent();
@@ -1282,7 +1284,8 @@ async function loadChooseSessionPage(reset = false) {
     if (!valid()) return;
     if (page.scope !== "continuable" || !Array.isArray(page.items) || page.items.length > 50
       || !(page.nextCursor === null || (typeof page.nextCursor === "string" && page.nextCursor.length > 0))
-      || page.items.some((record) => !isCompleteSessionRecord(record) || record.workspaceId !== context.workspaceId || !isContinuableSession(record))) {
+      || page.items.some((record) => !isCompleteSessionRecord(record) || record.workspaceId !== context.workspaceId
+        || record.visibility !== "listed" || !isContinuableSession(record))) {
       throw new Error("invalid candidate page response");
     }
     const items = new Map(chooseSessionItems.value.map((item) => [item.id, item]));
@@ -1340,7 +1343,7 @@ function cancelPickerSelection(options: { notifyUncertainty?: boolean } = {}) {
   selection.abort.abort();
   selection.receipt?.cancel();
   if (!selection.committed && selection.receipt && isTabVisibilityContextCurrent(selection.context)
-    && !selection.receipt.previousEffectiveVisibility
+    && selection.receipt.previousEffectiveVisibility === false
     && selection.receipt.intentSeq === tabVisibilityController.getState(selection.targetId)?.nextIntentSeq) {
     const record = serverSessions.value.find((item) => item.id === selection.targetId);
     if (record) {
@@ -1370,7 +1373,16 @@ function cancelPickerSelection(options: { notifyUncertainty?: boolean } = {}) {
       return;
     }
   }
-  if (options.notifyUncertainty && selection.receipt) notifyVisibilityTimeout(selection.targetId, selection.receipt);
+  if (options.notifyUncertainty && selection.receipt) {
+    // An unknown previous state cannot be "restored" to a guessed false. Keep
+    // the real request alive and give this ended UI interaction one notice.
+    const origin = selection.visibilityOrigin;
+    if (origin) {
+      origin.isCurrent = () => pickerToolActive.value && pickerToolGeneration === selection.toolGeneration
+        && isTabVisibilityContextCurrent(selection.context) && openParentIntentId === selection.openingIntent;
+    }
+    notifyVisibilityTimeout(selection.targetId, selection.receipt);
+  }
 }
 
 async function chooseSession(targetSessionId: string, retry = false) {
@@ -1466,23 +1478,28 @@ function commitTabsSnapshot(
   visibilitySnapshot: ReturnType<typeof tabVisibilityController.captureSnapshot>,
   workspaceId: string
 ) {
+  const validIds = (ids: unknown): ids is string[] => Array.isArray(ids)
+    && ids.every((id) => typeof id === "string" && id.length > 0 && id.trim() === id)
+    && new Set(ids).size === ids.length;
   if (snapshot.scope !== "tabs" || !Array.isArray(snapshot.items) || !snapshot.tabState
     || snapshot.tabState.workspaceId !== workspaceId
-    || !Array.isArray(snapshot.tabState.closedSessionIds) || !Array.isArray(snapshot.tabState.openedSubtaskSessionIds)
-    || [...snapshot.tabState.closedSessionIds, ...snapshot.tabState.openedSubtaskSessionIds].some((id) => typeof id !== "string" || !id)
-    || snapshot.items.some((record) => !isCompleteSessionRecord(record) || record.workspaceId !== workspaceId)) {
+    || !validIds(snapshot.tabState.openedSessionIds)
+    || snapshot.items.some((record) => !isCompleteSessionRecord(record) || record.workspaceId !== workspaceId)
+    || !validIds(snapshot.items.map((record) => record.id))
+    || snapshot.items.length !== snapshot.tabState.openedSessionIds.length
+    || snapshot.items.some((record) => !snapshot.tabState.openedSessionIds.includes(record.id))) {
     throw new Error("invalid tabs snapshot response");
   }
-  for (const record of snapshot.items) {
-    if (readSnapshot && metadataReads.accept(readSnapshot(record.id)) === "accepted") upsertSession(record);
-  }
-  const members = new Set(snapshot.items.map((record) => record.id));
+  const members = new Set(snapshot.tabState.openedSessionIds);
   for (const record of serverSessions.value) {
     if (tabVisibilityController.isSnapshotProtected(record.id, visibilitySnapshot)) members.add(record.id);
   }
-  // Only actual snapshot members can install default visibility. The cache is
-  // partial: omission cannot reset an absent Session's settled confirmation.
+  // Apply before caching snapshot-only metadata so new server members are not
+  // mistaken for cache entries learned after this request began.
   tabVisibilityController.applyInitializationSnapshot(snapshot.items, snapshot.tabState, visibilitySnapshot);
+  for (const record of snapshot.items) {
+    if (readSnapshot && metadataReads.accept(readSnapshot(record.id)) === "accepted") upsertSession(record);
+  }
   visibleServerSessionIds.value = members;
 }
 

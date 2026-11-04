@@ -5,7 +5,7 @@ import { runAgentSessionForkAction } from "./agentForkSessionAction";
 import { runAgentSessionMessageMutation } from "./agentMessageMutationAction";
 import { createAgentMessageMutationState } from "./agentMessageMutationState";
 
-const forkRecord: AgentSessionRecord = { id: "forked-session", workspaceId: "ws", title: "fork", kind: "primary", headMessageId: "msg", contextRootMessageId: null, revision: 0, forkedFromSessionId: "source-session", forkedFromMessageId: "historical-message", createdAt: 1, updatedAt: 1 };
+const forkRecord: AgentSessionRecord = { id: "forked-session", workspaceId: "ws", title: "fork", kind: "primary", visibility: "listed" as const, headMessageId: "msg", contextRootMessageId: null, revision: 0, forkedFromSessionId: "source-session", forkedFromMessageId: "historical-message", createdAt: 1, updatedAt: 1 };
 
 test("时间线 Fork 使用来源 Session 与消息构造请求，并在成功后通知新 Session", async () => {
   const requests: unknown[] = [];

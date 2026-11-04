@@ -10,6 +10,7 @@ type TestSession = {
   workspaceId: string;
   title: string;
   kind: "primary" | "subtask";
+  visibility: "listed" | "unlisted";
   createdAt: number;
   updatedAt: number;
   forkedFromSessionId: string | null;
@@ -23,7 +24,7 @@ const primary: TestSession = {
   id: "session-primary",
   workspaceId: "workspace",
   title: "Primary",
-  kind: "primary" as const,
+  kind: "primary" as const, visibility: "listed" as const,
   createdAt: 1,
   updatedAt: 1,
   forkedFromSessionId: null,

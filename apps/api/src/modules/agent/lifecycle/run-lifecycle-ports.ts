@@ -147,6 +147,7 @@ export type UserRunActivationInput = {
   uiLocale: "zh-CN" | "en-US" | null;
   createdAt: number;
   expectedHistoricalFork?: ExpectedHistoricalForkSession;
+  expectedSessionVisibility?: "listed" | "unlisted";
   expectedSessionTitle?: string;
 };
 
@@ -202,6 +203,7 @@ export type StartUserRunCommand = {
   uiLocale: "zh-CN" | "en-US" | null;
   runtime: RuntimeControlPort;
   expectedHistoricalFork?: ExpectedHistoricalForkSession;
+  expectedSessionVisibility?: "listed" | "unlisted";
   expectedSessionTitle?: string;
 };
 

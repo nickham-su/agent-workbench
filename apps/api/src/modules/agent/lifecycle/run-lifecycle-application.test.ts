@@ -89,7 +89,7 @@ test("runtime handoff: send enqueue acknowledgement 期间 cancel 等待，随�
   let cancelled = false;
   dependencies.persistence.getCancelSessionSnapshot = () => ({
     sessionId: "session", workspaceId: "workspace", session: {
-      id: "session", workspaceId: "workspace", title: "session", kind: "primary", forkedFromSessionId: null, forkedFromMessageId: null,
+      id: "session", workspaceId: "workspace", title: "session", kind: "primary", visibility: "listed" as const, forkedFromSessionId: null, forkedFromMessageId: null,
       headMessageId: null, contextRootMessageId: null, revision: 0, createdAt: 1, updatedAt: 1,
     }, runState: { status: "running", activeRunId: "run-created" },
   });
@@ -124,7 +124,7 @@ test("runtime handoff: cancel 先收敛时，已激活 send 的最终 fence 阻�
   let active = true;
   dependencies.persistence.getCancelSessionSnapshot = () => ({
     sessionId: "session", workspaceId: "workspace", session: {
-      id: "session", workspaceId: "workspace", title: "session", kind: "primary", forkedFromSessionId: null, forkedFromMessageId: null,
+      id: "session", workspaceId: "workspace", title: "session", kind: "primary", visibility: "listed" as const, forkedFromSessionId: null, forkedFromMessageId: null,
       headMessageId: null, contextRootMessageId: null, revision: 0, createdAt: 1, updatedAt: 1,
     }, runState: { status: "running", activeRunId: "run-created" },
   });
@@ -435,7 +435,7 @@ test("RunLifecycleApplication P4 cancel cascades durable state before best-effor
     id: "root",
     workspaceId: "workspace",
     title: "root",
-    kind: "primary" as const,
+    kind: "primary" as const, visibility: "listed" as const,
     forkedFromSessionId: null,
     forkedFromMessageId: null,
     headMessageId: null,

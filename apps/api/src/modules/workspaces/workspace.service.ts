@@ -68,10 +68,9 @@ import { withWorkspaceLock } from "../../infra/locks/workspaceLock.js";
 import { workspaceLifecycleCoordinator } from "../../infra/locks/workspace-lifecycle-coordinator.js";
 import { assertNoRepoGitEnvLeaseHold } from "../git-env/git-env.lease.js";
 import {
-  deleteWorkspaceSessionTabStateOverride,
   findAgentSessionKindInWorkspace,
-  listEffectiveWorkspaceSessionTabStateOverrides,
-  upsertWorkspaceSessionTabStateOverride,
+  readWorkspaceAgentTabState,
+  updateWorkspaceSessionTabState,
   workspaceExistsForAgentTabState
 } from "./workspace-session-tab-state.store.js";
 
@@ -222,13 +221,10 @@ function requireWorkspaceForAgentTabState(ctx: AppContext, workspaceId: string) 
 }
 
 export async function getWorkspaceAgentTabState(ctx: AppContext, workspaceId: string): Promise<WorkspaceAgentTabState> {
-  requireWorkspaceForAgentTabState(ctx, workspaceId);
-  const overrides = listEffectiveWorkspaceSessionTabStateOverrides(ctx.db, workspaceId);
-  return {
-    workspaceId,
-    closedSessionIds: overrides.filter((override) => override.kind === "primary" && !override.visible).map((override) => override.sessionId),
-    openedSubtaskSessionIds: overrides.filter((override) => override.kind === "subtask" && override.visible).map((override) => override.sessionId)
-  };
+  return ctx.db.transaction(() => {
+    requireWorkspaceForAgentTabState(ctx, workspaceId);
+    return readWorkspaceAgentTabState(ctx.db, workspaceId);
+  }).deferred();
 }
 
 export async function setWorkspaceAgentSessionTabVisibility(
@@ -243,13 +239,7 @@ export async function setWorkspaceAgentSessionTabVisibility(
         throw new HttpError(404, "Agent Session not found in Workspace", "AGENT_SESSION_NOT_FOUND_IN_WORKSPACE");
       }
 
-      if (kind === "primary" && !input.visible) {
-        upsertWorkspaceSessionTabStateOverride(ctx.db, { ...input, updatedAt: nowMs() });
-      } else if (kind === "subtask" && input.visible) {
-        upsertWorkspaceSessionTabStateOverride(ctx.db, { ...input, updatedAt: nowMs() });
-      } else {
-        deleteWorkspaceSessionTabStateOverride(ctx.db, input.workspaceId, input.sessionId);
-      }
+      updateWorkspaceSessionTabState(ctx.db, { ...input, updatedAt: nowMs() });
 
       return { ...input };
     })()

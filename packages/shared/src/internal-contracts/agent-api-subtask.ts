@@ -116,6 +116,7 @@ export const AgentSubtaskErrorCode = {
   SessionNotFound: "AGENT_SUBTASK_SESSION_NOT_FOUND",
   WorkspaceMismatch: "AGENT_SUBTASK_WORKSPACE_MISMATCH",
   KindMismatch: "AGENT_SUBTASK_KIND_MISMATCH",
+  SessionVisibilityMismatch: "SUBTASK_SESSION_VISIBILITY_MISMATCH",
   SessionIdNotAllowed: "AGENT_SUBTASK_SESSION_ID_NOT_ALLOWED",
   SessionModeInvalid: "AGENT_SUBTASK_SESSION_MODE_INVALID",
   SessionRunning: "AGENT_SUBTASK_SESSION_RUNNING",

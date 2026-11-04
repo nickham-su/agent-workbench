@@ -1,3 +1,6 @@
+import { HttpError } from "../../app/errors.js";
+import { resolveSessionVisibility, type SessionVisibilityInput } from "./session/session-visibility.js";
+import { insertInitialAgentSessionTabState } from "../../infra/db/agent-session-tab-state.js";
 import type {
   PrimaryProjectionProfile,
   AgentCompactionMessage,
@@ -151,7 +154,7 @@ export type SessionAgentModelOverrideRecord = {
 };
 
 type SessionRow = {
-  id: string; workspaceId: string; title: string; kind: "primary" | "subtask";
+  id: string; workspaceId: string; title: string; kind: "primary" | "subtask"; visibility: "listed" | "unlisted";
   headMessageId: string | null; contextRootMessageId: string | null; revision: number;
   forkedFromSessionId: string | null; forkedFromMessageId: string | null; createdAt: number; updatedAt: number;
 };
@@ -210,7 +213,7 @@ function toExecution(row: ExecutionRow): AgentToolExecution {
 }
 
 function sessionRow(db: Db, workspaceId: string, sessionId: string): SessionRow | null {
-  return db.prepare(`select id, workspace_id as workspaceId, title, kind, head_message_id as headMessageId, context_root_message_id as contextRootMessageId, revision, forked_from_session_id as forkedFromSessionId, forked_from_message_id as forkedFromMessageId, created_at as createdAt, updated_at as updatedAt from agent_session where id = ? and workspace_id = ?`).get(sessionId, workspaceId) as SessionRow | undefined ?? null;
+  return db.prepare(`select id, workspace_id as workspaceId, title, kind, visibility, head_message_id as headMessageId, context_root_message_id as contextRootMessageId, revision, forked_from_session_id as forkedFromSessionId, forked_from_message_id as forkedFromMessageId, created_at as createdAt, updated_at as updatedAt from agent_session where id = ? and workspace_id = ?`).get(sessionId, workspaceId) as SessionRow | undefined ?? null;
 }
 function messageRow(db: Db, messageId: string): MessageRow | null {
   return db.prepare(`select id, workspace_id as workspaceId, previous_message_id as previousMessageId,
@@ -388,26 +391,28 @@ function assertPrimaryProfileMatchesRun(run: AgentRunRecord | null, profile: Pri
   }
 }
 
-export function createMessageSession(db: Db, input: { id: string; workspaceId: string; title: string; kind: "primary" | "subtask"; createdAt: number; forkedFromSessionId?: string | null; forkedFromMessageId?: string | null; headMessageId?: string | null; contextRootMessageId?: string | null }) {
+export function createMessageSession(db: Db, input: { id: string; workspaceId: string; title: string; kind: "primary" | "subtask"; createdAt: number; forkedFromSessionId?: string | null; forkedFromMessageId?: string | null; headMessageId?: string | null; contextRootMessageId?: string | null } & SessionVisibilityInput) {
   db.transaction(() => {
+    const visibility = resolveSessionVisibility(db, input.workspaceId, input);
     if (input.forkedFromMessageId) {
       const message = messageRow(db, input.forkedFromMessageId);
       if (!message || message.workspaceId !== input.workspaceId) throw new Error("invalid fork message");
     }
-    db.prepare(`insert into agent_session (id,workspace_id,title,kind,head_message_id,context_root_message_id,revision,forked_from_session_id,forked_from_message_id,created_at,updated_at) values (@id,@workspaceId,@title,@kind,@headMessageId,@contextRootMessageId,0,@forkedFromSessionId,@forkedFromMessageId,@createdAt,@createdAt)`).run({ ...input, headMessageId: input.headMessageId ?? null, contextRootMessageId: input.contextRootMessageId ?? null, forkedFromSessionId: input.forkedFromSessionId ?? null, forkedFromMessageId: input.forkedFromMessageId ?? null });
+    db.prepare(`insert into agent_session (id,workspace_id,title,kind,head_message_id,context_root_message_id,revision,forked_from_session_id,forked_from_message_id,created_at,updated_at,visibility) values (@id,@workspaceId,@title,@kind,@headMessageId,@contextRootMessageId,0,@forkedFromSessionId,@forkedFromMessageId,@createdAt,@createdAt,@visibility)`).run({ ...input, visibility, headMessageId: input.headMessageId ?? null, contextRootMessageId: input.contextRootMessageId ?? null, forkedFromSessionId: input.forkedFromSessionId ?? null, forkedFromMessageId: input.forkedFromMessageId ?? null });
     db.prepare(`insert into session_run_state (workspace_id,session_id,status,active_run_id,run_notice_text,retry_count,next_retry_at,active_assistant_message_id,non_terminal_message_ids_json,non_terminal_tool_execution_ids_json,updated_at) values (@workspaceId,@id,'idle',null,'',0,null,null,'[]','[]',@createdAt)`).run(input);
+    insertInitialAgentSessionTabState(db, { ...input, visibility });
   })();
 }
 
 export function getMessageSession(db: Db, workspaceId: string, sessionId: string): AgentSessionMessageState | null { const row = sessionRow(db, workspaceId, sessionId); return row ? toSession(row) : null; }
 
 export function getMessageSessionById(db: Db, sessionId: string): AgentSessionMessageState | null {
-  const row = db.prepare(`select id,workspace_id as workspaceId,title,kind,head_message_id as headMessageId,context_root_message_id as contextRootMessageId,revision,forked_from_session_id as forkedFromSessionId,forked_from_message_id as forkedFromMessageId,created_at as createdAt,updated_at as updatedAt from agent_session where id=?`).get(sessionId) as SessionRow | undefined;
+  const row = db.prepare(`select id,workspace_id as workspaceId,title,kind,visibility,head_message_id as headMessageId,context_root_message_id as contextRootMessageId,revision,forked_from_session_id as forkedFromSessionId,forked_from_message_id as forkedFromMessageId,created_at as createdAt,updated_at as updatedAt from agent_session where id=?`).get(sessionId) as SessionRow | undefined;
   return row ? toSession(row) : null;
 }
 
 export function listMessageSessions(db: Db, workspaceId: string): AgentSessionMessageState[] {
-  return (db.prepare(`select id,workspace_id as workspaceId,title,kind,head_message_id as headMessageId,context_root_message_id as contextRootMessageId,revision,forked_from_session_id as forkedFromSessionId,forked_from_message_id as forkedFromMessageId,created_at as createdAt,updated_at as updatedAt from agent_session where workspace_id=? order by updated_at desc`).all(workspaceId) as SessionRow[]).map(toSession);
+  return (db.prepare(`select id,workspace_id as workspaceId,title,kind,visibility,head_message_id as headMessageId,context_root_message_id as contextRootMessageId,revision,forked_from_session_id as forkedFromSessionId,forked_from_message_id as forkedFromMessageId,created_at as createdAt,updated_at as updatedAt from agent_session where workspace_id=? and visibility='listed' order by updated_at desc`).all(workspaceId) as SessionRow[]).map(toSession);
 }
 export function getMessageRunState(db: Db, workspaceId: string, sessionId: string): AgentMessageSessionRunState | null {
   const row = db.prepare(`
@@ -960,9 +965,10 @@ export function forkMessageSession(db: Db, input: {
   id: string; workspaceId: string; sourceSessionId: string; expectedHeadMessageId: string | null;
   expectedRevision: number; targetMessageId: string; title: string; kind: "primary" | "subtask"; createdAt: number;
   allowSourceWithActiveRun?: boolean;
-}) {
+} & SessionVisibilityInput) {
   return db.transaction(() => {
     const source = assertCurrent(db, { workspaceId: input.workspaceId, sessionId: input.sourceSessionId, expectedHeadMessageId: input.expectedHeadMessageId, expectedRevision: input.expectedRevision });
+    const visibility = resolveSessionVisibility(db, input.workspaceId, { ...input, contentSourceSessionId: source.id });
     const state = getMessageRunState(db, input.workspaceId, input.sourceSessionId);
     const sourceHasActiveRun = state?.status === "running" && state.activeRunId != null;
     // Internal resolved forks keep their active-run contract. Public forks only
@@ -988,8 +994,9 @@ export function forkMessageSession(db: Db, input: {
       const pending = db.prepare(`select 1 from agent_tool_execution execution join agent_message_part part on part.id = execution.call_part_id where part.message_id = ? and execution.status in ('queued','running') limit 1`).get(target.id);
       if (pending) throw new AgentMessageDomainError("FORK_TARGET_HAS_NON_TERMINAL_EXECUTIONS");
     }
-    db.prepare(`insert into agent_session (id,workspace_id,title,kind,head_message_id,context_root_message_id,revision,forked_from_session_id,forked_from_message_id,created_at,updated_at) values (@id,@workspaceId,@title,@kind,@targetMessageId,@contextRootMessageId,0,@sourceSessionId,@targetMessageId,@createdAt,@createdAt)`).run({ ...input, contextRootMessageId: ancestry.contextRootMessageId });
+    db.prepare(`insert into agent_session (id,workspace_id,title,kind,head_message_id,context_root_message_id,revision,forked_from_session_id,forked_from_message_id,created_at,updated_at,visibility) values (@id,@workspaceId,@title,@kind,@targetMessageId,@contextRootMessageId,0,@sourceSessionId,@targetMessageId,@createdAt,@createdAt,@visibility)`).run({ ...input, visibility, contextRootMessageId: ancestry.contextRootMessageId });
     db.prepare(`insert into session_run_state (workspace_id,session_id,status,active_run_id,run_notice_text,retry_count,next_retry_at,active_assistant_message_id,non_terminal_message_ids_json,non_terminal_tool_execution_ids_json,updated_at) values (@workspaceId,@id,'idle',null,'',0,null,null,'[]','[]',@createdAt)`).run(input);
+    insertInitialAgentSessionTabState(db, { ...input, visibility });
     return getMessageSession(db, input.workspaceId, input.id)!;
   })();
 }
@@ -1005,7 +1012,7 @@ export class StableForkSourceError extends Error {
 /** Read, select and materialize against one write-reserved SQLite snapshot. */
 export function forkStableSourceSession(db: Db, input: {
   id: string; workspaceId: string; sourceSessionId: string; title: string; createdAt: number;
-}): AgentSessionMessageState {
+} & SessionVisibilityInput): AgentSessionMessageState {
   return db.transaction(() => {
     const source = getMessageSession(db, input.workspaceId, input.sourceSessionId);
     if (!source || (source.kind !== "primary" && source.kind !== "subtask")) {
@@ -1023,7 +1030,7 @@ export function forkStableSourceSession(db: Db, input: {
       throw error; // SQLITE_BUSY and other infrastructure failures retain their original semantics.
     }
     createMessageSession(db, {
-      ...input, kind: "subtask", forkedFromSessionId: source.id,
+      ...input, contentSourceSessionId: source.id, kind: "subtask", forkedFromSessionId: source.id,
       forkedFromMessageId: boundary.headMessageId, headMessageId: boundary.headMessageId,
       contextRootMessageId: boundary.contextRootMessageId,
     });
@@ -1116,13 +1123,14 @@ export function validateHistoricalForkSource(db: Db, input: {
 export function forkHistoricalMessageSession(db: Db, input: {
   id: string; workspaceId: string; sourceSessionId: string; targetMessageId: string;
   title: string; createdAt: number;
-}): AgentSessionMessageState {
+} & SessionVisibilityInput): AgentSessionMessageState {
   return db.transaction(() => {
-    const { ancestry } = historicalForkAnchor(db, input);
+    const { source, ancestry } = historicalForkAnchor(db, input);
+    const visibility = resolveSessionVisibility(db, input.workspaceId, { ...input, contentSourceSessionId: source.id });
     const existing = getMessageSessionById(db, input.id);
     if (existing) {
       if (existing.workspaceId !== input.workspaceId || existing.kind !== "primary" ||
-          existing.title !== input.title || existing.forkedFromSessionId !== input.sourceSessionId ||
+          existing.visibility !== visibility || existing.title !== input.title || existing.forkedFromSessionId !== input.sourceSessionId ||
           existing.forkedFromMessageId !== input.targetMessageId ||
           existing.headMessageId !== input.targetMessageId ||
           existing.contextRootMessageId !== ancestry.contextRootMessageId || existing.revision !== 0) {
@@ -1131,6 +1139,7 @@ export function forkHistoricalMessageSession(db: Db, input: {
       return existing;
     }
     createMessageSession(db, {
+      ...input, visibility, contentSourceSessionId: source.id,
       id: input.id, workspaceId: input.workspaceId, title: input.title, kind: "primary",
       createdAt: input.createdAt, forkedFromSessionId: input.sourceSessionId,
       forkedFromMessageId: input.targetMessageId, headMessageId: input.targetMessageId,
@@ -1806,7 +1815,7 @@ export function listRecentMessageSessionsAcrossWorkspaces(db: Db, limit: number,
       session.updated_at as sessionUpdatedAt, workspace.id as workspaceId,
       workspace.title as workspaceTitle, workspace.dir_name as workspaceDirName
     from agent_session session join workspaces workspace on workspace.id = session.workspace_id
-    where 1 = 1 ${kindClause}
+    where session.visibility = 'listed' ${kindClause}
     order by session.updated_at desc, session.id desc limit @limit
   `).all({ limit, kind }) as Array<{
     sessionId: string; sessionTitle: string; sessionUpdatedAt: number;
@@ -1825,12 +1834,29 @@ export function getLatestTerminalAssistantTextForMessageRun(db: Db, params: { ru
   return { messageId: row?.messageId ?? null, text: row?.text ?? "" };
 }
 
-export function findMessageClientRequestDedup(db: Db, params: { workspaceId: string; sessionId: string; clientRequestId: string }) {
-  return (db.prepare(`
+export function findMessageClientRequestDedup(db: Db, params: {
+  workspaceId: string; sessionId: string; clientRequestId: string; expectedSessionVisibility?: "listed" | "unlisted";
+}) {
+  const read = () => (db.prepare(`
     select message_id as messageId, run_id as runId
     from agent_client_request
     where workspace_id = ? and session_id = ? and client_request_id = ?
   `).get(params.workspaceId, params.sessionId, params.clientRequestId) as { messageId: string; runId: string } | undefined) ?? null;
+  if (params.expectedSessionVisibility == null) return read();
+  return db.transaction(() => {
+    const dedup = read();
+    if (!dedup) return null;
+    // Accepted scheduled requests only require stable identity. Never apply
+    // pristine head/title/revision or current Agent configuration to a replay.
+    const session = getMessageSession(db, params.workspaceId, params.sessionId);
+    const run = getRunRecord(db, dedup.runId);
+    if (!session || session.kind !== "primary" || session.visibility !== params.expectedSessionVisibility ||
+        !run || run.workspaceId !== params.workspaceId || run.sessionId !== params.sessionId ||
+        run.runKind !== "user" || run.triggerMessageId !== dedup.messageId) {
+      throw new HttpError(409, "Scheduled request identity does not match", "SESSION_ID_CONFLICT");
+    }
+    return dedup;
+  }).deferred();
 }
 
 export function insertMessageClientRequestDedup(db: Db, params: { workspaceId: string; sessionId: string; clientRequestId: string; messageId: string; runId: string; createdAt: number }) {

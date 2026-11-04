@@ -5,6 +5,9 @@ import { PluginToolCanonicalNameSchema } from "./plugin.js";
 export const AgentSessionKindSchema = Type.Union([Type.Literal("primary"), Type.Literal("subtask")]);
 export type AgentSessionKind = Static<typeof AgentSessionKindSchema>;
 
+export const AgentSessionVisibilitySchema = Type.Union([Type.Literal("listed"), Type.Literal("unlisted")]);
+export type AgentSessionVisibility = Static<typeof AgentSessionVisibilitySchema>;
+
 export const AgentMcpToolNameSchema = Type.String({ pattern: "^mcp_[A-Za-z0-9_-]+_[A-Za-z0-9_-]+$" });
 /** New callable context tools; the historical visual_analyze name is intentionally absent. */
 export const AgentCallableContextToolNameSchema = Type.Union([

@@ -130,7 +130,7 @@ function textMessage(overrides: Partial<AgentMessage> & Pick<AgentMessage, "id">
 function timelineSnapshot(messages: AgentMessage[]) {
   return {
     session: {
-      id: "session-a", workspaceId: "ws-a", title: "Session A", kind: "primary" as const,
+      id: "session-a", workspaceId: "ws-a", title: "Session A", kind: "primary" as const, visibility: "listed" as const,
       headMessageId: messages.at(-1)?.id ?? null, contextRootMessageId: null, revision: 1,
       forkedFromSessionId: null, forkedFromMessageId: null, createdAt: 1, updatedAt: 1,
     },

@@ -3,7 +3,7 @@ import type { AppContext } from "../../app/context.js";
 import { HttpError } from "../../app/errors.js";
 import type { AgentService } from "../agent/agent.service.js";
 import type { AgentRuntimePort } from "../agent/agent.runtime-port.js";
-import { findMessageClientRequestDedup, getRunRecord } from "../agent/agent-message.store.js";
+import { findMessageClientRequestDedup, getMessageSession, getRunRecord } from "../agent/agent-message.store.js";
 import { buildScheduledExecutionSessionTitle, normalizeScheduledTaskName } from "../agent/session/session-title.js";
 import { getWorkspaceEnabledAgentIds } from "../workspaces/workspace.service.js";
 import { getAgentSettings, resolveExecutionProfile } from "../settings/settings.service.js";
@@ -19,7 +19,7 @@ import type { TaskConfiguration, ExecutionRow } from "./scheduled-task.store.js"
 
 export type ScheduledRunReferenceDiagnostic = {
   executionId: string;
-  reason: "run_reference_conflict" | "run_reference_missing" | "run_reference_query_failed";
+  reason: "run_reference_conflict" | "run_reference_missing" | "run_reference_query_failed" | "snapshot_invalid";
 };
 
 export class ScheduledTaskService {
@@ -29,12 +29,15 @@ export class ScheduledTaskService {
     private readonly onUnresolvedRun: (diagnostic: ScheduledRunReferenceDiagnostic) => void = () => {}) {}
 
   /** Once per execution/process: keep activity locked until a valid Run is authoritative. */
-  private unresolvedRun(execution: ExecutionRow, reason: ScheduledRunReferenceDiagnostic["reason"]): ExecutionRow {
-    if (!this.unresolved.has(execution.id)) {
-      this.unresolved.add(execution.id);
-      try { this.onUnresolvedRun({ executionId: execution.id, reason }); }
+  private retainExecution(executionId: string, reason: ScheduledRunReferenceDiagnostic["reason"]): void {
+    if (!this.unresolved.has(executionId)) {
+      this.unresolved.add(executionId);
+      try { this.onUnresolvedRun({ executionId, reason }); }
       catch { /* diagnostics cannot alter scheduling safety */ }
     }
+  }
+  private unresolvedRun(execution: ExecutionRow, reason: ScheduledRunReferenceDiagnostic["reason"]): ExecutionRow {
+    this.retainExecution(execution.id, reason);
     return execution;
   }
 
@@ -160,12 +163,24 @@ export class ScheduledTaskService {
       return execution;
     }
     let run: ReturnType<typeof getRunRecord>;
-    try { run = getRunRecord(this.ctx.db, runId); }
+    let session: ReturnType<typeof getMessageSession>;
+    try {
+      run = getRunRecord(this.ctx.db, runId);
+      session = execution.sessionId ? getMessageSession(this.ctx.db, workspaceId, execution.sessionId) : null;
+    }
     catch { return this.unresolvedRun(execution, "run_reference_query_failed"); }
     if (!run || run.workspaceId !== workspaceId || run.sessionId !== execution.sessionId || run.runKind !== "user") {
       // AgentRuntimePort cannot prove a previously accepted run has stopped.
       // Do not guess a terminal result or free the slot even on startup recovery.
       return this.unresolvedRun(execution, "run_reference_missing");
+    }
+    // Accepted requests use stable identity, not pristine title/head/revision:
+    // the user may already have continued this Session in its ordinary Tab.
+    if (!dedup || dedup.runId !== runId || run.triggerMessageId !== dedup.messageId || !session ||
+        session.kind !== "primary" || session.visibility !== (execution.snapshot.sessionVisibility ?? "listed") ||
+        session.forkedFromSessionId !== execution.snapshot.sourceSessionId ||
+        session.forkedFromMessageId !== execution.snapshot.sourceMessageId) {
+      return this.unresolvedRun(execution, "run_reference_conflict");
     }
     this.unresolved.delete(execution.id);
     const nowMs = Math.max(this.now(), execution.createdAt, run.createdAt);
@@ -200,11 +215,18 @@ export class ScheduledTaskService {
 
   /** The claim and snapshot are durable before any Agent application call. */
   async execute(execution: ExecutionRow): Promise<ExecutionRow> {
-    if (execution.status === "skipped") return execution;
     const workspaceId = this.workspaceFor(execution.taskId);
-    if (execution.runId || findMessageClientRequestDedup(this.ctx.db, {
-      workspaceId, sessionId: execution.sessionId!, clientRequestId: execution.clientRequestId
-    })) return this.reconcile(execution);
+    // Re-read the durable snapshot, rather than trusting a previously claimed
+    // in-memory object after a delay. Invalid JSON never reaches Agent dispatch.
+    const stored = readScheduledExecution(this.ctx.db, workspaceId, execution.id);
+    if (!stored) throw new Error("Scheduled execution is missing");
+    execution = stored;
+    if (execution.status !== "starting" && execution.status !== "running") return execution;
+    try {
+      if (execution.runId || findMessageClientRequestDedup(this.ctx.db, {
+        workspaceId, sessionId: execution.sessionId!, clientRequestId: execution.clientRequestId
+      })) return this.reconcile(execution);
+    } catch { return this.unresolvedRun(execution, "run_reference_query_failed"); }
     const fail = (reasonCode: ScheduledExecutionReasonCode) => transitionScheduledExecution(this.ctx.db, {
       workspaceId, executionId: execution.id, nowMs: Math.max(this.now(), execution.createdAt),
       status: "failed_to_start", reasonCode
@@ -213,15 +235,16 @@ export class ScheduledTaskService {
       this.writable(workspaceId);
       this.readyAgent(workspaceId, execution.snapshot.agentId);
       const title = buildScheduledExecutionSessionTitle(execution.snapshot.taskName);
+      const visibility = execution.snapshot.sessionVisibility ?? "listed";
       let expectedHistoricalFork: import("../agent/lifecycle/run-lifecycle-ports.js").ExpectedHistoricalForkSession | undefined;
       if (execution.snapshot.triggerMode === "new_session") {
-        this.agent.createPrimarySessionWithExpectedId({ workspaceId, sessionId: execution.sessionId!, title });
+        this.agent.createPrimarySessionWithExpectedId({ workspaceId, sessionId: execution.sessionId!, title, visibility });
       } else {
         if (!execution.snapshot.sourceSessionId || !execution.snapshot.sourceMessageId) return fail("source_unavailable");
         const forked = this.agent.forkPrimarySessionFromHistoricalAnchorWithExpectedId({
           workspaceId, sessionId: execution.sessionId!, title,
           sourceSessionId: execution.snapshot.sourceSessionId,
-          targetMessageId: execution.snapshot.sourceMessageId
+          targetMessageId: execution.snapshot.sourceMessageId, visibility
         });
         expectedHistoricalFork = { title, headMessageId: execution.snapshot.sourceMessageId,
           contextRootMessageId: forked.contextRootMessageId, revision: forked.revision,
@@ -232,7 +255,7 @@ export class ScheduledTaskService {
       const response = await this.agent.sendMessage({ sessionId: execution.sessionId!, body: {
         workspaceId, clientRequestId: execution.clientRequestId, agentId: execution.snapshot.agentId,
         text: execution.snapshot.prompt
-      }, runtime: this.runtime, expectedHistoricalFork,
+      }, runtime: this.runtime, expectedHistoricalFork, expectedSessionVisibility: visibility,
       expectedSessionTitle: execution.snapshot.triggerMode === "new_session" ? title : undefined });
       return this.reconcile(transitionScheduledExecution(this.ctx.db, {
         workspaceId, executionId: execution.id, nowMs: Math.max(this.now(), execution.createdAt),
@@ -240,9 +263,7 @@ export class ScheduledTaskService {
       }) ?? execution);
     } catch (error) {
       const found = this.reconcile(readScheduledExecution(this.ctx.db, workspaceId, execution.id) ?? execution);
-      if (found.runId || findMessageClientRequestDedup(this.ctx.db, {
-        workspaceId, sessionId: execution.sessionId!, clientRequestId: execution.clientRequestId
-      })) return found; // Unknown acceptance is still an active execution.
+      if (found.runId || this.unresolved.has(execution.id)) return found; // Unknown acceptance keeps the slot active.
       if (error instanceof HttpError && error.code === "AGENT_WORKER_ENQUEUE_UNKNOWN") return found;
       if (error instanceof HttpError && error.code === "WORKSPACE_DELETING") return fail("workspace_deleting");
       if (error instanceof HttpError && error.code === "SESSION_ID_CONFLICT") return fail("session_id_conflict");
@@ -300,24 +321,31 @@ export class ScheduledTaskService {
       if (!activeIds.has(id)) this.unresolved.delete(id);
     }
     for (const { workspaceId, executionId } of active) {
-      const execution = readScheduledExecution(this.ctx.db, workspaceId, executionId);
-      if (!execution) continue;
-      const updated = this.reconcile(execution);
-      if (recover && updated.status === "starting" && !updated.runId && !this.unresolved.has(executionId)) {
-        let dedup: ReturnType<typeof findMessageClientRequestDedup>;
-        try {
-          dedup = findMessageClientRequestDedup(this.ctx.db, {
-            workspaceId, sessionId: updated.sessionId!, clientRequestId: updated.clientRequestId
-          });
-        } catch {
-          this.unresolvedRun(updated, "run_reference_query_failed");
-          continue;
+      try {
+        const execution = readScheduledExecution(this.ctx.db, workspaceId, executionId);
+        if (!execution) continue;
+        const updated = this.reconcile(execution);
+        if (recover && updated.status === "starting" && !updated.runId && !this.unresolved.has(executionId)) {
+          let dedup: ReturnType<typeof findMessageClientRequestDedup>;
+          try {
+            dedup = findMessageClientRequestDedup(this.ctx.db, {
+              workspaceId, sessionId: updated.sessionId!, clientRequestId: updated.clientRequestId
+            });
+          } catch {
+            this.unresolvedRun(updated, "run_reference_query_failed");
+            continue;
+          }
+          if (!dedup) {
+            transitionScheduledExecution(this.ctx.db, { workspaceId, executionId,
+              status: "failed_to_start", reasonCode: "startup_interrupted_before_run",
+              nowMs: Math.max(this.now(), updated.createdAt) });
+          }
         }
-        if (!dedup) {
-          transitionScheduledExecution(this.ctx.db, { workspaceId, executionId,
-            status: "failed_to_start", reasonCode: "startup_interrupted_before_run",
-            nowMs: Math.max(this.now(), updated.createdAt) });
-        }
+      } catch (error) {
+        if (!(error instanceof ScheduledStoreError) || error.code !== "SCHEDULED_EXECUTION_SNAPSHOT_INVALID") throw error;
+        // A corrupt active snapshot is not evidence that its accepted work has
+        // stopped. Retain its SQL mutual-exclusion slot and scan other rows.
+        this.retainExecution(executionId, "snapshot_invalid");
       }
     }
   }
@@ -325,6 +353,9 @@ export class ScheduledTaskService {
 
 export function scheduledError(error: unknown): never {
   if (error instanceof ScheduledStoreError) {
+    if (error.code === "SCHEDULED_EXECUTION_SNAPSHOT_INVALID") {
+      throw new HttpError(500, "Scheduled execution snapshot is invalid", error.code);
+    }
     const status = error.code === "SCHEDULED_TASK_NOT_FOUND" ? 404 : error.code === "WORKSPACE_DELETING" ? 409 : 409;
     throw new HttpError(status, error.code, error.code);
   }

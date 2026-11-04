@@ -74,7 +74,7 @@ test("A-REGRESSION-BUNDLE: builtin-only artifact actually logs in, posts multipa
     res.setHeader("content-type", "application/json");
     if (req.url === "/api/health") { res.end(healthBody(false)); return; }
     if (req.url?.endsWith("/agents/available?surface=user")) { res.end(JSON.stringify({ agents: [{ id: "a", name: "a", summary: "" }] })); return; }
-    if (req.url === "/api/agent/sessions") { res.end(JSON.stringify({ id: "s", workspaceId: "w", title: "fixture", kind: "primary", forkedFromSessionId: null, forkedFromMessageId: null, headMessageId: null, contextRootMessageId: null, revision: 0, createdAt: 1, updatedAt: 1 })); return; }
+    if (req.url === "/api/agent/sessions") { res.end(JSON.stringify({ id: "s", workspaceId: "w", title: "fixture", kind: "primary", visibility: "listed", forkedFromSessionId: null, forkedFromMessageId: null, headMessageId: null, contextRootMessageId: null, revision: 0, createdAt: 1, updatedAt: 1 })); return; }
     if (req.url === "/api/agent/sessions/s/messages") {
       assert.match(req.headers["content-type"]!, /^multipart\/form-data; boundary=/); let body = ""; for await (const chunk of req) body += String(chunk);
       assert.match(body, /name="payload"/); assert.match(body, /name="images"; filename="image.png"/); multipart++;

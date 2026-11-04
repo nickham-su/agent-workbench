@@ -9,7 +9,7 @@ export function jsonResult(value: unknown, status = 200, setCookies: string[] = 
   return { status, body: JSON.stringify(value), setCookies };
 }
 export function agentSession(overrides: Record<string, unknown> = {}) {
-  return { id: "s", workspaceId: "w", title: "fixture", kind: "primary", forkedFromSessionId: null, forkedFromMessageId: null,
+  return { id: "s", workspaceId: "w", title: "fixture", kind: "primary", visibility: "listed", forkedFromSessionId: null, forkedFromMessageId: null,
     headMessageId: null, contextRootMessageId: null, revision: 10_000, createdAt: 1, updatedAt: 2, ...overrides };
 }
 export function messagePart(messageId: string, type = "text", overrides: Record<string, unknown> = {}) {

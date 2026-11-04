@@ -163,7 +163,7 @@ test("AgentService Session facades delegate without local rules", async () => {
 test("AgentService Message Query facades delegate without local rules", async () => {
   const calls: unknown[][] = [];
   const session: AgentSessionMessageState = {
-    id: "session", workspaceId: "workspace", title: "Session", kind: "primary",
+    id: "session", workspaceId: "workspace", title: "Session", kind: "primary", visibility: "listed" as const,
     headMessageId: "message", contextRootMessageId: "message", revision: 3,
     forkedFromSessionId: null, forkedFromMessageId: null, createdAt: 1, updatedAt: 1
   };

@@ -15,6 +15,7 @@ import {
   revertBeforeUserMessage
 } from "../agent-message.store.js";
 import { findMessageClientRequestDedup, listMessageSessions, setManualMessageSessionTitle } from "../agent-message.store.js";
+import type { SessionVisibilityInput } from "./session-visibility.js";
 import type { SessionCloneInput, SessionCreateInput, SessionInteractionStore } from "./session-interaction-ports.js";
 
 /**
@@ -41,7 +42,7 @@ export class SqliteSessionInteractionStore implements SessionInteractionStore {
   setManualTitle(input: { sessionId: string; workspaceId: string; title: string }): boolean {
     return setManualMessageSessionTitle(this.dependencies.db, input);
   }
-  findClientRequestDedup(input: { workspaceId: string; sessionId: string; clientRequestId: string }) {
+  findClientRequestDedup(input: { workspaceId: string; sessionId: string; clientRequestId: string; expectedSessionVisibility?: "listed" | "unlisted" }) {
     return findMessageClientRequestDedup(this.dependencies.db, input);
   }
   getRunState(workspaceId: string, sessionId: string) {
@@ -62,11 +63,11 @@ export class SqliteSessionInteractionStore implements SessionInteractionStore {
     return validateHistoricalForkSource(this.dependencies.db, input);
   }
   forkStableSourceSession(input: { id: string; workspaceId: string; sourceSessionId: string;
-    title: string; createdAt: number }): AgentSessionRecord {
+    title: string; createdAt: number } & SessionVisibilityInput): AgentSessionRecord {
     return forkStableSourceSession(this.dependencies.db, input);
   }
   forkHistoricalSource(input: { id: string; workspaceId: string; sourceSessionId: string;
-    targetMessageId: string; title: string; createdAt: number }): AgentSessionRecord {
+    targetMessageId: string; title: string; createdAt: number } & SessionVisibilityInput): AgentSessionRecord {
     return forkHistoricalMessageSession(this.dependencies.db, input);
   }
 
@@ -82,6 +83,8 @@ export class SqliteSessionInteractionStore implements SessionInteractionStore {
       targetMessageId: input.fromMessageId,
       title: (input.title || `${source.title} (fork)`).trim() || `${source.title} (fork)`,
       kind: input.targetKind,
+      visibility: input.visibility,
+      executionParent: input.executionParent,
       allowSourceWithActiveRun: input.allowSourceWithActiveRun,
       createdAt: input.createdAt
     });

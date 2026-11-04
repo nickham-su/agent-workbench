@@ -218,6 +218,7 @@ export class RunLifecycleApplication {
         uiLocale: command.uiLocale,
         createdAt,
         expectedHistoricalFork: command.expectedHistoricalFork,
+        expectedSessionVisibility: command.expectedSessionVisibility,
         expectedSessionTitle: command.expectedSessionTitle,
       }, () => {
         // No await: SQLite checks and all publication share the write transaction.

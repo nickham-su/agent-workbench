@@ -11,10 +11,11 @@ import type {
 import type { AgentApiSubtaskStartRequest } from "@agent-workbench/shared/internal-contracts/agent-api";
 import type { AgentMessageControlResult, AgentMessageSessionRunState } from "@agent-workbench/shared";
 import type { AgentRuntimePort } from "../agent.runtime-port.js";
+import type { SessionVisibilityInput } from "./session-visibility.js";
 import type { HistoricalForkSource } from "../agent-message.store.js";
 import type { ExpectedHistoricalForkSession } from "../lifecycle/run-lifecycle-ports.js";
 
-export type SessionCreateInput = {
+export type SessionCreateInput = SessionVisibilityInput & {
   id: string;
   workspaceId: string;
   title: string;
@@ -26,7 +27,7 @@ export type SessionCreateInput = {
   forkedFromMessageId?: string | null;
 };
 
-export type SessionCloneInput = {
+export type SessionCloneInput = SessionVisibilityInput & {
   id: string;
   createdAt: number;
   fromSession: AgentSessionRecord;
@@ -45,11 +46,11 @@ export type SessionInteractionStore = {
   setManualTitle(input: { sessionId: string; workspaceId: string; title: string }): boolean;
   cloneSession(input: SessionCloneInput): Promise<AgentSessionRecord>;
   forkStableSourceSession(input: { id: string; workspaceId: string; sourceSessionId: string;
-    title: string; createdAt: number }): AgentSessionRecord;
+    title: string; createdAt: number } & SessionVisibilityInput): AgentSessionRecord;
   validateHistoricalSource(input: { workspaceId: string; sourceSessionId: string; targetMessageId: string }): HistoricalForkSource;
   forkHistoricalSource(input: { id: string; workspaceId: string; sourceSessionId: string;
-    targetMessageId: string; title: string; createdAt: number }): AgentSessionRecord;
-  findClientRequestDedup(input: { workspaceId: string; sessionId: string; clientRequestId: string }): { messageId: string; runId: string } | null;
+    targetMessageId: string; title: string; createdAt: number } & SessionVisibilityInput): AgentSessionRecord;
+  findClientRequestDedup(input: { workspaceId: string; sessionId: string; clientRequestId: string; expectedSessionVisibility?: "listed" | "unlisted" }): { messageId: string; runId: string } | null;
   getRunState(workspaceId: string, sessionId: string): Pick<AgentMessageSessionRunState, "status">;
   getControlRunState(sessionId: string): AgentMessageSessionRunState;
   hasNonTerminalItems(workspaceId: string, sessionId: string): boolean;
@@ -74,6 +75,7 @@ export type SessionLifecycleStarter = {
     uiLocale: AgentUiLocale | null;
     runtime: AgentRuntimePort;
     expectedHistoricalFork?: ExpectedHistoricalForkSession;
+    expectedSessionVisibility?: "listed" | "unlisted";
     expectedSessionTitle?: string;
   }): Promise<AgentSendMessageResponse>;
 };
@@ -103,6 +105,7 @@ export type RevertSessionCommand = {
 export type SubtaskSessionMaterializationCommand = {
   workspaceId: string;
   parentSessionId: string;
+  parentRunId: string;
   parentToolExecutionId: string;
   session: AgentApiSubtaskStartRequest["session"];
   subtaskTitleBase: string;
@@ -115,11 +118,12 @@ export type SessionInteractionApplication = {
   createPrimarySession(params: { workspaceId: string; title?: string }): AgentSessionRecord;
   validateHistoricalSource(params: { workspaceId: string; sourceSessionId: string; targetMessageId: string }): HistoricalForkSource;
   forkPrimarySessionFromHistoricalAnchorWithExpectedId(params: { workspaceId: string; sessionId: string;
-    sourceSessionId: string; targetMessageId: string; title: string }): AgentSessionRecord;
+    sourceSessionId: string; targetMessageId: string; title: string; visibility?: "listed" | "unlisted" }): AgentSessionRecord;
   forkPrimarySession(params: AgentForkSessionRequest): Promise<AgentSessionRecord>;
   updateSessionTitle(params: { sessionId: string; body: AgentUpdateSessionTitleRequest }): AgentSessionRecord;
   sendMessage(params: { sessionId: string; body: NormalizedAgentUserMessageInput; runtime: AgentRuntimePort;
-    expectedHistoricalFork?: ExpectedHistoricalForkSession; expectedSessionTitle?: string }): Promise<AgentSendMessageResponse>;
+    expectedHistoricalFork?: ExpectedHistoricalForkSession; expectedSessionVisibility?: "listed" | "unlisted";
+    expectedSessionTitle?: string }): Promise<AgentSendMessageResponse>;
   revertSession(command: RevertSessionCommand): Promise<AgentMessageControlResult>;
   resolveSubtaskSessionForStart(command: SubtaskSessionMaterializationCommand): Promise<{ session: AgentSessionRecord; createdSessionId: string | null }>;
 };

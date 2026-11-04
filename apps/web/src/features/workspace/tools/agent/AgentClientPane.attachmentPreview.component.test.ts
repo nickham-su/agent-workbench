@@ -50,7 +50,7 @@ async function mountPane(realPreview = false, text?: string) {
   } as AgentMessage;
   const vm = wrapper.vm as unknown as { timelineState: ReturnType<typeof replaceAgentTimelineSnapshot> };
   vm.timelineState = replaceAgentTimelineSnapshot(vm.timelineState, {
-    session: { id: "session-a", workspaceId: "ws-a", title: "Session A", kind: "primary", headMessageId: message.id, contextRootMessageId: null, revision: 1, forkedFromSessionId: null, forkedFromMessageId: null, createdAt: 1, updatedAt: 1 },
+    session: { id: "session-a", workspaceId: "ws-a", title: "Session A", kind: "primary", visibility: "listed" as const, headMessageId: message.id, contextRootMessageId: null, revision: 1, forkedFromSessionId: null, forkedFromMessageId: null, createdAt: 1, updatedAt: 1 },
     timelineReset: false, messages: [message], toolExecutions: [],
   });
   await settle();

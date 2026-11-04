@@ -1,11 +1,12 @@
+import Database from "better-sqlite3";
 import type { Db } from "./db.js";
+import { initialAgentSessionTabVisible } from "./agent-session-tab-state.js";
 
-/**
- * Message/Part/ToolExecution 数据模型的首个版本。
- *
- * 该版本是破坏性升级：旧 ContextItem 数据不会迁移，也不能和此版本共存。
- */
-export const AGENT_SCHEMA_VERSION = 23;
+/** v23 upgrades in place; only the pre-existing older-version policy may rebuild. */
+export const AGENT_SCHEMA_VERSION = 24;
+
+const SESSION_VISIBILITY_COLUMN = "visibility text not null default 'listed' check (visibility in ('listed', 'unlisted'))";
+const ADD_SESSION_VISIBILITY = `alter table agent_session add column ${SESSION_VISIBILITY_COLUMN}`;
 
 export type AgentSchemaInitResult = {
   /** 旧 Agent 数据已被清理，仍需要由 openDb 清理对应的文件系统数据。 */
@@ -569,7 +570,8 @@ const TARGET_AGENT_TABLES = new Set([
   "agent_archived_text_fts"
 ]);
 
-const TARGET_AGENT_TABLE_COLUMNS: Record<string, readonly string[]> = {
+/** Frozen v23 signature. Do not validate a source database using the v24 columns. */
+const V23_AGENT_TABLE_COLUMNS: Record<string, readonly string[]> = {
   agent_schema_meta: ["id", "version", "file_cleanup_pending", "updated_at"],
   agent_session: ["id", "workspace_id", "title", "title_manually_set", "kind", "head_message_id", "context_root_message_id", "revision", "forked_from_session_id", "forked_from_message_id", "created_at", "updated_at"],
   agent_session_agent_model_override: ["session_id", "agent_id", "provider_id", "model_id", "updated_at"],
@@ -584,7 +586,12 @@ const TARGET_AGENT_TABLE_COLUMNS: Record<string, readonly string[]> = {
   agent_archived_text_fts: ["text", "message_depth", "part_position"]
 };
 
-type AgentSchemaClassification = "clean" | "legacy-unversioned" | "current" | "rebuildable" | "unsupported";
+const TARGET_AGENT_TABLE_COLUMNS: Record<string, readonly string[]> = {
+  ...V23_AGENT_TABLE_COLUMNS,
+  agent_session: [...V23_AGENT_TABLE_COLUMNS.agent_session!, "visibility"]
+};
+
+type AgentSchemaClassification = "clean" | "legacy-unversioned" | "current" | "upgradeable-v23" | "rebuildable" | "unsupported";
 
 function listAgentSchemaObjects(db: Db) {
   return (db.prepare(`
@@ -608,24 +615,6 @@ function hasExactColumns(db: Db, table: string, expected: readonly string[]) {
   return actual.length === expected.length && actual.every((column, index) => column === expected[index]);
 }
 
-function hasUniqueIndex(db: Db, table: string, columns: readonly string[]) {
-  const indexes = db.prepare(`pragma index_list(${table})`).all() as Array<{ name: string; unique: number }>;
-  return indexes.some((index) => {
-    if (index.unique !== 1) return false;
-    const indexedColumns = (db.prepare(`pragma index_info(${index.name})`).all() as Array<{ name: string }>).map((row) => row.name);
-    return indexedColumns.length === columns.length && indexedColumns.every((column, index) => column === columns[index]);
-  });
-}
-
-function hasForeignKey(db: Db, table: string, params: { from: string; table: string; to: string; onDelete: string }) {
-  return (db.prepare(`pragma foreign_key_list(${table})`).all() as Array<{ from: string; table: string; to: string; on_delete: string }>).some((foreignKey) => (
-    foreignKey.from === params.from
-    && foreignKey.table === params.table
-    && foreignKey.to === params.to
-    && foreignKey.on_delete.toLowerCase() === params.onDelete.toLowerCase()
-  ));
-}
-
 function normalizedSql(sql: string) {
   return sql.toLowerCase().replace(/\s+/g, "");
 }
@@ -634,23 +623,6 @@ function hasTableSqlFragments(db: Db, table: string, fragments: readonly string[
   const row = db.prepare("select sql from sqlite_master where type = 'table' and name = ?").get(table) as { sql: string | null } | undefined;
   const sql = row?.sql ? normalizedSql(row.sql) : "";
   return fragments.every((fragment) => sql.includes(normalizedSql(fragment)));
-}
-
-function hasIndex(db: Db, table: string, columns: readonly string[], whereFragment?: string) {
-  const indexes = db.prepare(`pragma index_list(${table})`).all() as Array<{ name: string }>;
-  return indexes.some((index) => {
-    const indexedColumns = (db.prepare(`pragma index_info(${index.name})`).all() as Array<{ name: string }>).map((row) => row.name);
-    if (indexedColumns.length !== columns.length || !indexedColumns.every((column, position) => column === columns[position])) return false;
-    if (!whereFragment) return true;
-    const row = db.prepare("select sql from sqlite_master where type = 'index' and name = ?").get(index.name) as { sql: string | null } | undefined;
-    return Boolean(row?.sql && normalizedSql(row.sql).includes(normalizedSql(whereFragment)));
-  });
-}
-
-function hasTriggerSemantics(db: Db, name: string, fragments: readonly string[]) {
-  const row = db.prepare("select sql from sqlite_master where type = 'trigger' and name = ?").get(name) as { sql: string | null } | undefined;
-  const sql = row?.sql?.toLowerCase();
-  return Boolean(sql && fragments.every((fragment) => sql.includes(fragment.toLowerCase())));
 }
 
 /** DDL 片段不足以证明复合 CHECK 未被 `or 1=1` 绕过；探针始终在 savepoint 内回滚。 */
@@ -697,6 +669,9 @@ function hasCurrentAgentRunConstraintSemantics(db: Db) {
       .run(workspaceId, workspaceId, "Agent schema probe", `/agent-schema-probe/${suffix}`);
     db.prepare("insert into agent_session (id,workspace_id,title,kind,created_at,updated_at) values (?,?,?,'primary',1,1)")
       .run(sessionId, workspaceId, "Agent schema probe");
+    if (tableExists(db, "workspace_session_tab_state")) {
+      db.prepare("insert into workspace_session_tab_state values (?,?,1,1)").run(workspaceId, sessionId);
+    }
     const valid = [
       { case: "running-pending", ...running("work_pending") },
       { case: "running-in-progress", ...running("work_in_progress") },
@@ -745,64 +720,132 @@ function hasCurrentAgentRunConstraintSemantics(db: Db) {
   }
 }
 
-function hasCurrentSchemaSemantics(db: Db, ftsSql: string | null) {
-  const normalizedFtsSql = ftsSql?.toLowerCase() ?? "";
-  if (!normalizedFtsSql.includes("create virtual table") || !normalizedFtsSql.includes("using fts5") || !normalizedFtsSql.includes("tokenize = 'trigram'")) return false;
+/** Verify real constraint behavior as well as the physical target column. */
+function hasSessionVisibilitySemantics(db: Db) {
+  const column = (db.prepare("pragma table_info(agent_session)").all() as Array<{name: string; type: string; notnull: number; dflt_value: string | null}>)
+    .find((item) => item.name === "visibility");
+  if (!column || column.type.toLowerCase() !== "text" || column.notnull !== 1 || column.dflt_value !== "'listed'") return false;
+  if (!hasTableSqlFragments(db, "agent_session", ["check (visibility in ('listed', 'unlisted'))"])) return false;
+  const suffix = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  const workspaceId = `__visibility_probe_workspace_${suffix}`;
+  const sessionId = `__visibility_probe_session_${suffix}`;
+  db.exec("savepoint agent_session_visibility_probe");
+  try {
+    db.prepare("insert into workspaces (id,dir_name,title,path,created_at,updated_at) values (?,?,?, ?,1,1)")
+      .run(workspaceId, workspaceId, "Schema probe", `/agent-schema-probe/${suffix}`);
+    db.prepare("insert into agent_session (id,workspace_id,title,kind,created_at,updated_at) values (?,?,?,'primary',1,1)")
+      .run(sessionId, workspaceId, "Schema probe");
+    db.prepare("insert into workspace_session_tab_state values (?,?,1,1)").run(workspaceId, sessionId);
+    const row = db.prepare("select visibility from agent_session where id = ?").get(sessionId) as { visibility: string };
+    if (row.visibility !== "listed") return false;
+    db.prepare("update agent_session set visibility = 'unlisted' where id = ?").run(sessionId);
+    for (const value of [null, "invalid"]) {
+      try {
+        db.prepare("update agent_session set visibility = ? where id = ?").run(value, sessionId);
+        return false;
+      } catch (error) {
+        const code = (error as { code?: string }).code;
+        if (code !== "SQLITE_CONSTRAINT_CHECK" && code !== "SQLITE_CONSTRAINT_NOTNULL") throw error;
+      }
+    }
+    return true;
+  } finally {
+    db.exec("rollback to agent_session_visibility_probe; release agent_session_visibility_probe");
+  }
+}
 
-  const uniqueConstraints = [
-    ["agent_message_part", ["message_id", "position"]],
-    ["agent_tool_execution", ["call_part_id"]],
-    ["agent_text_part_fts_map", ["part_id"]],
-    ["agent_text_part_fts_map", ["fts_rowid"]]
-  ] as const;
-  if (uniqueConstraints.some(([table, columns]) => !hasUniqueIndex(db, table, columns))) return false;
+type AgentSchemaDefinition = { type: string; name: string; tbl_name: string; sql: string | null };
 
-  const foreignKeys = [
-    ["agent_message_part", { from: "message_id", table: "agent_message", to: "id", onDelete: "restrict" }],
-    ["agent_message_part", { from: "attachment_id", table: "agent_attachment", to: "id", onDelete: "restrict" }],
-    ["agent_tool_execution", { from: "call_part_id", table: "agent_message_part", to: "id", onDelete: "restrict" }],
-    ["agent_tool_execution", { from: "origin_session_id", table: "agent_session", to: "id", onDelete: "set null" }],
-    ["agent_tool_execution", { from: "origin_run_id", table: "agent_run", to: "run_id", onDelete: "set null" }],
-    ["agent_text_part_fts_map", { from: "part_id", table: "agent_message_part", to: "id", onDelete: "restrict" }],
-    ["agent_message", { from: "origin_session_id", table: "agent_session", to: "id", onDelete: "set null" }],
-    ["agent_message", { from: "origin_run_id", table: "agent_run", to: "run_id", onDelete: "set null" }],
-    ["agent_message", { from: "retained_from_message_id", table: "agent_message", to: "id", onDelete: "restrict" }],
-    ["agent_session", { from: "head_message_id", table: "agent_message", to: "id", onDelete: "restrict" }],
-    ["agent_session", { from: "context_root_message_id", table: "agent_message", to: "id", onDelete: "restrict" }]
-  ] as const;
-  if (foreignKeys.some(([table, params]) => !hasForeignKey(db, table, params))) return false;
+/**
+ * Dedicated schema-definition comparison, not a general SQL parser. Preserve token
+ * boundaries and quoted/comment bytes; only ASCII keyword case and SQLite ASCII
+ * whitespace between tokens may differ. Unknown/unfinished forms fail closed.
+ * Exported for direct lexical regression tests as well as the schema validator.
+ */
+export function canonicalAgentSql(sql: string) {
+  const whitespace = /[ \t\r\n\f]+/y;
+  const quoted = /'(?:[^']|'')*'|"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[[^\]]*\]|--[^\n]*(?:\n|$)|\/\*[\s\S]*?\*\//y;
+  const bare = /[A-Za-z_][A-Za-z0-9_$]*|0[xX][0-9A-Fa-f]+|(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?|->>|->|<<|>>|>=|<=|!=|==|<>|\|\||[(),;.~+*/%<>=&|!\-]/y;
+  const tokens: string[] = [];
+  let offset = 0;
+  while (offset < sql.length) {
+    whitespace.lastIndex = offset;
+    if (whitespace.exec(sql)) { offset = whitespace.lastIndex; continue; }
+    quoted.lastIndex = bare.lastIndex = offset;
+    const opaque = quoted.exec(sql);
+    const token = opaque ?? bare.exec(sql);
+    if (!token || (!opaque && sql.startsWith("/*", offset))) throwUnsupportedAgentSchema();
+    const text = token[0];
+    offset += text.length;
+    // Never split an unrecognized numeric token (e.g. 1abc) into legal atoms.
+    if (!opaque && /^(?:[0-9]|\.[0-9])/.test(text) && /[A-Za-z0-9_$]/.test(sql[offset] ?? "")) throwUnsupportedAgentSchema();
+    // Published definitions contain no blob literals; do not mistake x'00' for
+    // the two tokens x '00'. Unknown forms are deliberately unsupported here.
+    if (!opaque && /^[xX]$/.test(text) && sql[offset] === "'") throwUnsupportedAgentSchema();
+    tokens.push(opaque ? text : text.replace(/[A-Z]/g, (letter) => letter.toLowerCase()));
+  }
+  // An array, not concatenation: ["is", "not", "null"] != ["isnotnull"].
+  return JSON.stringify(tokens);
+}
 
-  if (!hasIndex(db, "agent_message", ["retained_from_message_id"], "where retained_from_message_id is not null")) return false;
-  if (!hasIndex(db, "agent_run", ["workspace_id", "session_id", "execution_phase"], "where execution_phase = 'terminal_intent_persisted'")) return false;
-  if (!hasTableSqlFragments(db, "agent_message", [
-    "check (type = 'compaction' or retained_from_message_id is null)",
-  ])) return false;
-  if (!hasTableSqlFragments(db, "agent_run", [
-    "run_kind text not null default 'user' check (run_kind in ('user', 'manual_compaction', 'subtask'))",
-    "execution_phase text not null default 'work_pending' check (execution_phase in ('work_pending', 'work_in_progress', 'terminal_intent_persisted', 'terminal'))",
-    "intended_terminal_status text check (intended_terminal_status is null or intended_terminal_status in ('completed', 'failed', 'cancelled'))",
-    "intended_terminal_code text check (intended_terminal_code is null or length(intended_terminal_code) between 1 and 80)",
-    "intended_terminal_detail text check (intended_terminal_detail is null or length(intended_terminal_detail) between 1 and 240)",
-    "terminal_result_code text check (terminal_result_code is null or length(terminal_result_code) between 1 and 80)",
-    "terminal_result_detail text check (terminal_result_detail is null or length(terminal_result_detail) between 1 and 240)",
-    "status = 'running' and execution_phase in ('work_pending', 'work_in_progress')",
-    "intended_terminal_status is null and intended_terminal_code is null and intended_terminal_detail is null",
-    "terminal_result_code is null and terminal_result_detail is null",
-    "status = 'running' and execution_phase = 'terminal_intent_persisted'",
-    "status in ('completed', 'failed', 'cancelled') and execution_phase = 'terminal'",
-    "terminal_result_code is not null",
-  ])) return false;
-  if (!hasCurrentAgentRunConstraintSemantics(db)) return false;
+function agentSchemaDefinitions(db: Db): AgentSchemaDefinition[] {
+  return (db.prepare(`
+    select type, name, tbl_name, sql from sqlite_master
+    where tbl_name like 'agent\\_%' escape '\\'
+       or tbl_name in ('session_run_state', 'workspace_session_tab_state')
+       or name like 'agent\\_%' escape '\\'
+    order by type, name
+  `).all() as AgentSchemaDefinition[]).map((object) => ({
+    ...object, sql: object.sql === null ? null : canonicalAgentSql(object.sql)
+  }));
+}
 
-  return hasTriggerSemantics(db, "agent_message_previous_workspace_insert", ["before insert on agent_message", "new.previous_message_id", "workspace_id = new.workspace_id"])
-    && hasTriggerSemantics(db, "agent_message_replaces_workspace_insert", ["before insert on agent_message", "new.replaces_message_id", "workspace_id = new.workspace_id"])
-    && hasTriggerSemantics(db, "agent_message_retained_workspace_insert", ["before insert on agent_message", "new.retained_from_message_id", "workspace_id = new.workspace_id"])
-    && hasTriggerSemantics(db, "agent_message_retained_workspace_update", ["before update of retained_from_message_id on agent_message", "new.retained_from_message_id", "workspace_id = new.workspace_id"])
-    && hasTriggerSemantics(db, "agent_message_retained_immutable_update", ["before update of retained_from_message_id on agent_message", "old.retained_from_message_id is not new.retained_from_message_id"])
-    && hasTriggerSemantics(db, "agent_tool_execution_call_part_insert", ["before insert on agent_tool_execution", "part.type = 'tool_call'", "message.workspace_id", "session.workspace_id = message.workspace_id", "run.workspace_id = message.workspace_id"])
-    && hasTriggerSemantics(db, "agent_tool_execution_call_part_update", ["before update of call_part_id, origin_session_id, origin_run_id on agent_tool_execution", "part.type = 'tool_call'", "message.workspace_id"])
-    && hasTriggerSemantics(db, "agent_message_session_head_workspace_update", ["before update of head_message_id, context_root_message_id on agent_session", "workspace_id = new.workspace_id"])
-    && hasTriggerSemantics(db, "agent_message_session_head_workspace_insert", ["before insert on agent_session", "workspace_id = new.workspace_id"]);
+type CanonicalAgentSchemas = {
+  v23: AgentSchemaDefinition[];
+  v24: AgentSchemaDefinition[][];
+  optionalIndexNames: Set<string>;
+};
+let canonicalAgentSchemas: CanonicalAgentSchemas | undefined;
+
+/**
+ * This dedicated v23/v24 validator uses the creation DDL as its single authority,
+ * not a second hand-written list of selected CHECK/FK fragments. SQLite itself
+ * materializes every table, autoindex, key index, FTS shadow and trigger definition.
+ * The only v23 difference is the absent visibility column. Materialize both real
+ * v24 Session SQL forms: CREATE puts visibility before table FKs; ALTER appends it
+ * after them. Neither form relaxes ordered columns or any inherited constraint.
+ */
+function getCanonicalAgentSchemas(): CanonicalAgentSchemas {
+  if (canonicalAgentSchemas) return canonicalAgentSchemas;
+  const source = new Database(":memory:");
+  const fresh = new Database(":memory:");
+  try {
+    createBaseSchema(source);
+    createAgentSchema(source, false, false);
+    const requiredNames = new Set(agentSchemaDefinitions(source).map((object) => object.name));
+    ensureAnalyticsCollectorIndexes(source);
+    const v23 = agentSchemaDefinitions(source);
+    // The existing additive Analytics indexes are optional, not recovery gates.
+    // If present their definitions still must match; missing indexes remain legal.
+    const optionalIndexNames = new Set(v23.filter((object) => !requiredNames.has(object.name)).map((object) => object.name));
+    source.exec(ADD_SESSION_VISIBILITY);
+    const upgraded = agentSchemaDefinitions(source);
+    createBaseSchema(fresh);
+    createAgentSchema(fresh, false);
+    ensureAnalyticsCollectorIndexes(fresh);
+    canonicalAgentSchemas = { v23, v24: [agentSchemaDefinitions(fresh), upgraded], optionalIndexNames };
+    return canonicalAgentSchemas;
+  } finally { source.close(); fresh.close(); }
+}
+
+function hasCanonicalAgentSchema(db: Db, version: number) {
+  const canonical = getCanonicalAgentSchemas();
+  const actual = agentSchemaDefinitions(db);
+  const names = new Set(actual.map((object) => object.name));
+  const candidates = version === 23 ? [canonical.v23] : canonical.v24;
+  const signature = JSON.stringify(actual);
+  return candidates.some((expected) => signature === JSON.stringify(expected.filter((object) =>
+    !canonical.optionalIndexNames.has(object.name) || names.has(object.name))));
 }
 
 function hasLegacySchemaSignature(db: Db, table: string) {
@@ -829,15 +872,18 @@ function classifyAgentSchema(db: Db): AgentSchemaClassification {
     const rows = db.prepare("select id, version from agent_schema_meta").all() as Array<{ id: unknown; version: unknown }>;
     if (rows.length !== 1 || rows[0]?.id !== 1) return "unsupported";
     const version = rows[0]?.version;
-    if (![18, 19, 20, 21, 22, AGENT_SCHEMA_VERSION].includes(version as number)) return "unsupported";
-    if (version !== AGENT_SCHEMA_VERSION) return "rebuildable";
+    if (![18, 19, 20, 21, 22, 23, AGENT_SCHEMA_VERSION].includes(version as number)) return "unsupported";
+    if (version !== 23 && version !== AGENT_SCHEMA_VERSION) return "rebuildable";
+    const columns = version === 23 ? V23_AGENT_TABLE_COLUMNS : TARGET_AGENT_TABLE_COLUMNS;
     const expectedColumns = [...TARGET_AGENT_TABLES].every((table) =>
-      hasExactColumns(db, table, TARGET_AGENT_TABLE_COLUMNS[table]!)
+      hasExactColumns(db, table, columns[table]!)
     );
     if (!expectedColumns) return "unsupported";
-    const fts = objects.find((object) => object.name === "agent_archived_text_fts");
-    if (!hasCurrentSchemaSemantics(db, fts?.sql ?? null)) return "unsupported";
-    return "current";
+    // Validate definitions before any live semantic probe can write, even temporarily.
+    if (!hasCanonicalAgentSchema(db, version as number)) return "unsupported";
+    if (version === AGENT_SCHEMA_VERSION && !hasSessionVisibilitySemantics(db)) return "unsupported";
+    if (!hasCurrentAgentRunConstraintSemantics(db)) return "unsupported";
+    return version === 23 ? "upgradeable-v23" : "current";
   }
 
   if (objects.length === 0) return "clean";
@@ -848,6 +894,8 @@ function classifyAgentSchema(db: Db): AgentSchemaClassification {
 }
 
 function clearAndDropAgentDomain(db: Db) {
+  // The Tab table belongs to the base domain and is not dropped with Agent tables.
+  db.exec("delete from workspace_session_tab_state");
   // 该分支会完整放弃旧 Agent 域，无需先逐行 DELETE。旧版本或中断升级可能
   // 留下引用已缺失父表的外键；调用方会在事务外暂时关闭 foreign_keys，使这里
   // 只依赖已知对象名，而不依赖旧外键图仍然完整。
@@ -886,7 +934,9 @@ function rebuildAgentDomain(db: Db, fileCleanupPending: boolean) {
   }
 }
 
-function createAgentSchema(db: Db, fileCleanupPending: boolean) {
+// The third argument is used only to materialize the frozen pre-visibility structure
+// in an isolated reference connection; production creation always targets v24.
+function createAgentSchema(db: Db, fileCleanupPending: boolean, includeSessionVisibility = true) {
   db.exec(`
     create table agent_schema_meta (
       id integer primary key check (id = 1),
@@ -908,6 +958,7 @@ function createAgentSchema(db: Db, fileCleanupPending: boolean) {
       forked_from_message_id text,
       created_at integer not null,
       updated_at integer not null,
+      ${includeSessionVisibility ? `${SESSION_VISIBILITY_COLUMN},` : ""}
       foreign key (workspace_id) references workspaces(id) on delete restrict,
       foreign key (head_message_id) references agent_message(id) on delete restrict,
       foreign key (context_root_message_id) references agent_message(id) on delete restrict
@@ -1223,21 +1274,57 @@ function ensureAnalyticsCollectorIndexes(db: Db) {
   }
 }
 
+/** Caller owns the immediate transaction; never invokes the destructive rebuild. */
+function upgradeAgentSchemaV23(db: Db) {
+  db.exec(ADD_SESSION_VISIBILITY);
+  const sessions = db.prepare(`select s.id, s.workspace_id as workspaceId, s.kind, s.created_at as createdAt,
+    t.visible, t.updated_at as updatedAt
+    from agent_session s left join workspace_session_tab_state t
+      on t.session_id = s.id and t.workspace_id = s.workspace_id`).all() as Array<{
+        id: string; workspaceId: string; kind: "primary" | "subtask"; createdAt: number;
+        visible: number | null; updatedAt: number | null;
+      }>;
+  // A v23 effective override only differs from its kind default. All other rows,
+  // including orphan/cross-Workspace records, must not survive the conversion.
+  db.exec("delete from workspace_session_tab_state");
+  const insert = db.prepare("insert into workspace_session_tab_state (workspace_id, session_id, visible, updated_at) values (?,?,?,?)");
+  for (const session of sessions) {
+    const effective = (session.kind === "primary" && session.visible === 0) || (session.kind === "subtask" && session.visible === 1);
+    insert.run(session.workspaceId, session.id,
+      effective ? session.visible : Number(initialAgentSessionTabVisible(session.kind, "listed")),
+      effective ? session.updatedAt : session.createdAt);
+  }
+  if (!hasCanonicalAgentSchema(db, AGENT_SCHEMA_VERSION) || !hasSessionVisibilitySemantics(db)) throwUnsupportedAgentSchema();
+  const missing = db.prepare(`select 1 from agent_session s left join workspace_session_tab_state t
+    on t.workspace_id = s.workspace_id and t.session_id = s.id where t.session_id is null limit 1`).get();
+  const counts = db.prepare(`select (select count(*) from agent_session) as sessions,
+    (select count(*) from workspace_session_tab_state) as states`).get() as { sessions: number; states: number };
+  if (missing || counts.sessions !== counts.states) throwUnsupportedAgentSchema();
+  assertAgentForeignKeysValid(db);
+  if (db.prepare("pragma foreign_key_check(workspace_session_tab_state)").all().length) throwUnsupportedAgentSchema();
+  db.prepare("update agent_schema_meta set version = ?, updated_at = ? where id = 1").run(AGENT_SCHEMA_VERSION, Date.now());
+  if (classifyAgentSchema(db) !== "current") throwUnsupportedAgentSchema();
+}
+
 export function initSchema(db: Db): AgentSchemaInitResult {
-  const classification = classifyAgentSchema(db);
-  if (classification === "unsupported") throwUnsupportedAgentSchema();
-
-  createBaseSchema(db);
-
-  if (classification === "current") {
+  // Reclassify after reserving the writer: a second starter may already have
+  // completed the migration since openDb's advisory precheck.
+  const checked = db.transaction(() => {
+    const classification = classifyAgentSchema(db);
+    if (classification === "unsupported") throwUnsupportedAgentSchema();
+    if (classification !== "current" && classification !== "upgradeable-v23") return { classification };
+    createBaseSchema(db);
+    if (classification === "upgradeable-v23") upgradeAgentSchemaV23(db);
     ensureAnalyticsCollectorIndexes(db);
     const row = db.prepare("select file_cleanup_pending as fileCleanupPending from agent_schema_meta where id = 1").get() as {
       fileCleanupPending: number;
     };
-    return { fileCleanupPending: row.fileCleanupPending === 1 };
-  }
+    return { result: { fileCleanupPending: row.fileCleanupPending === 1 } };
+  }).immediate();
+  if (checked.result) return checked.result;
 
-  const hadAgentDomain = classification === "legacy-unversioned" || classification === "rebuildable";
+  createBaseSchema(db);
+  const hadAgentDomain = checked.classification === "legacy-unversioned" || checked.classification === "rebuildable";
   rebuildAgentDomain(db, hadAgentDomain);
   ensureAnalyticsCollectorIndexes(db);
   return { fileCleanupPending: hadAgentDomain };

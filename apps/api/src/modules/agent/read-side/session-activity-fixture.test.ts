@@ -6,7 +6,7 @@ test("activity fixture only contains workspace/session/run-state/message metadat
   const { db, insertSession, insertMessage } = createSessionActivityFixture();
   t.after(() => db.close());
   assert.deepEqual(db.prepare("select name from sqlite_master where type = 'table' order by name").all(), [
-    { name: "agent_message" }, { name: "agent_session" }, { name: "session_run_state" }, { name: "workspaces" }
+    { name: "agent_message" }, { name: "agent_run" }, { name: "agent_session" }, { name: "session_run_state" }, { name: "workspaces" }
   ]);
   insertSession({ id: "primary" });
   insertSession({ id: "fork", kind: "subtask", forkedFromSessionId: "primary", status: "running" });

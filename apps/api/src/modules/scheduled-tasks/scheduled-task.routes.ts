@@ -6,7 +6,7 @@ import {
   ScheduledTaskResponseSchema, ScheduledTaskListResponseSchema, CreateScheduledTaskRequestSchema,
   ReplaceScheduledTaskRequestSchema, ScheduledEmptyBodySchema, ScheduledExecutionListQuerySchema,
   ScheduledExecutionListResponseSchema, ScheduledExecutionResponseSchema, ScheduledServerTimeResponseSchema,
-  ValidateScheduledSourceRequestSchema, ScheduledSourceResponseSchema, ScheduledReadyAgentsResponseSchema
+  ErrorResponseSchema, ValidateScheduledSourceRequestSchema, ScheduledSourceResponseSchema, ScheduledReadyAgentsResponseSchema
 } from "@agent-workbench/shared";
 import type { CreateScheduledTaskRequest, ReplaceScheduledTaskRequest } from "@agent-workbench/shared";
 import { HttpError } from "../../app/errors.js";
@@ -43,7 +43,7 @@ export async function registerScheduledTaskRoutes(app: FastifyInstance, service:
   };
   app.get<{Params: WorkspaceParams; Querystring: ListQuery}>(root,
     { schema: { params: ScheduledWorkspaceParamsSchema, querystring: ScheduledTaskListQuerySchema,
-      response: { 200: ScheduledTaskListResponseSchema } } },
+      response: { 200: ScheduledTaskListResponseSchema, 500: ErrorResponseSchema } } },
     async ({ params, query }) => guarded(() => { service.assertWorkspace(params.workspaceId); return service.list({ workspaceId: params.workspaceId, ...query }); }));
   app.post<{Params: WorkspaceParams; Body: CreateScheduledTaskRequest}>(root,
     { preValidation: strictBody(CreateScheduledTaskRequestSchema, true),
@@ -51,12 +51,12 @@ export async function registerScheduledTaskRoutes(app: FastifyInstance, service:
       response: { 201: ScheduledTaskResponseSchema } } },
     async ({ params, body }, reply) => guarded(() => reply.code(201).send({ task: service.create(params.workspaceId, body) })));
   app.get<{Params: TaskParams}>(`${root}/:taskId`,
-    { schema: { params: ScheduledTaskParamsSchema, response: { 200: ScheduledTaskResponseSchema } } },
+    { schema: { params: ScheduledTaskParamsSchema, response: { 200: ScheduledTaskResponseSchema, 500: ErrorResponseSchema } } },
     async ({ params }) => guarded(() => ({ task: service.read(params.workspaceId, params.taskId) })));
   app.put<{Params: TaskParams; Body: ReplaceScheduledTaskRequest}>(`${root}/:taskId`,
     { preValidation: strictBody(ReplaceScheduledTaskRequestSchema, true),
       schema: { params: ScheduledTaskParamsSchema, body: ReplaceScheduledTaskRequestSchema,
-      response: { 200: ScheduledTaskResponseSchema } } },
+      response: { 200: ScheduledTaskResponseSchema, 500: ErrorResponseSchema } } },
     async ({ params, body }) => guarded(() => ({ task: service.replace(params.workspaceId, params.taskId, body) })));
   app.delete<{Params: TaskParams}>(`${root}/:taskId`,
     { schema: { params: ScheduledTaskParamsSchema, response: { 204: { type: "null" } } } },
@@ -64,12 +64,12 @@ export async function registerScheduledTaskRoutes(app: FastifyInstance, service:
   for (const [path, enabled] of [["enable", true], ["pause", false]] as const) {
     app.post<{Params: TaskParams; Body: Record<string, never>}>(`${root}/:taskId/${path}`,
       { preValidation: strictBody(ScheduledEmptyBodySchema), schema: { params: ScheduledTaskParamsSchema, body: ScheduledEmptyBodySchema,
-        response: { 200: ScheduledTaskResponseSchema } } },
+        response: { 200: ScheduledTaskResponseSchema, 500: ErrorResponseSchema } } },
       async ({ params }) => guarded(() => ({ task: service.enable(params.workspaceId, params.taskId, enabled) })));
   }
   app.post<{Params: TaskParams; Body: Record<string, never>}>(`${root}/:taskId/run`,
     { preValidation: strictBody(ScheduledEmptyBodySchema), schema: { params: ScheduledTaskParamsSchema, body: ScheduledEmptyBodySchema,
-      response: { 202: ScheduledExecutionResponseSchema } } },
+      response: { 202: ScheduledExecutionResponseSchema, 500: ErrorResponseSchema } } },
     async ({ params }, reply) => {
       try { return reply.code(202).send({ execution: await service.run(params.workspaceId, params.taskId) }); }
       catch (error) {
@@ -82,7 +82,7 @@ export async function registerScheduledTaskRoutes(app: FastifyInstance, service:
     });
   app.get<{Params: TaskParams; Querystring: HistoryQuery}>(`${root}/:taskId/executions`,
     { schema: { params: ScheduledTaskParamsSchema, querystring: ScheduledExecutionListQuerySchema,
-      response: { 200: ScheduledExecutionListResponseSchema } } },
+      response: { 200: ScheduledExecutionListResponseSchema, 500: ErrorResponseSchema } } },
     async ({ params, query }) => guarded(() => service.history({ workspaceId: params.workspaceId, taskId: params.taskId, ...query })));
   app.post<{Params: WorkspaceParams; Body: {sessionId: string; messageId: string}}>(`${root}/validate-source`,
     { preValidation: strictBody(ValidateScheduledSourceRequestSchema),

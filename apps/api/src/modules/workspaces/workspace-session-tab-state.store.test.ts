@@ -2,77 +2,91 @@ import assert from "node:assert/strict";
 import Database from "better-sqlite3";
 import { test } from "node:test";
 import { initSchema } from "../../infra/db/schema.js";
+import { createMessageSession, getMessageSession, getMessageRunState } from "../agent/agent-message.store.js";
 import {
-  deleteWorkspaceSessionTabStateOverride,
-  findAgentSessionKindInWorkspace,
-  listEffectiveWorkspaceSessionTabStateOverrides,
-  upsertWorkspaceSessionTabStateOverride,
-  workspaceExistsForAgentTabState
+  findAgentSessionKindInWorkspace, readWorkspaceAgentTabState,
+  updateWorkspaceSessionTabState, workspaceExistsForAgentTabState
 } from "./workspace-session-tab-state.store.js";
 
 function createDb() {
-  const db = new Database(":memory:");
-  db.pragma("foreign_keys = ON");
-  initSchema(db);
-  db.prepare("insert into workspaces (id, dir_name, title, path, created_at, updated_at) values (?, ?, ?, ?, ?, ?)").run("ws-a", "ws-a", "Workspace A", "/workspace/a", 1, 1);
-  db.prepare("insert into workspaces (id, dir_name, title, path, created_at, updated_at) values (?, ?, ?, ?, ?, ?)").run("ws-b", "ws-b", "Workspace B", "/workspace/b", 1, 1);
+  const db = new Database(":memory:"); db.pragma("foreign_keys = ON"); initSchema(db);
+  for (const id of ["ws-a", "ws-b"]) db.prepare("insert into workspaces (id,dir_name,title,path,created_at,updated_at) values (?,?,?,?,1,1)")
+    .run(id, id, id, `/workspace/${id}`);
   return db;
 }
-
-function insertSession(db: Database.Database, id: string, workspaceId: string, kind: "primary" | "subtask") {
-  db.prepare("insert into agent_session (id, workspace_id, title, kind, created_at, updated_at) values (?, ?, ?, ?, ?, ?)")
-    .run(id, workspaceId, id, kind, 1, 1);
+function insertSession(db: Database.Database, id: string, kind: "primary" | "subtask", visibility: "listed" | "unlisted" = "listed", workspaceId = "ws-a") {
+  createMessageSession(db, { id, workspaceId, title: id, kind, visibility, createdAt: 1 });
 }
 
-test("tab state store uses narrow Workspace and Session ownership lookups", () => {
+test("tab state narrow ownership lookup and exact UPDATE retain each real state row", () => {
   const db = createDb();
-  insertSession(db, "primary-a", "ws-a", "primary");
-  insertSession(db, "subtask-b", "ws-b", "subtask");
-
-  assert.equal(workspaceExistsForAgentTabState(db, "ws-a"), true);
-  assert.equal(workspaceExistsForAgentTabState(db, "missing"), false);
-  assert.equal(findAgentSessionKindInWorkspace(db, "ws-a", "primary-a"), "primary");
-  assert.equal(findAgentSessionKindInWorkspace(db, "ws-a", "subtask-b"), null);
-  assert.equal(findAgentSessionKindInWorkspace(db, "ws-a", "missing"), null);
-  db.close();
+  try {
+    insertSession(db, "primary", "primary"); insertSession(db, "foreign", "subtask", "listed", "ws-b");
+    assert.equal(workspaceExistsForAgentTabState(db, "ws-a"), true);
+    assert.equal(workspaceExistsForAgentTabState(db, "missing"), false);
+    assert.equal(findAgentSessionKindInWorkspace(db, "ws-a", "primary"), "primary");
+    assert.equal(findAgentSessionKindInWorkspace(db, "ws-a", "foreign"), null);
+    for (const visible of [false, true, true, false]) updateWorkspaceSessionTabState(db, { workspaceId: "ws-a", sessionId: "primary", visible, updatedAt: 20 });
+    assert.deepEqual(db.prepare("select visible,updated_at as updatedAt from workspace_session_tab_state where session_id = 'primary'").get(), { visible: 0, updatedAt: 20 });
+    assert.equal((db.prepare("select count(*) n from workspace_session_tab_state").get() as {n:number}).n, 2);
+    assert.throws(() => updateWorkspaceSessionTabState(db, { workspaceId: "ws-a", sessionId: "missing", visible: true, updatedAt: 2 }), { code: "AGENT_TAB_STATE_INVALID" });
+  } finally { db.close(); }
 });
 
-test("tab state store reads only effective same-Workspace overrides", () => {
+test("all kind/visibility combinations initialize actual state and project only permitted IDs", () => {
   const db = createDb();
-  insertSession(db, "primary-closed", "ws-a", "primary");
-  insertSession(db, "primary-default", "ws-a", "primary");
-  insertSession(db, "subtask-open", "ws-a", "subtask");
-  insertSession(db, "subtask-default", "ws-a", "subtask");
-  insertSession(db, "foreign-session", "ws-b", "primary");
-
-  upsertWorkspaceSessionTabStateOverride(db, { workspaceId: "ws-a", sessionId: "primary-closed", visible: false, updatedAt: 1 });
-  upsertWorkspaceSessionTabStateOverride(db, { workspaceId: "ws-a", sessionId: "primary-default", visible: true, updatedAt: 2 });
-  upsertWorkspaceSessionTabStateOverride(db, { workspaceId: "ws-a", sessionId: "subtask-open", visible: true, updatedAt: 3 });
-  upsertWorkspaceSessionTabStateOverride(db, { workspaceId: "ws-a", sessionId: "subtask-default", visible: false, updatedAt: 4 });
-  upsertWorkspaceSessionTabStateOverride(db, { workspaceId: "ws-a", sessionId: "orphan-session", visible: false, updatedAt: 5 });
-  upsertWorkspaceSessionTabStateOverride(db, { workspaceId: "ws-a", sessionId: "foreign-session", visible: false, updatedAt: 6 });
-
-  assert.deepEqual(listEffectiveWorkspaceSessionTabStateOverrides(db, "ws-a"), [
-    { sessionId: "primary-closed", visible: false, kind: "primary" },
-    { sessionId: "subtask-open", visible: true, kind: "subtask" }
-  ]);
-  db.close();
+  try {
+    for (const kind of ["primary", "subtask"] as const) for (const visibility of ["listed", "unlisted"] as const) {
+      const id = `${kind}-${visibility}`; insertSession(db, id, kind, visibility);
+      assert.deepEqual(db.prepare("select visible from workspace_session_tab_state where session_id = ?").get(id), { visible: Number(kind === "primary" && visibility === "listed") });
+      assert.equal(getMessageSession(db, "ws-a", id)?.visibility, visibility);
+      assert.equal(getMessageRunState(db, "ws-a", id)?.status, "idle");
+    }
+    updateWorkspaceSessionTabState(db, { workspaceId: "ws-a", sessionId: "primary-listed", visible: false, updatedAt: 2 });
+    updateWorkspaceSessionTabState(db, { workspaceId: "ws-a", sessionId: "subtask-unlisted", visible: true, updatedAt: 2 });
+    assert.deepEqual(readWorkspaceAgentTabState(db, "ws-a"), {
+      workspaceId: "ws-a", openedSessionIds: ["subtask-unlisted"], closedSessionIds: ["primary-listed"], openedSubtaskSessionIds: ["subtask-unlisted"]
+    });
+  } finally { db.close(); }
 });
 
-test("tab state store upserts and deletes exact parameterized identities", () => {
+test("missing/orphan/cross-workspace state fails presentation without blocking Session or RunState reads", () => {
   const db = createDb();
-  const sessionId = "session-'quoted-?";
-  const workspaceId = "ws-'quoted-?";
-  db.prepare("insert into workspaces (id, dir_name, title, path, created_at, updated_at) values (?, ?, ?, ?, ?, ?)")
-    .run(workspaceId, "quoted", "Quoted", "/workspace/quoted", 1, 1);
+  try {
+    insertSession(db, "primary", "primary");
+    db.prepare("delete from workspace_session_tab_state where session_id = 'primary'").run();
+    assert.throws(() => readWorkspaceAgentTabState(db, "ws-a"), { code: "AGENT_TAB_STATE_INVALID" });
+    assert.throws(() => updateWorkspaceSessionTabState(db, { workspaceId: "ws-a", sessionId: "primary", visible: true, updatedAt: 2 }), { code: "AGENT_TAB_STATE_INVALID" });
+    assert.ok(getMessageSession(db, "ws-a", "primary")); assert.ok(getMessageRunState(db, "ws-a", "primary"));
+    assert.equal((db.prepare("select count(*) n from workspace_session_tab_state").get() as {n:number}).n, 0);
+    db.prepare("insert into workspace_session_tab_state values ('ws-a','primary',1,1),('ws-a','orphan',0,1)").run();
+    assert.throws(() => readWorkspaceAgentTabState(db, "ws-a"), { code: "AGENT_TAB_STATE_INVALID" });
+    db.prepare("delete from workspace_session_tab_state where session_id = 'orphan'").run();
+    db.prepare("insert into workspace_session_tab_state values ('ws-b','primary',0,1)").run();
+    assert.throws(() => readWorkspaceAgentTabState(db, "ws-a"), { code: "AGENT_TAB_STATE_INVALID" });
+    assert.throws(() => updateWorkspaceSessionTabState(db, { workspaceId: "ws-a", sessionId: "primary", visible: false, updatedAt: 2 }), { code: "AGENT_TAB_STATE_INVALID" });
+  } finally { db.close(); }
+});
 
-  upsertWorkspaceSessionTabStateOverride(db, { workspaceId, sessionId, visible: false, updatedAt: 10 });
-  upsertWorkspaceSessionTabStateOverride(db, { workspaceId, sessionId, visible: true, updatedAt: 20 });
-  assert.deepEqual(
-    db.prepare("select visible, updated_at as updatedAt from workspace_session_tab_state where workspace_id = ? and session_id = ?").get(workspaceId, sessionId),
-    { visible: 1, updatedAt: 20 }
-  );
-  deleteWorkspaceSessionTabStateOverride(db, workspaceId, sessionId);
-  assert.equal((db.prepare("select count(*) as count from workspace_session_tab_state where workspace_id = ? and session_id = ?").get(workspaceId, sessionId) as { count: number }).count, 0);
-  db.close();
+test("Tab or RunState insertion failure rolls back the entire Session creation", () => {
+  for (const table of ["workspace_session_tab_state", "session_run_state"]) {
+    const db = createDb();
+    try {
+      db.exec(`create trigger fail_creation before insert on ${table} begin select raise(abort, 'injected'); end`);
+      assert.throws(() => insertSession(db, "new-session", "primary"), /injected/);
+      for (const target of ["agent_session", "workspace_session_tab_state", "session_run_state"]) {
+        assert.deepEqual(db.prepare(`select count(*) n from ${target}`).get(), { n: 0 });
+      }
+    } finally { db.close(); }
+  }
+});
+
+
+test("a deferred commit failure also leaves no partial Session/RunState/Tab state", () => {
+  const db = createDb();
+  try {
+    db.pragma("defer_foreign_keys=ON");
+    assert.throws(() => insertSession(db, "deferred", "primary", "listed", "missing"), /FOREIGN KEY/);
+    for (const table of ["agent_session", "session_run_state", "workspace_session_tab_state"]) assert.deepEqual(db.prepare(`select count(*) n from ${table}`).get(), { n: 0 });
+  } finally { db.close(); }
 });

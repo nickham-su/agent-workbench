@@ -5,6 +5,7 @@ type SessionSeed = {
   workspaceId?: string;
   title?: string;
   kind?: "primary" | "subtask";
+  visibility?: "listed" | "unlisted";
   updatedAt?: number;
   createdAt?: number;
   headMessageId?: string | null;
@@ -33,7 +34,7 @@ export function createSessionActivityFixture() {
     create table agent_session (
       id text primary key, workspace_id text, title text, kind text,
       head_message_id text, context_root_message_id text, revision integer,
-      forked_from_session_id text, forked_from_message_id text, created_at integer, updated_at integer
+      forked_from_session_id text, forked_from_message_id text, created_at integer, updated_at integer, visibility text
     );
     create table session_run_state (
       workspace_id text, session_id text, status text, active_run_id text,
@@ -52,8 +53,8 @@ export function createSessionActivityFixture() {
   `);
   const sessionInsert = db.prepare(`insert into agent_session
     (id, workspace_id, title, kind, head_message_id, context_root_message_id, revision,
-      forked_from_session_id, forked_from_message_id, created_at, updated_at)
-    values (?, ?, ?, ?, ?, ?, 0, ?, null, ?, ?)`);
+      forked_from_session_id, forked_from_message_id, created_at, updated_at, visibility)
+    values (?, ?, ?, ?, ?, ?, 0, ?, null, ?, ?, ?)`);
   const stateInsert = db.prepare("insert into session_run_state (workspace_id, session_id, status, active_run_id) values (?, ?, ?, ?)");
   const messageInsert = db.prepare(`insert into agent_message
     (id, workspace_id, origin_session_id, origin_run_id, type, status, created_at, updated_at)
@@ -64,7 +65,7 @@ export function createSessionActivityFixture() {
       const workspaceId = seed.workspaceId ?? "a";
       sessionInsert.run(seed.id, workspaceId, seed.title ?? "", seed.kind ?? "primary",
         seed.headMessageId ?? null, seed.contextRootMessageId ?? null, seed.forkedFromSessionId ?? null,
-        seed.createdAt ?? 1, seed.updatedAt ?? 10);
+        seed.createdAt ?? 1, seed.updatedAt ?? 10, seed.visibility ?? "listed");
       if (seed.status !== null) stateInsert.run(workspaceId, seed.id, seed.status ?? "idle", seed.activeRunId ?? null);
     },
     insertRun(seed: {

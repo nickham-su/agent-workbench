@@ -17,7 +17,7 @@ function deferred<T = void>() {
 }
 
 const session = {
-  id: "session", workspaceId: "workspace", title: "session", kind: "primary" as const,
+  id: "session", workspaceId: "workspace", title: "session", kind: "primary" as const, visibility: "listed" as const,
   forkedFromSessionId: null, forkedFromMessageId: null, headMessageId: "message-7",
   contextRootMessageId: "message-7", revision: 1, createdAt: 1, updatedAt: 1,
 };

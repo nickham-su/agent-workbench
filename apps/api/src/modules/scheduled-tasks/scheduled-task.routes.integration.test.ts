@@ -140,7 +140,7 @@ test("recovery links an already-persisted Agent Run without repeating the Prompt
     sessionId: "sched_crash-window"
   });
   createMessageSession(f.db, { workspaceId: f.workspaceId, id: declared.sessionId!, kind: "primary",
-    title: buildScheduledExecutionSessionTitle(declared.snapshot.taskName), createdAt: Date.now() });
+    title: buildScheduledExecutionSessionTitle(declared.snapshot.taskName), visibility: "unlisted", createdAt: Date.now() });
   const send = await f.app.inject({ method: "POST", url: `/api/agent/sessions/${declared.sessionId}/messages`,
     payload: { workspaceId: f.workspaceId, clientRequestId: declared.clientRequestId,
       agentId: declared.snapshot.agentId, text: declared.snapshot.prompt } });

@@ -269,16 +269,14 @@ test("workspace session tab state is a base-domain table with the intended const
   db.close();
 });
 
-test("workspace session tab state survives Agent-domain rebuild without affecting schema classification", () => {
+test("controlled Agent-domain rebuild clears base-domain Tab state", () => {
   const db = createDb();
   insertWorkspace(db, "ws-a");
   db.prepare("insert into workspace_session_tab_state (workspace_id, session_id, visible, updated_at) values (?, ?, ?, ?)").run("ws-a", "orphan-session", 0, 1);
-  db.prepare("update agent_schema_meta set version = ? where id = 1").run(AGENT_SCHEMA_VERSION - 1);
+  db.prepare("update agent_schema_meta set version = ? where id = 1").run(22);
 
   assert.doesNotThrow(() => initSchema(db));
-  assert.deepEqual(db.prepare("select workspace_id as workspaceId, session_id as sessionId, visible, updated_at as updatedAt from workspace_session_tab_state").all(), [
-    { workspaceId: "ws-a", sessionId: "orphan-session", visible: 0, updatedAt: 1 }
-  ]);
+  assert.deepEqual(db.prepare("select * from workspace_session_tab_state").all(), []);
   assert.equal((db.prepare("select version from agent_schema_meta where id = 1").get() as { version: number }).version, AGENT_SCHEMA_VERSION);
   db.close();
 });

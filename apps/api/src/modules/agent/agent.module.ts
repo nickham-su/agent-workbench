@@ -100,7 +100,7 @@ export async function registerAgentModule(app: FastifyInstance, ctx: AppContext)
   await registerAgentRoutes(app, { service, runtime, internalToken: ctx.agentInternalToken, dataDir: ctx.dataDir, pluginHost: pluginHostClient, runCompletedEventHub });
   const scheduledTasks = new ScheduledTaskService(ctx, service, runtime, Date.now, ({ executionId, reason }) => {
     // No raw Agent errors, Prompt or source content in this bounded diagnostic.
-    app.log.warn({ executionId, reason }, "scheduled execution retained active: Run reference unresolved");
+    app.log.warn({ executionId, reason }, "scheduled execution retained active: authoritative state unresolved");
   });
   scheduledScheduler = new ScheduledTaskScheduler(scheduledTasks, Date.now,
     () => app.log.warn("scheduled task tick failed; will retry on the next scan"));

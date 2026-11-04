@@ -83,8 +83,22 @@ export async function registerAgentStatusSseRoutes(
     const heartbeat = setInterval(() => {
       reply.raw.write(": keepalive\n\n");
     }, 15_000);
+    let lookupFailureReported = false;
     const unsubscribe = dependencies.runCompletedEventHub.subscribe((event) => {
-      reply.raw.write(toSseEventChunk(event));
+      try {
+        // Discovery policy belongs to this export only. Internal completion
+        // publication and directed status/follow must still observe hidden Runs.
+        const session = dependencies.service.getSessionRecord({ workspaceId: event.workspaceId, sessionId: event.sessionId });
+        if (session.workspaceId !== event.workspaceId || session.id !== event.sessionId) throw new Error("Session identity mismatch");
+        if (session.visibility === "listed") reply.raw.write(toSseEventChunk(event));
+      } catch {
+        // Fail closed without logging SQL, content or the underlying exception.
+        // Bound diagnostics to one per connection, including repeated failures.
+        if (!lookupFailureReported) {
+          lookupFailureReported = true;
+          req.log.warn({ code: "AGENT_SSE_SESSION_LOOKUP_FAILED" }, "Agent completion event was not exported");
+        }
+      }
     });
     req.raw.once("close", () => {
       clearInterval(heartbeat);

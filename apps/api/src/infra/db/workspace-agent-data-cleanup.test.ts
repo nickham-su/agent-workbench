@@ -20,7 +20,7 @@ test("workspace agent cleanup removes shared graph, FTS/map, runs and attachment
     deleteWorkspaceAgentData(db, "ws");
     db.prepare("delete from workspaces where id = ?").run("ws");
   })();
-  for (const table of ["agent_archived_text_fts", "agent_text_part_fts_map", "agent_run", "agent_session", "agent_message", "agent_message_part", "agent_attachment"]) {
+  for (const table of ["workspace_session_tab_state", "agent_archived_text_fts", "agent_text_part_fts_map", "agent_run", "agent_session", "agent_message", "agent_message_part", "agent_attachment"]) {
     assert.equal((db.prepare(`select count(*) as count from ${table}`).get() as { count: number }).count, 0, table);
   }
   assert.equal((db.prepare("select count(*) as count from workspaces").get() as { count: number }).count, 0);
@@ -98,7 +98,7 @@ test("workspace cleanup 失败时由外层事务回滚此前删除", () => {
   db.exec(`create trigger fail_message_delete before delete on agent_message begin select raise(abort, 'injected cleanup failure'); end;`);
 
   assert.throws(() => db.transaction(() => deleteWorkspaceAgentData(db, "ws"))(), /injected cleanup failure/);
-  for (const table of ["agent_message", "agent_message_part", "agent_attachment"]) {
+  for (const table of ["agent_message", "agent_message_part", "agent_attachment", "workspace_session_tab_state"]) {
     assert.equal((db.prepare(`select count(*) as count from ${table}`).get() as { count: number }).count, 1, table);
   }
   db.close();

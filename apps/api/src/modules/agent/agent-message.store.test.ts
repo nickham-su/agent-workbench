@@ -1608,3 +1608,25 @@ test("Session Agent selection prefers active Run, otherwise latest creation incl
     assert.equal(getSessionSelectionAgentId(db, { workspaceId: "ws-a", sessionId: "missing", activeRunId: null }), null);
   } finally { db.close(); }
 });
+
+
+test("Fork creates actual hidden Tab state atomically, and a state insertion failure preserves the source graph", () => {
+  const db = createDb();
+  try {
+    session(db);
+    appendMessage(db, { id: "fork-source", workspaceId: "ws-a", sessionId: "s-a", expectedHeadMessageId: null, expectedRevision: 0,
+      type: "user", status: "completed", parts: [], createdAt: 2 });
+    const source = getMessageSession(db, "ws-a", "s-a")!;
+    const input = { id: "hidden-fork", workspaceId: "ws-a", sourceSessionId: source.id, expectedHeadMessageId: source.headMessageId,
+      expectedRevision: source.revision, targetMessageId: "fork-source", title: "hidden", kind: "primary" as const, visibility: "unlisted" as const, createdAt: 3 };
+    const hidden = forkMessageSession(db, input);
+    assert.equal(hidden.visibility, "unlisted");
+    assert.deepEqual(db.prepare("select visible from workspace_session_tab_state where session_id='hidden-fork'").get(), { visible: 0 });
+    db.exec("create trigger fail_fork_tab before insert on workspace_session_tab_state begin select raise(abort, 'injected fork tab failure'); end");
+    assert.throws(() => forkMessageSession(db, { ...input, id: "failed-fork" }), /injected fork tab failure/);
+    assert.equal(getMessageSession(db, "ws-a", "failed-fork"), null); assert.equal(getMessageRunState(db, "ws-a", "failed-fork"), null);
+    assert.equal(db.prepare("select 1 from workspace_session_tab_state where session_id='failed-fork'").get(), undefined);
+    assert.deepEqual(getMessageSession(db, "ws-a", "s-a"), source);
+    assert.deepEqual(db.prepare("select count(*) n from agent_message").get(), { n: 1 });
+  } finally { db.close(); }
+});

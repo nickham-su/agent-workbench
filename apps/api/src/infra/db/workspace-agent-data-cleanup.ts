@@ -53,6 +53,7 @@ export function deleteWorkspaceAgentData(db: Db, workspaceId: string) {
   // 删除 Run/Session 会分别以 SET NULL 解除 Message/Execution 的 origin 引用。
   db.prepare("delete from agent_run where workspace_id = ?").run(workspaceId);
   db.prepare("delete from agent_session where workspace_id = ?").run(workspaceId);
+  db.prepare("delete from workspace_session_tab_state where workspace_id = ?").run(workspaceId);
 
   // Message 三条边均不可改写；按“引用者先于被引用者”的逆拓扑批量删除。
   const selectLeaves = db.prepare(`

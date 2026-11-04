@@ -11,7 +11,8 @@ test("public metadata route: complete record, scoped errors and strict query val
     const valid = await fixture.app.inject({ method: "GET", url: `${url}?workspaceId=${fixture.workspaceId}` });
     assert.equal(valid.statusCode, 200, valid.body);
     assert.equal(valid.json().id, created.id);
-    assert.equal(Object.keys(valid.json()).length, 11);
+    assert.equal(Object.keys(valid.json()).length, 12);
+    assert.equal(valid.json().visibility, "listed");
     const other = await createTestWorkspace(fixture, { title: "other" });
     const cross = await fixture.app.inject({ method: "GET", url: `${url}?workspaceId=${other.id}` });
     assert.equal(cross.statusCode, 404);

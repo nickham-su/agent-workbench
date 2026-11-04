@@ -7,9 +7,10 @@ import path from "node:path";
 import { test, type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import { AUTH_REMEMBER_TTL_MS, createSessionCookieValue, readSessionCookiePayload } from "../../../infra/auth/sessionCookie.js";
-import { appendMessage, createMessageRunRecord, createMessageSession } from "../agent-message.store.js";
+import { appendMessage, createMessageRunRecord, createMessageSession, getMessageRunState, getRunRecord } from "../agent-message.store.js";
 import { setSettingJson } from "../../settings/settings.store.js";
 import { createAgentTestFixture, createTestWorkspace } from "../testkit/agent-testkit.js";
+import { createAgentIntegrationFixture } from "../testkit/agent-integration-testkit.js";
 
 const repoRoot = fileURLToPath(new URL("../../../../../../", import.meta.url));
 const cliEntry = path.join(repoRoot, "packages/cli/src/cli.ts");
@@ -127,7 +128,60 @@ test("production CLI initializes auth-off API and returns primary records and na
   }
 });
 
-test("全面审查L1: production CLI includes hidden, headless and primary Fork sessions but excludes subtask/foreign workspace", async (t) => {
+test("production CLI directly shows, sends, reads, follows and cancels a known unlisted Session without global SSE", { timeout: 60_000 }, async (t) => {
+  const f = await createAgentIntegrationFixture({ repoRoot, agentWorkerConcurrency: 0 });
+  t.after(() => f.dispose());
+  const home = path.join(f.dataDir, "direct-cli-home");
+  await fs.mkdir(home);
+  const origin = await f.app.listen({ host: "127.0.0.1", port: 0 });
+  let sseRequests = 0;
+  f.app.server.on("request", (request) => {
+    if (request.url?.includes("/events/sse")) sseRequests++;
+  });
+  const id = "known-hidden";
+  createMessageSession(f.db, { id, workspaceId: f.workspaceId, title: "hidden direct fixture", kind: "primary", visibility: "unlisted", createdAt: Date.now() });
+  assert.equal((await runCli(home, ["login", "--url", origin])).code, 0);
+  const target = ["-w", f.workspaceId, "-s", id];
+  for (const command of ["show", "status"]) {
+    const result = await runCli(home, ["session", command, ...target]);
+    assert.equal(result.code, 0, result.stderr);
+  }
+  const sent = await runCli(home, ["session", "send", ...target, "--prompt", "known hidden CLI fixture"]);
+  assert.equal(sent.code, 0, sent.stderr);
+  const runId = getMessageRunState(f.db, f.workspaceId, id)!.activeRunId!;
+  assert.ok(runId);
+  const messages = await runCli(home, ["session", "messages", ...target, "-n", "1"]);
+  assert.equal(messages.code, 0, messages.stderr);
+  assert.ok(messages.stdout.includes("known hidden CLI fixture"));
+  let timer: ReturnType<typeof setTimeout>;
+  const captured = new Promise<void>((resolve, reject) => {
+    timer = setTimeout(() => reject(new Error("CLI follow did not capture its active Run")), 10_000);
+    const listener = (request: import("node:http").IncomingMessage, response: import("node:http").ServerResponse) => {
+      if (request.url?.startsWith(`/api/agent/sessions/${id}/run-state?`)) response.once("finish", resolve);
+    };
+    f.app.server.on("request", listener);
+    t.after(() => { clearTimeout(timer); f.app.server.off("request", listener); });
+  });
+  const following = runCli(home, ["session", "messages", ...target, "-n", "1", "-f", "--follow-timeout", "10s"]);
+  await captured;
+  clearTimeout(timer!);
+  const cancelled = await runCli(home, ["session", "cancel", ...target]);
+  assert.equal(cancelled.code, 0, cancelled.stderr);
+  const followed = await following;
+  assert.equal(followed.code, 9, followed.stderr);
+  assert.ok(followed.stdout.includes(`Run ID：${runId}`));
+  assert.ok(followed.stdout.includes("outcome=run_cancelled"));
+  assert.ok(followed.stdout.includes("complete=true"));
+  assert.equal(getRunRecord(f.db, runId)!.status, "cancelled");
+  const listed = await runCli(home, ["session", "list", "-w", f.workspaceId, "--updated-within", "1h"]);
+  assert.equal(listed.code, 0, listed.stderr);
+  assert.equal(listed.stdout.includes(id), false);
+  assert.equal(sseRequests, 0, "direct CLI follow must not depend on global completion export");
+  assert.deepEqual(f.db.prepare("select visibility from agent_session where id=?").get(id), { visibility: "unlisted" });
+  assert.deepEqual(f.db.prepare("select visible from workspace_session_tab_state where session_id=?").get(id), { visible: 0 });
+});
+
+test("production CLI includes Tab-closed listed, headless and primary Fork sessions but excludes unlisted/subtask/foreign workspace", async (t) => {
   const f = await fixture(t, null); const now = Date.now() - 1000;
   createMessageSession(f.db, { id: "source", workspaceId: f.workspaceId, title: "source", kind: "primary", createdAt: now - 3600_000 });
   appendMessage(f.db, { id: "source-message", workspaceId: f.workspaceId, sessionId: "source", expectedHeadMessageId: null, expectedRevision: 0, type: "user", status: "completed", parts: [{ id: "source-part", position: 0, type: "text", text: "inherited fixture" }], createdAt: now });
@@ -136,7 +190,8 @@ test("全面审查L1: production CLI includes hidden, headless and primary Fork 
   createMessageSession(f.db, { id: "subtask", workspaceId: f.workspaceId, title: "", kind: "subtask", createdAt: now });
   const foreign = await createTestWorkspace(f, { title: "foreign workspace" });
   createMessageSession(f.db, { id: "foreign", workspaceId: foreign.id, title: "", kind: "primary", createdAt: now });
-  f.db.prepare("insert into workspace_session_tab_state (workspace_id,session_id,visible,updated_at) values (?, ?, 0, ?)").run(f.workspaceId, "hidden", now);
+  createMessageSession(f.db, { id: "unlisted", workspaceId: f.workspaceId, title: "hidden from discovery", kind: "primary", visibility: "unlisted", createdAt: now });
+  f.db.prepare("update workspace_session_tab_state set visible=0,updated_at=? where workspace_id=? and session_id=?").run(now, f.workspaceId, "hidden");
   assert.equal((await runCli(f.home, ["login", "--url", f.origin])).code, 0);
   const result = await runCli(f.home, f.args); assert.equal(result.code, 0, result.stderr);
   assert.deepEqual([...result.stdout.matchAll(/^Session ID：([^\n]+)$/gm)].map((match) => match[1]).sort(), ["headless", "hidden", "primary-fork", "source"]);

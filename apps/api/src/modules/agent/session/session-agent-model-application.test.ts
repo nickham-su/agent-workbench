@@ -6,7 +6,7 @@ const primarySession = {
   id: "sess_primary",
   workspaceId: "ws_1",
   title: "primary",
-  kind: "primary" as const,
+  kind: "primary" as const, visibility: "listed" as const,
   forkedFromSessionId: null,
   forkedFromMessageId: null,
   headMessageId: null,
