@@ -13,6 +13,7 @@ export type WorkerEnv = {
   internalRpcTimeoutMs: number;
   pidFilePath: string | null;
   analyticsProducerGeneration?: string;
+  runtimeInstanceId?: string;
 };
 
 function parsePositiveInt(raw: string, name: string) {
@@ -28,6 +29,12 @@ function parseStrictPositiveInt(raw: string, name: string) {
     throw new Error(`invalid ${name}: ${raw}`);
   }
   return parsePositiveInt(raw, name);
+}
+
+function parseRuntimeInstanceId(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) throw new Error("Invalid AWB_AGENT_RUNTIME_INSTANCE_ID: expected a UUID v4");
+  return value;
 }
 
 export function loadWorkerEnv(processEnv: NodeJS.ProcessEnv): WorkerEnv {
@@ -66,6 +73,7 @@ export function loadWorkerEnv(processEnv: NodeJS.ProcessEnv): WorkerEnv {
     responseValidation,
     concurrency,
     internalRpcTimeoutMs,
+    runtimeInstanceId: parseRuntimeInstanceId(processEnv.AWB_AGENT_RUNTIME_INSTANCE_ID),
     analyticsProducerGeneration: parseAnalyticsProducerGeneration(processEnv.AWB_AGENT_ANALYTICS_GENERATION),
     pidFilePath: pidFileRaw || null
   };

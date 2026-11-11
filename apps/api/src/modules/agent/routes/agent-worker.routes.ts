@@ -1,3 +1,5 @@
+import { AgentQueueApiEndpoints, AgentApiPrepareInteractiveInputRequestSchema, AgentApiPrepareInteractiveInputResponseSchema, type AgentApiPrepareInteractiveInputRequest, AgentApiInjectInteractiveInputRequestSchema, AgentApiInjectInteractiveInputResponseSchema, type AgentApiInjectInteractiveInputRequest, AgentApiCompleteInteractiveAssistantRequestSchema, AgentApiCompleteInteractiveAssistantResponseSchema, type AgentApiCompleteInteractiveAssistantRequest } from "@agent-workbench/shared/internal-contracts/agent-api";
+import { queueValidatorCompiler } from "../message-queue/message-queue.routes.js";
 import { Type } from "@sinclair/typebox";
 import type { FastifyInstance } from "fastify";
 import {
@@ -146,6 +148,36 @@ export async function registerAgentWorkerRoutes(
   app: FastifyInstance,
   dependencies: AgentWorkerRouteDependencies,
 ) {
+  app.route({
+    method: AgentQueueApiEndpoints.prepareInteractiveInput.method,
+    url: AgentQueueApiEndpoints.prepareInteractiveInput.path,
+    validatorCompiler: queueValidatorCompiler,
+    schema: { tags: ["agent"], body: AgentApiPrepareInteractiveInputRequestSchema, response: { 200: AgentApiPrepareInteractiveInputResponseSchema, 400: ErrorResponseSchema, 401: ErrorResponseSchema, 409: ErrorResponseSchema } },
+    handler: async (req) => {
+      assertInternalToken(req, dependencies.internalToken);
+      return dependencies.service.prepareInteractiveInputFromWorker(req.body as AgentApiPrepareInteractiveInputRequest);
+    },
+  });
+  app.route({
+    method: AgentQueueApiEndpoints.injectInteractiveInput.method,
+    url: AgentQueueApiEndpoints.injectInteractiveInput.path,
+    validatorCompiler: queueValidatorCompiler,
+    schema: { tags: ["agent"], body: AgentApiInjectInteractiveInputRequestSchema, response: { 200: AgentApiInjectInteractiveInputResponseSchema, 400: ErrorResponseSchema, 401: ErrorResponseSchema, 409: ErrorResponseSchema } },
+    handler: async (req) => {
+      assertInternalToken(req, dependencies.internalToken);
+      return dependencies.service.injectInteractiveInputFromWorker(req.body as AgentApiInjectInteractiveInputRequest);
+    },
+  });
+  app.route({
+    method: AgentQueueApiEndpoints.completeInteractiveAssistant.method,
+    url: AgentQueueApiEndpoints.completeInteractiveAssistant.path,
+    validatorCompiler: queueValidatorCompiler,
+    schema: { tags: ["agent"], body: AgentApiCompleteInteractiveAssistantRequestSchema, response: { 200: AgentApiCompleteInteractiveAssistantResponseSchema, 400: ErrorResponseSchema, 401: ErrorResponseSchema, 409: ErrorResponseSchema } },
+    handler: async (req) => {
+      assertInternalToken(req, dependencies.internalToken);
+      return dependencies.service.completeInteractiveAssistantFromWorker(req.body as AgentApiCompleteInteractiveAssistantRequest);
+    },
+  });
   app.route({
     method: AgentApiEndpoints.getSubtaskPreforkPlan.method,
     url: AgentApiEndpoints.getSubtaskPreforkPlan.path,

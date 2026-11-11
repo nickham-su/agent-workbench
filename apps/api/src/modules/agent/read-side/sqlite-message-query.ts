@@ -1,4 +1,5 @@
 import type {
+  AgentInputReceiptMetadata,
   AgentCompactionMessage,
   AgentHeadReplacementProof,
   AgentMessage,
@@ -39,7 +40,7 @@ type ReplacementHead = Pick<AgentMessageRow,
   "type" | "status" | "originSessionId" | "originRunId" | "updatedRevision"
 >;
 
-type HydratedMessage = AgentMessageRow & { inCurrentOperationRange?: boolean; parts: AgentMessagePart[] };
+type HydratedMessage = AgentMessageRow & { inputReceipt?: AgentInputReceiptMetadata; inCurrentOperationRange?: boolean; parts: AgentMessagePart[] };
 
 function asStrictMessage(message: HydratedMessage): AgentCompactionMessage | AgentOrdinaryMessage {
   const normalized = message.type === "compaction"
@@ -681,8 +682,18 @@ export class SqliteMessageQuery {
         partsByMessageId.set(part.messageId, current);
       }
     }
+    const messageIds = rows.map(row => row.id);
+    const receipts = new Map<string, AgentInputReceiptMetadata>();
+    if (messageIds.length) {
+      const inputRows = this.db.prepare(`select message_id as messageId, id as receiptId,
+        confirmation_state as confirmationState, confirmation_source as confirmationSource
+        from agent_user_message_receipt where message_id in (select value from json_each(?))
+        and status='injected'`).all(JSON.stringify(messageIds)) as (AgentInputReceiptMetadata & { messageId: string })[];
+      for (const { messageId, ...metadata } of inputRows) receipts.set(messageId, metadata);
+    }
     return rows.map((row) => ({
       ...row,
+      ...(receipts.has(row.id) ? { inputReceipt: receipts.get(row.id)! } : {}),
       depth: Number(row.depth),
       type: row.type as AgentMessageType,
       status: row.status as AgentMessageStatus,

@@ -6,6 +6,7 @@ import Database from "better-sqlite3";
 import { afterEach, test } from "node:test";
 import { openDb } from "./db.js";
 import { AGENT_SCHEMA_VERSION, initSchema, isAgentFileCleanupPending, markAgentFileCleanupComplete } from "./schema.js";
+import { AGENT_QUEUE_DOMAIN_TABLES } from "./agent-queue-schema.js";
 import { dbPath, workspaceAgentArtifactsRoot, workspaceRoot } from "../fs/paths.js";
 
 const tempDirs: string[] = [];
@@ -16,6 +17,16 @@ function createDb() {
   db.pragma("foreign_keys = ON");
   initSchema(db);
   return db;
+}
+
+/** Historical rebuild fixtures must not be a v26 queue schema merely relabeled as old. */
+function removePostV25QueueSchemaForLegacyFixture(db: Database.Database) {
+  db.pragma("foreign_keys = OFF");
+  try {
+    for (const table of [...AGENT_QUEUE_DOMAIN_TABLES].reverse()) db.exec(`drop table ${table}`);
+    for (const index of ["uq_agent_session_scope", "uq_agent_attachment_scope", "uq_agent_run_scope", "uq_agent_message_origin_scope"]) db.exec(`drop index ${index}`);
+    db.exec("alter table agent_run drop column interactive_queue_enabled");
+  } finally { db.pragma("foreign_keys = ON"); }
 }
 
 function tableExistsForTest(db: Database.Database, name: string) {
@@ -273,6 +284,7 @@ test("controlled Agent-domain rebuild clears base-domain Tab state", () => {
   const db = createDb();
   insertWorkspace(db, "ws-a");
   db.prepare("insert into workspace_session_tab_state (workspace_id, session_id, visible, updated_at) values (?, ?, ?, ?)").run("ws-a", "orphan-session", 0, 1);
+  removePostV25QueueSchemaForLegacyFixture(db);
   db.prepare("update agent_schema_meta set version = ? where id = 1").run(22);
 
   assert.doesNotThrow(() => initSchema(db));
@@ -1136,6 +1148,7 @@ test("v19 通过破坏性重建收敛到目标 schema", () => {
   insertMessage(db, { id: "message-v19", originSessionId: "session-a", type: "assistant", status: "completed" });
   db.prepare(`insert into agent_message_part (id,message_id,position,type,text,updated_revision,created_at,updated_at)
     values ('part-v19','message-v19',0,'reasoning','summary',7,10,11)`).run();
+  removePostV25QueueSchemaForLegacyFixture(db);
   db.prepare("update agent_schema_meta set version = 19, file_cleanup_pending = 1 where id = 1").run();
   db.exec("alter table agent_run drop column ui_locale");
   db.exec("alter table agent_message_part drop column provider_replay_json");
@@ -1157,6 +1170,7 @@ test("v20 通过破坏性重建收敛到目标 schema", () => {
   insertSession(db);
   db.prepare(`insert into session_run_state (workspace_id, session_id, status, run_notice_text, retry_count, updated_at)
     values ('ws-a', 'session-a', 'idle', 'preserved', 2, 9)`).run();
+  removePostV25QueueSchemaForLegacyFixture(db);
   db.prepare("update agent_schema_meta set version = 20 where id = 1").run();
   db.exec("alter table agent_run drop column ui_locale");
   db.exec("alter table session_run_state drop column last_response_total_tokens");
@@ -1175,6 +1189,7 @@ test("v21 通过破坏性重建收敛到目标 schema", () => {
   insertSession(db);
   db.prepare(`insert into agent_run (run_id, workspace_id, session_id, trigger_message_id, agent_id, provider_id, ui_locale, model_id, subtask_depth, parent_run_id, parent_tool_execution_id, status, created_at, updated_at, run_kind)
     values ('run-v21', 'ws-a', 'session-a', null, 'agent', 'provider', 'zh-CN', 'model', 0, null, null, 'running', 10, 11, 'user')`).run();
+  removePostV25QueueSchemaForLegacyFixture(db);
   db.prepare("update agent_schema_meta set version = 21 where id = 1").run();
   db.exec("alter table agent_run drop column ui_locale");
 
@@ -1188,6 +1203,7 @@ test("v21 通过破坏性重建收敛到目标 schema", () => {
 
 test("agent_run run_kind 在目标 schema 升级时保留数据并回填 user", () => {
   const db = createDb();
+  removePostV25QueueSchemaForLegacyFixture(db);
   db.prepare("update agent_schema_meta set version = 18 where id = 1").run();
   db.exec("alter table agent_run drop column ui_locale");
   db.exec("alter table agent_run drop column run_kind");
@@ -1205,6 +1221,7 @@ test("v22 通过破坏性重建收敛到目标 schema 并保留非 Agent 数据"
   db.prepare("insert into schema_v22_sentinel values (1, 'keep')").run();
   insertWorkspace(db); insertSession(db);
   insertMessage(db, { id: "message-v22", originSessionId: "session-a", type: "assistant", status: "completed" });
+  removePostV25QueueSchemaForLegacyFixture(db);
   db.prepare("update agent_schema_meta set version = 22, file_cleanup_pending = 1 where id = 1").run();
 
   const result = initSchema(db);
@@ -1233,6 +1250,7 @@ test("v18 Message 数据图通过破坏性重建并保留 file cleanup pending",
   db.prepare(`update agent_session set head_message_id = 'assistant-v18', context_root_message_id = 'user-v18', revision = 6, updated_at = 16 where id = 'session-a'`).run();
   db.prepare(`insert into session_run_state (workspace_id, session_id, status, active_run_id, run_notice_text, retry_count, next_retry_at, active_assistant_message_id, non_terminal_message_ids_json, non_terminal_tool_execution_ids_json, updated_at)
     values ('ws-a', 'session-a', 'running', 'run-v18', 'recovering', 2, 99, null, '[]', '[]', 17)`).run();
+  removePostV25QueueSchemaForLegacyFixture(db);
   db.prepare("update agent_schema_meta set version = 18, file_cleanup_pending = 1 where id = 1").run();
   db.exec("alter table agent_run drop column ui_locale");
   db.exec("alter table agent_run drop column run_kind");

@@ -1,3 +1,4 @@
+import { listenAgentTestApp } from "../src/modules/agent/testkit/agent-testkit.js";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import { createServer } from "node:http";
@@ -70,7 +71,7 @@ for (const provider of providers) {
       await fs.writeFile(`${workspace.path}/note.txt`, "test fixture content\n", "utf8");
       createMessageSession(fixture.db, { workspaceId: workspace.id, id: "http-session",
         title: "Cross-layer reasoning", kind: "primary", createdAt: Date.now() });
-      const apiOrigin = await app.listen({ host: "127.0.0.1", port: 0 });
+      const apiOrigin = await listenAgentTestApp(app, 0);
       const put = async (path: string, payload: unknown) => {
         const reply = await app.inject({ method: "PUT", url: path, payload });
         assert.equal(reply.statusCode, 200, `${path}: settings request failed`);
@@ -170,7 +171,7 @@ test("protected HTTP flush rejects unauthenticated writes and retains legacy Ope
   const fixture = await createAgentTestFixture({ dataDirPrefix: "reasoning-http-openai-", withApp: true });
   try {
     const workspace = await createTestWorkspace(fixture);
-    const apiOrigin = await fixture.app!.listen({ host: "127.0.0.1", port: 0 });
+    const apiOrigin = await listenAgentTestApp(fixture.app!, 0);
     const sessionId = "openai-http-session";
     const runId = "openai-http-run";
     const messageId = "openai-http-assistant";

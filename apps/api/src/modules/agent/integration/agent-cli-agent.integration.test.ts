@@ -1,3 +1,4 @@
+import { listenAgentTestApp } from "../testkit/agent-testkit.js";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
@@ -55,7 +56,7 @@ async function provider(t: TestContext) {
 }
 async function fixture(t: TestContext, worker: boolean, observe?: (request: { method: string; url: string; body: unknown }) => void) {
   const apiPort = await freePort(); const workerPort = await freePort();
-  const f = await createAgentTestFixture({ repoRoot, dataDirPrefix: "cli-agent-public-", withApp: true, authToken, agentWorkerConcurrency: worker ? 2 : 0,
+  const f = await createAgentTestFixture({ repoRoot, dataDirPrefix: "cli-agent-public-", withApp: true, listen: false, authToken, agentWorkerConcurrency: worker ? 2 : 0,
     appFactory: async (ctx) => {
       ctx.agentWorkerEnabled = worker; ctx.agentWorkerPort = workerPort; ctx.agentApiOrigin = `http://127.0.0.1:${apiPort}`;
       const app = await createApp(ctx);
@@ -65,7 +66,7 @@ async function fixture(t: TestContext, worker: boolean, observe?: (request: { me
   t.after(() => f.dispose()); const workspace = await createTestWorkspace(f, { title: "CLI smoke workspace" });
   const home = path.join(f.dataDir, "cli-home"); await fs.mkdir(home);
   const publicRequests: string[] = []; f.app!.server.on("request", (request) => { if (request.headers.cookie?.includes("awb_session=")) publicRequests.push(request.url ?? ""); });
-  const origin = await f.app!.listen({ host: "127.0.0.1", port: apiPort });
+  const origin = await listenAgentTestApp(f.app!, apiPort);
   async function run(args: string[], input = "") {
     const child = spawn(process.execPath, [cliEntry, ...args], { cwd: home, env: { HOME: home, USERPROFILE: home, TMPDIR: home, PATH: path.dirname(process.execPath), NODE_PATH: "" }, stdio: ["pipe", "pipe", "pipe"] });
     let stdout = ""; let stderr = ""; child.stdout.on("data", (chunk) => { stdout += chunk; }); child.stderr.on("data", (chunk) => { stderr += chunk; }); child.stdin.end(input);
@@ -200,7 +201,10 @@ test("全面审查M3: real API cancel uses new current Run after CLI precheck, n
 
 test("全面审查M3: real API idle-root cancel never scans or cancels historical active descendants", async (t) => {
   const f = await fixture(t, false); const w = f.workspace.id;
-  const root = seedRun(f, w, "primary", null, "completed"); const orphan = seedRun(f, w, "subtask", root.runId); const descendant = seedRun(f, w, "subtask", orphan.runId);
+  const root = seedRun(f, w, "primary", null); const orphan = seedRun(f, w, "subtask", root.runId); const descendant = seedRun(f, w, "subtask", orphan.runId);
+  const rootIdentity = {workspaceId:w,sessionId:root.sessionId,runId:root.runId,updatedAt:Date.now()};
+  persistRunTerminalIntent(f.db,{...rootIdentity,status:"completed",code:"run_completed",detail:null});
+  convergeRunTerminal(f.db,rootIdentity);
   assert.equal(field(success(await f.run(["session", "status", "-w", w, "-s", root.sessionId])), "状态"), "idle");
   const before = f.publicRequests.length;
   const result = success(await f.run(["session", "cancel", "-w", w, "-s", root.sessionId]));

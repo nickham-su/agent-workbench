@@ -1,3 +1,5 @@
+import { AgentRuntimeStopError } from "@agent-workbench/shared/node/agent-run-stop";
+import { AGENT_STOP_PROTOCOL_VERSION } from "@agent-workbench/shared/internal-contracts/agent-worker";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -6,6 +8,7 @@ import { AgentWorkerEndpoints } from "@agent-workbench/shared/internal-contracts
 import {
   AgentWorkerCancelSessionAndWaitRequestSchema,
   AgentWorkerCancelSessionRequestSchema,
+  AgentWorkerStopRunsRequestSchema,
   AgentWorkerEnqueueRequestSchema
 } from "@agent-workbench/shared/internal-contracts/agent-worker";
 import type { AgentWorkerEnqueueRequest } from "@agent-workbench/shared/internal-contracts/agent-worker";
@@ -58,6 +61,17 @@ export function createWorkerServer(params: {
         return;
       }
 
+      if (method === AgentWorkerEndpoints.runtimeIdentity.method && pathname === AgentWorkerEndpoints.runtimeIdentity.path) {
+        sendJson(res, 200, { runtimeInstanceId: params.runner.runtimeInstanceId, stopProtocolVersion: AGENT_STOP_PROTOCOL_VERSION });
+        return;
+      }
+      if (method === AgentWorkerEndpoints.stopRunsAndWait.method && pathname === AgentWorkerEndpoints.stopRunsAndWait.path) {
+        const body: unknown = await readJsonBody(req);
+        if (!Value.Check(AgentWorkerStopRunsRequestSchema, body)) { sendJson(res,400,{message:"invalid precise stop payload"}); return; }
+        sendJson(res,200,await params.runner.stopRunsAndWait(body));
+        return;
+      }
+
       if (method === "GET" && pathname === "/_internal/analytics-snapshot") {
         // Private manager-to-worker observation endpoint; it exposes no run data.
         sendJson(res, 200, params.runner.analyticsLiveSnapshot());
@@ -76,7 +90,8 @@ export function createWorkerServer(params: {
           return;
         }
         const enqueue = body as AgentWorkerEnqueueRequest;
-        params.runner.enqueueRun({
+        await params.runner.enqueueRunAdmitted({
+          ...(enqueue.runtimeInstanceId ? {runtimeInstanceId:enqueue.runtimeInstanceId} : {}),
           workspaceId: enqueue.workspaceId,
           sessionId: enqueue.sessionId,
           runId: enqueue.runId,
@@ -120,8 +135,8 @@ export function createWorkerServer(params: {
 
       sendJson(res, 404, { message: "Not Found" });
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      sendJson(res, 500, { message });
+      if (err instanceof AgentRuntimeStopError) { sendJson(res,409,{message:err.code,code:err.code}); return; }
+      sendJson(res, 500, { message: "Agent worker request failed" });
     }
   });
 

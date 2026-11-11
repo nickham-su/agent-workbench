@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test, { afterEach } from "node:test";
 import type { AxiosResponse, InternalAxiosRequestConfig } from "axios";
-import type { AgentMessage, AgentMessageSessionRunState } from "@agent-workbench/shared";
+import type { AgentMessage, AgentMessageSessionRunState, AgentMessageQueueSnapshot } from "@agent-workbench/shared";
 import DOMPurify from "dompurify";
 import { computed, defineComponent, h, KeepAlive, ref, type ComputedRef } from "vue";
 import { agentSessionMetadataReadContextKey, createAgentSessionMetadataReads, type MetadataReadContext, type TimelineMetadataEvent } from "./agentSessionMetadataReadContext";
@@ -9,7 +9,7 @@ import zhCN from "@/shared/i18n/locales/zh-CN";
 import enUS from "@/shared/i18n/locales/en-US";
 import { apiClient } from "@/shared/api/api";
 
-const [{ mount }, component, markdownComponent, { createI18n }, { nextTick, reactive }, { agentSessionStatusStoreKey }, { message, notification, Modal }, { replaceAgentTimelineSnapshot }] = await Promise.all([
+const [{ mount }, component, markdownComponent, { createI18n }, { nextTick, reactive }, { agentSessionStatusStoreKey }, { message, notification, Modal, Input }, { replaceAgentTimelineSnapshot }] = await Promise.all([
   import("@vue/test-utils"),
   import("./AgentClientPane.vue"),
   import("./AssistantMarkdownMessage.vue"),
@@ -34,6 +34,17 @@ async function clearComponentNotifications() {
 }
 
 afterEach(clearComponentNotifications);
+
+function queueSnapshot(sessionId = "session-a"): AgentMessageQueueSnapshot {
+  return { workspaceId: "ws-a", sessionId, queueVersion: 0, mode: "active", pauseCode: null,
+    pendingCount: 0, pendingBytes: 0, pendingIdentity: null, inputIdentity: null, unconfirmedInputCount: 0,
+    unconfirmedInputSetHash: null, recoveryIdentity: null, stop: { state: "none", unresolvedOperationCount: 0, unresolvedTargetCount: 0, code: null }, items: [] };
+}
+function injectedReceipt(runId: string, sessionId = "session-a") {
+  return { receipt: { id: `receipt-${runId}`, clientRequestId: "test-request", sequence: 1, createdAt: 1, updatedAt: 1,
+    status: "injected", messageId: `message-${runId}`, runId, confirmationState: "confirmed", confirmationSource: "worker_model" },
+    deduplicated: true, queue: queueSnapshot(sessionId) };
+}
 
 const baseRunState = (overrides: Partial<AgentMessageSessionRunState> = {}): AgentMessageSessionRunState => reactive({
   workspaceId: "ws-a",
@@ -163,6 +174,7 @@ function mountPane(options?: {
   ensureSession?: (sessionId: string) => Promise<string>;
   forkSession?: (request: { fromSessionId: string; fromMessageId: string }) => Promise<import("@agent-workbench/shared").AgentSessionRecord>;
   contextLocale?: "zh-CN" | "en-US";
+  renderRealTextarea?: boolean;
   renderModalSlots?: boolean;
   metadataReadContext?: MetadataReadContext;
 }) {
@@ -205,8 +217,9 @@ function mountPane(options?: {
           },
         }),
       },
-    } : { ...createMountGlobal(statusStore), provide: { ...createMountGlobal(statusStore).provide, ...(options?.metadataReadContext ? { [agentSessionMetadataReadContextKey as symbol]: options.metadataReadContext } : {}) } },
+    } : { ...createMountGlobal(statusStore), components: options?.renderRealTextarea ? { ATextarea: Input.TextArea } : {}, provide: { ...createMountGlobal(statusStore).provide, ...(options?.metadataReadContext ? { [agentSessionMetadataReadContextKey as symbol]: options.metadataReadContext } : {}) } },
   });
+  (wrapper.vm as any).queue.apply(queueSnapshot());
   return {
     wrapper,
     runState,
@@ -245,6 +258,9 @@ function mockContextRequests() {
       const request = requests[index];
       assert.ok(request);
       request.reply.resolve({ config: request.config, data, status: 200, statusText: "OK", headers: {} });
+    },
+    reject(index: number, error: unknown) {
+      assert.ok(requests[index]); requests[index]!.reply.reject(error);
     },
     async waitFor(index: number) {
       for (let i = 0; i < 30 && !requests[index]; i++) await new Promise((resolve) => setTimeout(resolve, 0));
@@ -875,8 +891,8 @@ test("真实 AgentClientPane：发送和状态轮询间隙保持 Run loading，R
     assert.equal(loadingCount(), 1, "等待会话就绪时显示 loading");
     ensured.resolve("session-a");
     const request = await http.waitFor(0);
-    assert.match(request.url || "", /messages/);
-    http.respond(0, { runId: "new-run" });
+    assert.match(request.url || "", /receipts/);
+    http.respond(0, injectedReceipt("new-run", "session-a"));
     await send;
     await nextTick();
     assert.equal(loadingCount(), 1, "发送完成但状态仍为 idle 时不能闪烁");
@@ -920,7 +936,7 @@ test("真实 AgentClientPane：旧会话请求回执只登记原 Run，不污染
   try {
     const oldSend = vm.onSend();
     const oldRequest = await http.waitFor(0);
-    assert.match(oldRequest.url || "", /session-a\/messages/);
+    assert.match(oldRequest.url || "", /session-a\/receipts/);
     await wrapper.setProps({ sessionId: "session-b" });
     setRunState({ status: "running", activeRunId: "old-run-after-switch" });
     await nextTick();
@@ -930,7 +946,7 @@ test("真实 AgentClientPane：旧会话请求回执只登记原 Run，不污染
     await nextTick();
     assert.equal(wrapper.find('[data-testid="agent-run-loading"]').exists(), true);
 
-    http.respond(0, { runId: "old-run-after-switch" });
+    http.respond(0, injectedReceipt("old-run-after-switch", "session-a"));
     await oldSend;
     await nextTick();
     assert.deepEqual(panePendingRuns(wrapper).list("ws-a", "session-a").map((run) => run.runId), ["old-run-after-switch"]);
@@ -939,8 +955,8 @@ test("真实 AgentClientPane：旧会话请求回执只登记原 Run，不污染
 
     newSessionReady.resolve("session-b");
     const newRequest = await http.waitFor(1);
-    assert.match(newRequest.url || "", /session-b\/messages/);
-    http.respond(1, { runId: "new-run-after-switch" });
+    assert.match(newRequest.url || "", /session-b\/receipts/);
+    http.respond(1, injectedReceipt("new-run-after-switch", "session-b"));
     await newSend;
     assert.equal(vm.awaitingRunStateRunId, "new-run-after-switch");
   } finally {
@@ -958,7 +974,7 @@ test("真实 AgentClientPane：上一 Run 的 running 状态不会提前清除�
   try {
     const send = vm.onSend();
     await http.waitFor(0);
-    http.respond(0, { runId: "overlap-run" });
+    http.respond(0, injectedReceipt("overlap-run", "session-a"));
     await send;
     assert.equal(vm.awaitingRunStateRunId, "overlap-run");
     setRunState({ status: "idle", activeRunId: null });
@@ -995,7 +1011,7 @@ for (const terminal of [
       vm.pendingRunController.start({ workspaceId: "ws-a", sessionId: "session-a" });
       const send = vm.onSend();
       await http.waitFor(0);
-      http.respond(0, { runId });
+      http.respond(0, injectedReceipt(runId));
       const timelineIndex = await waitForTimelineRequest(http);
       let statusIndex = -1;
       for (let i = 0; i < 30 && statusIndex < 0; i++) {
@@ -1398,7 +1414,7 @@ const ForkActionsStub = defineComponent({
 
 function mountForkPane(forkSession: NonNullable<Parameters<typeof mountPane>[0]>["forkSession"], metadataReadContext?: MetadataReadContext) {
   const global = createMountGlobal({ getRunState: () => computed(() => baseRunState()) });
-  return mount(AgentClientPane, {
+  const wrapper = mount(AgentClientPane, {
     attachTo: document.body,
     props: {
       workspaceId: "ws-a", toolId: "agent-tool", sessionId: "session-a", sessionKind: "primary", sessionTitle: "Session A",
@@ -1411,6 +1427,8 @@ function mountForkPane(forkSession: NonNullable<Parameters<typeof mountPane>[0]>
       stubs: { ...componentStubs, AgentMessageActions: ForkActionsStub },
     },
   });
+  (wrapper.vm as any).queue.apply(queueSnapshot());
+  return wrapper;
 }
 
 test("真实 AgentClientPane：点击历史 Fork 构造请求、pending 禁用并 emit 新 Session，且不调用确认", async () => {
@@ -1922,8 +1940,8 @@ test("真实 AgentClientPane：Agent 初始化中/失败禁止普通发送和 co
     vm.draft = "Hello";
     const send = vm.onSend();
     const request = await http.waitFor(0);
-    assert.match(request.url || "", /messages/);
-    http.respond(0, { runId: "selection-ready-run" }); await send;
+    assert.match(request.url || "", /receipts/);
+    http.respond(0, injectedReceipt("selection-ready-run", "session-a")); await send;
   } finally {
     panePendingRuns(wrapper).remove({ workspaceId: "ws-a", sessionId: "session-a", runKind: "user", runId: "selection-ready-run" });
     wrapper.unmount(); http.restore();
@@ -2047,5 +2065,113 @@ test("切换会话 Tab 即使保留 Pane 实例，也关闭错误详情并清空
     await wrapper.setProps({ active: false });
     assert.equal(wrapper.find('[data-testid="visible-modal"]').exists(), false);
     assert.equal((wrapper.vm as unknown as { modelErrorSnapshot: unknown }).modelErrorSnapshot, null);
+  } finally { wrapper.unmount(); }
+});
+
+
+test("真实 AgentClientPane：运行中普通消息使用 receipt，N 位于输入框上方，不登记虚假 Run，并保留等待期间新草稿", async () => {
+  const http = mockContextRequests();
+  const { wrapper } = mountPane({ initialDraft: "first", runState: baseRunState({ status: "running", activeRunId: "existing-run" }), contextLocale: "zh-CN", renderModalSlots: true });
+  const vm = wrapper.vm as any;
+  try {
+    const send = vm.onSend(); const request = await http.waitFor(0);
+    assert.match(request.url || "", /\/receipts$/);
+    assert.equal(wrapper.get("a-textarea").attributes("readonly"), undefined);
+    vm.draft = "new draft entered while receipt was pending";
+    const receipt = { id: "queued-receipt", clientRequestId: JSON.parse(String(request.data)).clientRequestId, sequence: 1, createdAt: 1, updatedAt: 1,
+      status: "queued", messageId: null, runId: null, confirmationState: null, confirmationSource: null };
+    http.respond(0, { receipt, deduplicated: false, queue: { ...queueSnapshot(), queueVersion: 1, pendingCount: 1,
+      items: [{ ...receipt, textPreview: "first", attachmentCount: 0 }] } });
+    await send; await nextTick();
+    assert.equal(vm.draft, "new draft entered while receipt was pending");
+    assert.equal(vm.awaitingRunStateRunId, null); assert.equal(panePendingRuns(wrapper).list("ws-a", "session-a").length, 0);
+    const count = wrapper.get('[data-testid="queue-pending-count"]'); assert.equal(count.text(), "有 1 条消息等待处理");
+    const textarea = wrapper.get("a-textarea").element;
+    assert.ok(count.element.compareDocumentPosition(textarea) & Node.DOCUMENT_POSITION_FOLLOWING);
+  } finally { wrapper.unmount(); http.restore(); }
+});
+test("真实 AgentClientPane：未知提交按原 ID 查询，确认旧提交不清掉后来编辑的文字和图片", async () => {
+  const http = mockContextRequests(); const { wrapper } = mountPane({ initialDraft: "original input" });
+  const vm = wrapper.vm as any;
+  try {
+    const originalImage = { id: "old-image", filename: "old.png", file: new File(["old"], "old.png", { type: "image/png" }) };
+    const newImage = { id: "new-image", filename: "new.png", file: new File(["new"], "new.png", { type: "image/png" }) };
+    vm.pendingImages = [originalImage];
+    const sending = vm.onSend(); const original = await http.waitFor(0);
+    const requestId = JSON.parse(String((original.data as FormData).get("payload"))).clientRequestId;
+    vm.draft = "later input"; vm.pendingImages = [originalImage, newImage];
+    http.reject(0, new Error("connection lost")); await sending;
+    assert.equal(wrapper.find('[data-testid="queue-submission-unknown"]').exists(), true);
+    assert.equal(wrapper.find('[data-testid="queue-pending-count"]').exists(), false);
+    const lookup = vm.onResolveQueueSubmission(false); const request = await http.waitFor(1);
+    assert.match(request.url || "", /receipts\/by-request$/); assert.equal(request.params.clientRequestId, requestId);
+    const acknowledged = injectedReceipt("actual-recovered-run");
+    http.respond(1, { receipt: acknowledged.receipt, queue: acknowledged.queue }); await lookup;
+    assert.equal(vm.draft, "later input"); assert.deepEqual(vm.pendingImages.map((image: { id: string }) => image.id), ["new-image"]);
+    assert.equal(wrapper.find('[data-testid="queue-submission-unknown"]').exists(), false);
+  } finally { wrapper.unmount(); http.restore(); }
+});
+test("真实 AgentClientPane：恢复必须确认，放弃使用确认时的全集 hash 和版本，不接收客户端 ID 数组", async () => {
+  const http = mockContextRequests(); const { wrapper } = mountPane({contextLocale:"zh-CN",renderModalSlots:true}); const vm = wrapper.vm as any;
+  const originalConfirm = Modal.confirm; let confirmation: any;
+  const modal = Modal as unknown as { confirm: typeof Modal.confirm };
+  modal.confirm = ((options: unknown) => { confirmation = options; return { destroy() {}, update() {} }; }) as typeof Modal.confirm;
+  try {
+    vm.queue.apply({ ...queueSnapshot(), queueVersion: 4, mode: "paused", unconfirmedInputCount: 1, unconfirmedInputSetHash: "a".repeat(64) });
+    vm.onQueueRecovery("abandon"); assert.ok(confirmation); assert.equal(http.requests.length, 0);
+    for (const text of ["1 条", "不可逆", "后续模型不再读取", "历史仍保留", "工具副作用", "留存额度不返还"]) assert.ok(confirmation.content.includes(text), text);
+    vm.queue.apply({ ...queueSnapshot(), queueVersion: 5, mode: "paused", unconfirmedInputCount: 2, unconfirmedInputSetHash: "b".repeat(64) });
+    assert.ok(confirmation.content.includes("1 条")); assert.equal(confirmation.content.includes("2 条"),false);
+    const action = confirmation.onOk(); const request = await http.waitFor(0); const body = JSON.parse(String(request.data));
+    assert.equal(body.expectedQueueVersion, 4); assert.equal(body.expectedUnconfirmedInputSetHash, "a".repeat(64)); assert.equal(body.confirmIrreversible, true); assert.equal("receiptIds" in body, false);
+    http.respond(0, { abandonedReceiptIds: ["r"], queue: { ...queueSnapshot(), queueVersion: 6, mode: "paused", pauseCode: "inputs_abandoned" } }); await action;
+    vm.queue.apply({...queueSnapshot(),queueVersion:7,mode:"paused",unconfirmedInputCount:1,unconfirmedInputSetHash:"c".repeat(64)});
+    vm.onQueueRecovery("abandon"); await wrapper.setProps({sessionId:"session-b"});
+    const beforeLateConfirm=http.requests.filter(item=>item.config.url?.includes("/message-queue/abandon-unconfirmed")).length;
+    await confirmation.onOk();
+    assert.equal(http.requests.filter(item=>item.config.url?.includes("/message-queue/abandon-unconfirmed")).length,beforeLateConfirm);
+  } finally { modal.confirm = originalConfirm; wrapper.unmount(); http.restore(); }
+});
+test("真实 AgentClientPane：服务端执行身份锁定 Agent/model，停止未知时隐藏历史写操作但仍可编辑输入", async () => {
+  const { wrapper } = mountPane({ modelValue: "agent-a" }); const vm = wrapper.vm as any;
+  try {
+    vm.queue.apply({ ...queueSnapshot(), queueVersion: 1, inputIdentity: { agentId: "agent-c", providerId: "authoritative-provider", modelId: "authoritative-model" },
+      stop: { state: "unknown", unresolvedOperationCount: 1, unresolvedTargetCount: 1, code: "transport_timeout" } });
+    await setTimeline(wrapper, [textMessage({ id: "history", type: "user" })]);
+    assert.equal(vm.effectiveAgentId, "agent-c"); assert.equal(vm.sessionModelLabel, "authoritative-provider / authoritative-model");
+    assert.equal(wrapper.getComponent({ name: "ASelect" }).attributes("disabled"), "true");
+    assert.equal(wrapper.findComponent({ name: "AgentMessageActions" }).exists(), false);
+    assert.equal(wrapper.get("a-textarea").attributes("readonly"), undefined);
+  } finally { wrapper.unmount(); }
+});
+
+test("真实 AgentClientPane：组件重建后查询原未知提交不清除新编辑器中同文案的草稿", async () => {
+  const http = mockContextRequests(); let wrapper = mountPane({ initialDraft: "same draft" }).wrapper;
+  try {
+    const send = (wrapper.vm as any).onSend(); await http.waitFor(0);
+    http.reject(0, new Error("timeout")); await send; wrapper.unmount();
+    wrapper = mountPane({ initialDraft: "same draft" }).wrapper;
+    const vm = wrapper.vm as any;
+    const lookup = vm.onResolveQueueSubmission(false); await http.waitFor(1);
+    const acknowledged = injectedReceipt("old-composer-run");
+    http.respond(1, { receipt: acknowledged.receipt, queue: acknowledged.queue }); await lookup;
+    assert.equal(vm.draft, "same draft", "a different composer never owns the previous submission's draft version");
+  } finally { wrapper.unmount(); http.restore(); }
+});
+
+test("真实 textarea Tab/Shift+Tab 和 select 更新均不能绕过队列身份锁，解锁保留原选择", async () => {
+  const { wrapper } = mountPane({ modelValue: "agent-a", renderRealTextarea: true }); const vm = wrapper.vm as any;
+  try {
+    vm.queue.apply({ ...queueSnapshot(), queueVersion: 1, inputIdentity: { agentId: "agent-c", providerId: "p", modelId: "m" } });
+    await nextTick();
+    await wrapper.get("textarea").trigger("keydown", { key: "Tab" });
+    await wrapper.get("textarea").trigger("keydown", { key: "Tab", shiftKey: true });
+    wrapper.getComponent({ name: "ASelect" }).vm.$emit("update:value", "agent-b"); await nextTick();
+    assert.equal(wrapper.emitted("update:modelValue"), undefined);
+    assert.equal((wrapper.props() as { modelValue: string }).modelValue, "agent-a"); assert.equal(vm.effectiveAgentId, "agent-c");
+    vm.queue.apply({ ...queueSnapshot(), queueVersion: 2 }); await nextTick();
+    assert.equal(vm.effectiveAgentId, "agent-a");
+    await wrapper.get("textarea").trigger("keydown", { key: "Tab" });
+    assert.deepEqual(wrapper.emitted("update:modelValue"), [["agent-b"]]);
   } finally { wrapper.unmount(); }
 });

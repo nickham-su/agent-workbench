@@ -1,9 +1,13 @@
 import Database from "better-sqlite3";
 import type { Db } from "./db.js";
 import { initialAgentSessionTabVisible } from "./agent-session-tab-state.js";
+import {
+  AGENT_QUEUE_DOMAIN_TABLES, AGENT_QUEUE_INDEPENDENT_TABLES, ADD_INTERACTIVE_QUEUE_COLUMN,
+  createAgentQueueDomainSchema, ensureAgentQueueIndependentSchema, hasAgentQueueIndependentSchema
+} from "./agent-queue-schema.js";
 
-/** v23/v24 upgrade in place; only the pre-existing older-version policy may rebuild. */
-export const AGENT_SCHEMA_VERSION = 25;
+/** v23/v24/v25 upgrade in place; only the pre-existing older-version policy may rebuild. */
+export const AGENT_SCHEMA_VERSION = 26;
 
 const SESSION_VISIBILITY_COLUMN = "visibility text not null default 'listed' check (visibility in ('listed', 'unlisted'))";
 const ADD_SESSION_VISIBILITY = `alter table agent_session add column ${SESSION_VISIBILITY_COLUMN}`;
@@ -377,6 +381,7 @@ function createBaseSchema(db: Db) {
   ensureTerminalEnvironmentLaunchAttemptSchema(db);
   ensureTerminalAuthCleanupIntentSchema(db);
   createScheduledTaskSchema(db);
+  ensureAgentQueueIndependentSchema(db);
 }
 
 /** Independent non-Agent locator table. Unknown layouts must never be repaired by dropping authority. */
@@ -509,6 +514,7 @@ function createScheduledTaskSchema(db: Db) {
 }
 
 const AGENT_DOMAIN_TABLES = [
+  ...AGENT_QUEUE_DOMAIN_TABLES,
   "agent_text_part_fts_map",
   "agent_archived_text_fts",
   "agent_tool_execution",
@@ -557,7 +563,7 @@ const LEGACY_AGENT_TABLE_SIGNATURES: Record<string, LegacyAgentTableSignature> =
   agent_client_request: { required: ["workspace_id", "session_id", "client_request_id", "message_item_id", "run_id", "created_at"], allowed: ["workspace_id", "session_id", "client_request_id", "message_item_id", "run_id", "created_at"] }
 };
 
-const TARGET_AGENT_TABLES = new Set([
+const V25_AGENT_TABLES = new Set([
   "agent_schema_meta",
   "agent_session",
   "agent_session_agent_model_override",
@@ -571,6 +577,8 @@ const TARGET_AGENT_TABLES = new Set([
   "agent_text_part_fts_map",
   "agent_archived_text_fts"
 ]);
+
+const TARGET_AGENT_TABLES = new Set([...V25_AGENT_TABLES, ...AGENT_QUEUE_DOMAIN_TABLES]);
 
 /** Frozen v23 signature. Do not validate a source database using the v24 columns. */
 const V23_AGENT_TABLE_COLUMNS: Record<string, readonly string[]> = {
@@ -592,12 +600,17 @@ const V24_AGENT_TABLE_COLUMNS: Record<string, readonly string[]> = {
   ...V23_AGENT_TABLE_COLUMNS,
   agent_session: [...V23_AGENT_TABLE_COLUMNS.agent_session!, "visibility"]
 };
-const TARGET_AGENT_TABLE_COLUMNS: Record<string, readonly string[]> = {
+const V25_AGENT_TABLE_COLUMNS: Record<string, readonly string[]> = {
   ...V24_AGENT_TABLE_COLUMNS,
   session_run_state: [...V24_AGENT_TABLE_COLUMNS.session_run_state!, "model_request_error_json"]
 };
 
-type AgentSchemaClassification = "clean" | "legacy-unversioned" | "current" | "upgradeable-v23" | "upgradeable-v24" | "rebuildable" | "unsupported";
+const TARGET_AGENT_TABLE_COLUMNS: Record<string, readonly string[]> = {
+  ...V25_AGENT_TABLE_COLUMNS,
+  agent_run: [...V25_AGENT_TABLE_COLUMNS.agent_run!, "interactive_queue_enabled"]
+};
+
+type AgentSchemaClassification = "clean" | "legacy-unversioned" | "current" | "upgradeable-v23" | "upgradeable-v24" | "upgradeable-v25" | "rebuildable" | "unsupported";
 
 function listAgentSchemaObjects(db: Db) {
   return (db.prepare(`
@@ -605,7 +618,7 @@ function listAgentSchemaObjects(db: Db) {
     from sqlite_master
     where (type = 'table' or type = 'view')
       and (name like 'agent\\_%' escape '\\' or name = 'session_run_state')
-  `).all() as Array<{ name: string; type: "table" | "view"; sql: string | null }>);
+  `).all() as Array<{ name: string; type: "table" | "view"; sql: string | null }>).filter(object => !(AGENT_QUEUE_INDEPENDENT_TABLES as readonly string[]).includes(object.name));
 }
 
 function isAgentFtsShadowTable(name: string) {
@@ -801,7 +814,7 @@ function agentSchemaDefinitions(db: Db): AgentSchemaDefinition[] {
        or tbl_name in ('session_run_state', 'workspace_session_tab_state')
        or name like 'agent\\_%' escape '\\'
     order by type, name
-  `).all() as AgentSchemaDefinition[]).map((object) => ({
+  `).all() as AgentSchemaDefinition[]).filter(object => !(AGENT_QUEUE_INDEPENDENT_TABLES as readonly string[]).includes(object.tbl_name)).map((object) => ({
     ...object, sql: object.sql === null ? null : canonicalAgentSql(object.sql)
   }));
 }
@@ -810,12 +823,13 @@ type CanonicalAgentSchemas = {
   v23: AgentSchemaDefinition[];
   v24: AgentSchemaDefinition[][];
   v25: AgentSchemaDefinition[][];
+  v26: AgentSchemaDefinition[][];
   optionalIndexNames: Set<string>;
 };
 let canonicalAgentSchemas: CanonicalAgentSchemas | undefined;
 
 /**
- * This dedicated v23/v24/v25 validator uses the creation DDL as its single authority,
+ * This dedicated v23/v24/v25/v26 validator uses the creation DDL as its single authority,
  * not a second hand-written list of selected CHECK/FK fragments. SQLite itself
  * materializes every table, autoindex, key index, FTS shadow and trigger definition.
  * The only v23 difference is the absent visibility column. Materialize both real
@@ -829,7 +843,7 @@ function getCanonicalAgentSchemas(): CanonicalAgentSchemas {
   const target = new Database(":memory:");
   try {
     createBaseSchema(source);
-    createAgentSchema(source, false, false, false);
+    createAgentSchema(source, false, false, false, false);
     const requiredNames = new Set(agentSchemaDefinitions(source).map((object) => object.name));
     ensureAnalyticsCollectorIndexes(source);
     const v23 = agentSchemaDefinitions(source);
@@ -841,16 +855,23 @@ function getCanonicalAgentSchemas(): CanonicalAgentSchemas {
     source.exec(ADD_MODEL_REQUEST_ERROR);
     const upgradedV25 = agentSchemaDefinitions(source);
     createBaseSchema(fresh);
-    createAgentSchema(fresh, false, true, false);
+    createAgentSchema(fresh, false, true, false, false);
     ensureAnalyticsCollectorIndexes(fresh);
     const freshV24 = agentSchemaDefinitions(fresh);
     fresh.exec(ADD_MODEL_REQUEST_ERROR);
     const freshV25 = agentSchemaDefinitions(fresh);
     // CREATE and ALTER put new columns on opposite sides of table constraints.
     createBaseSchema(target);
-    createAgentSchema(target, false);
+    createAgentSchema(target, false, true, true, false);
     ensureAnalyticsCollectorIndexes(target);
-    canonicalAgentSchemas = { v23, v24: [freshV24, upgradedV24], v25: [agentSchemaDefinitions(target), freshV25, upgradedV25], optionalIndexNames };
+    const freshCreatedV25 = agentSchemaDefinitions(target);
+    for (const reference of [source, fresh, target]) {
+      reference.exec(ADD_INTERACTIVE_QUEUE_COLUMN);
+      createAgentQueueDomainSchema(reference);
+    }
+    canonicalAgentSchemas = { v23, v24: [freshV24, upgradedV24],
+      v25: [freshCreatedV25, freshV25, upgradedV25],
+      v26: [target, fresh, source].map(agentSchemaDefinitions), optionalIndexNames };
     return canonicalAgentSchemas;
   } finally { source.close(); fresh.close(); target.close(); }
 }
@@ -859,7 +880,7 @@ function hasCanonicalAgentSchema(db: Db, version: number) {
   const canonical = getCanonicalAgentSchemas();
   const actual = agentSchemaDefinitions(db);
   const names = new Set(actual.map((object) => object.name));
-  const candidates = version === 23 ? [canonical.v23] : version === 24 ? canonical.v24 : canonical.v25;
+  const candidates = version === 23 ? [canonical.v23] : version === 24 ? canonical.v24 : version === 25 ? canonical.v25 : canonical.v26;
   const signature = JSON.stringify(actual);
   return candidates.some((expected) => signature === JSON.stringify(expected.filter((object) =>
     !canonical.optionalIndexNames.has(object.name) || names.has(object.name))));
@@ -874,6 +895,7 @@ function hasLegacySchemaSignature(db: Db, table: string) {
 }
 
 function classifyAgentSchema(db: Db): AgentSchemaClassification {
+  if (!hasAgentQueueIndependentSchema(db, canonicalAgentSql)) return "unsupported";
   const allObjects = listAgentSchemaObjects(db);
   const ftsShadows = allObjects.filter((object) => isAgentFtsShadowTable(object.name));
   const objects = allObjects.filter((object) => !isAgentFtsShadowTable(object.name));
@@ -883,24 +905,25 @@ function classifyAgentSchema(db: Db): AgentSchemaClassification {
   if (ftsShadows.length > 0 && !names.has("agent_archived_text_fts")) return "unsupported";
 
   if (hasMeta) {
-    if (objects.some((object) => object.type !== "table") || names.size !== TARGET_AGENT_TABLES.size || [...names].some((name) => !TARGET_AGENT_TABLES.has(name))) {
-      return "unsupported";
-    }
+    if (objects.some((object) => object.type !== "table")) return "unsupported";
     const rows = db.prepare("select id, version from agent_schema_meta").all() as Array<{ id: unknown; version: unknown }>;
     if (rows.length !== 1 || rows[0]?.id !== 1) return "unsupported";
     const version = rows[0]?.version;
-    if (![18, 19, 20, 21, 22, 23, 24, AGENT_SCHEMA_VERSION].includes(version as number)) return "unsupported";
-    if (version !== 23 && version !== 24 && version !== AGENT_SCHEMA_VERSION) return "rebuildable";
-    const columns = version === 23 ? V23_AGENT_TABLE_COLUMNS : version === 24 ? V24_AGENT_TABLE_COLUMNS : TARGET_AGENT_TABLE_COLUMNS;
-    const expectedColumns = [...TARGET_AGENT_TABLES].every((table) =>
-      hasExactColumns(db, table, columns[table]!)
+    if (![18, 19, 20, 21, 22, 23, 24, 25, AGENT_SCHEMA_VERSION].includes(version as number)) return "unsupported";
+    const expectedTables = version === AGENT_SCHEMA_VERSION ? TARGET_AGENT_TABLES : V25_AGENT_TABLES;
+    if (names.size !== expectedTables.size || [...names].some(name => !expectedTables.has(name))) return "unsupported";
+    if (version !== 23 && version !== 24 && version !== 25 && version !== AGENT_SCHEMA_VERSION) return "rebuildable";
+    if (version === AGENT_SCHEMA_VERSION && AGENT_QUEUE_INDEPENDENT_TABLES.some(table => !tableExists(db, table))) return "unsupported";
+    const columns = version === 23 ? V23_AGENT_TABLE_COLUMNS : version === 24 ? V24_AGENT_TABLE_COLUMNS : version === 25 ? V25_AGENT_TABLE_COLUMNS : TARGET_AGENT_TABLE_COLUMNS;
+    const expectedColumns = [...expectedTables].every((table) =>
+      !columns[table] || hasExactColumns(db, table, columns[table]!)
     );
     if (!expectedColumns) return "unsupported";
     // Validate definitions before any live semantic probe can write, even temporarily.
     if (!hasCanonicalAgentSchema(db, version as number)) return "unsupported";
     if (version !== 23 && !hasSessionVisibilitySemantics(db)) return "unsupported";
     if (!hasCurrentAgentRunConstraintSemantics(db)) return "unsupported";
-    return version === 23 ? "upgradeable-v23" : version === 24 ? "upgradeable-v24" : "current";
+    return version === 23 ? "upgradeable-v23" : version === 24 ? "upgradeable-v24" : version === 25 ? "upgradeable-v25" : "current";
   }
 
   if (objects.length === 0) return "clean";
@@ -923,7 +946,7 @@ function clearAndDropAgentDomain(db: Db) {
 
 function assertAgentForeignKeysValid(db: Db) {
   for (const table of TARGET_AGENT_TABLES) {
-    if (table === "agent_archived_text_fts") continue;
+    if (table === "agent_archived_text_fts" || !tableExists(db, table)) continue;
     const violations = db.prepare(`pragma foreign_key_check("${table}")`).all() as unknown[];
     if (violations.length > 0) {
       throw new Error(`Agent schema foreign key check failed for ${table}.`);
@@ -951,9 +974,9 @@ function rebuildAgentDomain(db: Db, fileCleanupPending: boolean) {
   }
 }
 
-// The third argument is used only to materialize the frozen pre-visibility structure
-// in an isolated reference connection; production creation always targets v24.
-function createAgentSchema(db: Db, fileCleanupPending: boolean, includeSessionVisibility = true, includeModelRequestError = true) {
+// Optional source-layout arguments are used only in isolated canonical references;
+// production creation always targets the latest schema.
+function createAgentSchema(db: Db, fileCleanupPending: boolean, includeSessionVisibility = true, includeModelRequestError = true, includeQueue = true) {
   db.exec(`
     create table agent_schema_meta (
       id integer primary key check (id = 1),
@@ -1265,6 +1288,10 @@ function createAgentSchema(db: Db, fileCleanupPending: boolean, includeSessionVi
     end;
   `);
 
+  if (includeQueue) {
+    db.exec(ADD_INTERACTIVE_QUEUE_COLUMN);
+    createAgentQueueDomainSchema(db);
+  }
   db.prepare(
     "insert into agent_schema_meta (id, version, file_cleanup_pending, updated_at) values (1, ?, ?, ?)"
   ).run(AGENT_SCHEMA_VERSION, fileCleanupPending ? 1 : 0, Date.now());
@@ -1327,6 +1354,16 @@ function upgradeAgentSchemaV23(db: Db) {
 /** Add diagnostics without rebuilding messages, runs, FTS or artifact state. */
 function upgradeAgentSchemaV24(db: Db) {
   db.exec(ADD_MODEL_REQUEST_ERROR);
+  if (!hasCanonicalAgentSchema(db, 25)) throwUnsupportedAgentSchema();
+  assertAgentForeignKeysValid(db);
+  db.prepare("update agent_schema_meta set version = ?, updated_at = ? where id = 1").run(25, Date.now());
+  if (classifyAgentSchema(db) !== "upgradeable-v25") throwUnsupportedAgentSchema();
+}
+
+/** In-place additive queue schema. An interrupted transaction rolls back column, tables and version. */
+function upgradeAgentSchemaV25(db: Db) {
+  db.exec(ADD_INTERACTIVE_QUEUE_COLUMN);
+  createAgentQueueDomainSchema(db);
   if (!hasCanonicalAgentSchema(db, AGENT_SCHEMA_VERSION)) throwUnsupportedAgentSchema();
   assertAgentForeignKeysValid(db);
   db.prepare("update agent_schema_meta set version = ?, updated_at = ? where id = 1").run(AGENT_SCHEMA_VERSION, Date.now());
@@ -1339,10 +1376,11 @@ export function initSchema(db: Db): AgentSchemaInitResult {
   const checked = db.transaction(() => {
     const classification = classifyAgentSchema(db);
     if (classification === "unsupported") throwUnsupportedAgentSchema();
-    if (classification !== "current" && classification !== "upgradeable-v23" && classification !== "upgradeable-v24") return { classification };
+    if (classification !== "current" && classification !== "upgradeable-v23" && classification !== "upgradeable-v24" && classification !== "upgradeable-v25") return { classification };
     createBaseSchema(db);
     if (classification === "upgradeable-v23") upgradeAgentSchemaV23(db);
     if (classification === "upgradeable-v23" || classification === "upgradeable-v24") upgradeAgentSchemaV24(db);
+    if (classification !== "current") upgradeAgentSchemaV25(db);
     ensureAnalyticsCollectorIndexes(db);
     const row = db.prepare("select file_cleanup_pending as fileCleanupPending from agent_schema_meta where id = 1").get() as {
       fileCleanupPending: number;

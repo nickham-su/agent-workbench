@@ -102,7 +102,20 @@ export const AgentMessagePartSchema = Type.Union([
 ]);
 export type AgentMessagePart = Static<typeof AgentMessagePartSchema>;
 
+export const AgentInputReceiptMetadataSchema = Type.Union([
+  Type.Object({
+    receiptId: IdSchema, confirmationState: Type.Literal("confirmed"),
+    confirmationSource: Type.Union([Type.Literal("worker_model"), Type.Literal("local_fallback")])
+  }, { additionalProperties: false }),
+  Type.Object({
+    receiptId: IdSchema, confirmationState: Type.Union([Type.Literal("unconfirmed"), Type.Literal("abandoned")]),
+    confirmationSource: Type.Null()
+  }, { additionalProperties: false })
+]);
+export type AgentInputReceiptMetadata = Static<typeof AgentInputReceiptMetadataSchema>;
+
 const AgentMessageBaseFields = {
+  inputReceipt: Type.Optional(AgentInputReceiptMetadataSchema),
   id: IdSchema,
   workspaceId: IdSchema,
   previousMessageId: NullableIdSchema,

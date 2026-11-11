@@ -1,3 +1,4 @@
+import { parseAgentMessageMultipart, removeStagedAgentMessageTemps, type NormalizedSendMessageBody } from "../attachments/agent-message-multipart.js";
 import { parseSessionListQuery } from "../read-side/session-list-query.js";
 import { parseSessionActivityQuery } from "../read-side/session-activity-query.js";
 import {
@@ -16,7 +17,6 @@ import {
   AgentForkSessionRequestSchema,
   AgentRevertSessionRequestSchema,
   AgentInternalCreateSessionRequestSchema,
-  AgentSendMessageMultipartPayloadSchema,
   AgentSendMessageRequestSchema,
   AgentSendMessageResponseSchema,
   AgentChannelAllowlistCheckRequestSchema,
@@ -25,7 +25,6 @@ import {
   type AgentUpdateSessionTitleRequest,
   AgentSessionRecordSchema,
   AgentSessionListResponseSchema,
-  AgentUiLocaleSchema,
   AgentProviderNpmSchema,
   AgentRecentSessionsRequestSchema,
   AgentRecentSessionsResponseSchema,
@@ -82,15 +81,6 @@ import {
   type AgentApiPromptContextRequest,
 } from "@agent-workbench/shared/internal-contracts/agent-api";
 import { HttpError } from "../../../app/errors.js";
-import { newSortableId } from "../../../utils/ids.js";
-import {
-  AGENT_IMAGE_MAX_COUNT,
-  AGENT_IMAGE_MAX_TOTAL_BYTES,
-} from "../attachments/agent-attachment-limits.js";
-import {
-  removeAgentAttachmentTempFile,
-  stageAgentImageUpload,
-} from "../attachments/agent-attachment-storage.js";
 import type { AgentPublicRouteDependencies } from "./agent-route-types.js";
 import {
   assertInternalToken,
@@ -100,26 +90,6 @@ import {
   AGENT_PRIMARY_SESSION_FORK_BODY_KEYS,
   AGENT_SESSION_TITLE_UPDATE_BODY_KEYS,
 } from "./agent-route-auth.js";
-
-const AGENT_MULTIPART_MAX_PARTS = 1 + AGENT_IMAGE_MAX_COUNT;
-const AGENT_MULTIPART_MAX_PAYLOAD_BYTES = 64 * 1024;
-
-type NormalizedSendMessageBody = {
-  workspaceId: string;
-  clientRequestId: string;
-  text: string;
-  agentId?: string;
-  uiLocale?: "zh-CN" | "en-US";
-  images: Array<{
-    attachmentId: string;
-    storageKey: string;
-    tempId: string;
-    filename: string;
-    mediaType: "image/png" | "image/jpeg" | "image/webp";
-    byteSize: number;
-    position: number;
-  }>;
-};
 
 function contentTypeBase(value: unknown) {
   return (
@@ -134,132 +104,6 @@ function hasMultipartBoundary(value: unknown) {
   return /(?:^|;)\s*boundary=(?:"[^"]+"|[^;\s]+)/i.test(String(value || ""));
 }
 
-async function drainMultipartFile(stream: AsyncIterable<unknown>) {
-  for await (const _chunk of stream) {
-    // Consume rejected parts so Busboy can finish the request safely.
-  }
-}
-
-async function parseAgentMessageMultipart(
-  req: FastifyRequest,
-  dataDir: string,
-): Promise<NormalizedSendMessageBody> {
-  const images: NormalizedSendMessageBody["images"] = [];
-  let payloadRaw: string | null = null;
-  let totalBytes = 0;
-  let partCount = 0;
-  let invalid: Error | null = null;
-  try {
-    for await (const part of req.parts()) {
-      partCount += 1;
-      if (partCount > AGENT_MULTIPART_MAX_PARTS) {
-        if (part.type === "file") await drainMultipartFile(part.file);
-        invalid ??= new Error("too many multipart parts");
-        continue;
-      }
-      if (invalid) {
-        if (part.type === "file") await drainMultipartFile(part.file);
-        continue;
-      }
-      if (part.type === "field") {
-        if (
-          part.fieldname !== "payload" ||
-          payloadRaw !== null ||
-          part.valueTruncated
-        ) {
-          invalid = new Error("invalid multipart payload field");
-          continue;
-        }
-        const value =
-          typeof part.value === "string" ? part.value : String(part.value);
-        if (
-          Buffer.byteLength(value, "utf8") > AGENT_MULTIPART_MAX_PAYLOAD_BYTES
-        ) {
-          invalid = new Error("multipart payload is too large");
-          continue;
-        }
-        payloadRaw = value;
-        continue;
-      }
-      if (
-        part.fieldname !== "images" ||
-        images.length >= AGENT_IMAGE_MAX_COUNT
-      ) {
-        await drainMultipartFile(part.file);
-        invalid = new Error("invalid multipart image field");
-        continue;
-      }
-      const tempId = newSortableId("tmp");
-      try {
-        const image = await stageAgentImageUpload({
-          dataDir,
-          tempId,
-          attachmentId: newSortableId("att"),
-          filename: part.filename,
-          stream: part.file,
-          onBytes: (byteLength) => {
-            totalBytes += byteLength;
-          },
-        });
-        images.push({ ...image, position: images.length });
-        // 当前文件必须被完整消费，否则 Busboy 会中止整个 multipart 请求并丢失稳定错误语义。
-        if (totalBytes > AGENT_IMAGE_MAX_TOTAL_BYTES) {
-          invalid = new HttpError(400, "agent images exceed total byte size limit", "AGENT_IMAGE_TOTAL_BYTES_EXCEEDED");
-        }
-      } catch (error) {
-        await drainMultipartFile(part.file);
-        invalid =
-          error instanceof Error ? error : new Error("invalid multipart image");
-      }
-    }
-    if (invalid) throw invalid;
-    if (payloadRaw === null) throw new Error("multipart payload is required");
-    if (images.length === 0) throw new Error("multipart image is required");
-    let payload: unknown;
-    try {
-      payload = JSON.parse(payloadRaw);
-    } catch {
-      throw new Error("multipart payload is not valid JSON");
-    }
-    if (!Value.Check(AgentSendMessageMultipartPayloadSchema, payload)) {
-      throw new Error("multipart payload is invalid");
-    }
-    return {
-      workspaceId: payload.workspaceId,
-      clientRequestId: payload.clientRequestId,
-      text: payload.text ?? "",
-      ...(payload.agentId ? { agentId: payload.agentId } : {}),
-      ...(payload.uiLocale ? { uiLocale: payload.uiLocale } : {}),
-      images,
-    };
-  } catch (error) {
-    await Promise.all(
-      images.map((image) =>
-        removeAgentAttachmentTempFile({ dataDir, tempId: image.tempId }).catch(
-          () => undefined,
-        ),
-      ),
-    );
-    if (error instanceof HttpError) throw error;
-    throw new HttpError(
-      400,
-      error instanceof Error ? error.message : "invalid multipart request",
-    );
-  }
-}
-
-async function removeStagedAgentMessageTemps(
-  dataDir: string,
-  body: NormalizedSendMessageBody,
-) {
-  await Promise.all(
-    body.images.map((image) =>
-      removeAgentAttachmentTempFile({ dataDir, tempId: image.tempId }).catch(
-        () => undefined,
-      ),
-    ),
-  );
-}
 
 async function handleCompactRequest(
   dependencies: AgentPublicRouteDependencies,

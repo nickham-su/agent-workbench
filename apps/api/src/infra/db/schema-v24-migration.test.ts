@@ -39,7 +39,7 @@ function v24(filename = ":memory:", freshVisibility = false, pending = 0) {
 function history(db: Database.Database) {
   return ["agent_session", "workspace_session_tab_state", "agent_message", "agent_message_part", "agent_run", "session_run_state", "agent_archived_text_fts", "agent_text_part_fts_map"]
     .map((table) => ({ table, rows: (db.prepare(`select * from ${table} order by rowid`).all() as Record<string, unknown>[])
-      .map(({ model_request_error_json: _newField, ...row }) => row) }));
+      .map(({ model_request_error_json: _newField, interactive_queue_enabled: _queueField, ...row }) => row) }));
 }
 
 for (const freshVisibility of [false, true]) for (const pending of [0, 1]) test(`v24 diagnostics migration preserves history, visibility, run state and cleanup marker (${freshVisibility ? "CREATE" : "ALTER"}, pending=${pending})`, () => {

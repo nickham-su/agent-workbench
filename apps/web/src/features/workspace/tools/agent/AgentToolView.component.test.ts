@@ -161,13 +161,14 @@ function respondDefaults(request: FakeXMLHttpRequest, workspaceId = "ws-a") {
   return request.respond(200, {});
 }
 
-function mountView(workspaceId = "ws-a", openSessionRequest?: { sessionId: string; sequence: number }, options: { renderPicker?: boolean; renderRealPane?: boolean } = {}) {
+function mountView(workspaceId = "ws-a", openSessionRequest?: { sessionId: string; sequence: number }, options: { renderPicker?: boolean; renderRealPane?: boolean; onPaneMounted?: (vm: any) => void } = {}) {
   const i18n = createI18n({ legacy: false, locale: "en-US", messages: { "en-US": enUS.default, "zh-CN": zhCN.default } });
   return mount(AgentToolView, {
     attachTo: document.body,
     props: { workspaceId, toolId: "agent-tool", openSessionRequest },
     global: {
       plugins: [i18n],
+      mixins: [{ mounted() { if ((this.$options.name ?? this.$options.__name) === "AgentClientPane") options.onPaneMounted?.(this); } }],
       provide: {
         [workspaceHostKey as symbol]: {
           openTool() {}, minimizeTool() {}, toggleMinimize() {}, setToolDot() {},
@@ -2760,3 +2761,79 @@ test("0037 picker 取消未知开闭目标不臆造 false 补偿；显式读取�
     assert.equal(vm.draftSessions.some((record: Session) => record.id === draft), true);
   } finally { wrapper.unmount(); }
 });
+
+for (const outcome of ["timeout-query", "timeout-retry", "507-retry", "507-edited", "timeout-edited"] as const) {
+  test(`真实草稿首发 ${outcome}：父视图即时替换 Pane，真实 Session 接管迟到结果、原 ID、文字和 File`, async () => {
+    const realId = `handoff-${outcome}`;
+    let firstReceipt: FakeXMLHttpRequest | undefined;
+    let origin: any; let originalId = "";
+    const postedIds: string[] = []; const acceptedIds = new Set<string>();
+    const file = new File(["private-image"], "original.png", { type: "image/png" });
+    const image = { id: "original-image", filename: file.name, file };
+    const laterFile = new File(["later-image"], "later.png", { type: "image/png" });
+    const laterImage = { id: "later-image", filename: laterFile.name, file: laterFile };
+    const queueSnapshot = (accepted = false) => ({ workspaceId: "ws-a", sessionId: realId, queueVersion: accepted ? 1 : 0,
+      mode: "active", pauseCode: null, pendingCount: accepted ? 1 : 0, pendingBytes: accepted ? 15 : 0,
+      inputIdentity: null, pendingIdentity: null, recoveryIdentity: null, unconfirmedInputCount: 0, unconfirmedInputSetHash: null,
+      stop: { state: "none", unresolvedOperationCount: 0, unresolvedTargetCount: 0, code: null }, items: [] });
+    const receipt = () => ({ id: `receipt-${realId}`, clientRequestId: originalId, sequence: 1, createdAt: 1, updatedAt: 1,
+      status: "queued", messageId: null, runId: null, confirmationState: null, confirmationSource: null });
+    FakeXMLHttpRequest.requests = [];
+    FakeXMLHttpRequest.responder = request => {
+      if (request.url.includes("/agents/available") || request.url.includes("/agent/available")) return request.respond(200, { agents: selectionAgents });
+      if (isListRead(request)) return respondSessions(request, []);
+      if (request.method === "POST" && request.url.endsWith("/agent/sessions")) return request.respond(200, session(realId, "ws-a"));
+      if (request.url.includes("/run-state")) return request.respond(200, selectionRunState("ws-a", realId, null));
+      if (request.url.includes("/message-queue")) return request.respond(200, queueSnapshot(acceptedIds.size > 0));
+      if (request.url.includes("/timeline")) return request.respond(200, { session: session(realId, "ws-a"), timelineReset: false, messages: [], toolExecutions: [] });
+      if (request.method === "POST" && request.url.endsWith("/receipts")) {
+        assert.equal(origin.$.isUnmounted, true, "production parent must unmount the draft before its receipt is submitted");
+        const payload = JSON.parse(String((request.requestBody as FormData).get("payload")));
+        postedIds.push(payload.clientRequestId);
+        assert.equal((request.requestBody as FormData).getAll("images").length, 1);
+        if (!firstReceipt) { firstReceipt = request; originalId = payload.clientRequestId; return; }
+        assert.equal(payload.clientRequestId, originalId); acceptedIds.add(originalId);
+        return request.respond(202, { receipt: receipt(), queue: queueSnapshot(true), deduplicated: outcome.startsWith("timeout") });
+      }
+      if (request.url.includes("/receipts/by-request")) {
+        assert.equal(new URL(request.url, "http://local").searchParams.get("clientRequestId"), originalId);
+        return request.respond(200, { receipt: receipt(), queue: queueSnapshot(true) });
+      }
+      return respondDefaults(request);
+    };
+    const wrapper = mountView("ws-a", undefined, { renderRealPane: true, onPaneMounted(vm) {
+      if (vm.$props.sessionId === realId && outcome.endsWith("edited")) { vm.$.setupState.draft = "new pane user input"; vm.$.setupState.pendingImages = [laterImage]; }
+    } });
+    try {
+      await settle(); const parent = wrapper.vm as any;
+      const draftId = parent.draftSessions[0].id; parent.setSessionAgent(draftId, "agent-a"); await settle();
+      const draftPane = wrapper.findAllComponents({ name: "AgentClientPane" }).find(pane => pane.props("sessionId") === draftId)!;
+      origin = draftPane.vm as any; origin.draft = "original private draft"; origin.pendingImages = [image];
+      const sending = origin.onSend(); await settle();
+      assert.ok(firstReceipt, "real Session receipt request must start after creation");
+      const successor = wrapper.findAllComponents({ name: "AgentClientPane" }).find(pane => pane.props("sessionId") === realId)!;
+      assert.ok(successor); assert.notEqual(successor.vm, origin); assert.equal(origin.$.isUnmounted, true);
+      const vm = successor.vm as any;
+      if (!outcome.endsWith("edited")) {
+        assert.equal(vm.draft, "original private draft"); assert.equal(vm.pendingImages[0].file, file);
+      } else {
+        assert.equal(vm.draft, "new pane user input"); assert.equal(vm.pendingImages[0].file, laterFile);
+      }
+      if (outcome.startsWith("timeout")) { acceptedIds.add(originalId); firstReceipt!.ontimeout?.(); }
+      else firstReceipt!.respond(507, { code: "AGENT_QUEUE_RETENTION_FULL", message: "retention full" });
+      await sending; await settle();
+      assert.equal(vm.queue.handoff.value.submission.payload.clientRequestId, originalId);
+      assert.equal(vm.queue.handoff.value.submission.images[0].file, file);
+      assert.equal(vm.queue.handoff.value.submission.draft, "original private draft");
+      assert.equal(vm.queue.handoff.value.phase, outcome.startsWith("timeout") ? "unknown" : "rejected");
+      assert.equal(successor.find('[data-testid="queue-retained-submission"]').exists(), true);
+      await vm.onResolveQueueSubmission(outcome !== "timeout-query"); await settle();
+      assert.equal(acceptedIds.size, 1, "lookup/retry reconciles the same logical receipt, never a new execution");
+      assert.deepEqual(postedIds, outcome === "timeout-query" ? [originalId] : [originalId, originalId]);
+      assert.equal(vm.queue.handoff.value, null);
+      if (outcome.endsWith("edited")) {
+        assert.equal(vm.draft, "new pane user input"); assert.equal(vm.pendingImages[0].file, laterFile);
+      } else { assert.equal(vm.draft, ""); assert.equal(vm.pendingImages.length, 0); }
+    } finally { wrapper.unmount(); }
+  });
+}

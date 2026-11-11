@@ -20,6 +20,7 @@ export const componentTests = [
   "src/features/workspace/tools/agent/agentSystemMessage.component.test.ts",
   "src/features/workspace/tools/agent/AgentAttachmentPreviewModal.component.test.ts",
   "src/features/workspace/tools/agent/AgentClientPane.component.test.ts",
+  "src/features/workspace/tools/agent/AgentMessageQueue.component.test.ts",
   "src/features/workspace/tools/agent/AgentClientPane.attachmentPreview.component.test.ts",
   "src/features/workspace/tools/agent/AgentMessageActions.component.test.ts",
   "src/features/workspace/tools/agent/AgentToolView.component.test.ts",

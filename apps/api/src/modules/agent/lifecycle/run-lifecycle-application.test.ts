@@ -551,3 +551,14 @@ test("RunLifecycleApplication 成功重试清理 temp 不误报，失败只计�
     if (failRetry) assert.equal(warnings[0]!.pendingTemps, 1);
   }
 });
+
+
+test("committed runtime convergence reuses lifecycle publication and ignores already-converged replay",()=>{
+  const {calls,dependencies}=createDependencies();const events:unknown[]=[];
+  dependencies.runCompletedEventPublisher={publishRunCompleted:event=>events.push(event)};
+  const application=new RunLifecycleApplication(dependencies);
+  const params={workspaceId:"workspace",sessionId:"session",runId:"run",updatedAt:123};
+  application.publishCommittedTerminalConvergence(params,{kind:"transitioned",finalStatus:"failed"});
+  application.publishCommittedTerminalConvergence(params,{kind:"already_converged",finalStatus:"failed"});
+  assert.deepEqual(calls,[["cache","run"]]);assert.equal(events.length,1);
+});

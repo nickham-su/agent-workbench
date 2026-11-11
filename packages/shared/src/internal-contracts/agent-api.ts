@@ -1,7 +1,9 @@
+import { AgentQueueApiEndpoints } from "./agent-api-queue.js";
 import { AgentGitToolEndpoints } from "./agent-git-tool.js";
 
 export const AgentApiEndpoints = {
   ...AgentGitToolEndpoints,
+  ...AgentQueueApiEndpoints,
   createStreamingAssistant: {
     method: "POST",
     path: "/api/internal/agent/messages/assistant",
@@ -107,3 +109,5 @@ export * from "./agent-api-read.js";
 export * from "./agent-image.js";
 export * from "./agent-provider-replay.js";
 export * from "./agent-git-tool.js";
+
+export * from "./agent-api-queue.js";

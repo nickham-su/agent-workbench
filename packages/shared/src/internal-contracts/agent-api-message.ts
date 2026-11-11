@@ -1,5 +1,7 @@
+import { AgentQueuePauseCodeSchema } from "../contracts/agent-queue.js";
 import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
+import { AgentInteractiveInputBindingSchema } from "./agent-input-binding.js";
 import {
   AgentMessageSchema,
   AgentModelRequestErrorSchema,
@@ -24,6 +26,7 @@ export const AgentApiCreateStreamingAssistantRequestSchema = Type.Object({
   sessionId: IdSchema,
   runId: IdSchema,
   messageId: IdSchema,
+  inputBinding: Type.Optional(AgentInteractiveInputBindingSchema),
   createdAt: Type.Number()
 }, { additionalProperties: false });
 export type AgentApiCreateStreamingAssistantRequest = Static<typeof AgentApiCreateStreamingAssistantRequestSchema>;
@@ -113,6 +116,7 @@ export const AgentApiResumeStreamingAssistantRequestSchema = Type.Object({
   workspaceId: IdSchema,
   sessionId: IdSchema,
   runId: IdSchema,
+  inputBinding: Type.Optional(AgentInteractiveInputBindingSchema),
   messageId: IdSchema
 }, { additionalProperties: false });
 export type AgentApiResumeStreamingAssistantRequest = Static<typeof AgentApiResumeStreamingAssistantRequestSchema>;
@@ -129,6 +133,10 @@ export const AgentApiReplaceStreamingAssistantRequestSchema = Type.Object({
   runId: IdSchema,
   oldMessageId: IdSchema,
   newMessageId: IdSchema,
+  inputBinding: Type.Optional(Type.Object({
+    ...AgentInteractiveInputBindingSchema.properties,
+    mode: Type.Union([Type.Literal("retry_same_input"), Type.Literal("recovery_reprepare")])
+  }, { additionalProperties: false })),
   runNoticeText: Type.String(),
   modelRequestError: Type.Optional(Type.Union([AgentModelRequestErrorSchema, Type.Null()])),
   retryCount: Type.Integer({ minimum: 0 }),
@@ -201,6 +209,8 @@ export const AgentApiUpdateRunNoticeRequestSchema = Type.Object({
   sessionId: IdSchema,
   runId: IdSchema,
   runNoticeText: Type.String(),
+  /** Protected Worker-only failure reason; cannot unpause or select a terminal tuple. */
+  queuePauseCode: Type.Optional(AgentQueuePauseCodeSchema),
   modelRequestError: Type.Optional(Type.Union([AgentModelRequestErrorSchema, Type.Null()])),
   /** Only compaction progress/cleanup uses this CAS guard; ordinary notices omit it. */
   compactionExpectedRevision: Type.Optional(Type.Integer({ minimum: 0 })),

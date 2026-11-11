@@ -1,3 +1,4 @@
+import { projectEffectiveUserContent, effectiveUserInput, type AgentEffectiveInputPolicy } from "@agent-workbench/shared";
 import type {
   AgentContextToolName,
   AgentImageMediaType,
@@ -84,6 +85,7 @@ export class RuntimeTranscriptProjector {
     messages: AgentMessage[];
     executions: RuntimeTranscriptExecution[];
     attachmentPaths?: ReadonlyMap<string, string | null>;
+    interactiveInput?: AgentEffectiveInputPolicy;
     /** Exclude the Assistant that owns any of these non-terminal calls. */
     stopBeforeAssistantMessageIds?: ReadonlySet<string>;
     /** Protected PromptContext only: preserve the ordinal of replay-only Assistants. */
@@ -99,6 +101,8 @@ export class RuntimeTranscriptProjector {
       const parts = [...message.parts].sort((left, right) => left.position - right.position);
 
       if (message.type === "user") {
+        const effective = effectiveUserInput({ messageId: message.id, triggerMessageId: input.triggerMessageId, policy: input.interactiveInput });
+        if (!effective.include) continue;
         const text = parts.filter((part) => part.type === "text").map((part) => part.text).join("");
         const images = parts.filter((part) => part.type === "image");
         const located = images.map((image) => ({ path: input.attachmentPaths?.get(image.id) ?? null }));
@@ -106,28 +110,13 @@ export class RuntimeTranscriptProjector {
           if (text) messages.push({ role: "user", content: text });
           continue;
         }
-        if (message.id !== input.triggerMessageId) {
+        if (!effective.realAttachments) {
           messages.push({ role: "user", content: safeUserText(text, located) });
           continue;
         }
-        const promptText: RuntimePromptTextPart = {
-          type: "text",
-          text: text || imageOnlyTriggerText(images.length)
-        };
-        const content: Array<RuntimePromptTextPart | RuntimePromptAttachmentRefPart> = [promptText];
-        for (const [index, image] of images.entries()) {
-          const attachmentPath = input.attachmentPaths?.get(image.id);
-          if (!attachmentPath) throw new Error("current Run image has no trusted Workspace path");
-          promptText.text += `\n\n[Image attachment ${index + 1} included in this run. Workspace-relative path: ${attachmentPath}]`;
-          content.push({
-            type: "attachment_ref",
-            workspaceId: input.workspaceId,
-            attachmentId: image.attachmentId,
-            mediaType: image.mediaType,
-            filename: image.filename,
-            path: attachmentPath
-          });
-        }
+        const content = projectEffectiveUserContent({ workspaceId: input.workspaceId, text, images: images.map(image => ({
+          attachmentId: image.attachmentId, mediaType: image.mediaType, filename: image.filename, path: input.attachmentPaths?.get(image.id) ?? "",
+        })) });
         messages.push({ role: "user", content });
         continue;
       }
@@ -189,6 +178,7 @@ export class RuntimeTranscriptProjector {
     messages: AgentMessage[];
     executions: RuntimeTranscriptExecution[];
     attachmentPaths?: ReadonlyMap<string, string | null>;
+    interactiveInput?: AgentEffectiveInputPolicy;
     stopBeforeAssistantMessageIds?: ReadonlySet<string>;
   }): RuntimePromptMessage[] {
     return this.projectDetailed(input).messages;

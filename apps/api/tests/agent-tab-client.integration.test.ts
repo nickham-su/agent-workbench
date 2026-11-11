@@ -1,3 +1,4 @@
+import { listenAgentTestApp } from "../src/modules/agent/testkit/agent-testkit.js";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { Value } from "@sinclair/typebox/value";
@@ -22,7 +23,7 @@ for (const triggerMode of ["new_session", "fork_message"] as const) {
   test(`real HTTP frontend loader/controller opens, restores and closes a hidden ${triggerMode} execution`, { timeout: 30_000 }, async (t) => {
     const f = await createAgentIntegrationFixture({ agentWorkerConcurrency: 0, authToken: "release-fixture-login" });
     t.after(() => f.dispose());
-    const origin = await f.app.listen({ host: "127.0.0.1", port: 0 });
+    const origin = await listenAgentTestApp(f.app, 0);
     const login = await fetch(`${origin}/api/auth/login`, {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ token: "release-fixture-login" })
     });

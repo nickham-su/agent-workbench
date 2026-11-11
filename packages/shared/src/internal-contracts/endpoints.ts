@@ -1,4 +1,6 @@
 export const AgentWorkerEndpoints = {
+  runtimeIdentity: { method: "GET", path: "/internal/agent-worker/runtime-identity" },
+  stopRunsAndWait: { method: "POST", path: "/internal/agent-worker/stop-runs-and-wait" },
   health: {
     method: "GET",
     path: "/internal/health"

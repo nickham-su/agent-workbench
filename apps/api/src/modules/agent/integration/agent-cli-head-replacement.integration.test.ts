@@ -1,3 +1,4 @@
+import { listenAgentTestApp } from "../testkit/agent-testkit.js";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
@@ -40,7 +41,7 @@ async function fixture(t: TestContext) {
   const workspace = await createTestWorkspace(f, { title: "CLI replacement proof E2E" });
   const home = path.join(f.dataDir, "home");
   await fs.mkdir(home);
-  const origin = await f.app!.listen({ host: "127.0.0.1", port: 0 });
+  const origin = await listenAgentTestApp(f.app!, 0);
   function run(args: string[]) {
     const child = spawn(process.execPath, [cliEntry, ...args], {
       cwd: home, env: { HOME: home, USERPROFILE: home, TMPDIR: home, PATH: path.dirname(process.execPath), NODE_PATH: "" },

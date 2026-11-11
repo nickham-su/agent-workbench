@@ -1,3 +1,4 @@
+import { listenAgentTestApp } from "../testkit/agent-testkit.js";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createAgentIntegrationFixture } from "../testkit/agent-integration-testkit.js";
@@ -17,7 +18,7 @@ test("hidden completions remain internal and directed, but never enter either gl
     hub = this;
     originalPublish.call(this, event);
   });
-  const origin = await f.app.listen({ host: "127.0.0.1", port: 0 });
+  const origin = await listenAgentTestApp(f.app, 0);
   const streams = await Promise.all([1, 2].map(async () => {
     const abort = new AbortController();
     const response = await fetch(`${origin}/api/internal/agent/events/sse`, {

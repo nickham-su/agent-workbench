@@ -1,3 +1,5 @@
+import type { AgentResumeMessageQueueRequest } from "@agent-workbench/shared";
+import type { QueueResumeActivation } from "../message-queue/queue-recovery.store.js";
 import type { AgentImageMediaType } from "@agent-workbench/shared/internal-contracts/agent-api-session";
 import type { AgentMessageControlResult, AgentMessageSessionRunState } from "@agent-workbench/shared";
 import type { AgentRunExecutionPhase, AgentRunKind, AgentTerminalResultCode, AgentTerminalRunStatus } from "@agent-workbench/shared";
@@ -8,6 +10,7 @@ export type AgentRuntimeRun = {
   sessionId: string;
   runId: string;
   runKind?: AgentRunKind;
+  runtimeInstanceId?: string;
   inputText?: string;
   resumeAssistantMessageId?: string | null;
   workspacePath: string;
@@ -17,6 +20,7 @@ export type AgentRuntimeRun = {
 export type RuntimeControlPort = {
   enqueueRun(run: AgentRuntimeRun): void | Promise<void>;
   cancelSession(sessionId: string): void | Promise<void>;
+  reconcileStops?(): Promise<void>;
   /** 删除工作区时使用的窄 drain 能力；普通用户取消不需要等待。 */
   cancelSessionAndWait?(input: {
     sessionId: string;
@@ -57,6 +61,8 @@ export type RunCompletedEventPublisher = {
 export type AtomicLifecyclePersistence = {
   listActiveSessionIdsForCancel(input: CancelSessionsInput): string[];
   activateUserRun(input: UserRunActivationInput, publishImages?: () => void): UserRunActivationResult;
+  resumeQueuedSession?(input: AgentResumeMessageQueueRequest & { sessionId: string }, runId: string, createdAt: number): QueueResumeActivation;
+  activateQueuedUserRun?(input: { workspaceId: string; sessionId: string; receiptId: string; runId: string; createdAt: number; assertDispatchAdmission?: () => void }): UserRunActivationResult;
   canEnqueueUserRunIfCurrent(input: { workspaceId: string; sessionId: string; runId: string }): boolean;
   failRunAfterEnqueueFailureIfCurrent(input: EnqueueFailureInput): EnqueueFailureSettlement;
   getCancelSessionSnapshot(sessionId: string): CancelSessionSnapshot | null;
@@ -109,6 +115,7 @@ export type CancelSessionsInput = {
   workspaceId: string;
   rootSessionId: string;
   updatedAt: number;
+  stopOperationId?: string;
   listActiveChildSessionIds(params: { workspaceId: string; sessionId: string; runId: string }): string[];
 };
 
@@ -117,6 +124,9 @@ export type CancelSessionsResult = {
   runtimeCancelSessionIds: string[];
   cancelledRunIds: string[];
   terminalIntents?: Array<{ workspaceId: string; sessionId: string; runId: string }>;
+  terminalConvergences?: Array<{ workspaceId:string;sessionId:string;runId:string;result:ReturnType<AtomicLifecyclePersistence["convergeRunTerminal"]> }>;
+  stopOperationId?: string;
+  stopReplayed?: boolean;
 };
 
 export type CancelSessionCascadeResult = {

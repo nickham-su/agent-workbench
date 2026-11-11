@@ -1,4 +1,10 @@
-import { randomBytes } from "node:crypto";
+import { AgentRuntimeRetirementNotifier } from "@agent-workbench/shared/node/agent-runtime-retirement";
+import { projectEffectiveUserContent, AGENT_QUEUE_INPUT_POLICY_VERSION } from "@agent-workbench/shared";
+import { estimateQueueInput, queueOutputReservation, queueInputSnapshotHash, canonicalQueueInputJson, QueueInputBudgetError, type BudgetImage } from "./queue-input-budget.js";
+import type { AgentInteractiveInputBinding, AgentApiPrepareInteractiveInputResponse } from "@agent-workbench/shared/internal-contracts/agent-api";
+import { AgentRunStopRegistry, AgentRuntimeStopError } from "@agent-workbench/shared/node/agent-run-stop";
+import type { AgentWorkerStopRunsRequest } from "@agent-workbench/shared/internal-contracts/agent-worker";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import fs from "node:fs/promises";
 import { clearTimeout as clearNativeTimeout, setTimeout as setNativeTimeout } from "node:timers";
@@ -814,6 +820,7 @@ async function finalizeToolText(params: {
 }
 
 type QueuedRun = {
+  runtimeInstanceId?: string;
   workspaceId: string;
   sessionId: string;
   runId: string;
@@ -1499,6 +1506,8 @@ export async function materializePromptAttachments(params: {
   attachmentStorage: AgentAttachmentStorage | undefined;
   run: Pick<QueuedRun, "workspaceId" | "workspacePath">;
   providerNpm: string;
+  interactiveInput?: PromptContext["interactiveInput"];
+  imageBudget?: BudgetImage[];
 }): Promise<ModelMessage[]> {
   const messages: ModelMessage[] = [];
   const validateImageBytes = (bytes: Uint8Array) => {
@@ -1579,6 +1588,7 @@ export async function materializePromptAttachments(params: {
               continue;
             }
             validateImageBytes(image.bytes);
+            params.imageBudget?.push({ stableRef: part.path, mediaType: image.mediaType, byteSize: image.bytes.byteLength });
             const label = `Image for toolCallId=${result.toolCallId}, path=${part.path}`;
             if (nativeToolMedia) nativeParts.push({ type: "media", data: Buffer.from(image.bytes).toString("base64"), mediaType: image.mediaType });
             else {
@@ -1621,6 +1631,9 @@ export async function materializePromptAttachments(params: {
         throw new Error("cannot read a valid user image in this Workspace");
       });
       validateImageBytes(attachment.bytes);
+      const expected = params.interactiveInput?.inputs.flatMap(input => input.attachments).find(item => item.attachmentId === part.attachmentId);
+      if (expected && (attachment.bytes.byteLength !== expected.byteSize || createHash("sha256").update(attachment.bytes).digest("hex") !== expected.byteSha256)) throw new QueueInputBudgetError("attachment_integrity_failed");
+      params.imageBudget?.push({ stableRef: part.attachmentId, mediaType: attachment.mediaType, byteSize: attachment.bytes.byteLength });
       content.push({
         type: "file",
         data: attachment.bytes,
@@ -1634,6 +1647,7 @@ export async function materializePromptAttachments(params: {
 }
 
 type AgentRunnerDeps = {
+  runtimeInstanceId?: string;
   /** Trusted shared data directory for the native Git credential lease guard. */
   dataDir?: string;
   streamText?: RuntimeStreamText;
@@ -1644,7 +1658,7 @@ type AgentRunnerDeps = {
   preparationRandom?: () => number;
   warningNowMs?: () => number;
   attachmentStorage?: AgentAttachmentStorage;
-  /** 仅用于测试控制面固定短间隔重试，不影响 Provider 退避。 */
+  /** 控制面退避等待的测试注入点，不影响 Provider 重试预算或退避。 */
   controlWriteSleep?: (ms: number, signal: AbortSignal) => Promise<boolean>;
   /** Provider 退避等待；取消返回 false。默认使用真实等待，不影响控制面重试。 */
   modelRetrySleep?: (ms: number, signal: AbortSignal) => Promise<boolean>;
@@ -1664,6 +1678,12 @@ export class AgentRunner {
   private readonly activeRunIds = new Set<string>();
   private readonly runningSessions = new Set<string>();
   private readonly controllers = new Map<string, AbortController>();
+  private readonly stopRegistry: AgentRunStopRegistry;
+  private readonly stopTokens = new Map<string, symbol>();
+  private readonly runtimeAdmissionEnabled: boolean;
+  private readonly retirements: AgentRuntimeRetirementNotifier;
+  private shuttingDown = false;
+  get runtimeInstanceId() { return this.stopRegistry.runtimeInstanceId; }
   private readonly pluginRuntimeManager: PluginRuntimeManager;
   private readonly nestedChildrenByParent = new Map<string, Set<string>>();
   private readonly nestedParentByChild = new Map<string, string>();
@@ -1691,6 +1711,9 @@ export class AgentRunner {
     private readonly concurrency: number,
     deps: AgentRunnerDeps = {}
   ) {
+    this.stopRegistry = new AgentRunStopRegistry(deps.runtimeInstanceId ?? randomUUID());
+    this.runtimeAdmissionEnabled = deps.runtimeInstanceId != null;
+    this.retirements = new AgentRuntimeRetirementNotifier(identity => this.apiClient.retireRuntimeAdmission(identity), () => this.logger.warn("runtime retirement unconfirmed; retrying"));
     this.streamTextFn = deps.streamText ?? streamText<RuntimeToolSet>;
     this.nowMsFn = deps.nowMs ?? nowMs;
     this.preparationNowMsFn = deps.preparationNowMs ?? (() => performance.now());
@@ -1755,33 +1778,99 @@ export class AgentRunner {
     }
   }
 
-  /** Retries an API operation whose request has an immutable idempotency key. */
+  /** Replay one immutable operation until its result is known or exact Stop aborts it.
+   * Response validation failure is as uncertain as a lost response. No provider,
+   * tool or finite terminal-control budget can retire this still-running work.
+   */
   private async retryIdempotentControlWrite<T>(
     operation: string,
     signal: AbortSignal,
     write: () => Promise<T>,
   ): Promise<T> {
+    let outcomeUnknown = false;
+    let attempt = 0;
     while (true) {
       if (signal.aborted) throw new FencedWriteIgnoredError(operation);
       try {
-        return await write();
+        const response = await new Promise<T>((resolve, reject) => {
+          const onAbort = () => {
+            signal.removeEventListener("abort", onAbort);
+            reject(new FencedWriteIgnoredError(operation));
+          };
+          signal.addEventListener("abort", onAbort, { once: true });
+          if (signal.aborted) { onAbort(); return; }
+          void Promise.resolve().then(() => {
+            if (signal.aborted) throw new FencedWriteIgnoredError(operation);
+            return write();
+          }).then(value => {
+            signal.removeEventListener("abort", onAbort);
+            resolve(value);
+          }, error => {
+            signal.removeEventListener("abort", onAbort);
+            reject(error);
+          });
+        });
+        if (signal.aborted) throw new FencedWriteIgnoredError(operation);
+        return response;
       } catch (error) {
         if (signal.aborted) throw error;
-        if (!isRetryableControlWriteError(error)) {
+        if (!outcomeUnknown && !isRetryableControlWriteError(error) && !(error instanceof InternalRpcInvalidResponseError)) {
           throw new ControlWritePermanentError(operation, error);
         }
-        const retry = await this.controlWriteSleepFn(CONTROL_WRITE_RETRY_DELAY_MS, signal);
-        if (!retry) throw new FencedWriteIgnoredError(operation);
+        // After any ambiguous response, even a later control-plane rejection
+        // cannot prove the original operation did not commit continue/prepare.
+        // Retain this controller/stop registration and replay the same key.
+        if (!outcomeUnknown) this.logger.warn("idempotent control result unconfirmed; waiting for control-plane recovery");
+        outcomeUnknown = true;
+        const delayMs = Math.min(5_000, CONTROL_WRITE_RETRY_DELAY_MS * 2 ** Math.min(attempt++, 6));
+        await this.controlWriteSleepFn(delayMs, signal);
       }
     }
+  }
+
+  /** Drain is bounded; only the Manager's observed process exit can prove a timed-out shutdown. */
+  async shutdownRetirements(timeoutMs = 2000) {
+    this.shuttingDown = true;
+    for (const queued of this.queue.splice(0)) {
+      this.queuedRunIds.delete(queued.runId);
+      const token = this.stopTokens.get(queued.runId);
+      if (token) this.stopRegistry.complete(queued.runId, token);
+      this.stopTokens.delete(queued.runId);
+      if (this.runtimeAdmissionEnabled) this.retirements.notifyExited({...queued,runtimeInstanceId:this.runtimeInstanceId});
+    }
+    for (const controller of this.controllers.values()) controller.abort();
+    const deadline = Date.now() + timeoutMs;
+    while (this.stopRegistry.size && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+    return this.retirements.drain(Math.max(0, deadline - Date.now()));
   }
 
   analyticsLiveSnapshot() {
     return { snapshotAt: this.nowMsFn(), activeCount: this.activeCount, queueLength: this.queue.length, concurrency: this.concurrency, lastReadyAt: null, runnerMode: "agent_worker" as const, analyticsProducerGeneration: this.analyticsSignals?.producerGeneration ?? null };
   }
 
+  async enqueueRunAdmitted(run: QueuedRun) {
+    if (run.runtimeInstanceId !== this.runtimeInstanceId) throw new AgentRuntimeStopError("AGENT_RUNTIME_INSTANCE_MISMATCH");
+    const admission = await this.apiClient.checkRuntimeAdmission({...run,runtimeInstanceId:this.runtimeInstanceId});
+    if (!admission.admitted) throw new AgentRuntimeStopError("AGENT_RUNTIME_BINDING_MISMATCH");
+    // The local tombstone check and registration below have no await between them.
+    this.enqueueRun(run);
+  }
+
+  stopRunsAndWait(request: AgentWorkerStopRunsRequest) {
+    return this.stopRegistry.stopRunsAndWait(request, async target => (await this.apiClient.checkRuntimeAdmission({workspaceId:request.workspaceId,...target,runtimeInstanceId:this.runtimeInstanceId})).bindingMatches);
+  }
+
   enqueueRun(run: QueuedRun) {
+    if (this.shuttingDown) throw new Error("AGENT_RUNTIME_STOPPING");
+    if (!this.stopRegistry.mayRegister(run.runId)) throw new AgentRuntimeStopError("AGENT_RUNTIME_BINDING_MISMATCH");
     if (this.queuedRunIds.has(run.runId) || this.activeRunIds.has(run.runId)) return;
+    if (this.runtimeAdmissionEnabled) this.retirements.reserve({...run,runtimeInstanceId:this.runtimeInstanceId});
+    const token = this.stopRegistry.register(run, () => {
+      const index = this.queue.findIndex(item => item.runId === run.runId);
+      if (index >= 0) { this.queue.splice(index, 1); this.queuedRunIds.delete(run.runId); this.stopRegistry.unregister(run.runId, token!); this.stopTokens.delete(run.runId); this.retirements.releaseUnstarted({...run,runtimeInstanceId:this.runtimeInstanceId}); }
+    });
+    if (!token) { this.retirements.releaseUnstarted({...run,runtimeInstanceId:this.runtimeInstanceId}); throw new AgentRuntimeStopError("AGENT_RUNTIME_BINDING_MISMATCH"); }
+    this.stopTokens.set(run.runId, token);
     this.queue.push(run);
     this.queuedRunIds.add(run.runId);
     this.pump();
@@ -1835,6 +1924,9 @@ export class AgentRunner {
       if (!item || item.sessionId !== sessionId) continue;
       this.queuedRunIds.delete(item.runId);
       this.queue.splice(i, 1);
+      const token = this.stopTokens.get(item.runId);
+      if (token) this.stopRegistry.complete(item.runId, token);
+      this.stopTokens.delete(item.runId);
     }
   }
 
@@ -1900,7 +1992,14 @@ export class AgentRunner {
     try {
       controller = new AbortController();
       this.registerController(run.sessionId, controller);
+      const queuedToken = this.stopTokens.get(run.runId);
+      const token = queuedToken ? this.stopRegistry.activate(run, queuedToken, () => controller.abort()) : null;
+      if (!token) { this.deleteControllerIfSame(run.sessionId, controller); throw new AgentRuntimeStopError("AGENT_RUNTIME_BINDING_MISMATCH"); }
+      this.stopTokens.set(run.runId, token);
     } catch (err) {
+      const queuedToken = this.stopTokens.get(run.runId);
+      if (queuedToken) this.stopRegistry.complete(run.runId,queuedToken);
+      this.stopTokens.delete(run.runId);
       this.runningSessions.delete(run.sessionId);
       this.activeRunIds.delete(run.runId);
       this.activeCount -= 1;
@@ -1909,7 +2008,7 @@ export class AgentRunner {
       return;
     }
 
-    void this.processRun(run, controller.signal)
+    void this.processAdmittedRun(run, controller.signal)
       .catch((err) => {
         this.logger.error(`worker run failed: ${safeErrorSummary(err)}`);
       })
@@ -1919,8 +2018,47 @@ export class AgentRunner {
         this.runningSessions.delete(run.sessionId);
         this.activeRunIds.delete(run.runId);
         this.activeCount -= 1;
+        const token = this.stopTokens.get(run.runId);
+        if (token) this.stopRegistry.complete(run.runId, token);
+        this.stopTokens.delete(run.runId);
+        if (this.runtimeAdmissionEnabled) this.retirements.notifyExited({...run,runtimeInstanceId:this.runtimeInstanceId});
         this.pump();
       });
+  }
+
+  private async processAdmittedRun(run: QueuedRun, signal: AbortSignal) {
+    if (this.runtimeAdmissionEnabled) {
+      let attempt = 0;
+      while (true) {
+        if (signal.aborted || !this.stopRegistry.mayRegister(run.runId)) return;
+        try {
+          // This read may outlive abort at the transport layer, but has no
+          // mutation capability. Abort detaches its result from this Runner;
+          // a late positive response can never enter processRun after Stop.
+          const admission = await new Promise<Awaited<ReturnType<AgentApiClient["checkRuntimeAdmission"]>> | null>((resolve, reject) => {
+            const onAbort = () => { signal.removeEventListener("abort", onAbort); resolve(null); };
+            signal.addEventListener("abort", onAbort, { once: true });
+            if (signal.aborted) { onAbort(); return; }
+            void Promise.resolve().then(() => this.apiClient.checkRuntimeAdmission({...run,runtimeInstanceId:this.runtimeInstanceId})).then(
+              value => { signal.removeEventListener("abort", onAbort); resolve(value); },
+              error => { signal.removeEventListener("abort", onAbort); reject(error); },
+            );
+          });
+          if (!admission || !admission.admitted) return;
+          break;
+        } catch {
+          // A missing/invalid response is not a negative admission decision.
+          // Keep the exact registration/controller until a definitive answer
+          // or Stop, rather than tombstoning a still-running DB Run.
+          if (signal.aborted) return;
+          if (attempt === 0) this.logger.warn("runtime admission unconfirmed; waiting for control-plane recovery");
+          const delayMs = Math.min(5_000, 100 * 2 ** Math.min(attempt++, 6));
+          if (!await this.controlWriteSleepFn(delayMs, signal)) return;
+        }
+      }
+    }
+    if (signal.aborted || !this.stopRegistry.mayRegister(run.runId)) return;
+    await this.processRun(run,signal);
   }
 
   private async processNestedRunWithController(params: {
@@ -1928,7 +2066,15 @@ export class AgentRunner {
     run: QueuedRun;
     parentSignal: AbortSignal;
   }) {
+    if (this.runtimeAdmissionEnabled) {
+      const admission = await this.apiClient.checkRuntimeAdmission({...params.run,runtimeInstanceId:this.runtimeInstanceId});
+      if (!admission.admitted) throw new AgentRuntimeStopError("AGENT_RUNTIME_BINDING_MISMATCH");
+    }
+    if (this.shuttingDown) throw new Error("AGENT_RUNTIME_STOPPING");
+    if (this.runtimeAdmissionEnabled) this.retirements.reserve({...params.run,runtimeInstanceId:this.runtimeInstanceId});
     const childController = new AbortController();
+    const token = this.stopRegistry.register(params.run, () => childController.abort());
+    if (!token) { this.retirements.releaseUnstarted({...params.run,runtimeInstanceId:this.runtimeInstanceId}); throw new AgentRuntimeStopError("AGENT_RUNTIME_BINDING_MISMATCH"); }
     const onParentAbort = () => {
       childController.abort();
     };
@@ -1949,6 +2095,8 @@ export class AgentRunner {
       params.parentSignal.removeEventListener("abort", onParentAbort);
       this.deleteControllerIfSame(params.run.sessionId, childController);
       this.unlinkNestedChild(params.run.sessionId);
+      this.stopRegistry.complete(params.run.runId, token);
+      if (this.runtimeAdmissionEnabled) this.retirements.notifyExited({...params.run,runtimeInstanceId:this.runtimeInstanceId});
     }
   }
 
@@ -2665,6 +2813,113 @@ export class AgentRunner {
     return generateSingleCallText(params.profile, params.input, { disableSdkRetries: true });
   }
 
+  /** A finite snapshot: at most 0..8 candidates, one old-prefix compaction, one actual request. */
+  private async prepareInteractiveModelStep(params: { profile: ExecutionProfile; run: QueuedRun; context: PromptContext; signal: AbortSignal; recovering: boolean }) {
+    const { profile, run, signal } = params;
+    const scope = { workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId };
+    const runtimeOptions = buildModelRuntimeOptions(profile);
+    const raw = toRecordObject(profile.model.options) ?? {};
+    const rawAiSdk = toRecordObject(raw.aiSdk) ?? {};
+    const reserve = queueOutputReservation(profile.model.contextWindowTokens, rawAiSdk.maxOutputTokens, raw.maxOutputTokens);
+    runtimeOptions.aiSdk.maxOutputTokens = reserve;
+    const adapter = this.providerConversationStateAdapterRegistry.resolve(profile);
+    const evaluate = async (context: PromptContext) => {
+      const invocation = adapter?.prepareInvocation({ profile, messages: context.messages as ModelMessage[], history: context.providerReplay, providerOptions: runtimeOptions.providerOptions });
+      const providerMessages = (invocation?.messages ?? context.messages).filter(message => message.role !== "assistant" || message.content.length > 0);
+      const toolDefinitions = [...await this.toolRegistry.listTools({ profile, promptContext: context, apiClient: this.apiClient })].sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+      const imageBudget: BudgetImage[] = [];
+      const materialized = await materializePromptAttachments({ messages: providerMessages as PromptContext["messages"], attachmentStorage: this.attachmentStorage, run,
+        providerNpm: profile.provider.npm, interactiveInput: context.interactiveInput, imageBudget });
+      const budget = estimateQueueInput({ contextWindowTokens: profile.model.contextWindowTokens, maxOutputTokens: reserve, system: context.system,
+        messages: materialized, tools: toolDefinitions, providerReplay: [], images: imageBudget });
+      return { context, runtimeOptions, adapter, invocation, providerMessages, toolDefinitions, materialized, budget };
+    };
+    let compactionAttempted = false;
+    for (let preparationAttempt = 0; preparationAttempt < 3; preparationAttempt++) {
+      let prepared: AgentApiPrepareInteractiveInputResponse | null = null;
+      if (!params.recovering) {
+        const request = { ...scope, operationId: newSortableId("queue-prepare") };
+        let uncertain = false;
+        try {
+          prepared = await this.retryIdempotentControlWrite("prepare interactive input", signal, async () => {
+            try { return await this.apiClient.prepareInteractiveInput(request); }
+            catch (error) {
+              if (isRetryableControlWriteError(error) || error instanceof InternalRpcInvalidResponseError || signal.aborted) uncertain = true;
+              throw error;
+            }
+          });
+        } catch (error) {
+          // prepare may commit finish after continue. Never infer a new tuple
+          // from response loss or cancellation before its replay is resolved.
+          if (uncertain) throw new TerminalAssistantOutcomeUncertainError();
+          const cause = error instanceof ControlWritePermanentError ? error.cause : error;
+          if (cause instanceof ApiConflictError) {
+            if (preparationAttempt === 2) throw new Error("Interactive boundary changed repeatedly");
+            continue;
+          }
+          throw error;
+        }
+      }
+      // A validated negative decision also resolves a previously unknown write.
+      if (prepared?.decision === "rejected") throw new QueueInputBudgetError(
+        prepared.reason === "snapshot_too_large" ? "prepare_snapshot_too_large" : "prepare_cache_capacity");
+      if (prepared?.decision === "finish") return { kind: "finish" as const };
+      if (prepared?.decision === "expired") {
+        if (preparationAttempt === 2) throw new Error("Interactive frozen preparation repeatedly expired");
+        continue;
+      }
+      const base = prepared?.context ?? params.context;
+      const candidates = prepared?.candidates ?? [];
+      let selected: { count: number; frozen: Awaited<ReturnType<typeof evaluate>> } | null = null;
+      for (let count = 0; count <= candidates.length; count++) {
+        if (signal.aborted) throw new Error("interactive preparation aborted");
+        const prefix = candidates.slice(0, count);
+        const policy = base.interactiveInput!;
+        const context: PromptContext = { ...base, headMessageId: prefix.length ? `message-queued-${prefix.at(-1)!.receipt.id}` : base.headMessageId,
+          sessionRevision: base.sessionRevision + count,
+          messages: [...base.messages, ...prefix.map(candidate => ({ role: "user" as const, content: projectEffectiveUserContent({ workspaceId: run.workspaceId, text: candidate.text,
+            images: candidate.attachments.map(image => ({ attachmentId: image.id, mediaType: image.mediaType, filename: image.filename, path: image.path })) }) }))],
+          interactiveInput: { ...policy, inputReceiptIds: [...policy.inputReceiptIds, ...prefix.map(item => item.receipt.id)], inputs: [...policy.inputs, ...prefix.map(candidate => ({
+            receiptId: candidate.receipt.id, messageId: `message-queued-${candidate.receipt.id}`, state: "unconfirmed" as const, currentRunInput: true,
+            attachments: candidate.attachments.map(image => ({ attachmentId: image.id, byteSha256: image.byteSha256, byteSize: image.byteSize })) }))] } };
+        const frozen = await evaluate(context);
+        if (frozen.budget.fits) selected = { count, frozen };
+      }
+      if (selected && (selected.count > 0 || candidates.length === 0)) {
+        if (selected.count > 0 && prepared) {
+          const request = { ...scope, operationId: newSortableId("queue-inject"), expectedHeadMessageId: base.headMessageId,
+            expectedRevision: base.sessionRevision, receiptIds: candidates.slice(0, selected.count).map(item => item.receipt.id), preparationSnapshotHash: prepared.preparationSnapshotHash,
+            estimatorVersion: prepared.estimatorVersion };
+          let injection;
+          try {
+            injection = await this.retryIdempotentControlWrite("inject interactive input", signal, () => this.apiClient.injectInteractiveInput(request));
+          } catch (error) {
+            const cause = error instanceof ControlWritePermanentError ? error.cause : error;
+            if (!(cause instanceof ApiConflictError)) throw error;
+            if (preparationAttempt === 2) throw new Error("Interactive FIFO changed repeatedly");
+            continue;
+          }
+          if (injection.headMessageId !== selected.frozen.context.headMessageId || injection.revision !== selected.frozen.context.sessionRevision) throw new Error("Injected input differs from the prepared prefix");
+          const actual = await this.apiClient.getPromptContext(scope);
+          if (canonicalQueueInputJson({ system: actual.system, messages: actual.messages, replay: actual.providerReplay ?? [] }) !== canonicalQueueInputJson({ system: selected.frozen.context.system, messages: selected.frozen.context.messages, replay: selected.frozen.context.providerReplay ?? [] })) throw new Error("Injected context projection changed");
+          selected.frozen.context = actual;
+        }
+        const binding: AgentInteractiveInputBinding = { inputReceiptIds: selected.frozen.context.interactiveInput!.inputReceiptIds,
+          effectiveInputPolicyVersion: AGENT_QUEUE_INPUT_POLICY_VERSION, inputRevision: selected.frozen.context.sessionRevision,
+          snapshotHash: queueInputSnapshotHash({ view: selected.frozen.budget.view, reserve, providerId: profile.provider.id, modelId: profile.model.id }) };
+        return { kind: "prepared" as const, ...selected.frozen, binding };
+      }
+      if (!compactionAttempted && !params.recovering) {
+        compactionAttempted = true;
+        const compacted = await this.executeCompaction({ mode: "proactive", profile, run, signal });
+        if (compacted.kind === "failed" && compacted.reason === "commit_outcome_uncertain") throw new TerminalAssistantOutcomeUncertainError();
+        continue;
+      }
+      break;
+    }
+    throw new QueueInputBudgetError("input_too_large");
+  }
+
   private async runModelStep(params: {
     profile: ExecutionProfile;
     run: QueuedRun;
@@ -2677,16 +2932,22 @@ export class AgentRunner {
     recoveryContinuation?: { messageId: string | null };
     repeatedToolCallCounter: Map<string, number>;
   }) {
-    const { profile, run, context, step, emptyResponseCount = 0, signal, recoveryContinuation = { messageId: null }, repeatedToolCallCounter } = params;
+    const { profile, run, step, emptyResponseCount = 0, signal, recoveryContinuation = { messageId: null }, repeatedToolCallCounter } = params;
+    let context = params.context;
     if (context.pendingTools.length > 0) {
       throw new Error("cannot invoke model while ToolExecution remains queued or running");
     }
+    const interactivePrepared = context.interactiveInput?.interactive ? await this.prepareInteractiveModelStep({ profile, run, context, signal, recovering: !!recoveryContinuation.messageId }) : null;
+    if (interactivePrepared?.kind === "finish") return { aborted: false as const, toolCallCount: 0, assistantMessageId: "", terminalIntentPersisted: true, hasVisibleText: false };
+    const frozen = interactivePrepared?.kind === "prepared" ? interactivePrepared : null;
+    if (frozen) context = frozen.context;
+    let inputBinding = frozen?.binding;
     const sharedPreparationStartedAt = params.contextPreparationMs != null ? this.preparationNowMsFn() : null;
-    const conversationStateAdapter = this.providerConversationStateAdapterRegistry.resolve(profile);
+    const conversationStateAdapter = frozen ? frozen.adapter : this.providerConversationStateAdapterRegistry.resolve(profile);
     const model = createLanguageModel(profile);
-    const runtimeOptions = buildModelRuntimeOptions(profile);
+    const runtimeOptions = frozen?.runtimeOptions ?? buildModelRuntimeOptions(profile);
     const turnId = newSortableId("turn");
-    const preparedInvocation = conversationStateAdapter?.prepareInvocation({
+    const preparedInvocation = frozen ? frozen.invocation : conversationStateAdapter?.prepareInvocation({
       profile,
       messages: context.messages as ModelMessage[],
       history: context.providerReplay,
@@ -2704,7 +2965,7 @@ export class AgentRunner {
     const modelRequestMaxRetries = normalizeModelRequestMaxRetries(profile.runtime.modelRequestMaxRetries);
     const modelRequestRetryBackoffMaxMs = normalizeRetryBackoffMaxMs(profile.runtime.modelRequestRetryBackoffMaxMs);
 
-    const toolDefinitions = await this.toolRegistry.listTools({
+    const toolDefinitions = frozen?.toolDefinitions ?? await this.toolRegistry.listTools({
       profile,
       promptContext: context,
       apiClient: this.apiClient
@@ -2748,7 +3009,7 @@ export class AgentRunner {
 
     // Preflight the first attempt before creating the Assistant item. Subsequent attempts
     // reconstruct their media from disk after the Provider failure and retry delay.
-    let firstAttemptMessages: ModelMessage[] | null = await materializePromptAttachments({
+    let firstAttemptMessages: ModelMessage[] | null = frozen?.materialized ?? await materializePromptAttachments({
       messages: providerMessages as PromptContext["messages"],
       attachmentStorage: this.attachmentStorage,
       run,
@@ -2763,30 +3024,36 @@ export class AgentRunner {
 
     let assistantMessageId: string;
     if (recoveryContinuation.messageId) {
-      if (profile.provider.npm === "@ai-sdk/moonshotai" || profile.provider.npm === "@ai-sdk/deepseek") {
-        // Existing streaming Parts cannot currently be loaded and proved identical here.
-        // Atomically replace instead of mixing a new Attempt with an unknown partial output.
+      const previous = context.interactiveInput?.activeAssistantBinding;
+      const sameRecoveryInput = inputBinding && previous?.messageId === recoveryContinuation.messageId
+        && previous.inputBinding.snapshotHash === inputBinding.snapshotHash
+        && previous.inputBinding.effectiveInputPolicyVersion === inputBinding.effectiveInputPolicyVersion
+        && canonicalQueueInputJson([...previous.inputBinding.inputReceiptIds].sort()) === canonicalQueueInputJson([...inputBinding.inputReceiptIds].sort());
+      // These providers cannot append a fresh stream to unknown partial replay Parts.
+      const providerRequiresReplacement = profile.provider.npm === "@ai-sdk/moonshotai" || profile.provider.npm === "@ai-sdk/deepseek";
+      if ((inputBinding && !sameRecoveryInput) || providerRequiresReplacement) {
         const newMessageId = newSortableId("message");
-        const replaced = await this.apiClient.replaceStreamingAssistant({
+        const request = {
           workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId,
           oldMessageId: recoveryContinuation.messageId, newMessageId,
+          ...(inputBinding ? { inputBinding: { ...inputBinding, mode: "recovery_reprepare" as const } } : {}),
           runNoticeText: "", retryCount: 0, nextRetryAt: null, createdAt: this.nowMsFn(),
-        });
+        };
+        const replaced = await this.retryControlWrite("replace recovery streaming assistant", signal, () => this.apiClient.replaceStreamingAssistant(request));
         assertFencedWriteUpdated("replace recovery streaming assistant", replaced);
         recoveryContinuation.messageId = null;
         assistantMessageId = newMessageId;
       } else {
-      const resumedMessageId = recoveryContinuation.messageId;
-      const claim = await this.apiClient.resumeStreamingAssistant({
-        workspaceId: run.workspaceId,
-        sessionId: run.sessionId,
-        runId: run.runId,
-        messageId: resumedMessageId,
-      });
-      assertFencedWriteUpdated("resume streaming assistant", claim);
-      // 成功 claim 后该 continuation 已与本次模型 step 绑定，不能供后续 step 重复使用。
-      recoveryContinuation.messageId = null;
-      assistantMessageId = resumedMessageId;
+        if (sameRecoveryInput) inputBinding = previous!.inputBinding;
+        const resumedMessageId = recoveryContinuation.messageId;
+        const request = {
+          workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId,
+          messageId: resumedMessageId, ...(inputBinding ? { inputBinding } : {}),
+        };
+        const claim = await this.retryControlWrite("resume streaming assistant", signal, () => this.apiClient.resumeStreamingAssistant(request));
+        assertFencedWriteUpdated("resume streaming assistant", claim);
+        recoveryContinuation.messageId = null;
+        assistantMessageId = resumedMessageId;
       }
     } else {
       assistantMessageId = newSortableId("message");
@@ -2795,6 +3062,7 @@ export class AgentRunner {
         sessionId: run.sessionId,
         runId: run.runId,
         messageId: assistantMessageId,
+        ...(inputBinding ? { inputBinding } : {}),
         createdAt: this.nowMsFn(),
       };
       await this.retryIdempotentControlWrite("create streaming assistant", signal, async () =>
@@ -3087,7 +3355,9 @@ export class AgentRunner {
       const newMessageId = newSortableId("message");
       const request = {
         workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId,
-        oldMessageId, newMessageId, runNoticeText: notice.runNoticeText, modelRequestError: notice.modelRequestError,
+        oldMessageId, newMessageId,
+        ...(inputBinding ? { inputBinding: { ...inputBinding, mode: "retry_same_input" as const } } : {}),
+        runNoticeText: notice.runNoticeText, modelRequestError: notice.modelRequestError,
         retryCount: notice.retryCount, nextRetryAt: notice.nextRetryAt, createdAt: this.nowMsFn()
       };
       await this.retryControlWrite("replace streaming assistant", signal, async () =>
@@ -3113,7 +3383,7 @@ export class AgentRunner {
       // Retry attempts sample independently; never charge them the shared preparation again.
       const preparationSampled = retryCount === 0 ? sharedPreparationMs !== null : this.preparationRandomFn() < REQUEST_PREPARATION_SAMPLE_RATE;
       const attemptPreparationStartedAt = preparationSampled ? this.preparationNowMsFn() : null;
-      if (retryCount > 0 && toolSet.subtask) {
+      if (retryCount > 0 && toolSet.subtask && !inputBinding) {
         // Refresh only the dynamic candidate description, preserving this turn's
         // tool/schema, conversation-state, and availableToolNames snapshots.
         const refreshedContext = await this.apiClient.getPromptContext({
@@ -3130,7 +3400,7 @@ export class AgentRunner {
       }
       // Preparation errors are local failures: never enter the Provider retry catch below.
       // The conversation-state adapter ran exactly once on the original assistant ordinals.
-      const materializedMessages = firstAttemptMessages ?? await materializePromptAttachments({
+      const materializedMessages = frozen?.materialized ?? firstAttemptMessages ?? await materializePromptAttachments({
         messages: providerMessages as PromptContext["messages"],
         attachmentStorage: this.attachmentStorage,
         run,
@@ -3425,6 +3695,7 @@ export class AgentRunner {
         } else if (idleTimedOut) {
           err = new Error(`model idle timeout after ${modelIdleTimeoutMs}ms`);
         }
+        if (inputBinding && collectErrorCodes(err).some(code => CONTEXT_LIMIT_ERROR_CODES.has(code))) throw new QueueInputBudgetError("provider_context_too_large");
         const message = safeErrorSummary(err);
         const modelRequestError = buildModelRequestError(err, {
           secrets: [profile.provider.options.apiKey ?? ""],
@@ -3554,6 +3825,8 @@ export class AgentRunner {
       });
     };
     let terminalAssistantCommitted = false;
+    let interactiveContinue = false;
+    let interactiveDecisionCommitted = false;
     try {
       const executions: Array<{ id: string; callPartId: string; originSessionId: string; originRunId: string; status: "queued" }> = [];
       for (const call of recognizedCalls) {
@@ -3582,7 +3855,20 @@ export class AgentRunner {
       };
       const hasVisibleText = hasVisibleAssistantText(textFromParts()) || reasoningFromParts().length > 0;
       const terminalAssistant = executions.length === 0 && (hasVisibleText || emptyResponseCount + 1 >= EMPTY_RESPONSE_COMPLETE_THRESHOLD);
-      if (terminalAssistant) {
+      if (terminalAssistant && inputBinding) {
+        const request = { workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId, operationId: newSortableId("queue-complete"),
+          messageId: assistantMessageId, responseTotalTokens, updatedAt: completeRequest.updatedAt };
+        let uncertain = false;
+        try {
+          const result = await this.retryIdempotentControlWrite("complete interactive assistant", signal, async () => {
+            try { return await this.apiClient.completeInteractiveAssistant(request); }
+            catch (error) { if (isRetryableControlWriteError(error) || error instanceof InternalRpcInvalidResponseError || signal.aborted) uncertain = true; throw error; }
+          });
+          interactiveDecisionCommitted = true;
+          interactiveContinue = result.decision === "continue";
+          terminalAssistantCommitted = !interactiveContinue;
+        } catch (error) { if (uncertain) throw new TerminalAssistantOutcomeUncertainError(); throw error; }
+      } else if (terminalAssistant) {
         const code: "run_completed" | "subtask_completed" = run.runKind === "subtask" ? "subtask_completed" : "run_completed";
         const terminalRequest = {
           workspaceId: completeRequest.workspaceId,
@@ -3647,11 +3933,14 @@ export class AgentRunner {
         aborted: false as const,
         toolCallCount: recognizedCalls.length,
         assistantMessageId,
-        terminalIntentPersisted: terminalAssistant,
+        terminalIntentPersisted: terminalAssistant && !interactiveContinue,
+        interactiveContinue,
         hasVisibleText,
         availableToolNames: recognizedCalls.length > 0 ? availableToolNames : undefined
       };
     } catch (err) {
+      if (interactiveDecisionCommitted && interactiveContinue) return { aborted: false as const, toolCallCount: 0, assistantMessageId,
+        terminalIntentPersisted: false, interactiveContinue: true, hasVisibleText: hasVisibleAssistantText(textFromParts()) || reasoningFromParts().length > 0 };
       if (terminalAssistantCommitted) {
         // Debug/notice cleanup after the atomic commit must never replace the
         // durable completed intent, even if cancellation interrupted cleanup.
@@ -3888,7 +4177,7 @@ export class AgentRunner {
           continue;
         }
 
-        if (!autoCompactionAttemptedForNextModelStep && recoveryContinuation.messageId == null && this.shouldAutoCompact({ context, model: profile.model, runtime: profile.runtime })) {
+        if (!context.interactiveInput?.interactive && !autoCompactionAttemptedForNextModelStep && recoveryContinuation.messageId == null && this.shouldAutoCompact({ context, model: profile.model, runtime: profile.runtime })) {
           const compacted = await this.executeCompaction({ mode: "proactive", profile, run, signal });
           if (compacted.kind === "failed" && compacted.reason === "commit_outcome_uncertain") {
             this.logger.warn(`compaction commit outcome uncertain; stop run without selecting terminal tuple: ${run.sessionId} ${run.runId}`);
@@ -3930,6 +4219,10 @@ export class AgentRunner {
         }
 
         if (shouldStopForMaxSteps(step, LOOP_MAX_STEPS)) {
+          if (context.interactiveInput?.interactive) {
+            try { await this.apiClient.updateRunNotice({ workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId,
+              runNoticeText: "budget_exhausted", queuePauseCode: "budget_exhausted", updatedAt: this.nowMsFn() }); } catch { /* Keep terminal convergence authoritative. */ }
+          }
           await finishOnce("failed");
           return;
         }
@@ -3968,6 +4261,7 @@ export class AgentRunner {
           pendingToolNamesSnapshot = result.availableToolNames;
           continue;
         }
+        if ("interactiveContinue" in result && result.interactiveContinue) { emptyResponseCount = 0; continue; }
         if (result.hasVisibleText) {
           emptyResponseCount = 0;
           await finishOnce("completed");
@@ -4011,6 +4305,10 @@ export class AgentRunner {
         return;
       }
 
+      if (err instanceof QueueInputBudgetError) {
+        try { await this.apiClient.updateRunNotice({ workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId,
+          runNoticeText: err.pauseCode, queuePauseCode: err.pauseCode, updatedAt: this.nowMsFn() }); } catch { /* Terminal convergence still pauses generically if the control RPC is unavailable. */ }
+      }
       const cause = err;
       const failedTuple: TerminalTuple = err instanceof CompactionConflictError && (run.runKind === "user" || run.runKind === "manual_compaction")
         ? { status: "failed", code: "compaction_conflict", detail: null }

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { AGENT_QUEUE_INPUT_POLICY_VERSION } from "@agent-workbench/shared";
 import { estimatePrimaryMaterializedBlock } from "./estimator-v1.js";
 import { COMPACTION_MODE_POLICIES, computeCompactionProfileFingerprint, planCompaction } from "./planner.js";
 import { materializePrimaryBlocks } from "./primary-materializer.js";
@@ -120,4 +121,28 @@ test("profile fingerprint changes only with normalized profile semantics", () =>
   assert.equal(noSecretChange, baseline);
   assert.notEqual(modelChange, baseline);
   assert.notEqual(windowChange, baseline);
+});
+
+
+test("unconfirmed input is a hard retained boundary even before the ordinary fixed tail", () => {
+  const source = plannedSource();
+  source.interactiveInput = { version: AGENT_QUEUE_INPUT_POLICY_VERSION, interactive: true, inputReceiptIds: ["receipt"],
+    inputs: [{ receiptId: "receipt", messageId: "m1", state: "unconfirmed", currentRunInput: true, attachments: [] }] };
+  assert.deepEqual(planCompaction({ source, profile: testProfile, mode: "proactive" }), { kind: "retained_tail_unavailable", reason: "budget" });
+  source.interactiveInput.inputs[0]!.state = "confirmed";
+  const confirmed = planCompaction({ source, profile: testProfile, mode: "proactive" });
+  assert.equal(confirmed.kind, "planned");
+  if (confirmed.kind === "planned") assert.deepEqual(confirmed.plan.prefixSourceBlockIds, ["m1"]);
+});
+
+test("abandoned inputs are absent from both retained content and summarizer prefix", () => {
+  const source = testSource({ texts: ["old ".repeat(14_000), "abandoned secret", "recent ".repeat(6_000), "trigger"] });
+  source.interactiveInput = { version: AGENT_QUEUE_INPUT_POLICY_VERSION, interactive: true, inputReceiptIds: [],
+    inputs: [{ receiptId: "receipt", messageId: "m2", state: "abandoned", currentRunInput: false, attachments: [] }] };
+  const result = planCompaction({ source, profile: testProfile, mode: "manual" });
+  assert.equal(result.kind, "planned");
+  if (result.kind === "planned") {
+    assert.ok(!result.plan.prefixSourceBlockIds.includes("m2")); assert.ok(!result.plan.retainedSourceBlockIds.includes("m2"));
+    assert.ok(!JSON.stringify(result.plan).includes("abandoned secret"));
+  }
 });

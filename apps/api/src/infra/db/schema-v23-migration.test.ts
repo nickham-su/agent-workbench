@@ -52,7 +52,7 @@ function businessData(db: Database.Database) {
   const tables = ["workspaces", "agent_session", "agent_attachment", "agent_message", "agent_message_part", "agent_run", "agent_tool_execution",
     "agent_client_request", "session_run_state", "agent_archived_text_fts", "agent_text_part_fts_map", "scheduled_agent_task", "scheduled_agent_execution"];
   return tables.map((table) => ({ table, rows: (db.prepare(`select * from ${table} order by rowid`).all() as Record<string, unknown>[])
-    .map(({ visibility: _visibility, model_request_error_json: _modelRequestError, ...row }) => row) }));
+    .map(({ visibility: _visibility, model_request_error_json: _modelRequestError, interactive_queue_enabled: _interactiveQueue, ...row }) => row) }));
 }
 function actualStates(db: Database.Database) {
   return db.prepare("select workspace_id as workspaceId, session_id as sessionId, visible, updated_at as updatedAt from workspace_session_tab_state order by workspace_id,session_id").all();

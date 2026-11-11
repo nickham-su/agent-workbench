@@ -1,3 +1,9 @@
+import { registerAgentMessageQueueRoutes } from "./message-queue/message-queue.routes.js";
+import { registerAgentRuntimeReadiness } from "./startup/agent-runtime-readiness.js";
+import { randomUUID } from "node:crypto";
+import { AgentRuntimeControlStore } from "./runtime-control/runtime-control.store.js";
+import { AgentRuntimeControlService } from "./runtime-control/runtime-control.service.js";
+import { registerAgentRuntimeControlRoutes } from "./runtime-control/runtime-control.routes.js";
 import type { FastifyInstance } from "fastify";
 import type { AppContext } from "../../app/context.js";
 import { registerAgentRoutes } from "./agent.routes.js";
@@ -21,22 +27,34 @@ import { registerScheduledTaskRoutes } from "../scheduled-tasks/scheduled-task.r
 
 export async function registerAgentModule(app: FastifyInstance, ctx: AppContext) {
   const runCompletedEventHub = new AgentRunCompletedEventHub();
-  const { service, localRuntimeExecution, startupCoordinator, runtimeHandoffCoordinator, dispose } = createAgentComposition(ctx, app.log, runCompletedEventHub);
+  const { service, localRuntimeExecution, startupCoordinator, runtimeHandoffCoordinator, publishCommittedTerminalConvergence, createMessageQueue, dispose } = createAgentComposition(ctx, app.log, runCompletedEventHub);
 
   let runtime: AgentRuntimePort;
+  const ownerApiInstanceId = randomUUID();
+  const runtimeReadiness = registerAgentRuntimeReadiness(app);
+  const runtimeControlStore = new AgentRuntimeControlStore(ctx.db);
+  let runtimeControl: AgentRuntimeControlService;
+  let localRuntime: AgentRuntime | null = null;
+  let localRuntimeInstanceId: string | null = null;
+  let lifecycleOpen = true;
+  let closing = false;
+  let runtimeRecoveryEpoch = 0;
   let workerManager: AgentWorkerProcessManager | null = null;
   let scheduledScheduler: ScheduledTaskScheduler | null = null;
+  let messageQueue: ReturnType<typeof createMessageQueue> | undefined;
   let pluginHostManager: AgentPluginHostProcessManager | null = null;
   let pluginHostClient: AgentPluginHostClient | null = null;
 
   if (ctx.agentWorkerEnabled) {
-    runtime = new AgentWorkerClient({
+    const workerClient = new AgentWorkerClient({
       workerOrigin: `http://${ctx.agentWorkerHost}:${ctx.agentWorkerPort}`,
       workerSocketPath: ctx.agentWorkerSocketPath,
       internalToken: ctx.agentInternalToken,
       responseValidation: ctx.agentWorkerResponseValidation,
       logger: app.log
     });
+    runtimeControl = new AgentRuntimeControlService(runtimeControlStore, workerClient, Date.now, publishCommittedTerminalConvergence);
+    runtime = runtimeControl;
     workerManager = new AgentWorkerProcessManager({
       repoRoot: ctx.repoRoot,
       dataDir: ctx.dataDir,
@@ -51,7 +69,33 @@ export async function registerAgentModule(app: FastifyInstance, ctx: AppContext)
       logger: app.log,
       dispatchAnalyticsSignal: ctx.analyticsSignal,
       diagnoseOutboxCorrupt: ctx.analyticsDiagnostics?.outboxCorrupt,
+      onRuntimeStarting: (runtimeInstanceId,processIdentity) => {
+        runtimeRecoveryEpoch++;
+        messageQueue?.suspendRuntimeDispatch();
+        runtimeControl.blockAdmission();
+        runtimeControlStore.createInstance({runtimeInstanceId,ownerApiInstanceId,runtimeKind:"worker"},processIdentity);
+      },
+      onRuntimeReady: async (runtimeInstanceId, processIdentity) => {
+        const handshake = await workerClient.getRuntimeIdentity();
+        if (handshake.runtimeInstanceId !== runtimeInstanceId) throw new Error("AGENT_RUNTIME_INSTANCE_MISMATCH");
+        runtimeControlStore.readyInstance(runtimeInstanceId,processIdentity);
+        runtimeControl.ready(runtimeInstanceId, false);
+      },
+      onRuntimeExit: (runtimeInstanceId,evidence) => {
+        if (!lifecycleOpen) return;
+        if (runtimeControl.currentRuntimeInstanceId === runtimeInstanceId) {
+          runtimeRecoveryEpoch++;
+          messageQueue?.suspendRuntimeDispatch();
+          runtimeControl.blockAdmission();
+        }
+        runtimeControlStore.recordInstanceExit(runtimeInstanceId,ownerApiInstanceId,"child_exit",evidence);
+        messageQueue?.dispatcher.wake();
+      },
       onReady: async (generation) => {
+        if (closing) return;
+        const recoveryEpoch = runtimeRecoveryEpoch;
+        try {
+        runtimeControl.recover();
         await recoverAfterAgentRuntimeReady({
           runtime,
           generation,
@@ -61,16 +105,34 @@ export async function registerAgentModule(app: FastifyInstance, ctx: AppContext)
           reconcileTerminals: () => reconcilePendingTerminals(ctx, app.log),
           logger: app.log,
         });
+        await runtimeControl.reconcileStops();
+        if (closing || recoveryEpoch !== runtimeRecoveryEpoch) return;
+        runtimeControl.openAdmission();
+        messageQueue?.openAfterRuntimeRecovery();
+        runtimeControl.startReconciler();
         scheduledScheduler?.start();
+        runtimeReadiness.complete();
+        } catch(error) { runtimeReadiness.fail(error); throw error; }
       },
       });
   } else {
     const localAnalytics = new LocalAnalyticsProducer({ apiOrigin: ctx.agentApiOrigin, internalToken: ctx.agentInternalToken, dataDir: ctx.dataDir, abandonPriorGeneration: ctx.analyticsDiagnostics?.abandonLocalFallbackGeneration, diagnoseOutboxCorrupt: ctx.analyticsDiagnostics?.outboxCorrupt });
     await localAnalytics.start();
-    const localRuntime = new AgentRuntime(localRuntimeExecution, app.log, ctx.agentWorkerConcurrency, localAnalytics);
+    localRuntimeInstanceId = randomUUID();
+    runtimeControlStore.createInstance({runtimeInstanceId:localRuntimeInstanceId,ownerApiInstanceId,runtimeKind:"local_fallback"},{pid:process.pid,ownerApiInstanceId});
+    const incarnation = localRuntimeInstanceId;
+    localRuntime = new AgentRuntime(localRuntimeExecution, app.log, ctx.agentWorkerConcurrency, localAnalytics, {
+      runtimeInstanceId:incarnation,
+      bindingMatches: run => runtimeControlStore.checkAdmission({...run,runtimeInstanceId:incarnation}).bindingMatches,
+      admissionAllowed: run => runtimeControlStore.checkAdmission({...run,runtimeInstanceId:incarnation}).admitted,
+      onRunQuiescent: run => { if (!lifecycleOpen) return {retired:false}; const result = runtimeControlStore.retireAdmission({...run,runtimeInstanceId:incarnation}); messageQueue?.dispatcher.wake(); return result; }
+    });
     app.addHook("onClose", async () => { await localAnalytics.close(); });
     localRuntime.bootstrap();
-    runtime = localRuntime;
+    runtimeControl = new AgentRuntimeControlService(runtimeControlStore,localRuntime,Date.now,publishCommittedTerminalConvergence);
+    runtimeControlStore.readyInstance(incarnation,{pid:process.pid,ownerApiInstanceId});
+    runtimeControl.ready(incarnation,false);
+    runtime = runtimeControl;
   }
 
   if (ctx.agentPluginHostEnabled) {
@@ -97,6 +159,11 @@ export async function registerAgentModule(app: FastifyInstance, ctx: AppContext)
     });
   }
 
+  messageQueue = createMessageQueue(runtimeControl);
+  await registerAgentMessageQueueRoutes(app, { service: messageQueue.service, dataDir: ctx.dataDir });
+  const unsubscribeQueueWake = runCompletedEventHub.subscribe(() => messageQueue?.dispatcher.wake());
+
+  await registerAgentRuntimeControlRoutes(app,runtimeControlStore,ctx.agentInternalToken, () => messageQueue?.dispatcher.wake());
   await registerAgentRoutes(app, { service, runtime, internalToken: ctx.agentInternalToken, dataDir: ctx.dataDir, pluginHost: pluginHostClient, runCompletedEventHub });
   const scheduledTasks = new ScheduledTaskService(ctx, service, runtime, Date.now, ({ executionId, reason }) => {
     // No raw Agent errors, Prompt or source content in this bounded diagnostic.
@@ -116,26 +183,59 @@ export async function registerAgentModule(app: FastifyInstance, ctx: AppContext)
     await reconcilePendingTerminals(ctx, app.log);
   }
   app.addHook("onClose", async () => {
-    // Stop reconciliation before Worker/SQLite shutdown can turn a stale
-    // timer into a late runtime RPC or database access.
+    closing = true;
+    // Seal public receipts and internal injection synchronously before awaiting
+    // any scanner, publisher or runtime. Terminal writeback stays available.
+    const queueClosing = messageQueue!.close(1_000);
+    runtimeControl.blockAdmission();
+    unsubscribeQueueWake();
     await scheduledScheduler?.stop();
-    dispose();
+    let queueSettled = await queueClosing;
+    await runtimeControl.stopAllForShutdown();
+    if (localRuntime) {
+      const drained = await localRuntime.drain(1_000);
+      if (!drained) {
+        if (localRuntimeInstanceId) runtimeControlStore.markInstanceUnknown(localRuntimeInstanceId);
+        app.log.warn("waiting for local Agent runtime to drain before releasing application resources");
+        // Cancellation/unknown is not an exit proof. A delayed context read
+        // can still write back; keep its DB/composition alive until settled.
+        while (!await localRuntime.drain(5_000)) { /* retain resources */ }
+      }
+      await runtimeControl.reconcileStops();
+    }
+    // An enqueue may only settle after exact cancellation has interrupted it.
+    if (!queueSettled) {
+      app.log.warn("waiting for Agent queue publishers and scans before releasing application resources");
+      while (!queueSettled) queueSettled = await messageQueue!.close(5_000);
+    }
+    await runtimeControl.close();
+    if (workerManager) await workerManager.stop();
+    if (localRuntimeInstanceId && localRuntime?.quiescent) runtimeControlStore.recordInstanceExit(localRuntimeInstanceId,ownerApiInstanceId,"local_shutdown",{pid:process.pid,observedAt:Date.now()});
+    lifecycleOpen = false;
     unregisterWorkspaceRuntime(workspaceRuntimeRegistration);
+    dispose();
   });
 
   await startupCoordinator.runPreListen();
-  // A managed Worker performs recovery after its own ready barrier. The local
-  // fallback has no independent generation, so API onListen remains its hook.
+  // Pre-listen preserves in-flight history and keeps admission closed. Local
+  // recovery starts at the same real listening lifecycle as ordinary API work.
   if (!workerManager) {
-    startupCoordinator.registerRecoverOnListen(app, runtime);
-    app.addHook("onListen", () => { scheduledScheduler?.start(); });
+    app.addHook("onListen", async () => {
+      try {
+      runtimeControl.recover();
+      await startupCoordinator.recoverWhenRuntimeReady(runtime,1);
+      await runtimeControl.reconcileStops();
+      if (closing) return;
+      runtimeControl.openAdmission();
+      messageQueue!.openAfterRuntimeRecovery();
+      runtimeControl.startReconciler();
+      scheduledScheduler?.start();
+      runtimeReadiness.complete();
+      } catch(error) { runtimeReadiness.fail(error); throw error; }
+    });
   }
 
   if (!workerManager) return;
-  app.addHook("onClose", async () => {
-    dispose();
-    await workerManager?.stop();
-  });
   try {
     await workerManager.start();
   } catch (error) {

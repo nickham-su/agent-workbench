@@ -20,3 +20,5 @@ export * from "../skills-protocol.js";
 export * from "../contracts/auth.js";
 export * from "../contracts/credentials.js";
 export * from "../contracts/terminals.js";
+
+export * from "../contracts/agent-queue.js";

@@ -1,3 +1,4 @@
+import { listenAgentTestApp } from "../testkit/agent-testkit.js";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -49,7 +50,7 @@ async function fixture(t: TestContext, authToken: string | null) {
   app.server.on("request", (request) => {
     if (request.url?.startsWith("/api/agent/sessions/query?")) queryRequests++;
   });
-  const origin = await app.listen({ host: "127.0.0.1", port: 0 });
+  const origin = await listenAgentTestApp(app, 0);
   const file = path.join(home, ".config/awb/config.json");
   const args = ["session", "list", "--workspace", workspace.id, "--updated-within", "1h"];
   return { ...f, workspaceId: workspace.id, home, origin, file, args, queryRequests: () => queryRequests };
@@ -133,7 +134,7 @@ test("production CLI directly shows, sends, reads, follows and cancels a known u
   t.after(() => f.dispose());
   const home = path.join(f.dataDir, "direct-cli-home");
   await fs.mkdir(home);
-  const origin = await f.app.listen({ host: "127.0.0.1", port: 0 });
+  const origin = await listenAgentTestApp(f.app, 0);
   let sseRequests = 0;
   f.app.server.on("request", (request) => {
     if (request.url?.includes("/events/sse")) sseRequests++;

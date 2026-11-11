@@ -48,7 +48,8 @@ test("P4 structure: module triggers the startup coordinator and keeps startup po
   );
   assert.match(moduleSource, /createAgentComposition/);
   assert.match(moduleSource, /startupCoordinator\.runPreListen\(\)/);
-  assert.match(moduleSource, /startupCoordinator\.registerRecoverOnListen\(app, runtime\)/);
+  assert.match(moduleSource, /startupCoordinator\.recoverWhenRuntimeReady\(runtime,\s*1\)/);
+  assert.match(moduleSource, /runtimeControl\.recover\(\)/);
   assert.doesNotMatch(moduleSource, /agent\.store/);
   assert.doesNotMatch(moduleSource, /ArchiveStartupReconcileApplication/);
   assert.doesNotMatch(moduleSource, /scanAndCleanupSubtaskOrphansBestEffort/);

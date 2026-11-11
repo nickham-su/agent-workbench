@@ -1,5 +1,12 @@
 import type { Db } from "./db.js";
 
+/** Logical deletion keeps the independent publication tombstones and charged bytes. */
+export function retainWorkspaceAttachmentPublications(db: Db, workspaceId: string, nowMs = Date.now()): void {
+  db.prepare(`update agent_attachment_publication_intent set state='retained',
+    retention_code='workspace_logically_deleted',updated_at=? where workspace_id=?
+    and state not in ('released_unpublished','released_offline_maintenance')`).run(nowMs, workspaceId);
+}
+
 /**
  * Workspace 删除中的 Agent 数据库清理原语。
  *
@@ -7,6 +14,22 @@ import type { Db } from "./db.js";
  * 实现这些运行时协调。所有删除都显式绑定 workspaceId，避免共享 Message 图误伤。
  */
 export function deleteWorkspaceAgentData(db: Db, workspaceId: string) {
+  const blocked = db.prepare(`select 1 from agent_session_stop_barrier where workspace_id=? and state<>'quiescent'
+    union all select 1 from agent_run_runtime_admission where workspace_id=? and state not in ('retired') and runtime_instance_id is not null limit 1`).get(workspaceId,workspaceId);
+  if (blocked) throw new Error("AGENT_WORKSPACE_RUNTIME_STOP_UNCONFIRMED");
+  // Queue payloads and barriers reference Run/Session; delete in FK-safe order only after the fence above.
+  db.prepare("delete from agent_session_stop_target where workspace_id=?").run(workspaceId);
+  db.prepare("delete from agent_session_stop_barrier where workspace_id=?").run(workspaceId);
+  db.prepare("delete from agent_run_runtime_admission where workspace_id=?").run(workspaceId);
+  db.prepare("delete from agent_queue_model_input where workspace_id=?").run(workspaceId);
+  db.prepare("delete from agent_queue_input_binding where workspace_id=?").run(workspaceId);
+  db.prepare("delete from agent_interactive_run_input where workspace_id=?").run(workspaceId);
+  db.prepare("delete from agent_user_message_receipt_attachment where workspace_id=?").run(workspaceId);
+  db.prepare("delete from agent_user_message_receipt where workspace_id=?").run(workspaceId);
+  db.prepare("delete from agent_queue_operation where workspace_id=?").run(workspaceId);
+  db.prepare("delete from agent_session_queue_control where workspace_id=?").run(workspaceId);
+  // The independent publication ledger survives logical deletion and stays charged.
+  retainWorkspaceAttachmentPublications(db, workspaceId);
   const ftsRowIds = db.prepare(`
     select map.fts_rowid as ftsRowid
     from agent_text_part_fts_map map

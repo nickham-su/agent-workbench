@@ -1,3 +1,4 @@
+import type { AgentResumeMessageQueueRequest } from "@agent-workbench/shared";
 import { HttpError } from "../../../app/errors.js";
 import { AgentAttachmentCommitError } from "../attachments/agent-attachment-storage.js";
 import { workspaceDeletingFence } from "./workspace-deleting-fence.js";
@@ -282,6 +283,38 @@ export class RunLifecycleApplication {
     };
   }
 
+  /** Receipt activation shares the ordinary activation authority and exact fenced handoff. */
+  async resumeQueuedSession(command: AgentResumeMessageQueueRequest & { sessionId: string; runtime: StartUserRunCommand["runtime"] }) {
+    if (this.closed) throw new HttpError(503, "Agent lifecycle is stopping", "AGENT_LIFECYCLE_STOPPING");
+    workspaceDeletingFence.assertWritable(command.workspaceId);
+    const context = this.dependencies.workspaceRunContextReader.get(command.workspaceId);
+    if (!context) throw new HttpError(404, "Workspace not found");
+    const activate = this.dependencies.persistence.resumeQueuedSession;
+    if (!activate) throw new Error("Queue continuation persistence is not configured");
+    const { runtime, ...request } = command;
+    const activation = activate.call(this.dependencies.persistence, request, this.dependencies.ids.newId("run"), this.dependencies.clock.nowMs());
+    if (activation.activated && activation.response.action === "continued_unconfirmed") await this.enqueueActivatedRunOrReconcile({ runtime,
+      run: { workspaceId: command.workspaceId, sessionId: command.sessionId, runId: activation.response.runId, inputText: activation.inputText, ...context } });
+    return activation.response;
+  }
+
+  async startQueuedUserRun(command: { workspaceId: string; sessionId: string; receiptId: string; inputText: string; runtime: StartUserRunCommand["runtime"]; assertDispatchAdmission?: () => void }) {
+    if (this.closed) throw new HttpError(503, "Agent lifecycle is stopping", "AGENT_LIFECYCLE_STOPPING");
+    command.assertDispatchAdmission?.();
+    workspaceDeletingFence.assertWritable(command.workspaceId);
+    const context = this.dependencies.workspaceRunContextReader.get(command.workspaceId);
+    if (!context) throw new HttpError(404, "Workspace not found");
+    const activate = this.dependencies.persistence.activateQueuedUserRun;
+    if (!activate) throw new Error("Queue activation persistence is not configured");
+    const activation = activate.call(this.dependencies.persistence, { workspaceId: command.workspaceId, sessionId: command.sessionId,
+      receiptId: command.receiptId, assertDispatchAdmission: command.assertDispatchAdmission, runId: this.dependencies.ids.newId("run"), createdAt: this.dependencies.clock.nowMs() });
+    if (activation.kind === "session-running") return null;
+    // A duplicate is a durable accepted identity, not authorization to replay a finished Run.
+    if (activation.kind !== "deduplicated") await this.enqueueActivatedRunOrReconcile({ runtime: command.runtime,
+      run: { workspaceId: command.workspaceId, sessionId: command.sessionId, runId: activation.runId, inputText: command.inputText, ...context } });
+    return { sessionId: command.sessionId, runId: activation.runId, messageId: activation.messageId, deduplicated: activation.kind === "deduplicated" };
+  }
+
   failRunAfterEnqueueFailure(params: { workspaceId: string; sessionId: string; runId: string; updatedAt?: number }): EnqueueFailureSettlement {
     const updatedAt = params.updatedAt ?? this.dependencies.clock.nowMs();
     const settlement = this.dependencies.persistence.failRunAfterEnqueueFailureIfCurrent({
@@ -337,6 +370,16 @@ export class RunLifecycleApplication {
 
   convergeRunTerminal(params: AgentApiConvergeRunTerminalRequest) {
     const result = this.dependencies.persistence.convergeRunTerminal(params);
+    this.publishTerminalConvergence(params,result);
+    return result;
+  }
+
+  /** Called only after the runtime-control transaction has committed. */
+  publishCommittedTerminalConvergence(params: AgentApiConvergeRunTerminalRequest, result: {kind:"transitioned"|"already_converged";finalStatus:"completed"|"failed"|"cancelled"}) {
+    if (result.kind === "transitioned") this.publishTerminalConvergence(params,result);
+  }
+
+  private publishTerminalConvergence(params: AgentApiConvergeRunTerminalRequest, result: {kind:"transitioned"|"already_converged";finalStatus:"completed"|"failed"|"cancelled"}) {
     this.dependencies.promptStaticCacheInvalidator.clear(params.runId);
     if (result.kind === "transitioned") {
       try {
@@ -355,7 +398,6 @@ export class RunLifecycleApplication {
         );
       }
     }
-    return result;
   }
 
   cancelSessionCascade(sessionId: string, body: AgentCancelSessionRequest): CancelSessionCascadeResult {
@@ -370,7 +412,8 @@ export class RunLifecycleApplication {
       listActiveChildSessionIds: (params) => this.dependencies.activeSubtaskChildQuery.listByParentRun(params)
     });
     const updatedAt = this.dependencies.clock.nowMs();
-    for (const terminalIntent of result.terminalIntents ?? []) {
+    for (const convergence of result.terminalConvergences ?? []) this.publishTerminalConvergence({...convergence,updatedAt},convergence.result);
+    for (const terminalIntent of result.terminalConvergences ? [] : result.terminalIntents ?? []) {
       this.convergeRunTerminal({
         ...terminalIntent,
         updatedAt,
@@ -398,6 +441,10 @@ export class RunLifecycleApplication {
       [snapshot.sessionId, ...lockedSessionIds],
       async () => {
         const result = this.cancelSessionCascade(command.sessionId, { workspaceId: command.workspaceId });
+        if (command.runtime.reconcileStops) {
+          await command.runtime.reconcileStops();
+          return result.result;
+        }
         const settled = await Promise.allSettled(result.runtimeCancelSessionIds.map((sessionId) => command.runtime.cancelSession(sessionId)));
         for (let index = 0; index < settled.length; index += 1) {
           const outcome = settled[index];

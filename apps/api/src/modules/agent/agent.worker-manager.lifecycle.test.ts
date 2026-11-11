@@ -48,13 +48,14 @@ async function fixture(t: TestContext) {
     };
     assert.equal(acceptAnalyticsSignal(db, signal).accepted, true);
   }
-  const createManager = (options: { onReady?: () => Promise<void>; waitForWorkerReady?: () => Promise<void>; exitOnKill?: boolean; registerOnSpawn?: boolean; dispatch?: typeof transport } = {}) => {
+  const createManager = (options: { runtimeCallbacks?: Pick<ConstructorParameters<typeof AgentWorkerProcessManager>[0],"onRuntimeStarting"|"onRuntimeReady"|"onRuntimeExit">; onReady?: () => Promise<void>; waitForWorkerReady?: () => Promise<void>; exitOnKill?: boolean; registerOnSpawn?: boolean; dispatch?: typeof transport } = {}) => {
     const manager = new AgentWorkerProcessManager({
       repoRoot: process.cwd(), dataDir, workerHost: "127.0.0.1", workerPort: 1, socketPath: "", workerConcurrency: 1,
       apiOrigin: "http://unused.invalid", internalToken: "test", responseValidation: "strict", pidFilePath: path.join(dataDir, "worker.pid"),
       logger: { info() {}, warn() {}, error() {} } as any,
       dispatchAnalyticsSignal: options.dispatch ?? transport,
       onReady: options.onReady,
+      ...options.runtimeCallbacks,
       waitForWorkerReady: options.waitForWorkerReady ?? (async () => undefined),
       childExitTimeoutMs: 30,
       spawnWorker: ((_command: unknown, _args: unknown, spawnOptions: any) => {
@@ -337,4 +338,33 @@ test("parent exit ACK before any child register persists terminal guards before 
   }
   const exit = f.history.find((signal) => signal.kind === "event" && signal.eventType === "worker_controlled_stop")!;
   assert.equal(acceptAnalyticsSignal(f.db, exit).accepted, true, "repeat receipt remains idempotent");
+});
+
+
+test("spawn UUID is independent of Analytics and trusted ready precedes orchestration; only exact exit produces proof", async t => {
+  const f=await fixture(t);
+  const events:string[]=[];
+  let runtimeId=""; let nonce="";
+  const manager=f.createManager({runtimeCallbacks:{
+    onRuntimeStarting(id){runtimeId=id;events.push("starting");},
+    onRuntimeReady(id,identity){assert.equal(id,runtimeId);nonce=identity.spawnNonce;events.push("ready");},
+    onRuntimeExit(id,evidence){assert.equal(id,runtimeId);assert.equal(evidence.spawnNonce,nonce);events.push("exit");}
+  },onReady:async()=>{events.push("recovered");}});
+  await manager.start();
+  assert.deepEqual(events,["starting","ready","recovered"]);
+  assert.notEqual(runtimeId,f.children[0]!.generation);
+  await manager.stop();
+  assert.deepEqual(events,["starting","ready","recovered","exit"]);
+});
+
+
+test("failed trusted identity handshake never opens recovery; exit observer persistence failure is not success",async t=>{
+  const f=await fixture(t);let recovered=false;let exits=0;
+  const manager=f.createManager({runtimeCallbacks:{
+    onRuntimeReady(){throw new Error("AGENT_RUNTIME_INSTANCE_MISMATCH");},
+    onRuntimeExit(){exits++;throw new Error("fixture proof persistence unavailable");},
+  },onReady:async()=>{recovered=true;}});
+  await assert.rejects(manager.start(),/AGENT_RUNTIME_INSTANCE_MISMATCH/);
+  assert.equal(recovered,false);assert.equal(exits,1);
+  await manager.stop();
 });
