@@ -720,17 +720,25 @@ const effectiveAgentId = computed(() =>
 const sessionModelState = computed(
   () => props.sessionModelStates[effectiveAgentId.value] ?? null,
 );
-const sessionModelLabel = computed(
-  () =>
-    (queueIdentity.value ? `${queueIdentity.value.providerId} / ${queueIdentity.value.modelId}` : null) || resolveSessionModelPresentation(
-      sessionModelState.value,
-      props.sessionModelStateLoading,
-      props.agentOptions.find((item) => item.value === effectiveAgentId.value)
-        ?.resolvedModel
-        ? `${props.agentOptions.find((item) => item.value === effectiveAgentId.value)?.resolvedModel?.providerName} / ${props.agentOptions.find((item) => item.value === effectiveAgentId.value)?.resolvedModel?.modelName}`
-        : null,
-    ).modelLabel || "",
-);
+const sessionModelLabel = computed(() => {
+  const defaultModel = props.agentOptions.find((item) => item.value === effectiveAgentId.value)?.resolvedModel;
+  const identity = queueIdentity.value;
+  if (identity) {
+    // Keep the execution identity authoritative; names are display metadata only.
+    const effectiveModel = sessionModelState.value?.status === "ready" ? sessionModelState.value.effectiveModel : null;
+    const namedModel = [effectiveModel, defaultModel].find(
+      (model) => model?.providerId === identity.providerId && model?.modelId === identity.modelId,
+    );
+    return namedModel
+      ? `${namedModel.providerName} / ${namedModel.modelName}`
+      : `${identity.providerId} / ${identity.modelId}`;
+  }
+  return resolveSessionModelPresentation(
+    sessionModelState.value,
+    props.sessionModelStateLoading,
+    defaultModel ? `${defaultModel.providerName} / ${defaultModel.modelName}` : null,
+  ).modelLabel || "";
+});
 const inputPlaceholder = computed(() => {
   if (!hasAvailableAgents.value) {
     return t("agent.client.inputPlaceholderNoAgent");

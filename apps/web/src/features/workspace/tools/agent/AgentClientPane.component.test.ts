@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test, { afterEach } from "node:test";
 import type { AxiosResponse, InternalAxiosRequestConfig } from "axios";
 import type { AgentMessage, AgentMessageSessionRunState, AgentMessageQueueSnapshot } from "@agent-workbench/shared";
+import type { AgentSessionAgentModelState } from "@agent-workbench/shared/internal-contracts/agent-api-session";
 import DOMPurify from "dompurify";
 import { computed, defineComponent, h, KeepAlive, ref, type ComputedRef } from "vue";
 import { agentSessionMetadataReadContextKey, createAgentSessionMetadataReads, type MetadataReadContext, type TimelineMetadataEvent } from "./agentSessionMetadataReadContext";
@@ -2161,6 +2162,86 @@ test("真实 AgentClientPane：未确认和暂停不展示标签、管理按钮�
     assert.equal(http.requests.length, 0);
   } finally { wrapper.unmount(); http.restore(); }
 });
+function readyQueueModelState(): AgentSessionAgentModelState {
+  return {
+    sessionId: "session-a", agentId: "agent-c", agentName: "Agent C", editable: false,
+    agentDefaultModel: { providerId: "p", modelId: "default" },
+    override: { providerId: "p", modelId: "m", updatedAt: 1 },
+    effectiveModel: { providerId: "p", modelId: "m", providerName: "Provider", modelName: "Override Model", contextWindowTokens: 1000 },
+    source: "session_override", status: "ready", reasonCode: null, message: null,
+  };
+}
+
+test("真实 AgentClientPane：运行前中后保持会话覆盖模型名称，运行时仍锁定选择", async () => {
+  const { wrapper, runState } = mountPane({ modelValue: "agent-c" });
+  const vm = wrapper.vm as any;
+  try {
+    await wrapper.setProps({
+      agentOptions: [{ value: "agent-c", resolvedModel: { providerId: "p", modelId: "default", providerName: "Default Provider", modelName: "Default Model" } }],
+      sessionModelStates: { "agent-c": readyQueueModelState() },
+    });
+    assert.equal(vm.sessionModelLabel, "Provider / Override Model");
+    runState.status = "running"; runState.activeRunId = "run-model";
+    vm.queue.apply({ ...queueSnapshot(), queueVersion: 1, inputIdentity: { agentId: "agent-c", providerId: "p", modelId: "m" } });
+    await nextTick();
+    assert.equal(vm.sessionModelLabel, "Provider / Override Model");
+    assert.ok(wrapper.text().includes("Provider / Override Model"));
+    assert.equal(wrapper.getComponent({ name: "ASelect" }).attributes("disabled"), "true");
+    runState.status = "idle"; runState.activeRunId = null;
+    vm.queue.apply({ ...queueSnapshot(), queueVersion: 2 });
+    await nextTick();
+    assert.equal(vm.sessionModelLabel, "Provider / Override Model");
+    assert.equal(vm.queueIdentityLocked, false);
+  } finally { wrapper.unmount(); }
+});
+
+test("真实 AgentClientPane：执行、恢复和等待身份均使用锁定 Agent 的匹配名称", async () => {
+  const { wrapper } = mountPane({ modelValue: "agent-a" }); const vm = wrapper.vm as any;
+  try {
+    const staleState = readyQueueModelState();
+    staleState.effectiveModel = { ...staleState.effectiveModel!, modelId: "old", modelName: "Old Model" };
+    await wrapper.setProps({
+      agentOptions: [
+        { value: "agent-a", resolvedModel: { providerId: "p", modelId: "m", providerName: "Wrong Agent Provider", modelName: "Wrong Agent Model" } },
+        { value: "agent-c", resolvedModel: { providerId: "p", modelId: "m", providerName: "Provider", modelName: "Model" } },
+      ],
+      sessionModelStates: { "agent-c": staleState },
+    });
+    let version = 0;
+    for (const field of ["inputIdentity", "recoveryIdentity", "pendingIdentity"] as const) {
+      vm.queue.apply({ ...queueSnapshot(), queueVersion: ++version, [field]: { agentId: "agent-c", providerId: "p", modelId: "m" } });
+      await nextTick();
+      assert.equal(vm.effectiveAgentId, "agent-c");
+      assert.equal(vm.sessionModelLabel, "Provider / Model", field);
+      assert.equal(vm.queueIdentityLocked, true);
+    }
+  } finally { wrapper.unmount(); }
+});
+
+test("真实 AgentClientPane：名称必须同时匹配 provider/model，未知名称降级 ID 并响应后续加载", async () => {
+  const { wrapper } = mountPane({ modelValue: "agent-c" }); const vm = wrapper.vm as any;
+  try {
+    vm.queue.apply({ ...queueSnapshot(), queueVersion: 1, inputIdentity: { agentId: "agent-c", providerId: "p", modelId: "m" } });
+    for (const ref of [{ providerId: "other", modelId: "m" }, { providerId: "p", modelId: "other" }]) {
+      const state = readyQueueModelState();
+      state.effectiveModel = { ...state.effectiveModel!, ...ref };
+      await wrapper.setProps({
+        agentOptions: [{ value: "agent-c", resolvedModel: { ...ref, providerName: "Wrong Provider", modelName: "Wrong Model" } }],
+        sessionModelStates: { "agent-c": state },
+      });
+      assert.equal(vm.sessionModelLabel, "p / m");
+    }
+    await wrapper.setProps({ agentOptions: [{ value: "agent-c" }], sessionModelStates: {}, sessionModelStateLoading: true });
+    assert.equal(vm.sessionModelLabel, "p / m");
+    const invalidState = { ...readyQueueModelState(), status: "invalid" as const };
+    await wrapper.setProps({ sessionModelStates: { "agent-c": invalidState } });
+    assert.equal(vm.sessionModelLabel, "p / m", "unavailable state must not supply stale names");
+    await wrapper.setProps({ sessionModelStates: { "agent-c": readyQueueModelState() }, sessionModelStateLoading: false });
+    assert.equal(vm.sessionModelLabel, "Provider / Override Model");
+    assert.equal(vm.queueIdentityLocked, true);
+  } finally { wrapper.unmount(); }
+});
+
 test("真实 AgentClientPane：服务端执行身份锁定 Agent/model，停止未知时隐藏历史写操作但仍可编辑输入", async () => {
   const { wrapper } = mountPane({ modelValue: "agent-a" }); const vm = wrapper.vm as any;
   try {
