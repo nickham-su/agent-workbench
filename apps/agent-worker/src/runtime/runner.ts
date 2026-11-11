@@ -2674,14 +2674,14 @@ export class AgentRunner {
   }
 
   private shouldAutoCompact(params: {
-    context: PromptContext;
+    responseTotalTokens: number | null | undefined;
     model: ExecutionProfile["model"];
     runtime: ExecutionProfile["runtime"];
   }) {
     const maxContextTokens = Math.max(1, Math.floor(Number(params.model.contextWindowTokens || 0)));
     const thresholdPct = Math.max(50, Math.min(99, Math.floor(Number(params.runtime.autoCompactThresholdPct || 80))));
-    const lastTotalTokens = typeof params.context.lastResponseTotalTokens === "number"
-      ? Math.max(0, Math.floor(params.context.lastResponseTotalTokens))
+    const lastTotalTokens = typeof params.responseTotalTokens === "number"
+      ? Math.max(0, Math.floor(params.responseTotalTokens))
       : null;
     if (lastTotalTokens == null) return false;
     const threshold = Math.floor(maxContextTokens * (thresholdPct / 100));
@@ -2813,7 +2813,7 @@ export class AgentRunner {
     return generateSingleCallText(params.profile, params.input, { disableSdkRetries: true });
   }
 
-  /** A finite snapshot: at most 0..8 candidates, one old-prefix compaction, one actual request. */
+  /** A finite FIFO snapshot: at most 8 candidates, one actual request; estimates only bind its identity. */
   private async prepareInteractiveModelStep(params: { profile: ExecutionProfile; run: QueuedRun; context: PromptContext; signal: AbortSignal; recovering: boolean }) {
     const { profile, run, signal } = params;
     const scope = { workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId };
@@ -2834,7 +2834,6 @@ export class AgentRunner {
         messages: materialized, tools: toolDefinitions, providerReplay: [], images: imageBudget });
       return { context, runtimeOptions, adapter, invocation, providerMessages, toolDefinitions, materialized, budget };
     };
-    let compactionAttempted = false;
     for (let preparationAttempt = 0; preparationAttempt < 3; preparationAttempt++) {
       let prepared: AgentApiPrepareInteractiveInputResponse | null = null;
       if (!params.recovering) {
@@ -2870,54 +2869,40 @@ export class AgentRunner {
       }
       const base = prepared?.context ?? params.context;
       const candidates = prepared?.candidates ?? [];
-      let selected: { count: number; frozen: Awaited<ReturnType<typeof evaluate>> } | null = null;
-      for (let count = 0; count <= candidates.length; count++) {
-        if (signal.aborted) throw new Error("interactive preparation aborted");
-        const prefix = candidates.slice(0, count);
-        const policy = base.interactiveInput!;
-        const context: PromptContext = { ...base, headMessageId: prefix.length ? `message-queued-${prefix.at(-1)!.receipt.id}` : base.headMessageId,
-          sessionRevision: base.sessionRevision + count,
-          messages: [...base.messages, ...prefix.map(candidate => ({ role: "user" as const, content: projectEffectiveUserContent({ workspaceId: run.workspaceId, text: candidate.text,
-            images: candidate.attachments.map(image => ({ attachmentId: image.id, mediaType: image.mediaType, filename: image.filename, path: image.path })) }) }))],
-          interactiveInput: { ...policy, inputReceiptIds: [...policy.inputReceiptIds, ...prefix.map(item => item.receipt.id)], inputs: [...policy.inputs, ...prefix.map(candidate => ({
-            receiptId: candidate.receipt.id, messageId: `message-queued-${candidate.receipt.id}`, state: "unconfirmed" as const, currentRunInput: true,
-            attachments: candidate.attachments.map(image => ({ attachmentId: image.id, byteSha256: image.byteSha256, byteSize: image.byteSize })) }))] } };
-        const frozen = await evaluate(context);
-        if (frozen.budget.fits) selected = { count, frozen };
-      }
-      if (selected && (selected.count > 0 || candidates.length === 0)) {
-        if (selected.count > 0 && prepared) {
-          const request = { ...scope, operationId: newSortableId("queue-inject"), expectedHeadMessageId: base.headMessageId,
-            expectedRevision: base.sessionRevision, receiptIds: candidates.slice(0, selected.count).map(item => item.receipt.id), preparationSnapshotHash: prepared.preparationSnapshotHash,
-            estimatorVersion: prepared.estimatorVersion };
-          let injection;
-          try {
-            injection = await this.retryIdempotentControlWrite("inject interactive input", signal, () => this.apiClient.injectInteractiveInput(request));
-          } catch (error) {
-            const cause = error instanceof ControlWritePermanentError ? error.cause : error;
-            if (!(cause instanceof ApiConflictError)) throw error;
-            if (preparationAttempt === 2) throw new Error("Interactive FIFO changed repeatedly");
-            continue;
-          }
-          if (injection.headMessageId !== selected.frozen.context.headMessageId || injection.revision !== selected.frozen.context.sessionRevision) throw new Error("Injected input differs from the prepared prefix");
-          const actual = await this.apiClient.getPromptContext(scope);
-          if (canonicalQueueInputJson({ system: actual.system, messages: actual.messages, replay: actual.providerReplay ?? [] }) !== canonicalQueueInputJson({ system: selected.frozen.context.system, messages: selected.frozen.context.messages, replay: selected.frozen.context.providerReplay ?? [] })) throw new Error("Injected context projection changed");
-          selected.frozen.context = actual;
+      if (signal.aborted) throw new Error("interactive preparation aborted");
+      const policy = base.interactiveInput!;
+      const context: PromptContext = { ...base, headMessageId: candidates.length ? `message-queued-${candidates.at(-1)!.receipt.id}` : base.headMessageId,
+        sessionRevision: base.sessionRevision + candidates.length,
+        messages: [...base.messages, ...candidates.map(candidate => ({ role: "user" as const, content: projectEffectiveUserContent({ workspaceId: run.workspaceId, text: candidate.text,
+          images: candidate.attachments.map(image => ({ attachmentId: image.id, mediaType: image.mediaType, filename: image.filename, path: image.path })) }) }))],
+        interactiveInput: { ...policy, inputReceiptIds: [...policy.inputReceiptIds, ...candidates.map(item => item.receipt.id)], inputs: [...policy.inputs, ...candidates.map(candidate => ({
+          receiptId: candidate.receipt.id, messageId: `message-queued-${candidate.receipt.id}`, state: "unconfirmed" as const, currentRunInput: true,
+          attachments: candidate.attachments.map(image => ({ attachmentId: image.id, byteSha256: image.byteSha256, byteSize: image.byteSize })) }))] } };
+      const frozen = await evaluate(context);
+      if (candidates.length > 0 && prepared) {
+        const request = { ...scope, operationId: newSortableId("queue-inject"), expectedHeadMessageId: base.headMessageId,
+          expectedRevision: base.sessionRevision, receiptIds: candidates.map(item => item.receipt.id), preparationSnapshotHash: prepared.preparationSnapshotHash,
+          estimatorVersion: prepared.estimatorVersion };
+        let injection;
+        try {
+          injection = await this.retryIdempotentControlWrite("inject interactive input", signal, () => this.apiClient.injectInteractiveInput(request));
+        } catch (error) {
+          const cause = error instanceof ControlWritePermanentError ? error.cause : error;
+          if (!(cause instanceof ApiConflictError)) throw error;
+          if (preparationAttempt === 2) throw new Error("Interactive FIFO changed repeatedly");
+          continue;
         }
-        const binding: AgentInteractiveInputBinding = { inputReceiptIds: selected.frozen.context.interactiveInput!.inputReceiptIds,
-          effectiveInputPolicyVersion: AGENT_QUEUE_INPUT_POLICY_VERSION, inputRevision: selected.frozen.context.sessionRevision,
-          snapshotHash: queueInputSnapshotHash({ view: selected.frozen.budget.view, reserve, providerId: profile.provider.id, modelId: profile.model.id }) };
-        return { kind: "prepared" as const, ...selected.frozen, binding };
+        if (injection.headMessageId !== frozen.context.headMessageId || injection.revision !== frozen.context.sessionRevision) throw new Error("Injected input differs from the prepared prefix");
+        const actual = await this.apiClient.getPromptContext(scope);
+        if (canonicalQueueInputJson({ system: actual.system, messages: actual.messages, replay: actual.providerReplay ?? [] }) !== canonicalQueueInputJson({ system: frozen.context.system, messages: frozen.context.messages, replay: frozen.context.providerReplay ?? [] })) throw new Error("Injected context projection changed");
+        frozen.context = actual;
       }
-      if (!compactionAttempted && !params.recovering) {
-        compactionAttempted = true;
-        const compacted = await this.executeCompaction({ mode: "proactive", profile, run, signal });
-        if (compacted.kind === "failed" && compacted.reason === "commit_outcome_uncertain") throw new TerminalAssistantOutcomeUncertainError();
-        continue;
-      }
-      break;
+      const binding: AgentInteractiveInputBinding = { inputReceiptIds: frozen.context.interactiveInput!.inputReceiptIds,
+        effectiveInputPolicyVersion: AGENT_QUEUE_INPUT_POLICY_VERSION, inputRevision: frozen.context.sessionRevision,
+        snapshotHash: queueInputSnapshotHash({ view: frozen.budget.view, reserve, providerId: profile.provider.id, modelId: profile.model.id }) };
+      return { kind: "prepared" as const, ...frozen, binding };
     }
-    throw new QueueInputBudgetError("input_too_large");
+    throw new Error("Interactive preparation exhausted");
   }
 
   private async runModelStep(params: {
@@ -3932,6 +3917,7 @@ export class AgentRunner {
       return {
         aborted: false as const,
         toolCallCount: recognizedCalls.length,
+        responseTotalTokens,
         assistantMessageId,
         terminalIntentPersisted: terminalAssistant && !interactiveContinue,
         interactiveContinue,
@@ -4142,9 +4128,9 @@ export class AgentRunner {
       };
 
       let pendingToolNamesSnapshot: ReadonlySet<string> | undefined;
-      // A skip is consumed only by the next model step, even when refreshed
-      // pending tools must finish before that step can start.
-      let autoCompactionAttemptedForNextModelStep = false;
+      // Only a successful tool-calling response in this Run can request compaction.
+      // Wait for its tools to close, then consume the request exactly once.
+      let autoCompactionPending = false;
       while (!signal.aborted) {
         // Decide before reading context so unselected requests do not call the timing clock.
         const contextPreparationStartedAt = this.preparationRandomFn() < REQUEST_PREPARATION_SAMPLE_RATE ? this.preparationNowMsFn() : null;
@@ -4177,7 +4163,8 @@ export class AgentRunner {
           continue;
         }
 
-        if (!context.interactiveInput?.interactive && !autoCompactionAttemptedForNextModelStep && recoveryContinuation.messageId == null && this.shouldAutoCompact({ context, model: profile.model, runtime: profile.runtime })) {
+        if (autoCompactionPending && recoveryContinuation.messageId == null) {
+          autoCompactionPending = false;
           const compacted = await this.executeCompaction({ mode: "proactive", profile, run, signal });
           if (compacted.kind === "failed" && compacted.reason === "commit_outcome_uncertain") {
             this.logger.warn(`compaction commit outcome uncertain; stop run without selecting terminal tuple: ${run.sessionId} ${run.runId}`);
@@ -4196,9 +4183,7 @@ export class AgentRunner {
             });
           }
           // Even a normal skip may have observed a newer session revision than
-          // the prompt snapshot above. Refresh once before the model step, but
-          // do not re-enter auto-compaction until after that step.
-          autoCompactionAttemptedForNextModelStep = true;
+          // the prompt snapshot above. Refresh once before the model step.
           // Discard the old context and its sampling decision after compaction.
           const refreshedPreparationStartedAt = this.preparationRandomFn() < REQUEST_PREPARATION_SAMPLE_RATE ? this.preparationNowMsFn() : null;
           context = await this.apiClient.getPromptContext({
@@ -4244,7 +4229,6 @@ export class AgentRunner {
           }
           throw err;
         });
-        autoCompactionAttemptedForNextModelStep = false;
         // A terminal Assistant transaction already persisted the completed
         // intent. A cancellation arriving after that commit cannot select a
         // conflicting cancelled tuple, for either user or subtask runs.
@@ -4258,6 +4242,7 @@ export class AgentRunner {
         }
         if (result.toolCallCount > 0) {
           emptyResponseCount = 0;
+          autoCompactionPending = this.shouldAutoCompact({ responseTotalTokens: result.responseTotalTokens, model: profile.model, runtime: profile.runtime });
           pendingToolNamesSnapshot = result.availableToolNames;
           continue;
         }

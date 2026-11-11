@@ -145,15 +145,40 @@ test("interactive recovery rejects changed image bytes even with the same truste
   assert.equal(f.requests.length, 0); assert.equal(f.creates.length, 0); assert.equal(f.completions, 0);
 });
 
-test("interactive oversized FIFO head stays queued with one compaction attempt and bounded prefix evaluations", async () => {
+test("interactive oversized FIFO input is injected in order without estimate-based compaction or rejection", async () => {
   const f = fixture(); let compactions = 0;
-  f.backend.prepareInteractiveInput = async () => ({ decision: "prepare", context: f.ctx, candidates: [{ receipt: { id: "large" }, text: "x".repeat(100_000), attachments: [] }] as never,
+  const candidates = [{ receipt: { id: "large" }, text: "x".repeat(100_000), attachments: [] },
+    { receipt: { id: "next" }, text: "next", attachments: [] }];
+  f.backend.prepareInteractiveInput = async () => ({ decision: "prepare", context: structuredClone(f.ctx), candidates: candidates as never,
     preparationSnapshotHash: "a".repeat(64), estimatorVersion: "queue-input-estimator-v1" });
+  Object.assign(f.backend, {
+    async injectInteractiveInput(request: { receiptIds: string[]; expectedHeadMessageId: string; expectedRevision: number }) {
+      assert.deepEqual(request.receiptIds, ["large", "next"]);
+      assert.equal(request.expectedHeadMessageId, "user"); assert.equal(request.expectedRevision, 1);
+      f.ctx.messages.push(...candidates.map(candidate => ({ role: "user" as const, content: candidate.text })));
+      f.ctx.headMessageId = "message-queued-next"; f.ctx.sessionRevision += candidates.length;
+      f.ctx.interactiveInput!.inputReceiptIds.push(...request.receiptIds);
+      f.ctx.interactiveInput!.inputs.push(...candidates.map(candidate => ({ receiptId: candidate.receipt.id,
+        messageId: `message-queued-${candidate.receipt.id}`, state: "unconfirmed" as const, currentRunInput: true, attachments: [] })));
+      return { headMessageId: f.ctx.headMessageId, revision: f.ctx.sessionRevision };
+    },
+    async getPromptContext() { return f.ctx; },
+  });
   f.access.executeCompaction = async () => { compactions++; return { kind: "unavailable" }; };
   const activeProfile = profile(); activeProfile.model.contextWindowTokens = 10_000;
-  await assert.rejects(f.invoke(activeProfile), (error: unknown) => error instanceof QueueInputBudgetError && error.pauseCode === "input_too_large");
-  assert.equal(compactions, 1); assert.equal(f.discoveries, 4); assert.equal(f.injections, 0);
-  assert.equal(f.requests.length, 0); assert.equal(f.creates.length, 0);
+  await f.invoke(activeProfile);
+  assert.equal(compactions, 0); assert.equal(f.discoveries, 1);
+  assert.equal(f.requests.length, 1); assert.equal(f.creates.length, 1);
+  assert.deepEqual((f.creates[0]!.inputBinding as AgentInteractiveInputBinding).inputReceiptIds, ["receipt", "large", "next"]);
+});
+
+test("interactive oversized existing context proceeds without input_too_large or compaction", async () => {
+  const ctx = context(); ctx.messages = [{ role: "user", content: "x".repeat(100_000) }];
+  const f = fixture({ ctx }); let compactions = 0;
+  f.access.executeCompaction = async () => { compactions++; return { kind: "unavailable" }; };
+  const activeProfile = profile(); activeProfile.model.contextWindowTokens = 10_000;
+  await f.invoke(activeProfile);
+  assert.equal(compactions, 0); assert.equal(f.requests.length, 1);
 });
 
 

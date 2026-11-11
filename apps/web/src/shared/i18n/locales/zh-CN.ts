@@ -1321,7 +1321,7 @@ export default {
       fields: {
         autoCompactThresholdPct: {
           label: "自动压缩阈值(%)",
-          help: "当最近一次模型响应总 token 达到当前模型 context window * 阈值/100 时触发自动压缩。范围 50-99。"
+          help: "仅在工具循环之间，当本次模型响应的实际总 token 达到当前模型 context window * 阈值/100 时触发自动压缩；最终回答不触发。范围 50-99。"
         },
         maxSubtaskDepth: {
           label: "Subtask 最大嵌套深度",

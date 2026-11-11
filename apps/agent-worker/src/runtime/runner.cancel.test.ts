@@ -262,6 +262,7 @@ test("proactive compaction commit outcome 无法确认时不会继续旧 context
     assert.fail("未确认的 commit outcome 不得继续旧 context 的 runModelStep");
   };
 
+  primeCompactionToolResponse(runner);
   await processRunForTest(runner, makeRun("sess_uncertain", "run_uncertain"), new AbortController().signal);
 
   assert.deepEqual(terminalCodes, [], "an unconfirmed write may still persist a completed artifact");
@@ -304,7 +305,7 @@ test("cancelled caller with uncertain manual commit does not select a conflictin
   assert.equal(convergences, 0);
 });
 
-test("ignored proactive commit stops the old Run without entering a model step", async () => {
+test("ignored proactive commit stops the old Run without entering another model step", async () => {
   const intents: string[] = [];
   const apiClient = {
     async markRunWorkInProgress() { return { result: "updated" }; },
@@ -316,6 +317,7 @@ test("ignored proactive commit stops the old Run without entering a model step",
   (runner as any).shouldAutoCompact = () => true;
   (runner as any).executeCompaction = async () => ({ kind: "failed", reason: "commit_outcome_uncertain" });
   (runner as any).runModelStep = async () => assert.fail("ignored commit must not issue a model request");
+  primeCompactionToolResponse(runner);
   await processRunForTest(runner, makeRun("sess_ignore", "run_ignore"), new AbortController().signal);
   assert.deepEqual(intents, []);
 });
@@ -339,16 +341,17 @@ test("proactive CAS skip refreshes prompt and execution profile without auto-com
   (runner as any).executeCompaction = async () => { compactions += 1; return { kind: "skipped", reason: "profile_changed" }; };
   (runner as any).runModelStep = async ({ context }: { context: ReturnType<typeof baseContext> }) => {
     assert.equal(context.headMessageId, "new");
-    assert.equal(context.sessionRevision, 2);
+    assert.equal(context.sessionRevision, 3);
     return { aborted: false, toolCallCount: 0, hasVisibleText: true };
   };
+  primeCompactionToolResponse(runner);
   await processRunForTest(runner, makeRun("sess_cas", "run_cas"), new AbortController().signal);
-  assert.equal(contextReads, 2);
+  assert.equal(contextReads, 3);
   assert.equal(profileReads, 2);
   assert.equal(compactions, 1);
 });
 
-test("fresh pending tools after a proactive skip are processed before any model request", async () => {
+test("fresh pending tools after a proactive skip are processed before the next model request", async () => {
   let reads = 0;
   let pendingCalls = 0;
   const apiClient = {
@@ -356,7 +359,7 @@ test("fresh pending tools after a proactive skip are processed before any model 
     async getExecutionProfile() { return baseProfile(); },
     async getPromptContext() {
       reads += 1;
-      return { ...baseContext(), lastResponseTotalTokens: 1, pendingTools: reads === 1 ? [] : [{ id: "pending" }] };
+      return { ...baseContext(), lastResponseTotalTokens: 1, pendingTools: reads <= 2 ? [] : [{ id: "pending" }] };
     },
   };
   const runner = new AgentRunner(apiClient as any, {} as any, { info() {}, warn() {}, error() {} }, 1);
@@ -368,8 +371,9 @@ test("fresh pending tools after a proactive skip are processed before any model 
     return { paused: true };
   };
   (runner as any).runModelStep = async () => assert.fail("pending tools must run first");
+  primeCompactionToolResponse(runner);
   await processRunForTest(runner, makeRun("sess_tools", "run_tools"), new AbortController().signal);
-  assert.equal(reads, 2);
+  assert.equal(reads, 3);
   assert.equal(pendingCalls, 1);
 });
 
@@ -385,7 +389,7 @@ test("proactive skip followed by successfully executed pending tools does not co
     async getExecutionProfile() { return baseProfile(); },
     async getPromptContext() {
       reads += 1;
-      return { ...baseContext(), lastResponseTotalTokens: 1, pendingTools: reads > 1 && pending ? [{ id: "pending" }] : [] };
+      return { ...baseContext(), lastResponseTotalTokens: 1, pendingTools: reads > 2 && pending ? [{ id: "pending" }] : [] };
     },
     async persistRunTerminalIntent(input: { status: string }) { intents.push(input.status); },
     async convergeRunTerminal() { return { kind: "transitioned", finalStatus: "completed" }; },
@@ -404,13 +408,14 @@ test("proactive skip followed by successfully executed pending tools does not co
   };
   (runner as any).runModelStep = async ({ context, step }: { context: ReturnType<typeof baseContext>; step: number }) => {
     assert.equal(context.pendingTools.length, 0);
-    assert.equal(step, 1);
+    assert.equal(step, 2);
     modelCalls += 1;
     return { aborted: false, toolCallCount: 0, hasVisibleText: true };
   };
 
+  primeCompactionToolResponse(runner);
   await processRunForTest(runner, makeRun("sess_tools", "run_tools"), new AbortController().signal);
-  assert.equal(reads, 3);
+  assert.equal(reads, 4);
   assert.equal(pendingCalls, 1);
   assert.equal(compactions, 1);
   assert.equal(modelCalls, 1);
@@ -439,6 +444,7 @@ test("proactive 非摘要控制面暂不可用可跳过并继续主模型", asyn
       return { aborted: false as const, toolCallCount: 0, assistantMessageId: "assistant", hasVisibleText: true };
     };
 
+    primeCompactionToolResponse(runner);
     await processRunForTest(runner, makeRun("sess_proactive", `run_${compacted.reason}`), new AbortController().signal);
     assert.equal(modelCalls, 1);
     assert.deepEqual(terminalCodes, ["run_completed"]);
@@ -464,6 +470,7 @@ test("proactive 摘要重试耗尽和整体 deadline 均使普通 Run 失败", a
     (runner as any).executeCompaction = async () => compacted;
     (runner as any).runModelStep = async () => assert.fail("摘要失败不得继续使用旧上下文请求主模型");
 
+    primeCompactionToolResponse(runner);
     await processRunForTest(runner, makeRun("sess_failed", `run_${compacted.reason}`), new AbortController().signal);
     assert.deepEqual(terminalCodes, ["run_failed"]);
   }
@@ -759,3 +766,13 @@ test("read probe 期间 signal abort 时不会把根路径错误写成 failed", 
 
   assert.deepEqual(statuses, ["running"]);
 });
+// Proactive compaction is now requested by a fresh tool-calling response, not stored session usage.
+function primeCompactionToolResponse(runner: AgentRunner) {
+  const access = runner as any;
+  const nextModelStep = access.runModelStep;
+  let first = true;
+  access.runModelStep = async (...args: unknown[]) => {
+    if (first) { first = false; return { aborted: false, toolCallCount: 1, responseTotalTokens: 80_000 }; }
+    return nextModelStep(...args);
+  };
+}

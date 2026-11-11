@@ -1323,7 +1323,7 @@ export default {
       fields: {
         autoCompactThresholdPct: {
           label: "Auto-compaction threshold (%)",
-          help: "Auto-compaction triggers when last response total tokens reach current model context window * threshold/100. Range: 50-99."
+          help: "Only between tool iterations, auto-compaction triggers when the current model response's actual total tokens reach current model context window * threshold/100. Final answers do not trigger compaction. Range: 50-99."
         },
         maxSubtaskDepth: {
           label: "Maximum subtask nesting depth",

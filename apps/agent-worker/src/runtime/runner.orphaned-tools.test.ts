@@ -225,12 +225,13 @@ test("processRun: paused pending tools skip orphan confirmation and terminal sel
 
 test("processRun: pending tools refreshed after proactive compaction use the same orphan guard", async () => {
   const harness = createHarness([pendingTool("orphan", "running")], {
-    getContext(call, context) { return call === 1 ? contextFor([]) : context; },
+    getContext(call, context) { return call <= 2 ? contextFor([]) : context; },
   });
+  (harness.runner as any).runModelStep = async () => ({ aborted: false, toolCallCount: 1, responseTotalTokens: 80_000 });
   (harness.runner as any).shouldAutoCompact = () => true;
   (harness.runner as any).executeCompaction = async () => ({ kind: "skipped", reason: "no_prefix" });
   await harness.process();
-  assert.equal(harness.promptCalls, 3);
+  assert.equal(harness.promptCalls, 4);
   assert.equal(harness.terminal[0]?.status, "failed");
   assert.equal(harness.modelCalls, 0);
   assert.deepEqual(harness.providerCalls, []);

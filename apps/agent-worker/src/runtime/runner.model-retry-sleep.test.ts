@@ -357,7 +357,8 @@ for (const scenario of ["direct", "pending_tools", "compaction_committed", "comp
       let clockCalls = 0;
       let randomCalls = 0;
       let pendingDraw: number | undefined;
-      const remainingDraws = [...samples];
+      const compactionScenario = scenario.startsWith("compaction");
+      const remainingDraws = [...(compactionScenario ? [0.1] : []), ...samples];
       let reads = 0;
       let shouldCompactCalls = 0;
       const preparedContexts: Array<number | null> = [];
@@ -392,14 +393,20 @@ for (const scenario of ["direct", "pending_tools", "compaction_committed", "comp
         return scenario === "compaction_committed" ? { kind: "committed" } : { kind: "skipped", reason: "below_threshold" };
       };
       access.executePendingTools = async () => { monotonic += 5000; return { paused: false }; };
+      let modelCalls = 0;
       access.runModelStep = async (params: { contextPreparationMs: number | null }) => {
+        if (++modelCalls === 1 && compactionScenario) {
+          // The first successful response requests compaction; only the subsequent
+          // model request's preparation measurement is asserted below.
+          return { aborted: false, toolCallCount: 1, responseTotalTokens: 80_000 };
+        }
         preparedContexts.push(params.contextPreparationMs);
         return { aborted: false, toolCallCount: 0, hasVisibleText: true, assistantMessageId: "assistant" };
       };
       await access.processRun({ workspaceId: "ws", sessionId: "session", runId: "run", runKind: "user", workspacePath: process.cwd(), workspaceRepoDirNames: [] }, new AbortController().signal);
       assert.deepEqual(preparedContexts, [samples.at(-1)! < 0.1 ? 10 : null]);
-      assert.equal(reads, scenario === "direct" ? 1 : 2);
-      assert.equal(randomCalls, samples.length);
+      assert.equal(reads, scenario === "direct" ? 1 : compactionScenario ? 3 : 2);
+      assert.equal(randomCalls, samples.length + (compactionScenario ? 1 : 0));
       assert.equal(clockCalls, samples.filter((value) => value < 0.1).length * 2);
       assert.equal(remainingDraws.length, 0);
       assert.deepEqual(terminals, ["completed"]);
