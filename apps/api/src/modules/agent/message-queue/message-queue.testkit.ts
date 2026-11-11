@@ -77,6 +77,7 @@ export async function queueFixture(t: TestContext, runtimeKind: "worker" | "loca
   };
   const publications = new AgentAttachmentPublicationService({ db, dataDir });
   const service = new AgentMessageQueueService(store, { dataDir, publications, runtimeControl: runtime, resolveProfile,
+    handoffContinuation: run => lifecycle.handoffQueuedContinuation({ ...run, runtime }),
     resumeSession: request => lifecycle.resumeQueuedSession({ ...request, runtime }) });
   const dispatcher = new AgentMessageQueueDispatcher(store, { lifecycle, runtime, resolveProfile });
   const upload = (filename = "image.png", bytes = PNG) => stageAgentImageUpload({ dataDir, attachmentId: `att_${randomUUID()}`, tempId: `tmp_${randomUUID()}`,

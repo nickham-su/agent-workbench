@@ -10,6 +10,9 @@ export const AGENT_QUEUE_MAX_INJECT_BATCH = 8;
 export const AGENT_ATTACHMENT_RETENTION_LIMIT_BYTES = 1024 * 1024 * 1024;
 export const AGENT_QUEUE_INPUT_POLICY_VERSION = "agent-effective-input-v1";
 export const AGENT_QUEUE_INPUT_ESTIMATOR_VERSION = "queue-input-estimator-v1";
+/** SHA-256 of JSON.stringify([]); only fresh creation may assume this without a snapshot. */
+export const AGENT_QUEUE_INITIAL_STOP_GENERATION =
+  "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945";
 
 export const AgentQueueIdSchema = Type.String({ minLength: 1 });
 export const AgentQueueVersionSchema = Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER });
@@ -65,6 +68,7 @@ export const AgentQueueStopSnapshotSchema = Type.Object({
 export type AgentQueueStopSnapshot = Static<typeof AgentQueueStopSnapshotSchema>;
 export const AgentMessageQueueSnapshotSchema = Type.Object({
   workspaceId: AgentQueueIdSchema, sessionId: AgentQueueIdSchema, queueVersion: AgentQueueVersionSchema,
+  stopGeneration: AgentQueueHashSchema,
   mode: literals(["active", "paused"] as const), pauseCode: Type.Union([AgentQueuePauseCodeSchema, Type.Null()]),
   pendingCount: Type.Integer({ minimum: 0, maximum: AGENT_QUEUE_MAX_PENDING_COUNT }),
   pendingBytes: Type.Integer({ minimum: 0, maximum: AGENT_QUEUE_MAX_PENDING_BYTES }),
@@ -84,6 +88,7 @@ export type AgentMessageQueueSnapshot = Static<typeof AgentMessageQueueSnapshotS
 
 const acceptFields = {
   workspaceId: AgentQueueIdSchema, clientRequestId: AgentQueueIdSchema,
+  stopGeneration: Type.Optional(AgentQueueHashSchema),
   agentId: Type.Optional(AgentQueueIdSchema), uiLocale: Type.Optional(AgentUiLocaleSchema)
 };
 /** UTF-8 byte limit is enforced by the application; schema maxLength is only an early ceiling. */
@@ -119,6 +124,16 @@ export const AgentReceiptDetailResponseSchema = Type.Object({
 export type AgentReceiptDetailResponse = Static<typeof AgentReceiptDetailResponseSchema>;
 export const AgentCancelReceiptRequestSchema = Type.Object({ workspaceId: AgentQueueIdSchema }, strict);
 export type AgentCancelReceiptRequest = Static<typeof AgentCancelReceiptRequestSchema>;
+/** Captured queued IDs only; effect-idempotent retries never target newer messages. */
+export const AgentClearMessageQueueRequestSchema = Type.Object({
+  workspaceId: AgentQueueIdSchema,
+  receiptIds: Type.Array(AgentQueueIdSchema, { maxItems: AGENT_QUEUE_MAX_PENDING_COUNT, uniqueItems: true })
+}, strict);
+export type AgentClearMessageQueueRequest = Static<typeof AgentClearMessageQueueRequestSchema>;
+export const AgentClearMessageQueueResponseSchema = Type.Object({
+  cancelledCount: Type.Integer({ minimum: 0, maximum: AGENT_QUEUE_MAX_PENDING_COUNT }), queue: AgentMessageQueueSnapshotSchema
+}, strict);
+export type AgentClearMessageQueueResponse = Static<typeof AgentClearMessageQueueResponseSchema>;
 export const AgentStopMessageQueueRequestSchema = Type.Object({ workspaceId: AgentQueueIdSchema, operationId: AgentQueueIdSchema }, strict);
 export type AgentStopMessageQueueRequest = Static<typeof AgentStopMessageQueueRequestSchema>;
 export const AgentStopMessageQueueResponseSchema = Type.Object({
@@ -158,6 +173,7 @@ export const AgentMessageQueueEndpoints = {
   receipt: { method: "GET", path: "/api/agent/sessions/:sessionId/receipts/:receiptId" },
   attachment: { method: "GET", path: "/api/agent/sessions/:sessionId/receipts/:receiptId/attachments/:attachmentId/content" },
   cancel: { method: "POST", path: "/api/agent/sessions/:sessionId/receipts/:receiptId/cancel" },
+  clear: { method: "POST", path: "/api/agent/sessions/:sessionId/message-queue/clear" },
   stop: { method: "POST", path: "/api/agent/sessions/:sessionId/message-queue/stop" },
   resume: { method: "POST", path: "/api/agent/sessions/:sessionId/message-queue/resume" },
   abandon: { method: "POST", path: "/api/agent/sessions/:sessionId/message-queue/abandon-unconfirmed" },
@@ -170,6 +186,7 @@ export const AgentQueueErrorCodeSchema = literals([
   "AGENT_SESSION_STOP_PENDING", "AGENT_SESSION_STOP_UNKNOWN", "AGENT_RUNTIME_INSTANCE_MISMATCH",
   "AGENT_STOP_OPERATION_CONFLICT", "AGENT_QUEUE_RUN_DRAINING", "AGENT_QUEUE_RUN_ACTIVE",
   "AGENT_NO_UNCONFIRMED_INPUT", "AGENT_QUEUE_INPUT_NOT_CONFIRMED", "AGENT_ATTACHMENT_PUBLICATION_UNCERTAIN",
+  "AGENT_QUEUE_STOP_GENERATION_CHANGED", "AGENT_QUEUE_EXECUTION_NOT_DRAINED", "AGENT_QUEUE_TOOL_STATE_UNSAFE",
   "AGENT_QUEUE_PAUSED", "SESSION_HAS_PENDING_INPUT", "AGENT_QUEUE_TEXT_TOO_LARGE",
   "AGENT_QUEUE_CAPACITY_EXCEEDED", "AGENT_ATTACHMENT_RETENTION_CAPACITY_EXCEEDED"
 ] as const);

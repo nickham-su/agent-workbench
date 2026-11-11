@@ -13,7 +13,7 @@ import { useAgentMessageQueue, type QueueSubmission } from "./useAgentMessageQue
 
 const identity = { agentId: "server-agent", providerId: "server-provider", modelId: "server-model" };
 function snapshot(overrides: Partial<AgentMessageQueueSnapshot> = {}): AgentMessageQueueSnapshot {
-  return { workspaceId: "queue-w", sessionId: "queue-s", queueVersion: 0, mode: "active", pauseCode: null,
+  return { workspaceId: "queue-w", sessionId: "queue-s", queueVersion: 0, stopGeneration: "0".repeat(64), mode: "active", pauseCode: null,
     pendingCount: 0, pendingBytes: 0, inputIdentity: null, pendingIdentity: null, recoveryIdentity: null,
     unconfirmedInputCount: 0, unconfirmedInputSetHash: null, stop: { state: "none", unresolvedOperationCount: 0, unresolvedTargetCount: 0, code: null }, items: [], ...overrides };
 }
@@ -26,11 +26,11 @@ async function settle() { for (let i = 0; i < 8; i++) { await Promise.resolve();
 function fixture(overrides: Partial<typeof api> = {}) {
   const scope = reactive({ workspaceId: "queue-w", sessionId: "queue-s", active: false, running: false });
   let queue!: ReturnType<typeof useAgentMessageQueue>;
-  const wrapper = mount(defineComponent({ setup() { queue = useAgentMessageQueue(() => scope, { ...api, ...overrides }); return () => h("div"); } }));
+  const wrapper = mount(defineComponent({ setup() { queue = useAgentMessageQueue(() => scope, { ...api, getAgentMessageQueue: async id => snapshot({ sessionId: id }), ...overrides }); return () => h("div"); } }));
   return { scope, queue, wrapper };
 }
 function submission(): QueueSubmission {
-  return { sessionId: "queue-s", composerId: "queue-composer", payload: { workspaceId: "queue-w", clientRequestId: "fixed-request", text: "original", agentId: "server-agent" },
+  return { sessionId: "queue-s", composerId: "queue-composer", payload: { workspaceId: "queue-w", clientRequestId: "fixed-request", text: "original", agentId: "server-agent", stopGeneration: "0".repeat(64) },
     draft: "original", draftRevision: 3, images: [] };
 }
 function panelGlobal(locale = "zh-CN") {
@@ -51,7 +51,7 @@ test("队列面板：N 只来自服务端 queued，暂停仍计数；N=0 时隐�
     assert.equal(wrapper.find('[data-testid="queue-submission-unknown"]').exists(), true);
   } finally { wrapper.unmount(); }
 });
-test("队列面板：停止屏障禁用继续与全量放弃，仍可取消 FIFO 收件", async () => {
+test("队列面板：停止屏障禁用全量放弃且不再展示继续按钮，仍可取消 FIFO 收件", async () => {
   const receipt = accepted().receipt;
   assert.equal(receipt.status, "queued");
   if (receipt.status !== "queued") return;
@@ -59,7 +59,8 @@ test("队列面板：停止屏障禁用继续与全量放弃，仍可取消 FIFO
   try {
     const buttons = wrapper.findAll("button");
     assert.equal(buttons[0]!.attributes("disabled"), "");
-    assert.equal(buttons[1]!.attributes("disabled"), "");
+    assert.equal(buttons.length, 3);
+    assert.equal(buttons.some(button => button.text() === "继续处理"), false);
     assert.equal(buttons.at(-1)!.attributes("disabled"), undefined);
     await buttons.at(-1)!.trigger("click");
     assert.deepEqual(wrapper.emitted("cancel"), [["receipt"]]);
@@ -380,4 +381,65 @@ test("Stop pending and unknown are distinct; quiescence never clears the paused 
     assert.equal(wrapper.find('[data-testid="queue-stop-barrier"]').exists(),false);assert.equal(wrapper.find('[data-testid="queue-paused"]').exists(),true);
     assert.match(wrapper.get('[data-testid="queue-pending-count"]').text(),/3/);
   } finally {wrapper.unmount();}
+});
+
+test("清空未知结果始终重试原 targets，不误删后来消息，busy 真实互斥", async () => {
+  const bodies: Array<{ workspaceId: string; receiptIds: string[] }> = [];
+  const blocked = deferred<Awaited<ReturnType<typeof api.clearAgentMessageQueue>>>();
+  let calls = 0;
+  const receipt = accepted().receipt; assert.equal(receipt.status, "queued"); if (receipt.status !== "queued") return;
+  const item = { ...receipt, textPreview: "old", attachmentCount: 0 };
+  const f = fixture({ clearAgentMessageQueue: async (_id, body) => { bodies.push(body); if (++calls === 1) return blocked.promise; return { cancelledCount: 0, queue: snapshot({ queueVersion: 3, pendingCount: 1, items: [{ ...item, id: "later" }] }) }; } });
+  try {
+    f.queue.apply(snapshot({ queueVersion: 1, pendingCount: 1, items: [item] }));
+    const first = f.queue.clear();
+    await assert.rejects(f.queue.clear(), /already in progress/);
+    blocked.reject(new ApiError({ message: "timeout" })); await assert.rejects(first);
+    assert.equal(f.queue.unknownClear.value, true);
+    f.queue.apply(snapshot({ queueVersion: 2, pendingCount: 1, items: [{ ...item, id: "later" }] }));
+    await f.queue.clear();
+    assert.deepEqual(bodies.map(body => body.receiptIds), [["receipt"], ["receipt"]]);
+    assert.equal(f.queue.snapshot.value?.items[0]?.id, "later"); assert.equal(f.queue.unknownClear.value, false);
+  } finally { f.wrapper.unmount(); }
+});
+
+test("发送保留的重试副本冻结 Stop generation，明确停止拒收保留 File 与草稿", async () => {
+  const bodies: Array<FormData> = [];
+  const f = fixture({ acceptAgentUserMessage: async (_id, body) => { bodies.push(body as FormData); throw new ApiError({ message: "Stop superseded send", status: 409, code: "AGENT_QUEUE_STOP_GENERATION_CHANGED" }); } });
+  try {
+    f.queue.apply(snapshot({ stopGeneration: "a".repeat(64) }));
+    const original = submission(); original.payload.stopGeneration = "a".repeat(64); const file = new File([new Uint8Array([1])], "kept.png", { type: "image/png" });
+    original.images = [{ id: "kept", filename: "kept.png", file }];
+    await assert.rejects(f.queue.submit(original));
+    assert.equal(f.queue.handoff.value?.phase, "rejected"); assert.equal(f.queue.handoff.value?.submission.images[0]?.file, file);
+    f.queue.apply(snapshot({ queueVersion: 1, stopGeneration: "b".repeat(64) }));
+    await assert.rejects(f.queue.resolveUnknown(true));
+    assert.equal(bodies.length, 2);
+    for (const body of bodies) assert.equal(JSON.parse(String(body.get("payload"))).stopGeneration, "a".repeat(64));
+  } finally { f.wrapper.unmount(); }
+});
+
+test("submit requires action-frozen generation: a first snapshot after Stop never resumes a blocked submission", async () => {
+  const loaded = deferred<AgentMessageQueueSnapshot>(); let posts = 0;
+  const f = fixture({ getAgentMessageQueue: async () => loaded.promise, acceptAgentUserMessage: async (_id, body) => {
+    posts++; assert.ok(!(body instanceof FormData)); assert.equal(body.stopGeneration, "b".repeat(64));
+    return accepted(snapshot({ queueVersion: 3, stopGeneration: "b".repeat(64) }));
+  } });
+  try {
+    if (f.queue.handoff.value) f.queue.acknowledgeHandoff(f.queue.handoff.value.submission);
+    f.scope.active = true; await settle();
+    const original = submission(); delete original.payload.stopGeneration;
+    const file = new File(["retained"], "retained.png", { type: "image/png" });
+    original.images = [{ id: "retained-image", filename: file.name, file }];
+    await assert.rejects(f.queue.submit(original), { code: "AGENT_QUEUE_STATE_UNKNOWN" });
+    assert.equal(posts, 0); assert.equal(f.queue.handoff.value, null);
+    loaded.resolve(snapshot({ queueVersion: 2, stopGeneration: "b".repeat(64), mode: "paused", pauseCode: "user_stop",
+      stop: { state: "quiescent", unresolvedOperationCount: 0, unresolvedTargetCount: 0, code: null } }));
+    await settle(); assert.equal(posts, 0); assert.equal(original.payload.stopGeneration, undefined);
+    assert.equal(original.draft, "original"); assert.equal(original.images[0]!.file, file);
+    // Even an already loaded snapshot must not backfill missing action metadata.
+    await assert.rejects(f.queue.submit(original), { code: "AGENT_QUEUE_STATE_UNKNOWN" }); assert.equal(posts, 0);
+    const explicit = submission(); explicit.payload.stopGeneration = f.queue.snapshot.value!.stopGeneration;
+    await f.queue.submit(explicit); assert.equal(posts, 1);
+  } finally { f.wrapper.unmount(); }
 });

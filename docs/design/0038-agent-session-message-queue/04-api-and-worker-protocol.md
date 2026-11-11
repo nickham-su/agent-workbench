@@ -1,8 +1,10 @@
+> 当前Web增量：停止同步清队列，发送统一启动；下文resume作为兼容HTTP能力，不再对应Web按钮。旧收件“暂停仍收件不恢复”规则由本文“Esc增量公共协议”取代。
+
 # API、共享契约与Worker协议
 
 ## 新旧契约隔离
 
-本节新路径／schema均为本次设计，不是现有实现。使用TypeBox唯一契约并复用Fastify schema／OpenAPI。
+本节新路径／schema现已实施。使用TypeBox唯一契约并复用Fastify schema／OpenAPI。
 
 | 入口 | 本次语义 |
 | --- | --- |
@@ -30,7 +32,7 @@ type Receipt = {
   createdAt: number; updatedAt: number;
 };
 type QueueSnapshot = {
-  workspaceId: string; sessionId: string; queueVersion: number;
+  workspaceId: string; sessionId: string; queueVersion: number; stopGeneration: string;
   mode: "active" | "paused"; pauseCode: QueuePauseCode | null;
   pendingCount: number; pendingBytes: number; pendingIdentity: Identity | null;
   unconfirmedInputCount: number;
@@ -76,12 +78,13 @@ type AcceptResult = { receipt: Receipt; deduplicated: boolean; queue: QueueSnaps
 
 | 方法路径 | 请求 | 成功 |
 | --- | --- | --- |
-| POST `/receipts` | 原有JSON字段；或payload+images multipart | 202 AcceptResult，持久受理不等Worker |
+| POST `/receipts` | 原有JSON字段及可选stopGeneration；或payload+images multipart | 202 AcceptResult，持久受理不等Worker |
 | GET `/message-queue` | query workspaceId | 200 QueueSnapshot |
 | GET `/receipts/by-request` | query workspaceId、clientRequestId | 200 receipt+queue；不存在404 |
 | GET `/receipts/:receiptId` | query workspaceId | 200原文／正式消息映射／附件描述／确认状态 |
 | GET `/receipts/:receiptId/attachments/:attachmentId/content` | query workspaceId | 受控图片；真实关联与可信文件校验，无关联404 |
 | POST `/receipts/:receiptId/cancel` | workspaceId | 200 receipt+queue，injected409 |
+| POST `/message-queue/clear` | workspaceId、固定receiptIds（unique，至多100） | 200 cancelledCount+queue；0也是成功 |
 
 - 同requestId同payload返回同receipt的当前状态，已cancelled不复活；异payload409。
 - 指纹包含原始文本、显式Agent/locale和图片字节／顺序／文件名／格式，不含随机tempId或服务端默认解析结果。
@@ -91,20 +94,20 @@ type AcceptResult = { receipt: Receipt; deduplicated: boolean; queue: QueueSnaps
 
 ## 控制与恢复API
 
-- Stop/Abandon的严格body必须在真实HTTP路径拒绝额外字段，而不是擦除后接受。采用路由级validatorCompiler对同一共享TypeBox schema做不修改输入的校验（参照既有analytics的Value.Check方式）；不能依赖Fastify默认AJV removeAdditional，也不全局改变旧路由的校验行为。OpenAPI仍直接复用同一schema。
+- Stop/Abandon/Clear的严格body必须在真实HTTP路径拒绝额外字段，而不是擦除后接受。采用路由级validatorCompiler对同一共享TypeBox schema做不修改输入的校验（参照既有analytics的Value.Check方式）；不能依赖Fastify默认AJV removeAdditional，也不全局改变旧路由的校验行为。OpenAPI仍直接复用同一schema。
 
 ### Stop
 
 `POST /message-queue/stop`：workspaceId、operationId。
 
-- Stop不携带、不校验expectedQueueVersion；schema仅workspaceId/operationId并additionalProperties=false。全新operationId表示新停止，按03原子关闭admission、固定cascade目标、持久barrier和paused(user_stop)+DB-first终态／取消；handoff可保留但不是退出证明。首次提交后唤醒精确停止调解器，不调用旧Session级吞错cancelSession。
+- Stop不携带、不校验expectedQueueVersion；schema仅workspaceId/operationId并additionalProperties=false。全新operationId表示新停止，按03原子关闭admission、固定cascade目标、持久barrier、取消当前Session queued和paused(user_stop)+DB-first终态／取消；handoff可保留但不是退出证明。首次提交后唤醒精确停止调解器，不调用旧Session级吞错cancelSession。
 - resume先成功、随后全新Stop成功是合法时序，最终Stop暂停并取消当时有效Run；无Run仍暂停。已有正常terminal intent则只暂停，不把completed改cancelled。
 - Stop先成功，携带此前版本的resume/abandon必须409；同一Stop operationId重试只重放原结果及当前queue，不再修改控制或取消用户后来恢复的新Run。
 - Stop/inject/finish的fence与终态唯一性保持，完整交错按D-STOP验收；不能把安全优先误写成覆写已提交正常终态。
 
 200返回`{ stopOperation: { operationId, acceptedQueueVersion, targetCount }, queue: QueueSnapshot }`。stopOperation是持久稳定“已记录停止操作”结果，不含runtimeStopped=true；queue是响应时可信当前快照，可能pending/unknown，只有已持久匹配证据才可quiescent。无目标也持久operation与原子关闭证明。相同ID重试不唤醒或重新执行取消，只返回原stopOperation和当前queue；后台独立重试原精确目标。新Stop独立记录，同root复制旧未解除目标并合并当前cascade；任何旧确认不得清新记录。
 
-### Resume
+### Resume（兼容保留，无Web独立入口）
 
 `POST /message-queue/resume`：workspaceId、operationId、expectedQueueVersion。
 
@@ -176,7 +179,7 @@ type StopRunsResponse = {
 
 ### 公共围栏、诊断与安全范围
 
-- 对root／target Session所有会创建或变更运行／历史的入口应用同一持久围栏；新resume/abandon按“访问／删除围栏→已成功操作重放→版本CAS→停止屏障→原有Run／集合／工具校验”执行。旧强制入口即使DB idle也409，不用版本字段绕过；纯读、queued受理／取消和Stop允许，匹配的终态／屏障收敛除外。
+- 对root／target Session所有会创建或变更运行／历史的入口应用同一持久围栏；新resume/abandon按“访问／删除围栏→已成功操作重放→版本CAS→停止屏障→原有Run／集合／工具校验”执行。旧强制入口即使DB idle也409，不用版本字段绕过；纯读、queued取消和Stop允许，匹配的终态／屏障收敛除外；停止期间新queued受理拒绝。
 - 可用现有queue GET持续查询停止状态，不增加在线force-clear接口；UI显示“停止确认中／停止状态未知”，提供重新查询／等待及安全诊断，禁继续／放弃／历史修改。N不包含停止目标数；屏障解除仍paused，工具unknown/lease独立，不能显示“所有工具均停止”。
 - 取消协调器负责首次和后续精确请求；公开旧Stop重试只重放。timeout/连接失败诊断要可见，且不能把响应时当前stop状态写进历史stopOperation稳定结果。
 
@@ -299,3 +302,17 @@ prepare严格union新增如下分支，合法内部认证请求返回HTTP **200*
 | 非权威网络／503／无效响应 | 仍保持原operation重放与Stop屏障，不按次数猜finish／失败 |
 
 Worker和fallback均不调用provider或工具，不确认输入。诊断码为`prepare_snapshot_too_large`与`prepare_cache_capacity`，前者提示缩小上下文，后者提示释放其他Run后由用户显式resume；abandon语义不变。未退休admission或未知Stop仍不得越过。通用503仍可能表示未知写入，不能仅从重试表删错误码绕过此协议。
+
+## Esc增量公共协议
+
+| 接口／元数据 | 权威语义 |
+| --- | --- |
+| `POST /api/agent/sessions/:sessionId/message-queue/clear` | 请求`{workspaceId,receiptIds}`，IDs unique且至多100；回复`{cancelledCount,queue}`。原固定集合求交仍queued，只效果幂等；重复0条成功、不Stop、不重选后续消息。missing／foreign整批404，无副作用 |
+| `POST .../message-queue/stop` | 请求形状及operationId重放保持；新Web Stop事务清当前Session queued，回包附当前快照。旧ID重试不清后来的收件 |
+| 收件JSON／multipart `stopGeneration?` | 可选64位SHA-256字符串；新Web发送及原请求重试冻结原值。兼容未传请求由route onRequest在读取body前捕获代际 |
+| snapshot `stopGeneration` | 必填，相关持久Stop身份集合排序hash；不随pending→quiescent变化，只随新Stop身份变化 |
+| `409 AGENT_QUEUE_STOP_GENERATION_CHANGED` | 本次新收件跨过Stop，明确拒收，保留草稿／图片；不归为结果未知 |
+| `409 AGENT_SESSION_STOP_PENDING/UNKNOWN` | 停止屏障阻止新收件；已受理同requestId仍先幂等重放原receipt，不激活 |
+| `409 AGENT_QUEUE_EXECUTION_NOT_DRAINED/TOOL_STATE_UNSAFE` | 发送统一恢复不能绕过旧执行／历史工具安全检查 |
+
+正文／图片指纹不包含stopGeneration。最终入队、解除暂停／续接激活同一DB事务；运行中收件不错误要求idle。Worker内部安全边界、固定身份、确认、退休及精确停止协议不变。resume／abandon API兼容保留；Web只保留放弃交互，不再渲染独立resume按钮。清空及取消仍保留墓碑及已发布附件安全记账。

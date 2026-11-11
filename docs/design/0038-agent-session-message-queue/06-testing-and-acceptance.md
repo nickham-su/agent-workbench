@@ -1,3 +1,5 @@
+> 本轮增量以末尾A-ESC验收及01／02新规则为准；旧停止保留queued／暂停仍收件不恢复的用例需按新用户共识更新，历史审查与旧测试计数保留在08。
+
 # 测试计划与验收标准
 
 本文保留设计阶段验收清单；下文“本次文档编写没有运行”指设计编写时点。实施后的S7执行记录、分层覆盖与尚未完成的人工验收见[实现与验收](08-implementation-and-acceptance.md)，不将计划自动视为通过。
@@ -20,7 +22,8 @@
 | 工具执行期间发送 | 接口不因busy拒绝；receipt queued，正式head/revision此刻不因入队变化 |
 | 模型streaming期间发送 | 原请求数组不变；queued可见；当前响应不被强制中断 |
 | Worker暂不可用 | 合法受理可成功持久化；推进失败有状态／暂停，不丢receipt，不伪造执行成功 |
-| paused发送 | queued和N增加，仍paused，不自动启动 |
+| Web用户Stop后的新发送 | pending／unknown／未drained明确拒收；安全完成后新用户动作按冻结代际入队并解除暂停，必要时承接未确认输入创建新Run |
+| 失败／预算暂停后的新发送 | 旧queued保留且不后台自动执行；新发送通过原恢复安全、身份／配置检查后解除暂停并启动／续接；检查拒绝则不新收件、不解除暂停，实际执行预算仍可能再次暂停 |
 | 纯图片发送 | text可空，有合法附件，仍正常受理 |
 | 同Session两个首次发送并发 | sequence唯一递增，只激活一个Run，FIFO不倒置 |
 | 非交互Run占用Session | Web可排队但不吸入该Run，正常收敛后创建独立交互Run |
@@ -50,7 +53,8 @@
 | 正常finish事务先提交，随后入队 | 旧意图保持completed；新收件等待旧Run收敛后进入下一Run |
 | complete回包丢失后又入队 | 重试返回原finish，不改成continue；新消息后续推进 |
 | continue回包丢失后队列被取消 | 重试仍continue；下次prepare原子finish，不产生无新输入额外模型调用 |
-| continue后停止／预算到达 | 不再吸收，按cancelled／failed收敛，未注入保留且paused |
+| continue后用户Web Stop到达 | 原子取消当前Session全部queued并paused(user_stop)，关闭注入，按cancelled收敛并可靠等待Runner退出 |
+| continue后失败／预算到达 | 不再吸收，按failed收敛并paused；未注入queued保留，不自动续跑 |
 | 合法无可见文本响应达到现有阈值时入队 | 走相同原子裁决，无悬挂，不遗漏纯文本之外分支；如官方OpenAI合法replay-only。真正无文本／reasoning／tool／合法replay的空流沿用既有provider失败语义，不得为清队列伪造正常完成 |
 | reasoning-only合法完成 | 保留provider原语义，同时按队列决定continue/finish |
 | terminal intent已提交后取消 | 不选择冲突终态，不改变先前持久tuple |
@@ -79,8 +83,8 @@
 | 其中1条注入 | 显示2，不等待整个Run完成 |
 | 再取消1条 | 显示1，取消项不计数 |
 | 最后一条注入／取消 | 提示隐藏 |
-| 停止时仍有2条 | 显示2并另示暂停原因；不降为0 |
-| 暂停后再发送1条 | 显示3，仍暂停 |
+| Web Stop受理前仍有2条 | 原子取消，N降为0，另示停止／暂停状态 |
+| 停止后再发送1条 | pending／unknown／未drained明确拒收；停止安全完成则解除暂停并启动新Run |
 | 草稿、上传中、HTTP尚未确认 | 不加入服务端N；不能前端自增假计数 |
 | 受理回包丢失但轮询已发现 | 按requestId合并，只计一次，确认后正确清理对应草稿 |
 | 正式消息revision不变但另一端入队 | 下一次queue轮询发现N变化 |
@@ -102,11 +106,11 @@
 ## A-STOP / A-PROFILE：控制与身份
 
 - 停止与激活并发两种提交顺序均验证：无停止后新激活遗漏；若激活先成功，新Run进入取消流程。
-- 停止与inject并发：inject先提交的消息保留历史；stop先提交则后续inject失败，queued仍计数。
-- stop重复operationId不能取消后来用户显式继续创建的新Run。
+- Web Stop与inject并发：inject先提交的消息保留正式历史／确认状态；Stop先提交则原queued已cancelled、不再计入N，后续inject失败。失败／预算暂停不等于用户Web Stop，不取消其既有queued。
+- stop重复operationId不能取消后来用户正常发送（或兼容resume）创建的新Run。
 - resume携带旧queueVersion：409，不解除另一端新暂停；同operationId重试只重放原结果。
 - Run尚terminal-intent未收敛时resume返回draining，不创建第二Run；即使DB已terminal，H5屏障pending/unknown仍必须拒绝。
-- queued为空且无未确认输入时stop/resume不创建空Run；有未确认输入时显式resume创建续接Run但不新建user；paused后单纯发送不恢复。
+- queued为空且无未确认输入时stop／兼容resume不创建空Run；正常新发送在安全条件满足后恢复。已有未确认输入时创建新续接Run但不重插原user。
 - 运行中显式不同Agent：409不入队；省略沿用当前Run。
 - 无Run但有queued时另一标签页改默认／显式选择不同Agent：不改旧身份；显式冲突拒绝。
 - 配置被删除／禁用或模型不支持待处理图片：暂停profile_unavailable，不自动换模型。
@@ -123,7 +127,7 @@
 | 相同场景改成全新Stop ID | 属新停止，成功暂停并取消当时有效Run，与旧重试区别可测 |
 | 无Run或已经paused时全新Stop | 持久paused，每个新操作递增queueVersion；相同ID重试不增版本 |
 | inject先提交→Stop | injected正式历史和确认状态不倒退；当前执行停止 |
-| Stop先提交→inject | control／fence拒绝注入，queued保留 |
+| Web Stop先提交→inject | control／fence拒绝注入，queued已cancelled |
 | 正常finish intent先提交→Stop | completed tuple保持，仅暂停后续，不能另写cancelled |
 | Stop已提交cancel intent→迟到正常完成 | fence／终态唯一性阻止覆盖，不能改为completed |
 | Assistant完成并continue→Stop | 已确认输入保持confirmed，当前Run可取消，后续准备／注入受暂停和fence保护；已开始请求仅尽力中断 |
@@ -166,7 +170,7 @@
 
 - 真实SQLite执行03新增DDL，检查跨Workspace／Session／实例的target FK拒绝、非法NULL证据拒绝、复合父键与索引、pending/unknown不能当quiescent；foreign_key_check无行。kind=stop、绑定不可改、集合hash、状态单调性由应用事务测试补足，不能假称CHECK能验证完整证据。
 - 真实RPC schema验证实例UUID、重复targets、非法hash、不同参数同ID、timeout与认证失败；旧idle:boolean和吞错void都不能作为证明。响应乱序不能把quiescent退回pending，错误proofId／实例／hash不能解除。等待预算变化只改变单次等待，固定targets变化才幂等冲突；terminal/paused/删除围栏下仍可读取可信绑定并停止，防调解自锁。
-- 所有入口参数化覆盖root及target Session：resume/abandon、自动推进、旧messages/runs/trigger、scheduled、nested、revert/fork/manual_compaction及历史修改；安全只读、受理queued、取消queued和Stop仍可用。CAS旧版本冲突优先保持M3/M4。
+- 所有入口参数化覆盖root及target Session：resume/abandon、自动推进、旧messages/runs/trigger、scheduled、nested、revert/fork/manual_compaction及历史修改；安全只读、取消queued和Stop仍可用；新queued受理拒绝。CAS旧版本冲突优先保持M3/M4。
 - Web验证“停止确认中／停止状态未知”、N=0仍显示、N仍仅queued、刷新／重连／多端不消失；仅可查询等待，无force-resume；解除后按钮按paused及工具保护恢复，不自动启动。
 
 ## A-ABANDON-SCHEMA：公开hash与全量对象（M4）
@@ -185,8 +189,8 @@
 - 附件格式、数量、单张与合计大小沿用现有限制；跨Workspace、伪造attachmentId、软链替换拒绝。
 - 新消息注入后，模型完成前触发自动压缩：原文与必要附件仍在下一次实际模型输入，不被摘要或裁剪。
 - 旧前缀可以压缩，边界必须完整，不切断tool call/result；压缩与注入CAS冲突重新准备。
-- 队首放不下时不跳过后续消息，未注入的队首保留queued并暂停；取消后，若原未确认输入已可安全处理或已放弃，显式继续可推进后续；不承诺取消一条能修复所有预算故障。
-- API只做输入／图片／容量和身份检查；trigger原子注入后由Worker保守准备，超限时保持injected和未确认保护、暂停，N可为0；显式继续／放弃均可恢复，不能永久卡死。
+- 队首放不下时不跳过后续消息，未注入的队首保留queued并暂停；取消后，若原未确认输入已可安全处理或已放弃，正常新发送（或兼容resume）可推进后续；不承诺取消一条能修复所有预算故障。
+- API只做输入／图片／容量和身份检查；trigger原子注入后由Worker保守准备，超限时保持injected和未确认保护、暂停，N可为0；正常新发送／放弃均可恢复，不能永久卡死。
 - provider错误／结果未知不标记confirmed_at；后续显式交互在新Run读取未确认历史输入时仍保留真实图片，不重复激活旧Run。
 - Worker仅实际合法模型完成才确认source=worker_model；fallback回显完成才确认source=local_fallback；不能伪造模型请求成功。绑定和来源均需证据。
 - 队列取消、放弃、重复上传、receipt正文清理、fork与Workspace逻辑删除均不自动unlink已发布Workspace附件，留存记账不释放。
@@ -239,7 +243,7 @@
 | 场景 | 必须断言 |
 | --- | --- |
 | trigger注入后预算准备失败，N=0 | UI仍展示未确认输入；显式resume新建续接Run，旧user数量不增、trigger引用既有user，原注入Run不改 |
-| Worker启动失败，旧Run恢复failed | paused持久，原Session可继续或放弃，不要求另建Session |
+| Worker启动失败，旧Run恢复failed | paused持久，原Session可正常新发送或放弃，不要求另建Session |
 | 未确认输入+queued并存 | resume优先原输入历史，queued保持FIFO和共同身份；不能queued另起Run绕过 |
 | 同resume操作回包丢失 | 返回同一续接runId，无重复user／Run，enqueue使用同Run对账 |
 | 旧Run尚有效或terminal-intent待收敛 | resume和abandon均409，无新Run、无状态修改 |
@@ -342,3 +346,21 @@
 - 不允许以“后续再做”绕过停止／终态并发、持久幂等、图片、压缩保护、恢复或删除边界。
 - 未通过的行为不得标记完成；已知限制与非目标必须和本目录一致。
 - 无业务代码之外的重构混入，无敏感数据、无外部服务依赖、无破坏性迁移。
+
+## A-ESC：清队列与发送统一启动增量
+
+- A-ESC-1：真实独立两次Esc先clear后Stop；第一步不暂停当前Run，有成功message。长按repeat、IME、busy重入不触发额外操作；clear0不fallback Stop；非running无操作。
+- A-ESC-2：固定ID批量clear严格契约／scope／100条上限／unique，missing或foreign整批回滚；已注入跳过，旧目标重试不取消新消息。附件授权撤销但文件与额度保留。
+- A-ESC-3：Web Stop清当前Session queued＋控制／屏障／版本同事务；COMMIT失败全回滚；旧operation重放不清后来消息；通用recovery不继承Web清空。
+- A-ESC-4：pending／unknown／未drained拒收；服务await发布期间及真实HTTP JSON／multipart流跨完整Stop均被代际拒绝；草稿／File保留，原requestId重放不重新恢复。
+- A-ESC-5：停止安全完成后正常发送启动新Run；失败暂停由新发送续接，原user不重插、原工具不重放、原输入绑定可信且新queued FIFO；profile／unknown工具／执行屏障仍阻止。激活失败回滚receipt和暂停状态。
+- A-ESC-6：停止／继续按钮不存在，abandon与安全诊断仍在；四态Placeholder随服务快照和Stopbusy即时更新，英文对应；首次草稿Session→真实Pane的原ID／File交接不回归。
+- A-ESC-7：实际Chromium使用真实API＋managed Worker＋本地假provider，原整轮工具注入断言保持，并追加Esc清空、repeat、第二次Stop、安全退出、正常发送新Run；厂商／真实用户DB／人工多端不在本轮已验证范围。
+
+
+### A-ESC-H1：用户动作准入同步冻结
+
+- 已有Session尚无scope匹配可信snapshot：不开始发送、不调用ensureSession、不发布sending handoff，保留文字／File；可刷新和提示，但首次snapshot即使返回Stop后quiescent也不能自动续发，必须新的独立用户动作。
+- composable.submit缺少动作冻结generation时明确拒绝，不能读当前snapshot补值，更不能await GET后补取。重试沿原payload generation；未知结果仍按原requestId查询／重试。
+- 已有Session在ensureSession或普通slash prompt准备await期间发生完整Stop：payload仍携带动作前代际，被最终收件事务拒绝；不按较新snapshot替换，草稿／File完整保留。
+- 真正fresh draft首发在动作开始时冻结共享INITIAL_STOP_GENERATION，先创建全新primary Session并保留真实父子Pane交接；创建响应期间发生Stop时第一条仍用初始代际明确拒绝，后续真实Pane的新独立发送使用可信代际成功。现有Session不得默用initial，ensureSession未创建新ID时不得提交。

@@ -1,3 +1,4 @@
+import { AgentClearMessageQueueResponseSchema, type AgentClearMessageQueueRequest, type AgentClearMessageQueueResponse } from "@agent-workbench/shared";
 import { Value } from "@sinclair/typebox/value";
 import type { TSchema } from "@sinclair/typebox";
 import {
@@ -39,6 +40,9 @@ export function getAgentReceiptDetail(sessionId: string, workspaceId: string, re
 }
 export function cancelAgentQueuedReceipt(sessionId: string, workspaceId: string, receiptId: string) {
   return queueRequest<AgentReceiptResponse>("POST", `${sessionPath(sessionId)}/receipts/${encodeURIComponent(receiptId)}/cancel`, AgentReceiptResponseSchema, { data: { workspaceId } });
+}
+export function clearAgentMessageQueue(sessionId: string, body: AgentClearMessageQueueRequest) {
+  return queueRequest<AgentClearMessageQueueResponse>("POST", `${sessionPath(sessionId)}/message-queue/clear`, AgentClearMessageQueueResponseSchema, { data: body });
 }
 export function stopAgentMessageQueue(sessionId: string, body: AgentStopMessageQueueRequest) {
   return queueRequest<AgentStopMessageQueueResponse>("POST", `${sessionPath(sessionId)}/message-queue/stop`, AgentStopMessageQueueResponseSchema, { data: body });

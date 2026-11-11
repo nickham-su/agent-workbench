@@ -198,7 +198,7 @@ for (const winner of ["resume", "abandon"] as const) test(`same-version recovery
 });
 
 test("service recovery chooses queued-only or unpause-only without creating an empty continuation Run", async t => {
-  const f = await queueFixture(t); await f.accept("only-queued"); f.service.stop(scope, "stop-queued");
+  const f = await queueFixture(t); await f.accept("only-queued"); f.store.pause(scope, "run_failed");
   const queued = await f.service.resume(scope.sessionId, { workspaceId: scope.workspaceId, operationId: "resume-queued", expectedQueueVersion: f.store.snapshot(scope).queueVersion });
   assert.equal(queued.action, "dispatch_queued"); assert.equal(queued.runId, null); assert.equal(f.enqueued.length, 0);
   const pending = f.store.listQueued(scope)[0]!; f.service.cancel(scope, pending.id); f.service.stop(scope, "stop-empty");
@@ -310,7 +310,7 @@ for (const first of ["inject", "stop"] as const) test(`inject and Stop preserve 
     assert.equal(f.store.get(scope, queued.receipt.id).status, "injected"); assert.equal(f.store.get(scope, queued.receipt.id).confirmation_state, "unconfirmed");
   } else {
     f.service.stop(scope, "stop-before-inject"); assert.throws(() => f.inputs.inject(request), errorIs(409));
-    assert.equal(f.store.get(scope, queued.receipt.id).status, "queued"); assert.equal(f.store.snapshot(scope).pendingCount, 1);
+    assert.equal(f.store.get(scope, queued.receipt.id).status, "cancelled"); assert.equal(f.store.snapshot(scope).pendingCount, 0);
   }
   assert.equal(f.store.snapshot(scope).mode, "paused");
 });
@@ -453,8 +453,10 @@ test("fallback real finally retries a failed local retirement without retaining 
     f.inputs.complete({...f.run,operationId:"fallback-test-finish",messageId:assistant.id,updatedAt:Date.now()});
     f.finish(f.runId); exited();
   };
+  await f.accept("arrived-before-fallback-finally");
   local.enqueueRun({...f.run,workspacePath:f.workspacePath,workspaceRepoDirNames:[],inputText:"initial"});
-  await exitGate; await f.accept("arrived-after-fallback-finally");
+  await exitGate;
+  await assert.rejects(f.accept("arrived-after-fallback-finally"),errorIs(409,"AGENT_QUEUE_EXECUTION_NOT_DRAINED"));
   assert.equal(await local.drain(3000),true);assert.equal(attempts,4);assert.equal(executions,1);assert.equal(local.quiescent,true);
   assert.ok(await f.dispatcher.dispatchSession(scope));assert.equal(f.enqueued.length,2);
 });
@@ -577,4 +579,31 @@ test("oversized content at a stale head cannot mint a rejected operation", async
   await assert.rejects(service.prepare(request), errorIs(409, "AGENT_INTERACTIVE_INPUT_STALE"));
   assert.equal(f.db.prepare("select 1 from agent_queue_operation where operation_id=?").get(request.operationId), undefined);
   staleHead = false; assert.equal((await service.prepare(request)).decision, "rejected");
+});
+
+test("normal send cannot bypass unsafe historical tool state after a failed Run", async t => {
+  const f = await fixture(t); await f.assistant();
+  flushStreamingParts(f.db, { ...f.run, messageId: "assistant", parts: [{ id: "unsafe-call", position: 0, type: "tool_call", toolName: "bash", input: { command: "fixture" } }], updatedAt: Date.now() });
+  completeAssistantWithExecutions(f.db, { ...f.run, messageId: "assistant", executions: [{ id: "unsafe-execution", callPartId: "unsafe-call", originSessionId: scope.sessionId, originRunId: f.runId, status: "queued" }], updatedAt: Date.now() });
+  updateToolExecution(f.db, { ...f.run, executionId: "unsafe-execution", status: "running", updatedAt: Date.now() });
+  updateToolExecution(f.db, { ...f.run, executionId: "unsafe-execution", status: "unknown", updatedAt: Date.now() });
+  f.finishFailure(); const before = f.store.snapshot(scope);
+  await assert.rejects(f.accept("unsafe-send"), errorIs(409, "AGENT_QUEUE_TOOL_STATE_UNSAFE"));
+  assert.deepEqual(f.store.snapshot(scope), before); assert.equal(f.enqueued.length, 1);
+});
+
+test("send continuation binds every unconfirmed input in chain order and cannot change their identity", async t => {
+  const f = await fixture(t), second = await f.accept("second-original");
+  const prepared = await f.inputs.prepare({ ...f.run, operationId: "multi-original-prepare" }); assert.equal(prepared.decision, "prepare");
+  const injected = f.inputs.inject({ ...f.run, operationId: "multi-original-inject", expectedHeadMessageId: prepared.context.headMessageId,
+    expectedRevision: prepared.context.sessionRevision, receiptIds: [second.receipt.id], preparationSnapshotHash: prepared.preparationSnapshotHash, estimatorVersion: prepared.estimatorVersion });
+  const originals = [f.first.receipt.id, injected.receipts[0]!.id];
+  f.finishFailure(); const before = f.store.snapshot(scope);
+  await assert.rejects(f.service.accept(scope.sessionId, { ...scope, clientRequestId: "conflicting-recovery-send", text: "wrong identity", agentId: "different-agent" }), errorIs(409, "AGENT_QUEUE_AGENT_CONFLICT"));
+  assert.deepEqual(f.store.snapshot(scope), before);
+  const next = await f.accept("send-after-two-unconfirmed"), continuation = f.enqueued.at(-1)!;
+  assert.notEqual(continuation.runId, f.runId); assert.equal(next.receipt.status, "queued");
+  assert.deepEqual(f.db.prepare("select i.receipt_id from agent_interactive_run_input i join agent_user_message_receipt r on r.id=i.receipt_id where i.run_id=? order by r.sequence").all(continuation.runId), originals.map(receipt_id => ({ receipt_id })));
+  assert.equal((f.db.prepare("select count(*) as n from agent_message where type='user'").get() as { n: number }).n, 2);
+  assert.equal(getRunRecord(f.db, continuation.runId)!.triggerMessageId, f.first.receipt.messageId);
 });

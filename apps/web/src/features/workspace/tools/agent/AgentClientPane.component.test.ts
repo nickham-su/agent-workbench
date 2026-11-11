@@ -7,7 +7,7 @@ import { computed, defineComponent, h, KeepAlive, ref, type ComputedRef } from "
 import { agentSessionMetadataReadContextKey, createAgentSessionMetadataReads, type MetadataReadContext, type TimelineMetadataEvent } from "./agentSessionMetadataReadContext";
 import zhCN from "@/shared/i18n/locales/zh-CN";
 import enUS from "@/shared/i18n/locales/en-US";
-import { apiClient } from "@/shared/api/api";
+import { ApiError, apiClient } from "@/shared/api/api";
 
 const [{ mount }, component, markdownComponent, { createI18n }, { nextTick, reactive }, { agentSessionStatusStoreKey }, { message, notification, Modal, Input }, { replaceAgentTimelineSnapshot }] = await Promise.all([
   import("@vue/test-utils"),
@@ -36,7 +36,7 @@ async function clearComponentNotifications() {
 afterEach(clearComponentNotifications);
 
 function queueSnapshot(sessionId = "session-a"): AgentMessageQueueSnapshot {
-  return { workspaceId: "ws-a", sessionId, queueVersion: 0, mode: "active", pauseCode: null,
+  return { workspaceId: "ws-a", sessionId, queueVersion: 0, stopGeneration: "0".repeat(64), mode: "active", pauseCode: null,
     pendingCount: 0, pendingBytes: 0, pendingIdentity: null, inputIdentity: null, unconfirmedInputCount: 0,
     unconfirmedInputSetHash: null, recoveryIdentity: null, stop: { state: "none", unresolvedOperationCount: 0, unresolvedTargetCount: 0, code: null }, items: [] };
 }
@@ -171,6 +171,7 @@ function mountPane(options?: {
   sessionReady?: boolean;
   modelValue?: string;
   initialDraft?: string;
+  initialQueue?: AgentMessageQueueSnapshot | null;
   ensureSession?: (sessionId: string) => Promise<string>;
   forkSession?: (request: { fromSessionId: string; fromMessageId: string }) => Promise<import("@agent-workbench/shared").AgentSessionRecord>;
   contextLocale?: "zh-CN" | "en-US";
@@ -217,9 +218,9 @@ function mountPane(options?: {
           },
         }),
       },
-    } : { ...createMountGlobal(statusStore), components: options?.renderRealTextarea ? { ATextarea: Input.TextArea } : {}, provide: { ...createMountGlobal(statusStore).provide, ...(options?.metadataReadContext ? { [agentSessionMetadataReadContextKey as symbol]: options.metadataReadContext } : {}) } },
+    } : { ...createMountGlobal(statusStore, options?.contextLocale), components: options?.renderRealTextarea ? { ATextarea: Input.TextArea } : {}, provide: { ...createMountGlobal(statusStore).provide, ...(options?.metadataReadContext ? { [agentSessionMetadataReadContextKey as symbol]: options.metadataReadContext } : {}) } },
   });
-  (wrapper.vm as any).queue.apply(queueSnapshot());
+  if (options?.initialQueue !== null) (wrapper.vm as any).queue.apply(options?.initialQueue ?? queueSnapshot());
   return {
     wrapper,
     runState,
@@ -244,10 +245,12 @@ function contextModalVm(wrapper: ReturnType<typeof mountPane>["wrapper"]): Conte
   return wrapper.vm as unknown as ContextModalVm;
 }
 
-function mockContextRequests() {
+function mockContextRequests(options?: { autoTimeline?: boolean }) {
   const previousAdapter = apiClient.defaults.adapter;
   const requests: Array<{ config: InternalAxiosRequestConfig; reply: ReturnType<typeof deferred<AxiosResponse>> }> = [];
   apiClient.defaults.adapter = (config) => {
+    if (options?.autoTimeline && config.url?.endsWith("/timeline"))
+      return Promise.resolve({ config, data: timelineSnapshot([]), status: 200, statusText: "OK", headers: {} });
     const reply = deferred<AxiosResponse>();
     requests.push({ config, reply });
     return reply.promise;
@@ -941,6 +944,7 @@ test("真实 AgentClientPane：旧会话请求回执只登记原 Run，不污染
     setRunState({ status: "running", activeRunId: "old-run-after-switch" });
     await nextTick();
     assert.equal(wrapper.find('[data-testid="agent-run-loading"]').exists(), false, "旧会话运行状态不能在新会话显示");
+    (wrapper.vm as any).queue.apply(queueSnapshot("session-b"));
     vm.draft = "new";
     const newSend = vm.onSend();
     await nextTick();
@@ -2111,14 +2115,14 @@ test("真实 AgentClientPane：未知提交按原 ID 查询，确认旧提交不
     assert.equal(wrapper.find('[data-testid="queue-submission-unknown"]').exists(), false);
   } finally { wrapper.unmount(); http.restore(); }
 });
-test("真实 AgentClientPane：恢复必须确认，放弃使用确认时的全集 hash 和版本，不接收客户端 ID 数组", async () => {
+test("真实 AgentClientPane：放弃必须确认并使用确认时的全集 hash 和版本，不接收客户端 ID 数组", async () => {
   const http = mockContextRequests(); const { wrapper } = mountPane({contextLocale:"zh-CN",renderModalSlots:true}); const vm = wrapper.vm as any;
   const originalConfirm = Modal.confirm; let confirmation: any;
   const modal = Modal as unknown as { confirm: typeof Modal.confirm };
   modal.confirm = ((options: unknown) => { confirmation = options; return { destroy() {}, update() {} }; }) as typeof Modal.confirm;
   try {
     vm.queue.apply({ ...queueSnapshot(), queueVersion: 4, mode: "paused", unconfirmedInputCount: 1, unconfirmedInputSetHash: "a".repeat(64) });
-    vm.onQueueRecovery("abandon"); assert.ok(confirmation); assert.equal(http.requests.length, 0);
+    vm.onQueueAbandon(); assert.ok(confirmation); assert.equal(http.requests.length, 0);
     for (const text of ["1 条", "不可逆", "后续模型不再读取", "历史仍保留", "工具副作用", "留存额度不返还"]) assert.ok(confirmation.content.includes(text), text);
     vm.queue.apply({ ...queueSnapshot(), queueVersion: 5, mode: "paused", unconfirmedInputCount: 2, unconfirmedInputSetHash: "b".repeat(64) });
     assert.ok(confirmation.content.includes("1 条")); assert.equal(confirmation.content.includes("2 条"),false);
@@ -2126,7 +2130,7 @@ test("真实 AgentClientPane：恢复必须确认，放弃使用确认时的全�
     assert.equal(body.expectedQueueVersion, 4); assert.equal(body.expectedUnconfirmedInputSetHash, "a".repeat(64)); assert.equal(body.confirmIrreversible, true); assert.equal("receiptIds" in body, false);
     http.respond(0, { abandonedReceiptIds: ["r"], queue: { ...queueSnapshot(), queueVersion: 6, mode: "paused", pauseCode: "inputs_abandoned" } }); await action;
     vm.queue.apply({...queueSnapshot(),queueVersion:7,mode:"paused",unconfirmedInputCount:1,unconfirmedInputSetHash:"c".repeat(64)});
-    vm.onQueueRecovery("abandon"); await wrapper.setProps({sessionId:"session-b"});
+    vm.onQueueAbandon(); await wrapper.setProps({sessionId:"session-b"});
     const beforeLateConfirm=http.requests.filter(item=>item.config.url?.includes("/message-queue/abandon-unconfirmed")).length;
     await confirmation.onOk();
     assert.equal(http.requests.filter(item=>item.config.url?.includes("/message-queue/abandon-unconfirmed")).length,beforeLateConfirm);
@@ -2174,4 +2178,159 @@ test("真实 textarea Tab/Shift+Tab 和 select 更新均不能绕过队列身份
     await wrapper.get("textarea").trigger("keydown", { key: "Tab" });
     assert.deepEqual(wrapper.emitted("update:modelValue"), [["agent-b"]]);
   } finally { wrapper.unmount(); }
+});
+
+test("真实 textarea：Esc 两次独立按键先清队列再停止，repeat/IME/busy 不会误停，四态 Placeholder 同步", async () => {
+  const http = mockContextRequests();
+  const { wrapper } = mountPane({ contextLocale: "zh-CN", renderRealTextarea: true, runState: baseRunState({ status: "running", activeRunId: "esc-running" }), initialDraft: "keep draft" });
+  const vm = wrapper.vm as any;
+  const item = { id: "esc-queued", clientRequestId: "esc-request", sequence: 1, createdAt: 1, updatedAt: 1, status: "queued" as const,
+    messageId: null, runId: null, confirmationState: null, confirmationSource: null, textPreview: "waiting", attachmentCount: 0 };
+  try {
+    assert.equal(wrapper.get("textarea").attributes("placeholder"), "输入消息加入队列，Esc 停止运行");
+    assert.equal(wrapper.text().includes("取消运行"), false); assert.equal(wrapper.text().includes("继续处理"), false);
+    vm.queue.apply({ ...queueSnapshot(), queueVersion: 1, pendingCount: 1, items: [item] }); await nextTick();
+    assert.equal(wrapper.get("textarea").attributes("placeholder"), "输入消息加入队列，Esc 清空等待消息");
+    await wrapper.get("textarea").trigger("keydown", { key: "Escape", isComposing: true });
+    await wrapper.get("textarea").trigger("keydown", { key: "Escape", repeat: true }); assert.equal(http.requests.length, 0);
+    await wrapper.get("textarea").trigger("keydown", { key: "Escape" });
+    const first = await http.waitFor(0); assert.match(first.url || "", /message-queue\/clear$/);
+    assert.deepEqual(JSON.parse(String(first.data)).receiptIds, ["esc-queued"]);
+    await wrapper.get("textarea").trigger("keydown", { key: "Escape" });
+    await wrapper.get("textarea").trigger("keydown", { key: "Escape", repeat: true }); assert.equal(http.requests.length, 1);
+    http.respond(0, { cancelledCount: 1, queue: { ...queueSnapshot(), queueVersion: 2 } });
+    for (let i = 0; i < 8; i++) await nextTick();
+    assert.equal(wrapper.get("textarea").attributes("placeholder"), "输入消息加入队列，Esc 停止运行");
+    assert.equal(http.requests.filter(row => row.config.url?.endsWith("/stop")).length, 0);
+    await wrapper.get("textarea").trigger("keydown", { key: "Escape", repeat: true }); assert.equal(http.requests.length, 1);
+    await wrapper.get("textarea").trigger("keydown", { key: "Escape" });
+    const stop = await http.waitFor(1); assert.match(stop.url || "", /message-queue\/stop$/);
+    assert.equal(wrapper.get("textarea").attributes("placeholder"), "正在停止，请稍候…");
+    const stopped = { ...queueSnapshot(), queueVersion: 3, mode: "paused" as const, pauseCode: "user_stop" as const,
+      stop: { state: "pending" as const, unresolvedOperationCount: 1, unresolvedTargetCount: 1, code: "stop_requested" as const } };
+    http.respond(1, { stopOperation: { operationId: JSON.parse(String(stop.data)).operationId, acceptedQueueVersion: 3, targetCount: 1 }, queue: stopped });
+    for (let i = 0; i < 8; i++) await nextTick();
+    assert.equal(vm.draft, "keep draft");
+    await vm.onSend(); assert.equal(http.requests.filter(row => row.config.url?.endsWith("/receipts")).length, 0);
+    assert.equal(wrapper.get("textarea").attributes("placeholder"), "正在停止，请稍候…");
+  } finally { wrapper.unmount(); http.restore(); }
+});
+
+test("真实 textarea：过期快照清空实际0条仍不停止；停止完成后正常 Enter 发送，无继续按钮", async () => {
+  const http = mockContextRequests(); const { wrapper, setRunState } = mountPane({ contextLocale: "zh-CN", renderRealTextarea: true, runState: baseRunState({ status: "running", activeRunId: "r" }) });
+  const vm = wrapper.vm as any;
+  try {
+    vm.queue.apply({ ...queueSnapshot(), queueVersion: 1, pendingCount: 1 }); await nextTick();
+    await wrapper.get("textarea").trigger("keydown", { key: "Escape" }); const clear = await http.waitFor(0);
+    assert.match(clear.url || "", /\/clear$/);
+    http.respond(0, { cancelledCount: 0, queue: { ...queueSnapshot(), queueVersion: 2 } });
+    for (let i = 0; i < 8; i++) await nextTick();
+    assert.equal(http.requests.filter(row => row.config.url?.endsWith("/stop")).length, 0);
+    setRunState({ status: "idle", activeRunId: null });
+    vm.queue.apply({ ...queueSnapshot(), queueVersion: 3, mode: "paused", pauseCode: "user_stop", stopGeneration: "b".repeat(64),
+      stop: { state: "quiescent", unresolvedOperationCount: 0, unresolvedTargetCount: 0, code: null } });
+    await nextTick(); assert.equal(wrapper.get("textarea").attributes("placeholder"), "输入消息，Enter 发送");
+    assert.equal(wrapper.text().includes("继续处理"), false);
+    vm.draft = "start again"; const pending = vm.onSend(); const request = await http.waitFor(1);
+    assert.match(request.url || "", /\/receipts$/); assert.equal(JSON.parse(String(request.data)).stopGeneration, "b".repeat(64));
+    http.respond(1, { ...injectedReceipt("next-run"), queue: { ...queueSnapshot(), queueVersion: 4, stopGeneration: "b".repeat(64) } });
+    await pending; assert.equal(vm.draft, "");
+  } finally { wrapper.unmount(); http.restore(); }
+});
+
+function sendPayload(config: InternalAxiosRequestConfig) {
+  return config.data instanceof FormData ? JSON.parse(String(config.data.get("payload"))) : JSON.parse(config.data);
+}
+const stoppedQueue = (sessionId = "session-a"): AgentMessageQueueSnapshot => ({ ...queueSnapshot(sessionId), queueVersion: 2,
+  stopGeneration: "b".repeat(64), mode: "paused", pauseCode: "user_stop",
+  stop: { state: "quiescent", unresolvedOperationCount: 0, unresolvedTargetCount: 0, code: null } });
+
+test("已有Session首个snapshot跨完整Stop：原发送不开始、不自动续发，草稿File保留且可信新发送成功", async () => {
+  const http = mockContextRequests({ autoTimeline: true }); let ensures = 0;
+  const { wrapper } = mountPane({ sessionReady: true, initialQueue: null, initialDraft: "before first snapshot", active: true,
+    ensureSession: async id => { ensures++; return id; } });
+  const vm = wrapper.vm as any, file = new File(["original bytes"], "original.png", { type: "image/png" });
+  vm.pendingImages = [{ id: "first-snapshot-image", filename: file.name, file }];
+  try {
+    const firstAction = vm.onSend(); await firstAction;
+    assert.equal(ensures, 0); assert.equal(http.requests.some(r => r.config.url?.endsWith("/receipts")), false);
+    const pendingSnapshots = http.requests.map((r, i) => [r, i] as const).filter(([r]) => r.config.url?.endsWith("/message-queue"));
+    assert.ok(pendingSnapshots.length > 0, "the initial snapshot really is in flight");
+    for (const [, i] of pendingSnapshots) http.respond(i, stoppedQueue());
+    await new Promise<void>(resolve => setImmediate(resolve)); await nextTick();
+    assert.equal(http.requests.some(r => r.config.url?.endsWith("/receipts")), false);
+    assert.equal(vm.draft, "before first snapshot"); assert.equal(vm.pendingImages[0].file, file);
+    assert.equal(vm.queue.snapshot.value.stopGeneration, "b".repeat(64));
+    const nextAction = vm.onSend();
+    for (let i = 0; i < 20 && !http.requests.some(r => r.config.url?.endsWith("/receipts")); i++) await new Promise(resolve => setImmediate(resolve));
+    const index = http.requests.findIndex(r => r.config.url?.endsWith("/receipts")); assert.ok(index >= 0);
+    assert.equal(ensures, 1); assert.equal(sendPayload(http.requests[index]!.config).stopGeneration, "b".repeat(64));
+    assert.equal((http.requests[index]!.config.data as FormData).getAll("images").length, 1);
+    http.respond(index, { ...injectedReceipt("explicit-after-snapshot"), queue: { ...stoppedQueue(), queueVersion: 3, mode: "active", pauseCode: null } });
+    await nextAction; assert.equal(vm.draft, ""); assert.equal(vm.pendingImages.length, 0);
+  } finally {
+    panePendingRuns(wrapper).remove({ workspaceId: "ws-a", sessionId: "session-a", runKind: "user", runId: "explicit-after-snapshot" });
+    wrapper.unmount(); http.restore();
+  }
+});
+
+for (const wrong of ["workspace", "session"] as const) test(`已有Session不使用${wrong}不匹配snapshot的generation`, async () => {
+  const http = mockContextRequests(); let ensures = 0;
+  const { wrapper } = mountPane({ sessionReady: true, initialQueue: null, initialDraft: "retained", ensureSession: async id => { ensures++; return id; } });
+  const vm = wrapper.vm as any, file = new File(["retained"], "retained.png", { type: "image/png" });
+  try {
+    vm.pendingImages = [{ id: `wrong-${wrong}`, filename: file.name, file }];
+    vm.queue.snapshot.value = { ...queueSnapshot(), ...(wrong === "workspace" ? { workspaceId: "other-workspace" } : { sessionId: "other-session" }) };
+    await vm.onSend(); assert.equal(ensures, 0); assert.equal(http.requests.length, 0);
+    assert.equal(vm.draft, "retained"); assert.equal(vm.pendingImages[0].file, file);
+  } finally { wrapper.unmount(); http.restore(); }
+});
+
+for (const stage of ["ensureSession", "prompt preparation"] as const) test(`已有Session ${stage} await期间Stop：发送保留动作开始时generation并拒收，不替换为新值`, async () => {
+  const http = mockContextRequests({ autoTimeline: true }), ensured = deferred<string>();
+  const draft = stage === "ensureSession" ? "before ensure" : "/ordinary-prompt";
+  const { wrapper } = mountPane({ sessionReady: true, initialDraft: draft, ensureSession: stage === "ensureSession" ? () => ensured.promise : async id => id });
+  const vm = wrapper.vm as any, file = new File(["keep"], "keep.png", { type: "image/png" });
+  vm.pendingImages = [{ id: `stage-${stage}`, filename: file.name, file }];
+  try {
+    const sending = vm.onSend(); await nextTick(); vm.queue.apply(stoppedQueue());
+    if (stage === "ensureSession") ensured.resolve("session-a");
+    else { const prompt = await http.waitFor(0); assert.match(prompt.url || "", /global-prompts/); http.respond(0, { items: [] }); }
+    const index = stage === "ensureSession" ? 0 : 1;
+    const request = await http.waitFor(index); assert.match(request.url || "", /receipts/);
+    assert.equal(sendPayload(http.requests[index]!.config).stopGeneration, "0".repeat(64));
+    http.reject(index, new ApiError({ status: 409, code: "AGENT_QUEUE_STOP_GENERATION_CHANGED", message: "Stop generation changed" }));
+    await sending; assert.equal(vm.draft, draft); assert.equal(vm.pendingImages[0].file, file);
+    assert.equal(vm.queue.handoff.value.phase, "rejected");
+    assert.equal(vm.queue.handoff.value.submission.payload.stopGeneration, "0".repeat(64));
+    assert.equal(http.requests.filter(r => r.config.url?.endsWith("/receipts")).length, 1);
+    const explicit = vm.onSend(); const next = await http.waitFor(index + 1);
+    assert.match(next.url || "", /receipts/); assert.equal(sendPayload(http.requests[index + 1]!.config).stopGeneration, "b".repeat(64));
+    http.respond(index + 1, { ...injectedReceipt(`explicit-after-${stage}`), queue: { ...stoppedQueue(), queueVersion: 3, mode: "active", pauseCode: null } });
+    await explicit; assert.equal(vm.draft, ""); assert.equal(vm.pendingImages.length, 0); assert.equal(vm.queue.handoff.value, null);
+    panePendingRuns(wrapper).remove({ workspaceId: "ws-a", sessionId: "session-a", runKind: "user", runId: `explicit-after-${stage}` });
+  } finally { wrapper.unmount(); http.restore(); }
+});
+
+test("fresh draft未实际创建新Session时不能使用初始generation提交", async () => {
+  const http = mockContextRequests();
+  const { wrapper } = mountPane({ initialQueue: null, initialDraft: "keep draft", ensureSession: async id => id });
+  const vm = wrapper.vm as any, file = new File(["keep"], "keep.png", { type: "image/png" });
+  try {
+    vm.pendingImages = [{ id: "not-created", filename: file.name, file }]; await vm.onSend();
+    assert.equal(http.requests.length, 0); assert.equal(vm.draft, "keep draft"); assert.equal(vm.pendingImages[0].file, file);
+  } finally { wrapper.unmount(); http.restore(); }
+});
+
+
+for (const changed of ["workspace", "session"] as const) test(`fresh draft ensureSession期间切换${changed}后不发送旧动作`, async () => {
+  const http = mockContextRequests(), created = deferred<string>();
+  const { wrapper } = mountPane({ initialQueue: null, initialDraft: "old fresh draft", ensureSession: () => created.promise });
+  const vm = wrapper.vm as any, file = new File(["old bytes"], "old.png", { type: "image/png" });
+  try {
+    vm.pendingImages = [{ id: `old-fresh-${changed}`, filename: file.name, file }]; const sending = vm.onSend(); await nextTick();
+    await wrapper.setProps(changed === "workspace" ? { workspaceId: "ws-other" } : { sessionId: "other-draft" });
+    vm.draft = "new scope draft"; created.resolve("newly-created-old-scope"); await sending;
+    assert.equal(http.requests.length, 0); assert.equal(vm.draft, "new scope draft"); assert.equal(vm.queue.handoff.value, null);
+  } finally { wrapper.unmount(); http.restore(); }
 });

@@ -56,8 +56,9 @@ test("cancel-first cannot activate; cancelling after injection conflicts; FIFO c
 
 test("authority transaction rejects draining historical executions even with idle current pointer", async t => {
   const f = await queueFixture(t);
-  createMessageRunRecord(f.db, { ...scope, runId: "draining", triggerMessageId: null, ...identity, status: "running", createdAt: 1 });
   const a = await f.accept("a");
+  createMessageRunRecord(f.db, { ...scope, runId: "draining", triggerMessageId: null, interactiveQueue: true, ...identity, status: "running", createdAt: 1 });
+  await assert.rejects(f.accept("late"), errorIs(409, "AGENT_QUEUE_EXECUTION_NOT_DRAINED"));
   const activation = f.persistence.activateQueuedUserRun({ ...scope, receiptId: a.receipt.id, runId: "illegal", createdAt: 2 });
   assert.equal(activation.kind, "session-running");
   assert.equal(f.store.get(scope, a.receipt.id).status, "queued");
@@ -113,12 +114,11 @@ test("Stop returns stable acceptance and current pending evidence; old operation
   assert.equal(first.queue.mode, "paused"); assert.equal(first.queue.stop.state, "pending");
   await f.runtime.reconcileStops();
   const calls = f.stopCalls.length;
-  const receipt = await f.accept("queued-after-stop");
+  await assert.rejects(f.accept("queued-after-stop"), errorIs(409, "AGENT_SESSION_STOP_PENDING"));
   const replay = f.service.stop(scope, "stop-a");
   assert.deepEqual(replay.stopOperation, first.stopOperation);
-  assert.ok(replay.queue.queueVersion > first.queue.queueVersion);
-  assert.equal(replay.queue.pendingCount, 1); assert.equal(f.stopCalls.length, calls);
-  assert.equal(receipt.receipt.status, "queued");
+  assert.ok(replay.queue.queueVersion >= first.queue.queueVersion);
+  assert.equal(replay.queue.pendingCount, 0); assert.equal(f.stopCalls.length, calls);
   assert.equal(await f.dispatcher.dispatchSession(scope), null);
 });
 

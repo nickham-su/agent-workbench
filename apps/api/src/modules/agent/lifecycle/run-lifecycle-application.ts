@@ -298,6 +298,14 @@ export class RunLifecycleApplication {
     return activation.response;
   }
 
+  /** A receipt transaction already activated this continuation; never activate it twice. */
+  async handoffQueuedContinuation(command: { workspaceId: string; sessionId: string; runId: string; inputText: string; runtime: StartUserRunCommand["runtime"] }) {
+    const context = this.dependencies.workspaceRunContextReader.get(command.workspaceId);
+    if (!context) throw new HttpError(404, "Workspace not found");
+    const { runtime, ...run } = command;
+    await this.enqueueActivatedRunOrReconcile({ runtime, run: { ...run, ...context } });
+  }
+
   async startQueuedUserRun(command: { workspaceId: string; sessionId: string; receiptId: string; inputText: string; runtime: StartUserRunCommand["runtime"]; assertDispatchAdmission?: () => void }) {
     if (this.closed) throw new HttpError(503, "Agent lifecycle is stopping", "AGENT_LIFECYCLE_STOPPING");
     command.assertDispatchAdmission?.();

@@ -1,3 +1,5 @@
+> 当前Esc增量（15e2590之后）实现及作者相关回归已完成，待独立审查。本文此前阶段通过结论仅属基线／设计历史；本轮状态见末尾增量小节及08第14节。
+
 # 开发任务与详细实施步骤
 
 ## 当前实施状态（2026-11-10，S8后H2增量）
@@ -907,3 +909,12 @@ S7完成后最终全面独立审查**未通过**，发现H1／M1／M2／L1／L2�
 3. Worker在权威响应返回后（未知catch之外）进入既有failed＋paused；fallback同步处理；不改退休、Stop、输入确认及恢复语义。
 4. 新增严格契约、单条／总额／在途名额、旧prepare／finish重放、回滚、stale head、真实fallback及managed Worker→AgentApiClient→输入服务＋SSE／网络unknown／显式resume与abandon回归。
 5. 实际命令、开发失败处置和结果追加至08。交回父任务复用原existing全面审查会话；作者自测不等于独立全面通过。
+
+## 增量S9：Esc清队列与发送统一启动（实施，待独立审查）
+
+基线`15e2590`已由主助理提交。本轮不执行Git／stage／commit。
+
+1. 契约与API：固定目标clear、snapshot／发送Stop代际、明确409；schema26不变。
+2. 权威事务：共享批量取消；显式Web Stop原事务清队列；最终receipt提交组合原恢复安全与新Run绑定；提交后可靠handoff。
+3. Web：删除停止／继续处理按钮；Esc双行为、IME／repeat／busy互斥；未知clear原目标重试；四态Placeholder及英文；新发送统一入口，草稿／File不丢。
+4. 验收：定向及完整相关组、真实Chromium扩增；准确记录失败修正，不把旧5827当成本轮结果。当前独立审查未执行，见08增量记录。

@@ -1,3 +1,4 @@
+import { AgentClearMessageQueueRequestSchema, AgentClearMessageQueueResponseSchema, type AgentClearMessageQueueRequest } from "@agent-workbench/shared";
 import { AgentResumeMessageQueueRequestSchema, AgentResumeMessageQueueResponseSchema, AgentAbandonUnconfirmedInputRequestSchema, AgentAbandonUnconfirmedInputResponseSchema, type AgentResumeMessageQueueRequest, type AgentAbandonUnconfirmedInputRequest } from "@agent-workbench/shared";
 import { Type, type TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
@@ -27,19 +28,22 @@ const schemas = (schema: Record<string, unknown>) => ({ validatorCompiler: queue
 /** Public routes share the application auth boundary; admission opens only after trusted runtime recovery. */
 export async function registerAgentMessageQueueRoutes(app: FastifyInstance, dependencies: { dataDir: string; service: AgentMessageQueueService }) {
   const { service, dataDir } = dependencies;
-  app.post(AgentMessageQueueEndpoints.accept.path, schemas({ params: sessionParams, body: AgentAcceptUserMessageRequestSchema,
-    description: "Durably accepts text JSON or multipart payload + images; returns a receipt, not necessarily a new Run.", response: { 202: AgentAcceptUserMessageResponseSchema } }), async (req, reply) => {
+  const admittedGenerations = new WeakMap<object, string>();
+  app.post(AgentMessageQueueEndpoints.accept.path, { ...schemas({ params: sessionParams, body: AgentAcceptUserMessageRequestSchema,
+    description: "Durably accepts text JSON or multipart payload + images; returns a receipt, not necessarily a new Run.", response: { 202: AgentAcceptUserMessageResponseSchema } }),
+    onRequest: async req => { admittedGenerations.set(req, service.captureStopGeneration((req.params as { sessionId: string }).sessionId)); },
+  }, async (req, reply) => {
     const { sessionId } = req.params as { sessionId: string };
     const contentType = String(req.headers["content-type"] ?? "");
     const mediaType = contentType.split(";", 1)[0]!.trim().toLowerCase();
     if (mediaType === "application/json") {
       if (!Value.Check(AgentAcceptUserMessageRequestSchema, req.body)) throw new HttpError(400, "Invalid receipt payload");
-      return reply.code(202).send(await service.accept(sessionId, req.body as AgentAcceptUserMessageRequest));
+      return reply.code(202).send(await service.accept(sessionId, req.body as AgentAcceptUserMessageRequest, admittedGenerations.get(req)));
     }
     if (mediaType !== "multipart/form-data") throw new HttpError(415, "Unsupported message media type");
     if (!/(?:^|;)\s*boundary=(?:"[^"]+"|[^;\s]+)/i.test(contentType)) throw new HttpError(400, "Invalid multipart boundary");
     const input = await parseAgentMessageMultipart(req, dataDir, AgentAcceptUserMessageMultipartPayloadSchema, AGENT_QUEUE_MAX_TEXT_BYTES * 6 + 4096);
-    return reply.code(202).send(await service.accept(sessionId, input));
+    return reply.code(202).send(await service.accept(sessionId, input, admittedGenerations.get(req)));
   });
   app.get(AgentMessageQueueEndpoints.snapshot.path, schemas({ params: sessionParams, querystring: AgentMessageQueueQuerySchema, response: { 200: AgentMessageQueueSnapshotSchema } }), async req =>
     service.snapshot({ ...(req.query as AgentMessageQueueQuery), sessionId: (req.params as { sessionId: string }).sessionId }));
@@ -58,6 +62,11 @@ export async function registerAgentMessageQueueRoutes(app: FastifyInstance, depe
     if (!Value.Check(AgentCancelReceiptRequestSchema, req.body)) throw new HttpError(400, "Invalid receipt cancellation");
     const { sessionId, receiptId } = req.params as { sessionId: string; receiptId: string };
     return service.cancel({ ...req.body, sessionId }, receiptId);
+  });
+  app.post(AgentMessageQueueEndpoints.clear.path, schemas({ params: sessionParams, body: AgentClearMessageQueueRequestSchema, response: { 200: AgentClearMessageQueueResponseSchema } }), async req => {
+    if (!Value.Check(AgentClearMessageQueueRequestSchema, req.body)) throw new HttpError(400, "Invalid queue clear");
+    const { workspaceId, receiptIds } = req.body as AgentClearMessageQueueRequest;
+    return service.clear({ workspaceId, sessionId: (req.params as { sessionId: string }).sessionId }, receiptIds);
   });
   app.post(AgentMessageQueueEndpoints.stop.path, schemas({ params: sessionParams, body: AgentStopMessageQueueRequestSchema, response: { 200: AgentStopMessageQueueResponseSchema } }), async req => {
     if (!Value.Check(AgentStopMessageQueueRequestSchema, req.body)) throw new HttpError(400, "Invalid queue stop");

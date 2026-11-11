@@ -134,7 +134,7 @@ test("HTTP Stop replays stable acceptance and current snapshot; recovery routes 
   await f.accept("after-stop");
   const retry = await stop();
   assert.deepEqual(retry.json().stopOperation, first.json().stopOperation);
-  assert.equal(retry.json().queue.pendingCount, 2); assert.equal(retry.json().queue.mode, "paused");
+  assert.equal(retry.json().queue.pendingCount, 1); assert.equal(retry.json().queue.mode, "active");
   for (const endpoint of ["resume", "abandon-unconfirmed"]) {
     assert.equal((await f.app.inject({ method: "POST", url: `${base}/message-queue/${endpoint}`, payload: {} })).statusCode, 400);
   }
@@ -172,7 +172,7 @@ test("recovery HTTP never strips extra receipt IDs, hashes, or explicit confirma
     assert.equal(response.statusCode, 400, response.body); assert.equal(f.store.snapshot(scope).queueVersion, snapshot.queueVersion);
   }
   const resumed = await f.app.inject({ method: "POST", url: `${base}/message-queue/resume`, payload: resume });
-  assert.equal(resumed.statusCode, 200, resumed.body); assert.equal(resumed.json().action, "dispatch_queued"); assert.equal(f.enqueued.length, 0);
+  assert.equal(resumed.statusCode, 200, resumed.body); assert.equal(resumed.json().action, "unpaused_only"); assert.equal(f.enqueued.length, 0);
 });
 
 for (const kind of ["resume", "abandon"] as const) test(`HTTP ${kind} replay preserves its original action but reports Stop/enqueue/cancel current snapshot`, async t => {
@@ -201,7 +201,7 @@ for (const kind of ["resume", "abandon"] as const) test(`HTTP ${kind} replay pre
   const later = await f.accept(`queued-after-${kind}`); await assertReplay();
   const cancelled = await f.app.inject({ method: "POST", url: `${base}/receipts/${later.receipt.id}/cancel`, payload: { workspaceId: scope.workspaceId } });
   assert.equal(cancelled.statusCode, 200, cancelled.body); await assertReplay();
-  assert.equal(f.store.snapshot(scope).pauseCode, "user_stop");
+  assert.equal(f.store.snapshot(scope).pauseCode, null);
   if (kind === "abandon") assert.equal(f.store.get(scope, trigger.receipt.id).confirmation_state, "abandoned");
 });
 
@@ -243,4 +243,64 @@ for(const fault of ["stop_pending","invalid_profile"] as const) test(`HTTP recov
   assert.equal(response.statusCode,409,response.body);assert.equal(response.json().code,"AGENT_QUEUE_VERSION_CONFLICT");
   assert.deepEqual(f.store.snapshot(scope),before);assert.deepEqual(f.db.prepare("select count(*) as n from agent_queue_operation").get(),operations);
   assert.deepEqual(f.db.prepare("select count(*) as n from agent_run").get(),runs);assert.equal(f.enqueued.length,1);
+});
+
+for (const image of [false, true]) test(`HTTP legacy ${image ? "multipart image" : "JSON text"} captures Stop generation before body streaming`, { timeout: 15_000 }, async t => {
+  const f = await httpFixture(t);
+  const address = f.app.server.address(); assert.ok(address && typeof address !== "string");
+  let observed!: () => void; const admitted = new Promise<void>(resolve => { observed = resolve; });
+  const capture = f.service.captureStopGeneration.bind(f.service);
+  f.service.captureStopGeneration = id => { const value = capture(id); observed(); return value; };
+  const { request } = await import("node:http");
+  const body = image ? form({ workspaceId: "w1", clientRequestId: "slow-http", text: "slow image" })
+    : { headers: { "content-type": "application/json" }, payload: Buffer.from(JSON.stringify({ workspaceId: "w1", clientRequestId: "slow-http", text: "slow text" })) };
+  let req!: ReturnType<typeof request>;
+  const reply = new Promise<{ status: number; body: string }>((resolve, reject) => {
+    req = request({ hostname: "127.0.0.1", port: address.port, path: `${base}/receipts`, method: "POST",
+      headers: { ...body.headers, "content-length": body.payload.length } }, response => {
+      const chunks: Buffer[] = []; response.on("data", chunk => chunks.push(Buffer.from(chunk)));
+      response.on("end", () => resolve({ status: response.statusCode!, body: Buffer.concat(chunks).toString() }));
+    });
+    req.on("error", reject); req.write(body.payload.subarray(0, 1));
+  });
+  t.after(() => req.destroy());
+  await admitted;
+  const stopped = f.service.stop(scope, "http-stream-stop"); assert.equal(stopped.queue.stop.state, "quiescent");
+  req.end(body.payload.subarray(1));
+  const response = await reply;
+  assert.equal(response.status, 409, response.body);
+  assert.equal(JSON.parse(response.body).code, "AGENT_QUEUE_STOP_GENERATION_CHANGED");
+  assert.equal(f.store.snapshot(scope).pendingCount, 0); assert.equal(f.store.snapshot(scope).mode, "paused");
+});
+
+test("HTTP clear is strict, scoped and independent from Stop; retries use only original receipt IDs", async t => {
+  const f = await httpFixture(t); const a = await f.accept("http-clear");
+  const clear = (payload: unknown) => f.app.inject({ method: "POST", url: `${base}/message-queue/clear`, payload: payload as object });
+  for (const payload of [null, {}, { workspaceId: "w1", receiptIds: [a.receipt.id, a.receipt.id] },
+    { workspaceId: "w1", receiptIds: [], operationId: "not-supported" }, { workspaceId: "w1", receiptIds: Array.from({ length: 101 }, (_, i) => String(i)) }]) {
+    const response = await clear(payload); assert.equal(response.statusCode, 400, response.body);
+  }
+  const before = f.store.snapshot(scope);
+  assert.equal((await clear({ workspaceId: "w1", receiptIds: [a.receipt.id, "foreign"] })).statusCode, 404);
+  assert.deepEqual(f.store.snapshot(scope), before);
+  const cleared = await clear({ workspaceId: "w1", receiptIds: [a.receipt.id] });
+  assert.equal(cleared.statusCode, 200, cleared.body); assert.equal(cleared.json().cancelledCount, 1);
+  assert.equal(cleared.json().queue.mode, "active"); assert.equal(cleared.json().queue.stop.state, "none");
+  const later = await f.accept("http-clear-later");
+  const retry = await clear({ workspaceId: "w1", receiptIds: [a.receipt.id] });
+  assert.equal(retry.statusCode, 200); assert.equal(retry.json().cancelledCount, 0);
+  assert.equal(retry.json().queue.items[0].id, later.receipt.id);
+});
+
+test("HTTP explicit Stop generation rejects stale new sends but never enters the payload dedup fingerprint", async t => {
+  const f = await httpFixture(t); const generation = f.store.snapshot(scope).stopGeneration;
+  const original = await f.accept("fenced-dedup");
+  f.service.stop(scope, "generation-http");
+  const send = (clientRequestId: string) => f.app.inject({ method: "POST", url: `${base}/receipts`, payload: { workspaceId: "w1", clientRequestId, text: "hello", stopGeneration: generation } });
+  const stale = await send("stale-generation"); assert.equal(stale.statusCode, 409);
+  assert.equal(stale.json().code, "AGENT_QUEUE_STOP_GENERATION_CHANGED");
+  assert.equal(Value.Check(AgentQueueErrorCodeSchema, stale.json().code), true);
+  const replay = await send("fenced-dedup"); assert.equal(replay.statusCode, 202, replay.body);
+  assert.equal(replay.json().deduplicated, true); assert.equal(replay.json().receipt.id, original.receipt.id);
+  assert.equal(replay.json().receipt.status, "cancelled"); assert.equal(replay.json().queue.mode, "paused");
 });

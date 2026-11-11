@@ -1,3 +1,5 @@
+import { cancelQueuedReceipts } from "./queued-receipt-cancellation.js";
+import { sessionStopGeneration } from "./queue-stop-generation.js";
 import { createHash } from "node:crypto";
 import { canonicalRuntimeStopJson } from "@agent-workbench/shared/node/agent-run-stop";
 import {
@@ -155,14 +157,19 @@ export class AgentMessageQueueStore {
       const row = this.get(scope, receiptId);
       if (row.status === "injected") throw new HttpError(409, "Receipt has already entered the conversation", "AGENT_RECEIPT_ALREADY_INJECTED");
       if (row.status === "cancelled") return toQueueReceipt(row);
-      const at = this.now();
-      new AgentAttachmentPublicationStore(this.db, this.now).retainReceipt({ ...scope, receiptId }, "cancelled");
-      this.db.prepare("delete from agent_user_message_receipt_attachment where receipt_id=?").run(receiptId);
-      this.db.prepare("update agent_user_message_receipt set status='cancelled',input_text=null,text=null,updated_at=? where id=?").run(at, receiptId);
-      this.db.prepare("update agent_session_queue_control set queue_version=queue_version+1,updated_at=? where session_id=?").run(at, scope.sessionId);
+      cancelQueuedReceipts(this.db, scope, [receiptId], this.now());
       return toQueueReceipt(this.get(scope, receiptId));
     }).immediate();
   }
+
+  clear(scope: QueueScope, receiptIds: readonly string[]) {
+    return this.db.transaction(() => {
+      this.assertScope(scope);
+      return { cancelledCount: cancelQueuedReceipts(this.db, scope, receiptIds, this.now()), queue: this.snapshot(scope) };
+    }).immediate();
+  }
+
+  stopGeneration(scope: QueueScope) { return sessionStopGeneration(this.db, scope); }
 
   pause(scope: QueueScope, code: AgentQueuePauseCode) {
     this.db.transaction(() => { this.ensureControl(scope); pauseMessageQueue(this.db, scope.workspaceId, scope.sessionId, code, this.now()); }).immediate();
@@ -187,7 +194,7 @@ export class AgentMessageQueueStore {
       const state: AgentMessageQueueSnapshot["stop"]["state"] = unresolved.some(row => row.state === "unknown") ? "unknown" : unresolved.length ? "pending" : barriers.length ? "quiescent" : "none";
       const selected = unresolved.find(row => row.state === state);
       return { workspaceId: scope.workspaceId, sessionId: scope.sessionId, queueVersion: control?.queueVersion ?? 0, mode: control?.mode ?? "active", pauseCode: control?.pauseCode ?? null,
-        inputIdentity: this.fixedIdentity(scope),
+        inputIdentity: this.fixedIdentity(scope), stopGeneration: this.stopGeneration(scope),
         pendingCount: rows.length, pendingBytes: rows.reduce((sum, row) => sum + row.payload_bytes, 0), pendingIdentity: rows[0] ? queueIdentity(rows[0]) : null,
         unconfirmedInputCount: unconfirmed.length, recoveryIdentity: unconfirmed[0] ? queueIdentity(unconfirmed[0]) : null,
         unconfirmedInputSetHash: unconfirmed.length ? queuePayloadHash({ version: "agent-unconfirmed-input-set-v1", workspaceId: scope.workspaceId, sessionId: scope.sessionId,

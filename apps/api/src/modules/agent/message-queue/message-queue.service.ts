@@ -1,3 +1,4 @@
+import { newSortableId } from "../../../utils/ids.js";
 import type { AgentResumeMessageQueueRequest, AgentResumeMessageQueueResponse, AgentAbandonUnconfirmedInputRequest } from "@agent-workbench/shared";
 import { AgentQueueRecoveryStore } from "./queue-recovery.store.js";
 import { createHash } from "node:crypto";
@@ -27,6 +28,7 @@ export class AgentMessageQueueService {
     admissionInitiallyClosed?: boolean; dataDir: string; publications: AgentAttachmentPublicationService;
     runtimeControl: Pick<AgentRuntimeControlService, "stopSession" | "reconcileStops">;
     resolveProfile: QueueProfileResolver;
+    handoffContinuation?: (run: QueueScope & { runId: string; inputText: string }) => Promise<void>;
     resumeSession?: (request: AgentResumeMessageQueueRequest & { sessionId: string }) => Promise<AgentResumeMessageQueueResponse>;
   }) { this.accepting = !dependencies.admissionInitiallyClosed; }
 
@@ -65,7 +67,14 @@ export class AgentMessageQueueService {
     return resolved;
   }
 
-  async accept(sessionId: string, input: AcceptQueueMessage): Promise<AgentAcceptUserMessageResponse> {
+  /** Captured before body parsing for old clients without explicit send metadata. */
+  captureStopGeneration(sessionId: string): string {
+    const row = this.store.db.prepare("select workspace_id as workspaceId from agent_session where id=?").get(sessionId) as { workspaceId: string } | undefined;
+    if (!row) throw new HttpError(404, "Session not found");
+    return this.store.stopGeneration({ workspaceId: row.workspaceId, sessionId });
+  }
+
+  async accept(sessionId: string, input: AcceptQueueMessage, admittedStopGeneration?: string): Promise<AgentAcceptUserMessageResponse> {
     const scope = { workspaceId: input.workspaceId, sessionId };
     const images = [...(input.images ?? [])];
     let settled!: () => void;
@@ -88,19 +97,39 @@ export class AgentMessageQueueService {
       const existing = checkExisting();
       if (existing) return { receipt: toQueueReceipt(existing), deduplicated: true, queue: this.store.snapshot(scope) };
       this.store.assertNamespaceAvailable({ ...scope, clientRequestId: input.clientRequestId });
+      const stopGeneration = input.stopGeneration ?? admittedStopGeneration ?? this.store.stopGeneration(scope);
+      const assertSendGeneration = () => {
+        if (this.store.stopGeneration(scope) !== stopGeneration)
+          throw new HttpError(409, "A Stop superseded this send; send again explicitly", "AGENT_QUEUE_STOP_GENERATION_CHANGED");
+      };
+      const recovery = new AgentQueueRecoveryStore(this.store.db);
+      assertSendGeneration();
+      recovery.validateSend(scope);
       const payloadBytes = Buffer.byteLength(inputText, "utf8") + images.reduce((sum, image) => sum + image.byteSize, 0);
       // Predictable validation before publication; repeat it after await inside the actual receipt transaction.
       this.store.assertCapacity(scope, payloadBytes);
       this.resolveProfile(scope, input);
+      const activationState: { continuation: { runId: string; inputText: string } | null } = { continuation: null };
       const accepted = await this.dependencies.publications.publishAndCommit({ ...scope, clientRequestId: input.clientRequestId, payloadHash, images }, ({ images: published }) => {
         this.assertAccepting(); this.store.assertScope(scope);
         const duplicate = checkExisting();
         if (duplicate) return { receiptId: duplicate.id, value: { receipt: toQueueReceipt(duplicate), deduplicated: true } };
+        assertSendGeneration();
+        const needsRecovery = recovery.validateSend(scope);
         const identity = this.resolveProfile(scope, input);
         const row = this.store.insert({ ...scope, clientRequestId: input.clientRequestId, payloadHash, inputText, text: inputText.trim(),
           payloadBytes, identity, uiLocale: input.uiLocale ?? null, images: published });
+        if (needsRecovery) {
+          if (this.store.listUnconfirmed(scope).length && !this.dependencies.handoffContinuation)
+            throw new Error("Queue continuation handoff is not configured");
+          activationState.continuation = recovery.activateForSend(scope, newSortableId("run"), Date.now());
+        }
         return { receiptId: row.id, value: { receipt: toQueueReceipt(row), deduplicated: false } };
       });
+      if (activationState.continuation) {
+        if (!this.dependencies.handoffContinuation) throw new Error("Queue continuation handoff is not configured");
+        await this.dependencies.handoffContinuation({ ...scope, ...activationState.continuation });
+      }
       this.wakeDispatcher?.();
       return { ...accepted, queue: this.store.snapshot(scope) };
     } catch (error) {
@@ -128,9 +157,13 @@ export class AgentMessageQueueService {
   cancel(scope: QueueScope, receiptId: string): AgentReceiptResponse {
     return this.store.db.transaction(() => ({ receipt: this.store.cancel(scope, receiptId), queue: this.store.snapshot(scope) })).immediate();
   }
+  clear(scope: QueueScope, receiptIds: readonly string[]) {
+    this.assertAccepting();
+    return this.store.clear(scope, receiptIds);
+  }
   stop(scope: QueueScope, operationId: string): AgentStopMessageQueueResponse {
     this.assertAccepting(); this.store.assertScope(scope);
-    const stopped = this.dependencies.runtimeControl.stopSession({ workspaceId: scope.workspaceId, rootSessionId: scope.sessionId, operationId });
+    const stopped = this.dependencies.runtimeControl.stopSession({ workspaceId: scope.workspaceId, rootSessionId: scope.sessionId, operationId, clearQueued: true });
     if (!stopped.replayed) void this.dependencies.runtimeControl.reconcileStops().catch(() => undefined);
     return { stopOperation: { operationId: stopped.record.operationId, acceptedQueueVersion: stopped.record.acceptedQueueVersion, targetCount: stopped.record.targetCount }, queue: this.store.snapshot(scope) };
   }

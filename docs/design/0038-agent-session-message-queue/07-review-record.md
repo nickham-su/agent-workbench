@@ -1,3 +1,5 @@
+> 当前Esc增量（15e2590之后）独立首审未通过；H1／M1／L1作者修复并完成定向验证，待原审查会话复审。本文此前阶段通过结论仅属基线／设计历史；本轮状态见末尾增量小节及08第14节。
+
 # 文档审查与修订记录
 
 ## 记录性质与设计审查当时状态
@@ -27,8 +29,8 @@
 
 ### H1：两条恢复出口闭合
 
-- 产品：[R-RECOVERY与停止／继续／放弃](01-requirements-and-product.md#停止继续与放弃)，N=0仍有独立恢复提示。
-- 规则：[D-RECOVER](02-business-rules-and-state-machine.md#d-recover显式继续不重插user)、[D-ABANDON](02-business-rules-and-state-machine.md#d-abandon放弃全部未确认输入)。
+- 产品：[R-RECOVERY与停止／继续／放弃](01-requirements-and-product.md#esc停止与发送统一启动)，N=0仍有独立恢复提示。
+- 规则：[D-RECOVER](02-business-rules-and-state-machine.md#d-recover发送承接恢复不重插user)、[D-ABANDON](02-business-rules-and-state-machine.md#d-abandon放弃全部未确认输入)。
 - 技术：[独立续接与abandon事务](03-architecture-and-data-model.md#受控恢复两个闭合出口)，新增Run输入关联与confirmation_state；trigger引用既有user。
 - 协议：[控制与恢复API](04-api-and-worker-protocol.md#控制与恢复api)，resume operationId去重，abandon全量集合hash+CAS+不可逆确认。
 - 实施：P-RECOVER；验收：A-RECOVER-EXIT及A-STOP。
@@ -193,3 +195,40 @@
 - 141是独立审查定向集合，不并入作者完整八组计数，也不将其描述为reviewer跑过真实managed Worker进程或真实browser；这两类真实环境证据由实现方另列。
 - 不宣称实际用户DB升级、真实外部provider、人工多端／多标签协作与断网验收完成。历史内存DDL／fixture迁移、loopback fake provider、受控RPC、组件与真实Chromium各有证据边界。
 - 本次仅README／07／08的状态、审查与验收metadata归档，无新规范／业务语义变化，无Git／stage／commit；最终暂存由主助理亲自核查diff后执行。
+
+## Esc增量审查状态
+
+> 本节及下一节保留首审时点历史；当前已复审通过，最终结论见文末“Esc增量最终独立复审通过”。
+
+基线`15e2590`的最终通过结论仅覆盖该提交。本轮是新用户共识引起的交互与控制语义变化：固定ID clear、Stop原子清队列、持久Stop代际、发送统一启动及按钮／Placeholder改造。首审前作者4056项相关分组及Chromium19项通过仍不等于独立通过；本轮首审已执行且未通过，H1／M1／L1作者修复后待原会话复审，不提前关闭任何新问题。具体证据在08增量记录。
+
+
+## Esc增量独立首审未通过及修复（待复审）
+
+独立审查会话：`sess_00mwbkx46f00006b8334387035`。首审未通过，reviewer其余373项定向通过（API136／Web227／Shared10），7个额外场景中5个保护成立、2个复现同一H1。373与旧4056仅属首审／先前作者证据，不替代修复后验证。
+
+| 编号 | 优先级／处置 | 作者修复，尚待reviewer确认 |
+| --- | --- | --- |
+| H1 | 高／Fix | 已有Session无scope匹配可信snapshot时不开始发送，不调用ensureSession，不发布sending副本；只刷新／提示且保留草稿File。同步冻结动作准入代际，composable缺字段直接拒绝，删除全部异步补取／替换。真正fresh draft创建路径在动作开始冻结共享INITIAL_STOP_GENERATION；ensureSession返回原ID不提交，保留父子Pane交接与scope检查 |
+| M1 | 中／Fix | 06现行受理表、continue停止／预算表及Stop/inject断言改为新规则；明确用户Web Stop清queued，失败／预算暂停保留旧queued，并由安全的新发送恢复，不只依赖页首覆盖声明 |
+| L1 | 低／Fix | 08仅保留单个末尾换行；以字节／空白检查验证，不执行Git |
+
+fresh事实核查：生产AgentToolView仅对本地draft传sessionReady=false；ensureSessionCreated先匹配draft，随后调用createAgentSession POST创建primary，API SessionInteractionApplication.createSession分配全新ID。非draft只返回原ID，Pane不在该分支使用initial；消失draft返回原ID也被fresh guard拒绝。已有workspace/session请求scope保护继续保留，真实创建引起的旧Pane卸载仍通过原同步sending publication交接，不为修H1牺牲正常首发。
+
+terminal-intent冲突由reviewer独立确认是既有安全拒绝且维持cancelled，本轮WontFix：不吞错、不放松终态规则，风险可接受，不作为新增未修复缺陷。H1／M1／L1仅作者已修复，不标独立Resolved；当前待原审查会话复审。修复后实际命令与计数见08后续记录。
+
+## Esc增量最终独立复审通过
+
+原审查会话`sess_00mwbkx46f00006b8334387035`明确复审通过；主助理已亲自核验`.tmp-tests/review-esc/re-review-summary.json`及关键代际准入代码，并确认Git diff空白检查通过。作者不冒充执行该Git核查，本轮未执行Git。
+
+| 本轮问题 | 最终独立状态 |
+| --- | --- |
+| H1：发送代际晚绑定 | Resolved |
+| M1：06现行验收表冲突 | Resolved |
+| L1：08末尾空行 | Resolved |
+
+- 本轮3/3关闭，Open 0，无新增问题；不与基线或设计审查的同名编号混计。首审未通过和修复过程保留在上文。
+- reviewer独立339/339：API81＋Web238＋Shared11＋crossLayer6＋UI3；fail／cancelled／skipped均0。reviewer仅核读作者Chromium19项，未独立重跑，浏览器不计入339。
+- 作者最终同源树五组4069/4069：Shared151、API unit1977（含root-cwd插件8）、完整61文件API integration596（并发2）、managed Worker36、Web1309（完整31组件）；fail／cancelled／skipped均0。另有root typecheck、API／Worker build、API test gate及harness strictcheck通过。命令及机器证据见[08最终归档](08-implementation-and-acceptance.md#16-esc增量最终独立复审通过与同源树归档)。
+- 作者Chromium沿用修后`agent-queue-oQYzPB/result.json`，19/19且cleanup完成；本轮28份非文档正式文件匹配当时修复哈希，当前1430份源文件／配置before/after一致，不机械复跑浏览器。
+- 本次只修改README／07／08状态metadata及07两个失效本地锚点；不修改生产／协议／测试语义。仅验证本轮相关五组，不扩称全仓八组；真实用户DB升级、外部provider联调、人工多端／断网验收不在结论范围。临时gate首次cwd错误及旧外部重定向偏差在08如实归档。

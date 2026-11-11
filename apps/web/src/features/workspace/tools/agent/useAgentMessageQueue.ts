@@ -26,6 +26,7 @@ export type QueueSubmissionHandoff = {
 // A real Session can mount before its draft Pane publishes the first attempt.
 // Reactive publication, not a one-time lookup at mount, is the ownership handoff.
 const submissionHandoffs = shallowReactive(new Map<string, QueueSubmissionHandoff>());
+const uncertainClears = new Map<string, string[]>();
 const uncertainStops = new Map<string, string>();
 const uncertainControls = new Map<string, PendingControl>();
 const keyOf = (scope: Scope) => JSON.stringify([scope.workspaceId, scope.sessionId]);
@@ -35,7 +36,7 @@ const uncertain = (error: unknown) => !(error instanceof ApiError) || error.stat
 // Runtime-derived inputIdentity and internal proof metadata are not versioned here.
 function versionedQueueFields(q: AgentMessageQueueSnapshot) {
   const identity = (value: AgentMessageQueueSnapshot["pendingIdentity"]) => value ? [value.agentId, value.providerId, value.modelId] : null;
-  return JSON.stringify([q.mode, q.pauseCode, q.pendingCount, q.pendingBytes, identity(q.pendingIdentity),
+  return JSON.stringify([q.stopGeneration, q.mode, q.pauseCode, q.pendingCount, q.pendingBytes, identity(q.pendingIdentity),
     q.unconfirmedInputCount, q.unconfirmedInputSetHash, identity(q.recoveryIdentity),
     [q.stop.state, q.stop.unresolvedOperationCount, q.stop.unresolvedTargetCount, q.stop.code],
     q.items.map(item => [item.id, item.clientRequestId, item.sequence, item.createdAt, item.updatedAt,
@@ -48,6 +49,7 @@ export function useAgentMessageQueue(getScope: () => Scope, api = queueApi) {
   const handoff = computed(() => submissionHandoffs.get(keyOf(getScope())) ?? null);
   const unknownSubmission = computed(() => handoff.value && (handoff.value.phase === "sending" || handoff.value.phase === "unknown") ? handoff.value.submission : null);
   const unknownStop = ref(false);
+  const unknownClear = ref(false);
   const unknownControl = shallowRef<PendingControl | null>(null);
   const busy = ref(false);
   let generation = 0;
@@ -78,7 +80,7 @@ export function useAgentMessageQueue(getScope: () => Scope, api = queueApi) {
     clearTimeout(timer);
     if (stopped || !getScope().active) return;
     const q = snapshot.value;
-    const frequent = getScope().running || !q || q.pendingCount > 0 || q.mode === "paused" || q.unconfirmedInputCount > 0 || (q.stop.state === "pending" || q.stop.state === "unknown") || unknownSubmission.value || unknownStop.value || unknownControl.value;
+    const frequent = getScope().running || !q || q.pendingCount > 0 || q.mode === "paused" || q.unconfirmedInputCount > 0 || (q.stop.state === "pending" || q.stop.state === "unknown") || unknownSubmission.value || unknownStop.value || unknownClear.value || unknownControl.value;
     timer = setTimeout(() => void refresh(), frequent ? 800 : 3000);
   }
   async function refresh() {
@@ -94,6 +96,7 @@ export function useAgentMessageQueue(getScope: () => Scope, api = queueApi) {
     finally { if (token === generation && abort === request) schedule(); }
   }
   async function scopedAction<T>(action: (scope: Scope, token: number, key: string) => Promise<T>): Promise<T> {
+    if (busy.value) throw new ApiError({ message: "A queue action is already in progress", code: "AGENT_QUEUE_ACTION_BUSY" });
     const scope = { ...getScope() }, token = generation;
     busy.value = true;
     try { return await action(scope, token, keyOf(scope)); }
@@ -113,17 +116,22 @@ export function useAgentMessageQueue(getScope: () => Scope, api = queueApi) {
   async function submit(submission: QueueSubmission) {
     return scopedAction(async (scope, token) => {
       if (submission.payload.workspaceId !== scope.workspaceId) throw new Error("AGENT_QUEUE_SCOPE_CHANGED");
-      // Publish under the server-created identity even when the submitting draft
-      // Pane has already unmounted. Its successor reacts to this publication.
+      // Admission metadata must already be frozen by the user action, never
+      // fetched here: an awaited snapshot may belong to a later Stop generation.
+      if (!submission.payload.stopGeneration)
+        throw new ApiError({ message: "Queue state is unavailable; send again after it loads", code: "AGENT_QUEUE_STATE_UNKNOWN" });
+      // Publish before the first await: ensureSession may have replaced the draft Pane.
       publishSubmission(submission, "sending");
+      let attempted = false;
       try {
+        attempted = true;
         const body = submission.images.length ? createAgentMessageFormData(submission.payload, submission.images) : { ...submission.payload, text: submission.payload.text! };
         const result = await api.acceptAgentUserMessage(submission.sessionId, body);
         publishSubmission(submission, "accepted", { queue: result.queue });
         apply(result.queue, scope, token);
         return { result, submission };
       } catch (cause) {
-        publishSubmission(submission, uncertain(cause) ? "unknown" : "rejected", { status: cause instanceof ApiError ? cause.status : undefined });
+        publishSubmission(submission, attempted && uncertain(cause) ? "unknown" : "rejected", { status: cause instanceof ApiError ? cause.status : undefined });
         throw cause;
       }
     });
@@ -142,6 +150,24 @@ export function useAgentMessageQueue(getScope: () => Scope, api = queueApi) {
   watch(handoff, entry => {
     if (entry?.phase === "accepted" && entry.queue) apply(entry.queue);
   }, { immediate: true, flush: "sync" });
+  async function clear() {
+    return scopedAction(async (scope, token, key) => {
+      const receiptIds = uncertainClears.get(key) ?? snapshot.value?.items.map(item => item.id);
+      if (!receiptIds) throw new ApiError({ message: "Queue state is unavailable", code: "AGENT_QUEUE_STATE_UNKNOWN" });
+      uncertainClears.set(key, [...receiptIds]);
+      if (token === generation) unknownClear.value = true;
+      try {
+        const result = await api.clearAgentMessageQueue(scope.sessionId, { workspaceId: scope.workspaceId, receiptIds });
+        uncertainClears.delete(key);
+        if (token === generation) unknownClear.value = false;
+        apply(result.queue, scope, token);
+        return result;
+      } catch (cause) {
+        if (!uncertain(cause)) { uncertainClears.delete(key); if (token === generation) unknownClear.value = false; }
+        throw cause;
+      }
+    });
+  }
   async function stop() {
     return scopedAction(async (scope, token, key) => {
       const operationId = uncertainStops.get(key) ?? createAgentClientRequestId();
@@ -200,10 +226,11 @@ export function useAgentMessageQueue(getScope: () => Scope, api = queueApi) {
     generation++; diagnosedConflictVersion = null; abort?.abort(); clearTimeout(timer); snapshot.value = null; error.value = null; busy.value = false;
     const key = keyOf(getScope());
     unknownStop.value = uncertainStops.has(key);
+    unknownClear.value = uncertainClears.has(key);
     unknownControl.value = uncertainControls.get(key) ?? null;
     void refresh();
   }, { immediate: true });
   watch([() => getScope().active, () => getScope().running], () => { if (getScope().active) void refresh(); else { clearTimeout(timer); abort?.abort(); } });
   onBeforeUnmount(() => { stopped = true; generation++; clearTimeout(timer); abort?.abort(); document.removeEventListener("visibilitychange", visible); });
-  return { handoff, acknowledgeHandoff, snapshot, error, busy, identity, stopBlocked, historyBlocked, unknownSubmission, unknownStop, unknownControl, apply, refresh, submit, resolveUnknown, stop, control, cancel };
+  return { handoff, acknowledgeHandoff, snapshot, error, busy, identity, stopBlocked, historyBlocked, unknownSubmission, unknownStop, unknownClear, unknownControl, apply, refresh, submit, resolveUnknown, clear, stop, control, cancel };
 }

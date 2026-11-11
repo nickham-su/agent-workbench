@@ -1,3 +1,5 @@
+> 当前增量（15e2590之后）：Web Stop改为事务内清当前队列，发送统一启动；固定目标clear与持久Stop代际无需数据库迁移。旧版通过结论仅覆盖基线，详见本文末“Esc增量事务”。
+
 # 架构、实体、恢复与预算
 
 ## 权威边界
@@ -362,18 +364,18 @@ create index idx_agent_stop_target_instance
 
 ## 受控恢复：两个闭合出口
 
-### 继续已有输入
+### 新发送承接已有输入（resume兼容）
 
-显式resume在所有相关停止屏障已解除、旧Run DB完全terminal、既有工具安全检查通过、Workspace可写、control版本匹配、身份和静态输入／原有发布记账校验通过后，原子选择：
+正常发送在Stop代际匹配、所有相关停止屏障解除、旧Run DB完全terminal且实际执行drained、既有工具安全检查通过、Workspace可写、身份和静态输入／原有发布记账校验通过后，在最终receipt事务内原子选择（兼容resume仍独立CAS）：
 
 | 状态 | 动作 |
 | --- | --- |
 | 有未确认正式输入（无论是否queued） | 创建新的交互续接Run，不创建user；引用最早未确认user作为trigger，关联全部未确认输入；queued保持FIFO等待安全边界 |
 | 无未确认输入，有queued | 恢复active，按普通队首激活路径推进 |
-| 两者都没有 | 仅解除暂停，不创建Run |
+| 发送前两者都没有 | 本次receipt进入queued，恢复active后普通激活；兼容resume则仅解除暂停不建Run |
 
-- 续接激活是独立store事务，不能调用“必定插入新user”的原激活事务；事务检查所有相关停止屏障已解除、旧Run已收敛、control CAS、输入集与身份未变，写Run和输入关联及resume操作结果。
-- 事务外复用同Run enqueue未知结果对账；同resume operationId丢回包重试返回原runId，不创建第二次续接。
+- 续接权威为AgentQueueRecoveryStore共享激活方法，不能调用“必定插入新user”的原激活事务。新发送把receipt、暂停解除、Run和输入关联放在最终附件publication commit同步事务；兼容resume独立事务保存原control CAS和操作结果。
+- 事务外复用同Run enqueue未知结果对账；新发送按clientRequestId receipt先去重，兼容resume按operationId重放原runId，二者都不重新激活。
 - 仅未确认输入能触发空队列续接，全部confirmed／abandoned时不能再次触发旧输入。
 - 不回放旧tool executions，不恢复旧Run；历史工具结果仍作为上下文，外部副作用不撤销、不承诺exactly-once。
 - API不做精确token适配；Worker在实际请求前执行下述保守预算。仍不可容纳时再次安全暂停，用户可选择放弃，不能无限后台重试。
@@ -384,7 +386,7 @@ create index idx_agent_stop_target_instance
 - 仅所有相关停止屏障已解除、无有效Run（含无terminal-intent待收敛）、Workspace可写时允许。集合／版本变化409，无副作用。
 - 放弃不依赖旧Agent/model仍有效、上下文窗口或留存剩余额度；否则配置删除／超限会再次堵死恢复出口。只校验范围、停止屏障已解除、无Run、版本／集合和显式确认。
 - 同事务将confirmation_state改abandoned、写abandoned_at、持久paused(inputs_abandoned)、递增queueVersion及操作结果；不改receipt.status、消息图、originRun或确认来源。
-- queued保持原身份及顺序，不自动取消或执行。放弃后要推进queued仍需新的显式resume；无queued时可解除暂停或发送新输入。
+- queued保持原身份及顺序，不自动取消或执行。放弃后要推进queued需正常新发送（兼容resume仍保留）；无queued时正常发送新输入。
 - 已confirmed输入一律不允许放弃；不是“删除用户历史”、不是伪造确认、不是撤销工具。
 - 有效模型上下文统一排除abandoned收件的user／附件；历史timeline仍展示。主PromptContext、primary-materializer、compaction source、provider私有replay必须使用同一`effectiveInputPolicy`。
 - 与abandoned输入绑定的未完成／superseded Assistant不得被provider replay恢复；原始持久记录保留，投影层排除。已合法完成Assistant会使输入confirmed，因此不会被放弃。
@@ -436,7 +438,7 @@ E = ceil(1.25 * (ceil(B/3) + 8*M + 4*P + 8*Tcall + 8*Tresult + 8192*I + 256))
 - 每安全边界最多评估0..8条FIFO前缀；针对每个候选虚拟上下文发现实际工具，计算公式，选择可容纳的最长前缀并冻结该准备结果。不得跳过队首；候选取消／head CAS变化则重准备。
 - 同一准备周期最多尝试一次旧完整轮次前缀压缩，随后重算；planner新增“最早unconfirmed输入前”的硬保护，不得沿原固定尾部策略越界。
 - 额外queued先预算再注入。没有任何前缀可放入则queued保留，暂停input_too_large并收敛；不能先注入再摘要新消息。
-- 空闲trigger先原子注入再由Worker准备，API只校验输入／图片／容量／可解析身份，不承诺token预检。准备失败时trigger保留injected+unconfirmed；通过继续或放弃恢复，不永久卡死。
+- 空闲trigger先原子注入再由Worker准备，API只校验输入／图片／容量／可解析身份，不承诺token预检。准备失败时trigger保留injected+unconfirmed；通过新发送或放弃恢复，不永久卡死。
 - 已注入unconfirmed输入直到合法确认前保持原文／必要附件，不能因压缩、recovery或primary materialization降级。abandoned才从有效上下文和保护集合排除。
 - provider明确context-too-large：本次请求不无限retry，不再自动摘要未确认输入，收敛failed并paused(provider_context_too_large)；输入确认不写入。网络／其他错误继续既有有限重试规则。
 - primary-materializer和compaction source的trigger-only媒体分支必须改为同一可信媒体集合；实际模型、预算、压缩源及provider replay都按同一有效策略投影。
@@ -532,4 +534,13 @@ E = ceil(1.25 * (ceil(B/3) + 8*M + 4*P + 8*Tcall + 8*Tresult + 8192*I + 256))
 - 新裁决在既有`agent_queue_operation`事务中持久化，内容仅为`{runId,response:{operationId,decision:"rejected",reason}}`；不持久正文、context、candidates、queue，不占用冻结slot，不改schema26。COMMIT失败不能返回假成功，失败替换不释放旧slot。
 - 先验证scope并重放已有prepare／finish／expired／rejected，再判断新操作是否能接纳；新操作须通过Run／Stop／安全工具边界／当前head验证。单条／总额检查在上下文异步读取后的权威事务内，在途名额拒绝也在同一类事务内验证当前边界。continue后的空队列finish优先于容量拒绝。
 - rejected墓碑不依赖内存，API重启、额度释放或后续队列变化不改变原reason；每次附fresh queue。当前容量不能把旧prepare／finish改判rejected。原prepare冻结内容已释放时仍为expired。
-- Worker与fallback将权威拒绝送入现有failed终态及paused队列生命周期，诊断分别为`prepare_snapshot_too_large`／`prepare_cache_capacity`；保留injected未确认及queued，真实finally后沿用原退休通知。用户只通过已有resume／abandon显式退出暂停，不添加隐式调度或新协调实体。
+- Worker与fallback将权威拒绝送入现有failed终态及paused队列生命周期，诊断分别为`prepare_snapshot_too_large`／`prepare_cache_capacity`；保留injected未确认及queued，真实finally后沿用原退休通知。用户通过正常新发送或abandon显式退出暂停（兼容resume仍保留），不添加隐式调度或新协调实体。
+
+## Esc增量事务
+
+- schema保持26，`agent_queue_operation.kind`不新增clear。clear用固定receipt IDs＋集合求交提供效果幂等，不保存批量动作日志，不重建operation表／外键。
+- `queued-receipt-cancellation.ts`是单条cancel、批量clear及Web Stop共享的唯一取消权威：先验证整组scope，再retain已发布附件、撤销receipt附件授权、清正文、置cancelled并推进queueVersion；不unlink、不减留存额度。
+- 新Web Stop显式传内部clearQueued策略，原operation重放最先返回；当前Session queued取消、暂停、admission关闭、acceptedQueueVersion与屏障在同一事务提交。默认通用Stop保持旧行为，不遍历targets清队列。
+- `queue-stop-generation.ts`从所有相关持久barrier身份排序hash；无新列、无时间戳猜测。代际随收件请求冻结，最终事务对比，覆盖完整Stop结束后的迟到提交。
+- 附件发布仍独立记账；最终同步commit回调组合代际／profile／原恢复安全检查、receipt插入、控制active及必要续接Run／原输入绑定。任何失败回滚业务事务，已发布文件保留。
+- `AgentQueueRecoveryStore.activateRecoveredInputs`统一兼容resume与发送的业务规则；发送不另建恢复幂等账本，原clientRequestId receipt墓碑承担重复收件保护。物理handoff仅在提交后复用lifecycle enqueueActivatedRunOrReconcile。

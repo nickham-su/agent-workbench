@@ -1922,13 +1922,13 @@ for (const decision of ["continue", "finish"] as const) test(`worker 队列H1: S
   const before = f.queue.service.snapshot(f.scope); release.resolve();
   await waitUntil(async () => f.fixture.internalRpcCalls.filter(call => call.url === AgentApiEndpoints.completeInteractiveAssistant.path).every(call => call.statusCode === 200), 10_000);
   assert.deepEqual(f.queue.service.snapshot(f.scope), before); assert.equal(f.fixture.llmStub!.requests.length, 1);
-  assert.equal(f.queue.service.detail(f.scope, queued.receipt.id).receipt.status, "queued");
+  assert.equal(f.queue.service.detail(f.scope, queued.receipt.id).receipt.status, "cancelled");
   assert.equal(getMessageRunState(f.fixture.db, f.scope.workspaceId, f.scope.sessionId)!.status, "idle");
   await assert.rejects(f.worker.enqueueRun({ ...f.scope, runtimeInstanceId: f.runtimeInstanceId, runId: activated.runId, workspacePath: f.fixture.workspacePath, workspaceRepoDirNames: [] }));
   assert.equal((await f.snapshot()).activeCount, 0);
 });
 
-for(const fault of ["request_lost","continuous_failure","committed_reply_lost"] as const) test(`worker S8 retirement ${fault}: later queued input executes automatically once`,{timeout:45_000},async t=>{
+for(const fault of ["request_lost","continuous_failure","committed_reply_lost"] as const) test(`worker S8 retirement ${fault}: undrained sends reject and the next input executes once after retirement`,{timeout:45_000},async t=>{
   const f=await interactiveWorkerFixture(t); const first=await f.accept(`retire-${fault}`);
   let originalRunId:string|undefined, attempts=0, queued:Awaited<ReturnType<typeof f.accept>>|undefined;
   const failures=fault==="continuous_failure"?3:1;
@@ -1937,15 +1937,23 @@ for(const fault of ["request_lost","continuous_failure","committed_reply_lost"] 
     const body=call.body as {runId:string;runtimeInstanceId:string}; originalRunId??=body.runId;
     if(body.runId!==originalRunId) return;
     assert.equal(body.runtimeInstanceId,f.runtimeInstanceId); attempts++;
-    if(!queued) {
+    if(attempts===1) {
       assert.equal((await f.snapshot()).activeCount,0,"the notifier must not retain the execution controller");
-      queued=await f.accept(`arrived-after-real-exit-${fault}`);
-      assert.equal(f.queue.service.snapshot(f.scope).pendingCount,1);
+      await assert.rejects(f.accept(`before-retirement-proof-${fault}`), { statusCode: 409, code: "AGENT_QUEUE_EXECUTION_NOT_DRAINED" });
+      assert.equal(f.queue.service.snapshot(f.scope).pendingCount,0);
     }
     if(fault!=="committed_reply_lost"&&attempts<=failures) throw Object.assign(new Error("isolated retirement transport unavailable"),{statusCode:503});
   };
   f.fixture.internalRpcGate.after=async call=>{
-    if(call.url===AgentApiEndpoints.retireRuntimeAdmission.path&&(call.body as {runId:string}).runId===originalRunId&&fault==="committed_reply_lost"&&attempts===1) return "{}";
+    if(call.url!==AgentApiEndpoints.retireRuntimeAdmission.path||(call.body as {runId:string}).runId!==originalRunId) return;
+    if(!queued) {
+      // Transport-fault error responses also pass through this onSend hook.
+      if (!(call.responseBody as {retired?:boolean}).retired) return;
+      assert.equal((call.responseBody as {retired:boolean}).retired,true);
+      queued=await f.accept(`arrived-after-retirement-proof-${fault}`);
+      assert.equal(f.queue.service.snapshot(f.scope).pendingCount,1);
+    }
+    if(fault==="committed_reply_lost"&&attempts===1) return "{}";
   };
   const activated=await f.queue.dispatcher.dispatchSession(f.scope);assert.ok(activated);
   f.queue.dispatcher.start();

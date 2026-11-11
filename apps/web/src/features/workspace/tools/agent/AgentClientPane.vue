@@ -240,10 +240,10 @@
         :snapshot="queueSnapshot" :error="!!queueError" :busy="queueBusy || sending || queueSubmissionHandoff?.phase === 'sending'"
         :stop-blocked="queueStopBlocked" :unknown-submission="!!queueUnknownSubmission"
         :retained-submission="queueSubmissionHandoff?.phase !== 'accepted' ? queueSubmissionHandoff : null"
-        :unknown-stop="queueUnknownStop" :unknown-control="queueUnknownControl?.kind ?? null"
+        :unknown-clear="queueUnknownClear" :unknown-stop="queueUnknownStop" :unknown-control="queueUnknownControl?.kind ?? null"
         @restore="restoreQueueSubmission"
         @lookup="onResolveQueueSubmission(false)" @retry="onResolveQueueSubmission(true)"
-        @stop="onCancel" @resume="onQueueRecovery('resume')" @abandon="onQueueRecovery('abandon')"
+        @stop="onCancel" @clear="onQueueClear" @abandon="onQueueAbandon"
         @cancel="onQueueCancel" @detail="onQueueDetail"
       />
       <a-textarea
@@ -347,13 +347,7 @@
           >{{ t("common.loading") }}</span
         >
         <div class="flex-1" />
-        <a-button
-          v-if="runState.status === 'running' || (queueSnapshot?.pendingCount ?? 0) > 0"
-          size="small"
-          :loading="cancelling"
-          @click="onCancel"
-          >{{ t("agent.client.cancel") }}</a-button
-        >
+
       </div>
     </footer>
 
@@ -485,6 +479,7 @@
 </template>
 
 <script setup lang="ts">
+import { AGENT_QUEUE_INITIAL_STOP_GENERATION } from "@agent-workbench/shared";
 import type {
   AgentImagePart,
   AgentMessage,
@@ -695,7 +690,7 @@ const queue = useAgentMessageQueue(() => ({
 }));
 const { snapshot: queueSnapshot, error: queueError, busy: queueBusy, identity: queueIdentity,
   stopBlocked: queueStopBlocked, historyBlocked: queueHistoryBlocked,
-  handoff: queueSubmissionHandoff, unknownSubmission: queueUnknownSubmission, unknownStop: queueUnknownStop, unknownControl: queueUnknownControl } = queue;
+  handoff: queueSubmissionHandoff, unknownSubmission: queueUnknownSubmission, unknownStop: queueUnknownStop, unknownClear: queueUnknownClear, unknownControl: queueUnknownControl } = queue;
 const queueIdentityLocked = computed(() => !!queueIdentity.value || queueStopBlocked.value || !!queueUnknownSubmission.value || !!queueUnknownControl.value);
 
 const modelErrorModalVisible = ref(false);
@@ -752,8 +747,9 @@ const inputPlaceholder = computed(() => {
   if (!hasAvailableAgents.value) {
     return t("agent.client.inputPlaceholderNoAgent");
   }
+  if (cancelling.value || queueStopBlocked.value) return t("agent.client.inputPlaceholderStopping");
   return runState.value.status === "running"
-    ? t("agent.client.inputPlaceholderRunning")
+    ? t((queueSnapshot.value?.pendingCount ?? 0) > 0 ? "agent.client.inputPlaceholderRunningQueued" : "agent.client.inputPlaceholderRunning")
     : t("agent.client.inputPlaceholderIdle");
 });
 const draft = ref("");
@@ -1345,6 +1341,7 @@ function onRevert(targetMessage: AgentMessage) {
   });
 }
 async function onCancel() {
+  if (queueBusy.value || sending.value || cancelling.value) return;
   const scope = requestScope;
   cancelling.value = true;
   try {
@@ -1355,6 +1352,15 @@ async function onCancel() {
   } finally {
     if (isCurrentAgentRequestScope(requestScope, scope)) cancelling.value = false;
   }
+}
+
+async function onQueueClear() {
+  if (queueBusy.value || sending.value || cancelling.value) return;
+  const scope = requestScope;
+  try {
+    const result = await queue.clear();
+    if (isCurrentAgentRequestScope(requestScope, scope) && result) message.success(t("agent.client.queueCleared", { count: result.cancelledCount }));
+  } catch (error) { if (isCurrentAgentRequestScope(requestScope, scope)) showQueueError(error); }
 }
 
 const slashCommands = [
@@ -1535,7 +1541,9 @@ function onInputKeydown(event: KeyboardEvent) {
   }
   if (event.key === "Escape" && runState.value.status === "running") {
     event.preventDefault();
-    void onCancel();
+    if (event.repeat || queueBusy.value || sending.value || cancelling.value || queueStopBlocked.value || !queueSnapshot.value) return;
+    if (queueUnknownClear.value || queueSnapshot.value.pendingCount > 0) void onQueueClear();
+    else void onCancel();
   }
 }
 async function refreshPromptItems() {
@@ -1585,6 +1593,9 @@ async function onSend() {
     isSubtaskSession.value ||
     sending.value ||
     queueBusy.value ||
+    cancelling.value ||
+    queueStopBlocked.value ||
+    !!queueUnknownControl.value ||
     !!queueUnknownSubmission.value ||
     processingPastedImages.value ||
     isSessionModelSendBlocked({
@@ -1593,6 +1604,18 @@ async function onSend() {
   )
     return;
   const sendScope = requestScope;
+  const currentQueue = queueSnapshot.value;
+  const trustedGeneration = currentQueue?.workspaceId === sendScope.workspaceId && currentQueue.sessionId === sendScope.sessionId
+    ? currentQueue.stopGeneration : undefined;
+  // sessionReady=false is the parent's local draft path. ensureSession creates
+  // a new primary Session; existing Sessions must wait for their own snapshot.
+  const creatingFreshSession = !trustedGeneration && !props.sessionReady && !!props.ensureSession;
+  const submittedStopGeneration = trustedGeneration ?? (creatingFreshSession ? AGENT_QUEUE_INITIAL_STOP_GENERATION : undefined);
+  if (!submittedStopGeneration) {
+    void queue.refresh();
+    message.warning(t("agent.client.queueStateLoading"));
+    return; // Loading never resumes this user action automatically.
+  }
   const submittedDraft = draft.value;
   const submittedRevision = draftRevision;
   const submittedImages = [...pendingImages.value];
@@ -1623,6 +1646,8 @@ async function onSend() {
       ? await props.ensureSession(sendScope.sessionId)
       : sendScope.sessionId;
     if (!isCurrentAgentRequestScope(requestScope, sendScope)) return;
+    // A disappeared draft may return its input unchanged, not a fresh Session.
+    if (creatingFreshSession && ensuredId === sendScope.sessionId) return;
     if (!agentSelectionReady.value || !effectiveAgentId.value) return;
     if (action.kind === "compact") {
       const fingerprint = createAgentCompactAttemptFingerprint({
@@ -1661,7 +1686,7 @@ async function onSend() {
       pendingAttempt.value = attempt;
       const acknowledged = await queue.submit({
         sessionId: ensuredId, composerId, draft: submittedDraft, draftRevision: submittedRevision, images: submittedImages,
-        payload: { workspaceId: sendScope.workspaceId, clientRequestId: attempt.clientRequestId,
+        payload: { workspaceId: sendScope.workspaceId, clientRequestId: attempt.clientRequestId, stopGeneration: submittedStopGeneration,
           agentId: effectiveAgentId.value || undefined, uiLocale: getInitialLocale(), ...(sendText ? { text: sendText } : {}) },
       });
       if (acknowledged.result.receipt.status === "injected") {
@@ -1758,19 +1783,19 @@ async function onQueueDetail(receiptId: string) {
     ]) });
   } catch (error) { if (isCurrentAgentRequestScope(requestScope, scope)) showQueueError(error); }
 }
-function onQueueRecovery(kind: "resume" | "abandon") {
+function onQueueAbandon() {
   if (queueStopBlocked.value || queueBusy.value) return;
   const scope = requestScope;
   const confirmedSnapshot = queueSnapshot.value;
   Modal.confirm({
-    title: t(kind === "resume" ? "agent.client.queueResumeConfirm" : "agent.client.queueAbandonConfirm"),
-    content: t(kind === "resume" ? "agent.client.queueResumeDescription" : "agent.client.queueAbandonDescription", { count: confirmedSnapshot?.unconfirmedInputCount ?? 0 }),
-    okText: t(kind === "resume" ? "agent.client.queueResume" : "agent.client.queueAbandon"), cancelText: t("common.cancel"),
-    okType: kind === "abandon" ? "danger" : "primary",
+    title: t("agent.client.queueAbandonConfirm"),
+    content: t("agent.client.queueAbandonDescription", { count: confirmedSnapshot?.unconfirmedInputCount ?? 0 }),
+    okText: t("agent.client.queueAbandon"), cancelText: t("common.cancel"),
+    okType: "danger",
     async onOk() {
       if (!isCurrentAgentRequestScope(requestScope, scope) || queueStopBlocked.value) return;
       try {
-        const result = await queue.control(kind, confirmedSnapshot);
+        const result = await queue.control("abandon", confirmedSnapshot);
         if (!isCurrentAgentRequestScope(requestScope, scope)) return;
         if (result && "runId" in result && result.runId) bridgeRunState(result.runId);
         await refreshStructuralTimeline();

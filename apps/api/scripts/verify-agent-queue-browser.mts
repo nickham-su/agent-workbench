@@ -88,12 +88,12 @@ function loopback(raw: string) {
   const url = new URL(raw);
   return ["http:", "https:", "ws:", "wss:"].includes(url.protocol) && ["127.0.0.1", "[::1]", "localhost"].includes(url.hostname);
 }
-function providerChunks(first: boolean) {
-  const begin = { type: "response.created", response: { id: first ? "browser-tools" : "browser-answer", created_at: 1, model: "gpt-5.2" } };
+function providerChunks(first: boolean, sequence: number) {
+  const begin = { type: "response.created", response: { id: first ? "browser-tools" : `browser-answer-${sequence}`, created_at: 1, model: "gpt-5.2" } };
   if (!first) return [begin,
-    { type: "response.output_item.added", output_index: 0, item: { type: "message", id: "browser-message", phase: "final_answer" } },
-    { type: "response.output_text.delta", item_id: "browser-message", delta: "Browser queue processed" },
-    { type: "response.output_item.done", output_index: 0, item: { type: "message", id: "browser-message", phase: "final_answer" } },
+    { type: "response.output_item.added", output_index: 0, item: { type: "message", id: `browser-message-${sequence}`, phase: "final_answer" } },
+    { type: "response.output_text.delta", item_id: `browser-message-${sequence}`, delta: "Browser queue processed" },
+    { type: "response.output_item.done", output_index: 0, item: { type: "message", id: `browser-message-${sequence}`, phase: "final_answer" } },
     { type: "response.completed", response: { usage: { input_tokens: 1, output_tokens: 1 } } },
   ];
   const calls = [1, 2].map(index => ({ type: "function_call", id: `browser-call-item-${index}`, call_id: `browser-call-${index}`,
@@ -133,6 +133,9 @@ async function main() {
   let sessionId = "", runId = "", targetPort = 0, blockedHttp = 0, blockedWebSocket = 0;
   let release!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; });
+  let releaseEscProvider!: () => void;
+  const escProviderGate = new Promise<void>(resolve => { releaseEscProvider = resolve; });
+  let holdNextProvider = false;
   const terminalIds = new Set<string>();
   const requests: Array<Record<string, unknown>> = [];
   const workspaceId = "browser-queue-workspace";
@@ -161,7 +164,12 @@ async function main() {
         try {
           requests.push(JSON.parse(body));
           res.writeHead(200, { "content-type": "text/event-stream; charset=utf-8" });
-          res.end(providerChunks(requests.length === 1).map(chunk => `data: ${JSON.stringify(chunk)}\n\n`).join(""));
+          const chunks = providerChunks(requests.length === 1, requests.length).map(chunk => `data: ${JSON.stringify(chunk)}\n\n`);
+          if (holdNextProvider) {
+            holdNextProvider = false;
+            res.write(chunks[0]);
+            void escProviderGate.then(() => { if (!res.destroyed) res.end(chunks.slice(1).join("")); });
+          } else res.end(chunks.join(""));
         } catch { res.writeHead(400); res.end(); }
       });
     });
@@ -332,6 +340,48 @@ async function main() {
     evidence.provider = { kind: "loopback-fake", requestCount: 2, callPositions, outputPositions, userPositions };
     evidence.network = { loopbackOnly: true, blockedHttp, blockedWebSocket };
     evidence.screenshots = ["queued-three.png", "refreshed-three.png", "cancelled-two.png", "completed-zero.png"];
+    phase = "browser-esc-start-held-model";
+    // A deliberately open provider stream (not a long tool) makes the Esc sequence deterministic.
+    await api("/api/settings/agent/runtime", "PUT", { modelRequestMaxRetries: 0, modelIdleTimeoutMs: 30_000, modelTotalTimeoutMs: 30_000, autoCompactThresholdPct: 80 });
+    await waitUntil(() => (db!.prepare("select count(*) as n from agent_run_runtime_admission where session_id=? and state<>'retired'").get(sessionId) as { n: number }).n === 0, "first Runner retires");
+    holdNextProvider = true;
+    await send("browser esc held model");
+    await waitUntil(() => requests.length === 3, "held model HTTP request");
+    const heldRun = receipts().at(-1)!.runId!; assert.ok(heldRun);
+    await send("browser esc clear this queued message");
+    await page.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('[data-testid="agent-message-queue"] + textarea')?.placeholder === "输入消息加入队列，Esc 清空等待消息");
+    const clearedReceipt = receipts().at(-1)!.id;
+    phase = "browser-esc-clear";
+    await editor().press("Escape");
+    await page.waitForFunction(() => document.body.textContent?.includes("已清空 1 条等待消息") === true);
+    await page.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('[data-testid="agent-message-queue"] + textarea')?.placeholder === "输入消息加入队列，Esc 停止运行");
+    assert.equal((await snapshot()).pendingCount, 0); assert.equal((await snapshot()).mode, "active");
+    assert.equal(getRunRecord(db, heldRun)!.status, "running");
+    assert.equal(receipts().find(item => item.id === clearedReceipt)!.status, "cancelled");
+    checks.firstEscClearsWithoutStopping = true; checks.runningPlaceholdersFollowQueue = true;
+    await page.evaluate(() => document.querySelector<HTMLTextAreaElement>('[data-testid="agent-message-queue"] + textarea')!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", repeat: true, bubbles: true })));
+    assert.equal((db.prepare("select count(*) as n from agent_session_stop_barrier where root_session_id=?").get(sessionId) as { n: number }).n, 0);
+    checks.heldEscapeRepeatDoesNotStop = true;
+    phase = "browser-esc-stop";
+    const stoppedResponse = page.waitForResponse(response => new URL(response.url()).pathname === `/api/agent/sessions/${sessionId}/message-queue/stop`, { timeout: 10_000 });
+    await editor().press("Escape"); await stoppedResponse;
+    await waitUntil(async () => (await snapshot()).stop.state === "quiescent", "real managed Runner exits after second Esc");
+    assert.equal(getRunRecord(db, heldRun)!.status, "cancelled"); assert.equal((await snapshot()).pendingCount, 0);
+    checks.secondIndependentEscStopsAndClears = true;
+    releaseEscProvider();
+    await page.waitForFunction(() => document.querySelector<HTMLTextAreaElement>('[data-testid="agent-message-queue"] + textarea')?.placeholder === "输入消息，Enter 发送");
+    const obsoleteButtons = await page.evaluate(() => [...document.querySelectorAll('footer button')].filter(node => ["取消运行", "继续处理"].includes((node.textContent ?? "").replace(/\s/g, ""))).length);
+    assert.equal(obsoleteButtons, 0); checks.stopAndResumeButtonsRemoved = true;
+    phase = "browser-send-after-stop";
+    await send("browser explicit send starts next run");
+    await waitUntil(() => {
+      const last = receipts().at(-1)!;
+      return last.status === "injected" && last.runId !== heldRun && getRunRecord(db!, last.runId!)?.status === "completed";
+    }, "ordinary send after Stop starts a new Run without resume button");
+    checks.sendAfterStopStartsNewRun = true;
+    evidence.esc = { heldRunStatus: "cancelled", clearedReceiptStatus: "cancelled", pendingCount: (await snapshot()).pendingCount, providerRequestCount: requests.length };
+    await page.screenshot({ path: path.join(evidenceDir, "esc-send-after-stop.png"), fullPage: true });
+    (evidence.screenshots as string[]).push("esc-send-after-stop.png");
     evidence.passed = true;
   } finally {
     if (!evidence.passed && page) {
@@ -344,7 +394,7 @@ async function main() {
         countText: document.querySelector('[data-testid="queue-pending-count"]')?.textContent?.trim(),
       })).catch(() => null);
     }
-    release();
+    release(); releaseEscProvider();
     // Always release writeback before shutting down browser/API. Normal and
     // failure paths let an already-started Run settle while SQLite stays open.
     if (sessionId && db) await waitUntil(() => (db!.prepare("select count(*) as n from agent_run where session_id=? and status='running'").get(sessionId) as { n: number }).n === 0,

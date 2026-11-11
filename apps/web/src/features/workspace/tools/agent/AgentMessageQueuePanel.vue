@@ -25,9 +25,12 @@
       <a-button size="small" :disabled="busy" @click="emit('restore')">{{ t('agent.client.queueRestoreDraft') }}</a-button>
       <a-button v-if="retainedSubmission.phase === 'rejected'" size="small" :disabled="busy" @click="emit('retry')">{{ t('agent.client.queueRetryOriginal') }}</a-button>
     </div>
+    <div v-if="unknownClear" data-testid="queue-clear-unknown">
+      <p>{{ t('agent.client.queueClearUnknown') }}</p>
+      <a-button size="small" :disabled="busy" @click="emit('clear')">{{ t('agent.client.queueRetryClear') }}</a-button>
+    </div>
     <a-button v-if="unknownStop" size="small" :disabled="busy" @click="emit('stop')">{{ t('agent.client.queueRetryStop') }}</a-button>
     <div v-if="snapshot && (snapshot.mode === 'paused' || snapshot.unconfirmedInputCount > 0)">
-      <a-button size="small" :disabled="busy || stopBlocked || (unknownControl !== null && unknownControl !== 'resume')" @click="emit('resume')">{{ t('agent.client.queueResume') }}</a-button>
       <a-button v-if="snapshot.unconfirmedInputCount > 0" danger size="small" :disabled="busy || stopBlocked || (unknownControl !== null && unknownControl !== 'abandon')" @click="emit('abandon')">{{ t('agent.client.queueAbandon') }}</a-button>
     </div>
     <details v-if="snapshot && snapshot.items.length" data-testid="queue-items">
@@ -47,13 +50,14 @@ import type { AgentMessageQueueSnapshot } from '@agent-workbench/shared';
 import type { QueueSubmissionHandoff } from './useAgentMessageQueue';
 import { useI18n } from 'vue-i18n';
 defineProps<{
+  unknownClear?: boolean;
   retainedSubmission?: QueueSubmissionHandoff | null;
   snapshot: AgentMessageQueueSnapshot | null; error: boolean; busy: boolean;
   stopBlocked: boolean; unknownSubmission: boolean; unknownStop: boolean;
   unknownControl: 'resume' | 'abandon' | null;
 }>();
 const emit = defineEmits<{
-  restore: []; lookup: []; retry: []; stop: []; resume: []; abandon: []; cancel: [receiptId: string]; detail: [receiptId: string];
+  restore: []; lookup: []; retry: []; stop: []; clear: []; abandon: []; cancel: [receiptId: string]; detail: [receiptId: string];
 }>();
 const { t } = useI18n();
 </script>

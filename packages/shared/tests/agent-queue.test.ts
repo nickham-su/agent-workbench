@@ -25,7 +25,7 @@ import { AgentApiEndpoints } from "../src/internal-contracts/agent-api.js";
 const hash = "a".repeat(64);
 const runtime = "00000000-0000-4000-8000-000000000001";
 const receipt = { id: "receipt", clientRequestId: "request", sequence: 1, status: "queued", messageId: null, runId: null, confirmationState: null, confirmationSource: null, createdAt: 1, updatedAt: 1 };
-const queue = { workspaceId: "w", sessionId: "s", queueVersion: 1, mode: "active", pauseCode: null,
+const queue = { workspaceId: "w", sessionId: "s", queueVersion: 1, stopGeneration: "0".repeat(64), mode: "active", pauseCode: null,
   pendingCount: 1, pendingBytes: 5, pendingIdentity: { agentId: "a", providerId: "p", modelId: "m" },
   unconfirmedInputCount: 0, unconfirmedInputSetHash: null, recoveryIdentity: null,
   stop: { state: "none", unresolvedOperationCount: 0, unresolvedTargetCount: 0, code: null },
@@ -147,4 +147,24 @@ test("prepare rejected is a strict authoritative decision with no frozen body", 
     }
   }
   assert.equal(Value.Check(AgentApiPrepareInteractiveInputResponseSchema, { operationId: "op", decision: "finish", reason: "cache_capacity", queue }), false);
+});
+
+test("Esc clear contract fixes unique receipt targets; generation is valid send metadata", async () => {
+  const { AgentClearMessageQueueRequestSchema, AgentClearMessageQueueResponseSchema, AgentQueueErrorCodeSchema } = await import("../src/index.js");
+  assert.equal(Value.Check(AgentClearMessageQueueRequestSchema, { workspaceId: "w", receiptIds: [] }), true);
+  assert.equal(Value.Check(AgentClearMessageQueueRequestSchema, { workspaceId: "w", receiptIds: ["a", "b"] }), true);
+  for (const receiptIds of [["a", "a"], [""], Array.from({ length: 101 }, (_, i) => String(i))])
+    assert.equal(Value.Check(AgentClearMessageQueueRequestSchema, { workspaceId: "w", receiptIds }), false);
+  assert.equal(Value.Check(AgentClearMessageQueueRequestSchema, { workspaceId: "w", receiptIds: [], operationId: "extra" }), false);
+  assert.equal(Value.Check(AgentClearMessageQueueResponseSchema, { cancelledCount: 0, queue }), true);
+  assert.equal(Value.Check(AgentAcceptUserMessageRequestSchema, { workspaceId: "w", clientRequestId: "r", text: "hello", stopGeneration: "a".repeat(64) }), true);
+  assert.equal(Value.Check(AgentAcceptUserMessageRequestSchema, { workspaceId: "w", clientRequestId: "r", text: "hello", stopGeneration: "old" }), false);
+  assert.equal(Value.Check(AgentQueueErrorCodeSchema, "AGENT_QUEUE_STOP_GENERATION_CHANGED"), true);
+});
+
+test("fresh Session Stop generation is the canonical empty Stop identity hash", async () => {
+  const { createHash } = await import("node:crypto");
+  const { AGENT_QUEUE_INITIAL_STOP_GENERATION } = await import("../src/index.js");
+  assert.equal(AGENT_QUEUE_INITIAL_STOP_GENERATION, createHash("sha256").update(JSON.stringify([])).digest("hex"));
+  assert.equal(Value.Check(AgentMessageQueueSnapshotSchema, { ...queue, stopGeneration: AGENT_QUEUE_INITIAL_STOP_GENERATION }), true);
 });

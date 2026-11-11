@@ -87,6 +87,7 @@ export class AgentRuntimeControlService implements AgentRuntimePort {
         rootSessionId: string;
         operationId: string;
         reason?: "user_stop" | "recovery_required";
+        clearQueued?: boolean;
     }) {
         this.assertOutsideTransaction();
         const stopped = this.store.stop(input, runIds => this.settleClosedRuns(input.workspaceId, runIds, input.reason === "recovery_required"));

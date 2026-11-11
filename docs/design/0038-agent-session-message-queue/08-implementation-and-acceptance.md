@@ -1,6 +1,8 @@
-# 实现与验收记录（S7／S8／最终归档）
+# 实现与验收记录（S7／S8基线及Esc增量）
 
-> **当前：工程实现完成，最终全面独立existing复审通过；0038整体实现可交付，H1／H2／M1／M2／L1／L2共6/6关闭、Open 0，无新增问题。** 主助理已明确转述审查结论；独立141定向测试与作者真实managed／browser、最终同源树八组验证分开归档，见第13节及07。第1～12节保留各历史时点的未通过／修复／待审查记录，不代表当前状态；本次不再修改已过审生产／协议／测试语义。
+> **基线15e2590：工程实现完成，最终全面独立existing复审通过；0038整体实现可交付，H1／H2／M1／M2／L1／L2共6/6关闭、Open 0，无新增问题。** 主助理已明确转述审查结论；独立141定向测试与作者真实managed／browser、最终同源树八组验证分开归档，见第13节及07。第1～12节保留各历史时点的未通过／修复／待审查记录，不代表当前状态；本次不再修改已过审生产／协议／测试语义。
+
+> **当前Esc增量：原会话独立复审通过，H1／M1／L1全部Resolved，3/3关闭、Open 0、无新增问题；作者最终同源树五组4069/4069通过，Chromium19/19。** 第1～13节仅属基线历史，第14～15节保留首审未通过与修复过程；当前最终证据及限制见第16节。不混算旧4056／5827、修后318或reviewer339。
 
 ## 1. S7历史状态、范围与证据口径
 
@@ -643,3 +645,285 @@ S8原30项＋H2额外3项＋收尾新增涉及README／07两项，共**35个正�
 - `docs/design/0038-agent-session-message-queue/06-testing-and-acceptance.md`
 
 mtime还命中`apps/agent-worker/src/runtime/apiClient.ts`：H2调试曾临时加入后完整移除网络诊断，**无预期正式内容变更**，不因mtime把它冒充第40个功能改动。主助理如见该文件diff须自行核对来源，不得因清单而恢复未知变更。S1～S6已暂存的历史成果不据此重置或推断。本轮35项及S7额外4项均应由主助理亲自核对实际diff／index后决定暂存，`.tmp-tests`工具／日志／截图／dist不纳入正式文件。
+
+
+## 14. Esc清队列／发送统一启动增量（2026-11-11，待独立审查）
+
+### 14.1 用户共识与实施边界
+
+基线已由主助理提交为`15e2590`（`feat(agent): add persistent session message queue and safe run injection`）。本轮作者未执行Git命令，不暂存／提交，不访问真实用户配置／凭证，不修改IM／飞书、Worker整轮工具闭合注入规则、数据库版本或operation kind。
+
+| 增量 | 实现与安全边界 |
+| --- | --- |
+| Esc先清空、再停止 | 输入框原范围；running queued>0固定目标clear、queued=0独立Stop；非running无操作，IME／repeat／busy忽略，clear0也成功不转Stop |
+| 固定clear | `queued-receipt-cancellation.ts`共享单条取消及Web Stop；scope全验后同事务取消仍queued集合，missing／foreign整批404；原集合重试不清后来消息，publication retained／授权撤销／正文清除但不unlink |
+| Web Stop | 内部显式clearQueued策略，replay之后、acceptedQueueVersion冻结之前清当前根Session queued；原事务结合暂停／准入关闭／持久屏障，不清targets子树，不改变通用recovery／shutdown默认行为 |
+| 迟到请求拒绝 | `queue-stop-generation.ts`对相关持久Stop身份排序hash。新Web冻结snapshot代际；老HTTP在onRequest早于body流捕获，直调service首次await前捕获；最终receipt提交复核。代际不入内容指纹，receipt去重优先 |
+| 发送统一启动 | 最终附件publication commit同步事务里复用原恢复权威，组合profile／工具／执行／停止检查、receipt、解除暂停及必要新Run／全部未确认原输入绑定；之后可靠handoff，不事务内await或RPC |
+| Web | 删除停止及继续处理按钮，保留abandon／单条cancel／N／pending unknown诊断；unknown clear固定原targets；四态中英文Placeholder；请求拒收保草稿与File，首次draft Session在首次await前发布sending交接 |
+
+### 14.2 作者验证记录
+
+所有最终相关分组共4056项通过，fail／cancelled／skipped均为0；不重复计入定向验证，不计旧版5827。真实Chromium另19项。
+
+| 最终命令／范围 | 结果 | 证据（仓库根目录下） |
+| --- | --- | --- |
+| `npm run typecheck`（含先构建Shared、CLI／Worker／API／飞书／Web检查） | 通过 | `.tmp-tests/esc-root-typecheck.log` |
+| `npm test -w packages/shared` | 150/150 | `.tmp-tests/esc-shared-tests-final.log` |
+| `npm run test:unit`，cwd `apps/api` | 1968＋仓库cwd插件8＝1976/1976 | `.tmp-tests/esc-api-unit-final.log` |
+| API integration完整61文件、`tsx --test --test-concurrency=2`（见下） | 596/596 | `.tmp-tests/esc-api-integration-complete.log` |
+| `npm run test:integration:worker`，cwd `apps/api` | 36/36；managed Worker＋SQLite＋本地假provider | `.tmp-tests/esc-worker-integration-complete.log` |
+| `npm test -w apps/web` | 1298/1298，31个组件文件全部执行，skipped0 | `.tmp-tests/esc-web-all-final.log` |
+| `node scripts/verify-test-gate.mjs`，cwd `apps/api` | 通过 | `.tmp-tests/esc-api-test-gate.log` |
+| `npm run build -w apps/api`、`npm run build -w apps/agent-worker` | 均通过 | `.tmp-tests/esc-api-build-final.log`、`.tmp-tests/esc-worker-build-final.log` |
+| browser harness独立strict TypeScript检查 | 通过 | `.tmp-tests/esc-browser-typecheck.log` |
+| 隔离Vite component-test config build＋真实Chromium | 19/19，cleanup complete | `.tmp-tests/esc-browser.log`、`.tmp-tests/browser-e2e/evidence/agent-queue-aXFziP/result.json` |
+
+API integration按正式runner相同collect／suffix过滤全部61文件，仅限制并发为2，不遗漏文件、不修改默认测试脚本。可在`apps/api`重现：
+
+```sh
+node --input-type=module <<'JS'
+import { readdirSync } from 'node:fs';
+import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
+function collect(dir) {
+  return readdirSync(dir, { withFileTypes: true }).flatMap(e =>
+    e.isDirectory() ? collect(join(dir, e.name)) :
+    e.isFile() && e.name.endsWith('.test.ts') ? [join(dir, e.name)] : []);
+}
+const files = [...collect('src'), ...collect('tests')].filter(f =>
+  f.endsWith('.integration.test.ts') && f !== 'src/modules/agent/agent.worker.integration.test.ts');
+execFileSync('../../node_modules/.bin/tsx', ['--test', '--test-concurrency=2', ...files], { stdio: 'inherit' });
+JS
+```
+
+浏览器采用Playwright1.56.1／Chromium141.0.7390.37，仅loopback fake provider；真实API／SQLite／受管Worker／Web dist，不是外部厂商联调。保留原13项整轮工具闭合注入及N／刷新断言，追加首Esc清空不停、两个running Placeholder、repeat不停止、第二独立Esc停止清空、按钮移除、安全退出后正常发送新Run，共19项。截图`esc-send-after-stop.png`等与result.json同目录；证据确认旧Run cancelled、queued0、cleanup全部完成。
+
+harness类型检查命令（仓库根）：
+
+```sh
+node node_modules/typescript/bin/tsc --noEmit --strict --skipLibCheck \
+  --target ES2022 --module ES2022 --moduleResolution Bundler \
+  --allowSyntheticDefaultImports --types node \
+  apps/api/scripts/verify-agent-queue-browser.mts
+```
+
+真实用户DB升级、外部provider、人工多端仍未验证；本轮没有声称完成这些验收。
+
+### 14.3 失败与处置、审查关注点
+
+- API首次unit 1963项中3项旧预期与新共识冲突：Web Stop不再保queued；queued-only兼容resume改用异常暂停前提；fallback finally未退休时拒收而不宣称可提前新收件。保持原恢复／安全注入／可靠退休覆盖，不放宽生产检查。
+- Web首次全组出现5项首发draft测试失败：fixture缺required stopGeneration，pre-send snapshot被契约拒绝；修正fixture且保留原ID／File跨Pane交接断言。随后完整组必须无skipped才算通过。
+- 首次真实浏览器18项后失败来自本地fake provider每轮复用message ID，导致fixture主键冲突；改为逐轮唯一ID，最终19项通过。这不是生产数据库去重缺陷。
+- API integration及managed首轮工具240秒上限中断，不能算完整失败／通过。完整integration保持全部61文件，`--test-concurrency=2`重跑，不删用例／放宽时限断言。
+- managed旧H1两项queued预期改为cancelled。旧S8退休通知用例在API未取得drained证明时直接新收件不再合法；改为先断言409 execution_not_drained，保持request_lost／continuous_failure／committed_reply_lost三种退休原ID重试，取得证明后收件只启动一次新Run且不重跑旧模型；不放宽执行屏障。
+- 成功Chromium日志仍观察到既有`persistRunTerminalIntent`对迟到Worker terminal intent报`terminal intent conflicts with current run state`：源路径在`agent-message.store.ts`未改动，当前状态／tuple不匹配即拒绝的保护仍在；19断言、旧Run cancelled、Stop quiescent及新发送成功均成立。本轮不吞异常、不改终态幂等协议，交独立审查核查诊断等级及既有竞态，不能将该日志隐藏为“无错误日志”。
+- 独立reviewer重点：最终receipt事务恢复原子性／失败回滚；legacy HTTP body streaming代际；原requestId及Stop ID重放；clear scope及注入交错；Web-only Stop策略；draft Pane handoff与unknown clear原目标保留；退休通知新拒收测试及上述terminal-intent诊断。
+
+本节14.1～14.4记录首审前作者自测与文件树；独立首审随后未通过，修复及复审状态见第15节，不以本节4056冒充修复后验证。
+
+### 14.4 本轮精确文件清单（37份）
+
+26份已有源码／测试修改、2份新增源码、9份设计文档。临时日志／浏览器工具／DB只在`.tmp-tests`，不属于正式变更。
+
+**已有源码／测试**
+
+- [apps/api/scripts/verify-agent-queue-browser.mts](../../../apps/api/scripts/verify-agent-queue-browser.mts)
+- [apps/api/src/modules/agent/agent.worker.integration.test.ts](../../../apps/api/src/modules/agent/agent.worker.integration.test.ts)
+- [apps/api/src/modules/agent/lifecycle/run-lifecycle-application.ts](../../../apps/api/src/modules/agent/lifecycle/run-lifecycle-application.ts)
+- [apps/api/src/modules/agent/message-queue/interactive-input.test.ts](../../../apps/api/src/modules/agent/message-queue/interactive-input.test.ts)
+- [apps/api/src/modules/agent/message-queue/message-queue.assembly.ts](../../../apps/api/src/modules/agent/message-queue/message-queue.assembly.ts)
+- [apps/api/src/modules/agent/message-queue/message-queue.dispatcher.test.ts](../../../apps/api/src/modules/agent/message-queue/message-queue.dispatcher.test.ts)
+- [apps/api/src/modules/agent/message-queue/message-queue.integration.test.ts](../../../apps/api/src/modules/agent/message-queue/message-queue.integration.test.ts)
+- [apps/api/src/modules/agent/message-queue/message-queue.routes.ts](../../../apps/api/src/modules/agent/message-queue/message-queue.routes.ts)
+- [apps/api/src/modules/agent/message-queue/message-queue.service.ts](../../../apps/api/src/modules/agent/message-queue/message-queue.service.ts)
+- [apps/api/src/modules/agent/message-queue/message-queue.store.ts](../../../apps/api/src/modules/agent/message-queue/message-queue.store.ts)
+- [apps/api/src/modules/agent/message-queue/message-queue.test.ts](../../../apps/api/src/modules/agent/message-queue/message-queue.test.ts)
+- [apps/api/src/modules/agent/message-queue/message-queue.testkit.ts](../../../apps/api/src/modules/agent/message-queue/message-queue.testkit.ts)
+- [apps/api/src/modules/agent/message-queue/queue-recovery.store.ts](../../../apps/api/src/modules/agent/message-queue/queue-recovery.store.ts)
+- [apps/api/src/modules/agent/runtime-control/runtime-control.service.ts](../../../apps/api/src/modules/agent/runtime-control/runtime-control.service.ts)
+- [apps/api/src/modules/agent/runtime-control/runtime-control.store.ts](../../../apps/api/src/modules/agent/runtime-control/runtime-control.store.ts)
+- [apps/web/src/features/workspace/tools/agent/AgentClientPane.component.test.ts](../../../apps/web/src/features/workspace/tools/agent/AgentClientPane.component.test.ts)
+- [apps/web/src/features/workspace/tools/agent/AgentClientPane.vue](../../../apps/web/src/features/workspace/tools/agent/AgentClientPane.vue)
+- [apps/web/src/features/workspace/tools/agent/AgentMessageQueue.component.test.ts](../../../apps/web/src/features/workspace/tools/agent/AgentMessageQueue.component.test.ts)
+- [apps/web/src/features/workspace/tools/agent/AgentMessageQueuePanel.vue](../../../apps/web/src/features/workspace/tools/agent/AgentMessageQueuePanel.vue)
+- [apps/web/src/features/workspace/tools/agent/AgentToolView.component.test.ts](../../../apps/web/src/features/workspace/tools/agent/AgentToolView.component.test.ts)
+- [apps/web/src/features/workspace/tools/agent/useAgentMessageQueue.ts](../../../apps/web/src/features/workspace/tools/agent/useAgentMessageQueue.ts)
+- [apps/web/src/shared/api/agentMessageQueueApi.ts](../../../apps/web/src/shared/api/agentMessageQueueApi.ts)
+- [apps/web/src/shared/i18n/locales/en-US.ts](../../../apps/web/src/shared/i18n/locales/en-US.ts)
+- [apps/web/src/shared/i18n/locales/zh-CN.ts](../../../apps/web/src/shared/i18n/locales/zh-CN.ts)
+- [packages/shared/src/contracts/agent-queue.ts](../../../packages/shared/src/contracts/agent-queue.ts)
+- [packages/shared/tests/agent-queue.test.ts](../../../packages/shared/tests/agent-queue.test.ts)
+
+**新增源码**
+
+- [apps/api/src/modules/agent/message-queue/queued-receipt-cancellation.ts](../../../apps/api/src/modules/agent/message-queue/queued-receipt-cancellation.ts)
+- [apps/api/src/modules/agent/message-queue/queue-stop-generation.ts](../../../apps/api/src/modules/agent/message-queue/queue-stop-generation.ts)
+
+**九份设计文档**
+
+- [docs/design/0038-agent-session-message-queue/01-requirements-and-product.md](../../../docs/design/0038-agent-session-message-queue/01-requirements-and-product.md)
+- [docs/design/0038-agent-session-message-queue/02-business-rules-and-state-machine.md](../../../docs/design/0038-agent-session-message-queue/02-business-rules-and-state-machine.md)
+- [docs/design/0038-agent-session-message-queue/03-architecture-and-data-model.md](../../../docs/design/0038-agent-session-message-queue/03-architecture-and-data-model.md)
+- [docs/design/0038-agent-session-message-queue/04-api-and-worker-protocol.md](../../../docs/design/0038-agent-session-message-queue/04-api-and-worker-protocol.md)
+- [docs/design/0038-agent-session-message-queue/05-implementation-plan.md](../../../docs/design/0038-agent-session-message-queue/05-implementation-plan.md)
+- [docs/design/0038-agent-session-message-queue/06-testing-and-acceptance.md](../../../docs/design/0038-agent-session-message-queue/06-testing-and-acceptance.md)
+- [docs/design/0038-agent-session-message-queue/07-review-record.md](../../../docs/design/0038-agent-session-message-queue/07-review-record.md)
+- [docs/design/0038-agent-session-message-queue/08-implementation-and-acceptance.md](../../../docs/design/0038-agent-session-message-queue/08-implementation-and-acceptance.md)
+- [docs/design/0038-agent-session-message-queue/README.md](../../../docs/design/0038-agent-session-message-queue/README.md)
+
+
+## 15. 独立首审未通过与H1／M1／L1作者修复（待复审）
+
+### 15.1 处置与机制
+
+独立审查会话`sess_00mwbkx46f00006b8334387035`首审未通过。H1高、M1中、L1低均决策Fix，不以reviewer其余373项通过或首审前作者4056项作为关闭依据。此轮只跑相关定向回归／类型检查及必要浏览器，复审通过后再跑最终完整相关回归。
+
+- **H1**：已有Session首个可信snapshot缺失／scope不匹配时，Pane在任何await前拒绝本次发送，仅刷新和加载提示，保留文字／File；不调用ensureSession、不发布sending handoff、不在snapshot返回后自动续发。snapshot到达后必须新的独立用户发送动作。
+- `composable.submit`自身要求payload已经冻结stopGeneration，缺少即AGENT_QUEUE_STATE_UNKNOWN；不再从当前snapshot或await GET补值。已开始动作在ensureSession／普通prompt准备await间跨Stop，仍发送原代际，被API最终权威拒绝；重试原副本也不替换代际。
+- 真正fresh draft在动作准入时冻结共享`AGENT_QUEUE_INITIAL_STOP_GENERATION`，即SHA-256(JSON.stringify([]))。API在无相关持久Stop时返回相同权威常量，非空仍按原排序集合hash。已有Session不能默用initial；draft没有ensureSession或ensureSession仅返回原ID，不能作为fresh首发证明。
+- fresh事实：AgentToolView将本地draft标sessionReady=false；ensureSessionCreated匹配draft后调用createAgentSession POST，API createPrimarySession→createSession分配新Session ID，非draft仅返回原ID。原workspace/session scope检查及创建后的同步sending publication保留；真实父子Pane卸载交接继续支持一键首发。创建响应期间发生Stop时，第一条仍是initial而非后来snapshot代际，明确409；新Pane完整保留原File／草稿，后续独立发送才用当前可信代际成功。
+- **M1**：06现行受理表、continue后Stop／预算表、Stop→inject的N断言逐项修正，不仅页首注明优先级。用户Web Stop原子清queued，失败／预算暂停保留旧queued；pending／unknown／未drained拒收，安全的新发送承担恢复。
+- **L1**：08仅单个末尾换行；用字节、行尾空白检查替代Git检查，本作者未执行Git命令。
+- terminal-intent冲突已由独立reviewer确认是原安全拒绝且保持cancelled，WontFix／风险可接受，不吞异常、不放松终态规则；本次浏览器仍如实保留该日志。
+
+### 15.2 修复后实际验证
+
+| 定向命令／范围 | 结果 | 证据 |
+| --- | --- | --- |
+| `npm run build -w packages/shared` | 通过 | `.tmp-tests/esc-review-shared-build.log` |
+| API cwd：`tsx --test --test-reporter=tap`，message-queue.test.ts、message-queue.integration.test.ts、message-queue.dispatcher.test.ts、message-queue.assembly.integration.test.ts | 69/69 | `.tmp-tests/esc-review-api-targeted.log` |
+| Web `runComponentTests`仅AgentClientPane、AgentMessageQueue、AgentToolView三个文件 | 76＋31＋131＝238/238，completed3／skipped0 | `.tmp-tests/esc-review-web-targeted.log` |
+| Shared cwd：`tsx --test tests/agent-queue.test.ts` | 11/11 | `.tmp-tests/esc-review-shared-targeted.log` |
+| `npm run typecheck -w apps/api`、`npm run typecheck -w apps/web`、`tsc -p packages/shared/tsconfig.json --noEmit` | 均通过 | `.tmp-tests/esc-review-api-typecheck.log`、`.tmp-tests/esc-review-web-typecheck.log`、`.tmp-tests/esc-review-shared-typecheck.log` |
+| 按第9节既有隔离环境重建Web并运行真实Chromium harness | 19/19，cleanup complete | `.tmp-tests/esc-review-browser-build.log`、`.tmp-tests/esc-review-browser.log`、`.tmp-tests/browser-e2e/evidence/agent-queue-oQYzPB/result.json` |
+
+合计318项相关定向通过，fail／cancelled／skipped均0；浏览器19项另计。未重跑4056全组，不宣称本轮已独立通过。
+
+新增／强化覆盖：已有Session首次snapshot跨完整Stop不自动发送；scope不匹配不能准入；ensureSession和普通prompt准备await跨Stop保持原代际、拒收保File且后续独立发送成功；composable缺generation即使后来snapshot可用也不补值；fresh正常一键首发／创建响应期间Stop拒收／真实父子Pane与File交接；fresh未创建新ID不提交；fresh创建await期间workspace／session切换不发送旧动作；Shared初始hash与API空历史权威一致。
+
+测试编写中发现并修正测试前提：旧composable测试应由动作显式提供冻结代际，不能再期待composable补取；API新HTTP尝试需把保留File重新stage，旧请求temp在finally清理；新增Pane成功发送的timeline应由fixture即时响应，避免错误等待HTTP超时。最终记录以上完整定向组，不把中途fixture失败／工具超时算通过。
+
+### 15.3 精确文件与复审边界
+
+本次首审修复修改15份既有文件，不新增正式文件，整体增量仍为第14.4节37份。清单和最终同源哈希：`.tmp-tests/esc-review-fix-changed-files.json`、`.tmp-tests/esc-review-fix-source-hashes.json`；原交付哈希保存在`.tmp-tests/esc-review-fix-before.json`。
+
+复审重点为用户动作同步冻结、fresh证明与scope guard、首次snapshot不自动续发、拒收File／Pane交接；事务／handoff／clear协议不另改动。H1／M1／L1状态为作者已修复、待原会话复审，不标独立Resolved。
+
+本次15份文件的完整清单（相对仓库根）：
+
+- [apps/api/src/modules/agent/message-queue/message-queue.test.ts](../../../apps/api/src/modules/agent/message-queue/message-queue.test.ts)
+- [apps/web/src/features/workspace/tools/agent/AgentClientPane.component.test.ts](../../../apps/web/src/features/workspace/tools/agent/AgentClientPane.component.test.ts)
+- [apps/web/src/features/workspace/tools/agent/AgentClientPane.vue](../../../apps/web/src/features/workspace/tools/agent/AgentClientPane.vue)
+- [apps/web/src/features/workspace/tools/agent/AgentMessageQueue.component.test.ts](../../../apps/web/src/features/workspace/tools/agent/AgentMessageQueue.component.test.ts)
+- [apps/web/src/features/workspace/tools/agent/AgentToolView.component.test.ts](../../../apps/web/src/features/workspace/tools/agent/AgentToolView.component.test.ts)
+- [apps/web/src/features/workspace/tools/agent/useAgentMessageQueue.ts](../../../apps/web/src/features/workspace/tools/agent/useAgentMessageQueue.ts)
+- [apps/web/src/shared/i18n/locales/en-US.ts](../../../apps/web/src/shared/i18n/locales/en-US.ts)
+- [apps/web/src/shared/i18n/locales/zh-CN.ts](../../../apps/web/src/shared/i18n/locales/zh-CN.ts)
+- [packages/shared/src/contracts/agent-queue.ts](../../../packages/shared/src/contracts/agent-queue.ts)
+- [packages/shared/tests/agent-queue.test.ts](../../../packages/shared/tests/agent-queue.test.ts)
+- [apps/api/src/modules/agent/message-queue/queue-stop-generation.ts](../../../apps/api/src/modules/agent/message-queue/queue-stop-generation.ts)
+- [docs/design/0038-agent-session-message-queue/06-testing-and-acceptance.md](../../../docs/design/0038-agent-session-message-queue/06-testing-and-acceptance.md)
+- [docs/design/0038-agent-session-message-queue/07-review-record.md](../../../docs/design/0038-agent-session-message-queue/07-review-record.md)
+- [docs/design/0038-agent-session-message-queue/08-implementation-and-acceptance.md](../../../docs/design/0038-agent-session-message-queue/08-implementation-and-acceptance.md)
+- [docs/design/0038-agent-session-message-queue/README.md](../../../docs/design/0038-agent-session-message-queue/README.md)
+
+
+可复现的定向命令（仓库根执行）：
+
+```sh
+(cd apps/api && ../../node_modules/.bin/tsx --test --test-reporter=tap \
+  src/modules/agent/message-queue/message-queue.test.ts \
+  src/modules/agent/message-queue/message-queue.integration.test.ts \
+  src/modules/agent/message-queue/message-queue.dispatcher.test.ts \
+  src/modules/agent/message-queue/message-queue.assembly.integration.test.ts)
+(cd packages/shared && ../../node_modules/.bin/tsx --test tests/agent-queue.test.ts)
+(cd apps/web && node --input-type=module <<'JS'
+import { runComponentTests } from './scripts/run-component-tests.mjs';
+const result = await runComponentTests({ tests: [
+  'src/features/workspace/tools/agent/AgentClientPane.component.test.ts',
+  'src/features/workspace/tools/agent/AgentMessageQueue.component.test.ts',
+  'src/features/workspace/tools/agent/AgentToolView.component.test.ts'
+] });
+process.exitCode = result.exitCode;
+JS
+)
+```
+
+## 16. Esc增量最终独立复审通过与同源树归档
+
+### 16.1 独立审查关闭与本次边界
+
+原会话`sess_00mwbkx46f00006b8334387035`复审通过，H1／M1／L1全部Resolved，3/3关闭、Open 0、无新增问题。独立机器证据：`.tmp-tests/review-esc/re-review-summary.json`；主助理已核验summary和关键代际准入代码，确认Git diff空白检查通过。作者未执行Git、不暂存、不提交。
+
+reviewer独立339/339＝API81＋Web238＋Shared11＋crossLayer6＋UI3，fail／cancelled／skipped均0。作者Chromium19仅由reviewer核读，不计reviewer执行；作者318定向和旧4056／5827均不混入下面本轮最终五组。首审未通过与修复历史按时点保留。
+
+本次不改已审通过的生产代码、协议或测试语义；最终只更新本目录README／07／08状态metadata，另修正07两条已失效的文档锚点目标，保留历史文字。源树如需修改应先回报并重新送审；本轮无此类改动。
+
+### 16.2 同源树最终五组实际结果
+
+| 完整相关集合 | 实际通过 | 精确日志（仓库根目录下） |
+| --- | --- | --- |
+| Shared正式test，先完成clean-build | 151/151 | `.tmp-tests/esc-final-archive/shared.log` |
+| API unit正式入口，含root-cwd插件 | 1969＋8＝1977/1977 | `.tmp-tests/esc-final-archive/api-unit.log` |
+| 完整61文件API integration，文件并发2 | 596/596 | `.tmp-tests/esc-final-archive/api-integration.log` |
+| managed Worker正式入口 | 36/36 | `.tmp-tests/esc-final-archive/managed-worker.log` |
+| Web正式test，含完整31组件 | 1309/1309＝22 runner＋493非组件＋794组件 | `.tmp-tests/esc-final-archive/web.log` |
+| **本轮五组合计** | **4069/4069，fail 0／cancelled 0／skipped 0** | `.tmp-tests/esc-final-archive/test-counts.json` |
+
+Web组件summary：completed31、skipped0、exitCode0、signal=null。各完整测试组首次完整执行均通过，无失败用例补跑拼接；API integration独占资源执行，并发固定2，managed Worker也单独执行，其后API unit与Web并行。只覆盖本轮要求的五组，不声称重跑基线Worker unit／CLI／飞书三组或全仓八组。
+
+所有入口和构建门禁命令／cwd／退出码／耗时在`.tmp-tests/esc-final-archive/execution.json`及各`*.result.json`。Shared clean-build顺序完成后，root typecheck再次构建Shared；随后API／Worker build通过，依赖dist的API／Web／managed组才运行，未并行清理Shared dist。root typecheck、API／Worker build、API test gate及harness独立strictcheck均退出0，对应同目录`root-typecheck.log`、`api-build.log`、`worker-build.log`、`api-test-gate.log`、`harness-strictcheck.log`。
+
+可复现正式入口（均从仓库根执行；临时日志固定在项目`.tmp-tests`）：
+
+```sh
+export TMPDIR="$PWD/.tmp-tests"
+export TSX_DISABLE_CACHE=1
+export npm_config_cache="$PWD/.tmp-tests/npm-cache"
+npm test -w packages/shared
+npm run typecheck
+npm run build -w apps/api
+npm run build -w apps/agent-worker
+npm run test:unit -w apps/api
+npm run test:integration:worker -w apps/api
+npm test -w apps/web
+node --input-type=module -e "process.chdir('apps/api'); await import(process.cwd() + '/scripts/verify-test-gate.mjs')"
+node node_modules/typescript/bin/tsc --noEmit --strict --skipLibCheck --target ES2022 --module ES2022 --moduleResolution Bundler --allowSyntheticDefaultImports --types node apps/api/scripts/verify-agent-queue-browser.mts
+```
+
+API integration递归发现与正式runner完全相同，完整路径集合在`.tmp-tests/esc-final-archive/api-integration-files.json`（61项），只将文件并发限制为2。实际Node／tsx参数及API cwd在`api-integration.result.json`；可在仓库根用以下方式重现，不改正式runner：
+
+```sh
+node --input-type=module <<'JS'
+import { readdirSync } from 'node:fs';
+import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
+const root = process.cwd();
+const collect = dir => readdirSync(dir, { withFileTypes: true }).flatMap(e => {
+  const p = join(dir, e.name);
+  return e.isDirectory() ? collect(p) : e.isFile() && e.name.endsWith('.integration.test.ts') ? [p] : [];
+});
+const files = [...collect('apps/api/src'), ...collect('apps/api/tests')]
+  .filter(p => p !== 'apps/api/src/modules/agent/agent.worker.integration.test.ts').sort();
+if (files.length !== 61) throw new Error(`Unexpected integration file count: ${files.length}`);
+const result = spawnSync(process.execPath, [join(root, 'node_modules/tsx/dist/cli.mjs'), '--test', '--test-concurrency=2', ...files.map(p => p.slice('apps/api/'.length))], { cwd: join(root, 'apps/api'), stdio: 'inherit' });
+process.exitCode = result.status ?? 1;
+JS
+```
+
+临时执行器首次误以仓库cwd运行依赖API cwd的test gate，退出1（不是测试或源代码失败）；保留`attempt1-api-test-gate.log`及`auxiliary-attempts.json`，仅改`.tmp-tests`执行器cwd后完整gate退出0。不修改源文件、不伪称所有辅助命令零错误，不将此计入tests失败。五组测试本身fail／cancelled／skipped均0。
+
+### 16.3 哈希、Chromium及37份正式文件
+
+- `.tmp-tests/esc-final-archive/source-before.json`与`source-after.json`：SHA-256覆盖1430份apps／packages／plugins首方源文件、测试、脚本、配置及既有根package／lock／tsconfig／AGENTS文件。具体集合、排除规则和逐文件哈希写入JSON；排除dist、node_modules、临时工具／日志／截图、环境和数据文件、软链。before/after路径集合及哈希完全匹配，不用mtime替代内容核查。
+- `.tmp-tests/esc-final-archive/formal-before.json`与`formal-after.json`：相对主助理提供的基线`15e2590`沿用已核实37项正式清单（26 modified＋2 new＋9 documentation），完整逐路径清单及当前SHA-256在后者；数量不变。此次作者没有Git权限，最终相对提交的diff仍由主助理亲自核查；不把测试工具或dist纳正式文件。
+- `.tmp-tests/esc-final-archive/source-comparison.json`确认1430份源／配置无变化，37项中只有README／07／08的metadata哈希变化；01～06及全部28份非文档正式文件不变。
+- Chromium复用修后`.tmp-tests/browser-e2e/evidence/agent-queue-oQYzPB/result.json`：19个assertions全true、passed=true、cleanup.complete=true。`.tmp-tests/esc-final-archive/browser-source-match.json`记录37份历史修复哈希在归档前全部匹配，其中28份非文档正式文件与浏览器修后源树一致；当前1430份全量源before/after另行完全匹配。历史没有1430份全树哈希，不虚构其已覆盖该历史集合；依据已知28份增量源文件匹配且本轮无源修改，不机械重跑浏览器。
+- 机器汇总入口：`.tmp-tests/esc-final-archive/delivery-summary.json`；三文档UTF-8、单个EOF换行、无尾随空白、围栏及全部本地链接／锚点检查在`document-checks.json`。本轮临时脚本、日志、JSON、截图及构建dist均不属37份正式变更。
+
+### 16.4 限制与操作偏差披露
+
+真实用户DB升级、真实外部provider联调、人工多端／多标签／断网验收未执行；真实managed Worker／Chromium使用隔离SQLite与loopback fake provider，不能扩称厂商验收。terminal-intent冲突仍是已独立确认的安全拒绝，维持cancelled，不吞日志、不放松终态规则。
+
+保留此前事实披露：上轮空Node脚本误用仓库外日志重定向，可能创建或截断空日志。本轮严格只在项目内执行，未访问、检查、删除或修正该外部路径；不因该旧偏差阻断本次项目内验证，也不声称已检查或清理。作者无Git／stage／commit，交由主助理最终核查与提交。

@@ -1,3 +1,4 @@
+import { cancelQueuedReceipts } from "../message-queue/queued-receipt-cancellation.js";
 import { Type } from "@sinclair/typebox";
 import { createHash, randomUUID } from "node:crypto";
 import { canonicalRuntimeStopJson, runtimeStopTargetsHash, type RuntimeStopTarget } from "@agent-workbench/shared/node/agent-run-stop";
@@ -256,6 +257,7 @@ export class AgentRuntimeControlStore {
         rootSessionId: string;
         operationId: string;
         reason?: "user_stop" | "recovery_required";
+        clearQueued?: boolean;
     }, settle: (runIds: string[]) => T, selectCurrentRuns?: () => RunScope[]): {
         record: RuntimeStopRecord;
         result?: T;
@@ -315,6 +317,12 @@ export class AgentRuntimeControlStore {
             }
             for (const sessionId of sessions)
                 this.pause(input.workspaceId, sessionId, input.reason ?? "user_stop");
+            // Only the explicit Web Stop policy clears this Session; replay returned above.
+            if (input.clearQueued) {
+                const queued = this.db.prepare("select id from agent_user_message_receipt where workspace_id=? and session_id=? and status='queued'")
+                    .all(input.workspaceId, input.rootSessionId) as Array<{ id: string }>;
+                cancelQueuedReceipts(this.db, { workspaceId: input.workspaceId, sessionId: input.rootSessionId }, queued.map(row => row.id), this.now());
+            }
             const acceptedQueueVersion = (this.db.prepare(`select queue_version as version from agent_session_queue_control where session_id=?`).get(input.rootSessionId) as {
                 version: number;
             }).version;
