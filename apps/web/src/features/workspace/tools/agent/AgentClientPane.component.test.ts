@@ -2103,6 +2103,135 @@ test("切换会话 Tab 即使保留 Pane 实例，也关闭错误详情并清空
 });
 
 
+function queuedStartupResponse(clientRequestId: string) {
+  const result = acceptedQueuedSubmission(clientRequestId);
+  return { ...result, queue: { ...result.queue, pendingCount: 1,
+    pendingIdentity: { agentId: "agent-b", providerId: "p", modelId: "m" },
+    items: [{ ...result.receipt, textPreview: "start", attachmentCount: 0 }] } };
+}
+
+for (const first of ["queue", "state"] as const) test(`空闲首条消息：隐藏短暂排队并保持 loading，${first} 先更新均无闪现或虚假 Run`, async () => {
+  const http = mockContextRequests({ autoTimeline: true });
+  const { wrapper, setRunState } = mountPane({ initialDraft: "start", contextLocale: "zh-CN" }); const vm = wrapper.vm as any;
+  try {
+    const sending = vm.onSend(), request = await http.waitFor(0);
+    const accepted = queuedStartupResponse(sendPayload(request).clientRequestId);
+    http.respond(0, accepted); await sending; await nextTick();
+    assert.equal(vm.queue.snapshot.value.pendingCount, 1, "presentation never alters authoritative count");
+    assert.equal(wrapper.find('[data-testid="queue-pending-count"]').exists(), false);
+    assert.equal(wrapper.find('[data-testid="agent-run-loading"]').exists(), true);
+    assert.equal(panePendingRuns(wrapper).list("ws-a", "session-a").length, 0);
+    const updateQueue = () => vm.queue.apply({ ...queueSnapshot(), queueVersion: 2 });
+    const updateState = () => setRunState({ status: "running", activeRunId: "real-startup-run" });
+    (first === "queue" ? updateQueue : updateState)(); await nextTick();
+    assert.equal(wrapper.find('[data-testid="queue-pending-count"]').exists(), false);
+    assert.equal(wrapper.find('[data-testid="agent-run-loading"]').exists(), true);
+    (first === "queue" ? updateState : updateQueue)(); await nextTick();
+    assert.equal(vm.queueStartupRequestId, null);
+    assert.equal(wrapper.find('[data-testid="agent-run-loading"]').exists(), true);
+    setRunState({ status: "idle", activeRunId: null }); await nextTick();
+    assert.equal(wrapper.find('[data-testid="agent-run-loading"]').exists(), false);
+  } finally { wrapper.unmount(); http.restore(); }
+});
+
+test("空闲首条消息：1 秒后仍未调度则显示真实等待数量，不继续虚假 loading", async () => {
+  const http = mockContextRequests({ autoTimeline: true });
+  const { wrapper } = mountPane({ initialDraft: "start", contextLocale: "zh-CN" }); const vm = wrapper.vm as any;
+  try {
+    const sending = vm.onSend(), request = await http.waitFor(0);
+    http.respond(0, queuedStartupResponse(sendPayload(request).clientRequestId)); await sending; await nextTick();
+    assert.equal(wrapper.find('[data-testid="queue-pending-count"]').exists(), false);
+    await new Promise(resolve => setTimeout(resolve, 1050)); await nextTick();
+    assert.equal(wrapper.get('[data-testid="queue-pending-count"]').text(), "有 1 条消息等待处理");
+    assert.equal(wrapper.find('[data-testid="agent-run-loading"]').exists(), false);
+    assert.equal(vm.queue.snapshot.value.pendingCount, 1);
+  } finally { wrapper.unmount(); http.restore(); }
+});
+
+for (const backlog of ["second", "other"] as const) test(`空闲首条消息：${backlog} 排队时立即恢复真实数量`, async () => {
+  const http = mockContextRequests({ autoTimeline: true });
+  const { wrapper } = mountPane({ initialDraft: "start", contextLocale: "zh-CN" }); const vm = wrapper.vm as any;
+  try {
+    const sending = vm.onSend(), request = await http.waitFor(0);
+    const accepted = queuedStartupResponse(sendPayload(request).clientRequestId);
+    http.respond(0, accepted); await sending; await nextTick();
+    vm.queue.apply({ ...accepted.queue, queueVersion: 2, pendingCount: backlog === "second" ? 2 : 1,
+      items: backlog === "second" ? [...accepted.queue.items, { ...accepted.queue.items[0], id: "second", clientRequestId: "other" }]
+        : [{ ...accepted.queue.items[0], clientRequestId: "other" }] });
+    await nextTick();
+    assert.equal(wrapper.get('[data-testid="queue-pending-count"]').text(), `有 ${backlog === "second" ? 2 : 1} 条消息等待处理`);
+    assert.equal(wrapper.find('[data-testid="agent-run-loading"]').exists(), false);
+    vm.queue.apply({ ...accepted.queue, queueVersion: 3, items: [{ ...accepted.queue.items[0], clientRequestId: "other" }] });
+    await nextTick();
+    assert.equal(wrapper.get('[data-testid="queue-pending-count"]').text(), "有 1 条消息等待处理");
+  } finally { wrapper.unmount(); http.restore(); }
+});
+
+for (const blocked of ["paused", "unconfirmed", "stop_pending", "stop_unknown"] as const) test(`空闲首条消息：${blocked} 不隐藏真实等待`, async () => {
+  const http = mockContextRequests({ autoTimeline: true });
+  const { wrapper } = mountPane({ initialDraft: "start", contextLocale: "zh-CN" }); const vm = wrapper.vm as any;
+  try {
+    const sending = vm.onSend(), request = await http.waitFor(0);
+    const accepted = queuedStartupResponse(sendPayload(request).clientRequestId);
+    http.respond(0, accepted); await sending; await nextTick();
+    vm.queue.apply({ ...accepted.queue, queueVersion: 2,
+      ...(blocked === "paused" ? { mode: "paused", pauseCode: "user_stop" } : {}),
+      ...(blocked === "unconfirmed" ? { unconfirmedInputCount: 1, unconfirmedInputSetHash: "a".repeat(64) } : {}),
+      ...(blocked.startsWith("stop_") ? { stop: { state: blocked === "stop_pending" ? "pending" : "unknown",
+        unresolvedOperationCount: 1, unresolvedTargetCount: 1, code: "transport_timeout" } } : {}),
+    });
+    await nextTick();
+    assert.equal(wrapper.get('[data-testid="queue-pending-count"]').text(), "有 1 条消息等待处理");
+    assert.equal(vm.queueStartupRequestId, null);
+    assert.equal(wrapper.find('[data-testid="agent-run-loading"]').exists(), false);
+  } finally { wrapper.unmount(); http.restore(); }
+});
+
+for (const failure of ["rejected", "unknown"] as const) test(`空闲首条消息：${failure} 和作用域切换均清理过渡及定时器`, async (t) => {
+  const timers = t.mock.method(globalThis, "setTimeout");
+  const cleared = t.mock.method(globalThis, "clearTimeout");
+  const http = mockContextRequests({ autoTimeline: true });
+  const { wrapper } = mountPane({ initialDraft: "start", contextLocale: "zh-CN" }); const vm = wrapper.vm as any;
+  try {
+    const sending = vm.onSend(); await http.waitFor(0);
+    assert.ok(vm.queueStartupRequestId);
+    http.reject(0, failure === "rejected"
+      ? new ApiError({ status: 409, code: "AGENT_QUEUE_STOP_GENERATION_CHANGED", message: "retry explicitly" }) : new Error("connection lost"));
+    await sending; await nextTick();
+    assert.equal(vm.queueStartupRequestId, null);
+    assert.equal(wrapper.find('[data-testid="agent-run-loading"]').exists(), false);
+    forgetTestSubmission(vm);
+    const retry = vm.onSend(), request = await http.waitFor(1);
+    http.respond(1, queuedStartupResponse(sendPayload(request).clientRequestId)); await retry; await nextTick();
+    assert.ok(vm.queueStartupRequestId);
+    const startupTimer = timers.mock.calls.find(call => call.arguments[0] === vm.clearQueueStartup && call.arguments[1] === 1000)?.result;
+    assert.ok(startupTimer);
+    await wrapper.setProps(failure === "rejected" ? { sessionId: "session-b" } : { workspaceId: "ws-b" });
+    assert.ok(cleared.mock.calls.some(call => call.arguments[0] === startupTimer));
+    assert.equal(vm.queueStartupRequestId, null);
+    assert.equal(wrapper.find('[data-testid="agent-run-loading"]').exists(), false);
+  } finally { forgetTestSubmission(vm); wrapper.unmount(); http.restore(); }
+});
+
+test("空闲首条消息：发送期间组件重建，真实 Session 接续启动展示", async () => {
+  const http = mockContextRequests({ autoTimeline: true });
+  const original = mountPane({ initialDraft: "start", contextLocale: "zh-CN" }).wrapper;
+  let successor: ReturnType<typeof mountPane>["wrapper"] | null = null;
+  try {
+    const sending = (original.vm as any).onSend(), request = await http.waitFor(0);
+    original.unmount();
+    successor = mountPane({ contextLocale: "zh-CN" }).wrapper;
+    const vm = successor.vm as any;
+    assert.equal(successor.find('[data-testid="agent-run-loading"]').exists(), true);
+    const accepted = queuedStartupResponse(sendPayload(request).clientRequestId);
+    http.respond(0, accepted); await sending;
+    vm.queue.apply(accepted.queue); await nextTick();
+    assert.equal(successor.find('[data-testid="queue-pending-count"]').exists(), false);
+    assert.equal(successor.find('[data-testid="agent-run-loading"]').exists(), true);
+    assert.equal(panePendingRuns(successor).list("ws-a", "session-a").length, 0);
+  } finally { successor?.unmount(); if (!successor) original.unmount(); http.restore(); }
+});
+
 test("真实 AgentClientPane：运行中普通消息使用 receipt，N 位于输入框上方，不登记虚假 Run，并保留等待期间新草稿", async () => {
   const http = mockContextRequests();
   const { wrapper } = mountPane({ initialDraft: "first", runState: baseRunState({ status: "running", activeRunId: "existing-run" }), contextLocale: "zh-CN", renderModalSlots: true });

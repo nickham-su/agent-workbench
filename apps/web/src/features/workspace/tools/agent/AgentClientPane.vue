@@ -233,7 +233,7 @@
           {{ formatPendingAgentImageLabel(image) }}</a-tag
         >
       </div>
-      <AgentMessageQueuePanel :snapshot="queueSnapshot" />
+      <AgentMessageQueuePanel :snapshot="queueSnapshot" :hide-pending-count="!!queueStartupRequestId" />
       <a-textarea
         ref="inputEl"
         v-model:value="draft"
@@ -753,6 +753,13 @@ const composerId = createAgentClientRequestId();
 let draftRevision = 0;
 watch(draft, () => { draftRevision++; }, { flush: "sync" });
 const sending = ref(false);
+const queueStartupRequestId = ref<string | null>(null);
+let queueStartupTimer: ReturnType<typeof setTimeout> | null = null;
+function clearQueueStartup() {
+  if (queueStartupTimer !== null) clearTimeout(queueStartupTimer);
+  queueStartupTimer = null;
+  queueStartupRequestId.value = null;
+}
 // 请求已返回 runId、但状态轮询尚未观察到 running 时，避免列表图标闪烁。
 const awaitingRunStateRunId = ref<string | null>(null);
 // 只保留当前状态 Run 与待同步 Run 的终态确认，不累积历史 Run。
@@ -763,7 +770,7 @@ function bridgeRunState(runId: string) {
     : runId;
 }
 const showRunLoading = computed(() =>
-  sending.value ||
+  sending.value || queueStartupRequestId.value !== null ||
   (runState.value.workspaceId === props.workspaceId &&
     runState.value.status === "running" &&
     !terminalRunIds.value.has(runState.value.activeRunId ?? "")) ||
@@ -774,6 +781,26 @@ const pendingImages = ref<PendingAgentImage[]>([]);
 const processingPastedImages = ref(0);
 const pendingAttempt = ref<PendingAgentSendAttempt | null>(null);
 const pendingCompactAttempt = ref<PendingAgentCompactAttempt | null>(null);
+watch(
+  [queueStartupRequestId, queueSnapshot, queueStopBlocked, queueUnknownControl, cancelling,
+    () => runState.value.status, awaitingRunStateRunId],
+  () => {
+    const requestId = queueStartupRequestId.value;
+    if (!requestId) return;
+    const snapshot = queueSnapshot.value;
+    // Only this first receipt gets a grace period. Never conceal real backlog or recovery.
+    if (queueStopBlocked.value || queueUnknownControl.value || cancelling.value ||
+      (snapshot && (snapshot.mode !== "active" || snapshot.stop.state !== "none" || snapshot.unconfirmedInputCount > 0 ||
+        (snapshot.pendingCount > 0 && (snapshot.pendingCount !== 1 || snapshot.items[0]?.clientRequestId !== requestId))))) {
+      clearQueueStartup();
+    } else if (snapshot?.pendingCount === 0 &&
+      (runState.value.status === "running" || awaitingRunStateRunId.value !== null)) {
+      // State and queue polling can arrive in either order. Retire only after both agree.
+      clearQueueStartup();
+    }
+  },
+  { flush: "sync" },
+);
 const scrollEl = ref<HTMLElement | null>(null);
 const inputEl = ref<any>(null);
 type ScrollPosition = { top: number; wasAtBottom: boolean };
@@ -1338,6 +1365,7 @@ function onRevert(targetMessage: AgentMessage) {
 }
 async function onCancel() {
   if (queueBusy.value || sending.value || cancelling.value) return;
+  clearQueueStartup();
   const scope = requestScope;
   cancelling.value = true;
   try {
@@ -1634,6 +1662,11 @@ async function onSend() {
     message.warning(t("agent.client.queueCompactBlocked"));
     return;
   }
+  const idleStartup = !showRunLoading.value && runState.value.status !== "running" &&
+    !queueStopBlocked.value && !queueUnknownControl.value && !queueUnknownSubmission.value &&
+    (creatingFreshSession || (!!trustedGeneration && currentQueue?.mode === "active" &&
+      currentQueue.pendingCount === 0 && currentQueue.unconfirmedInputCount === 0 &&
+      currentQueue.stop.state === "none" && !currentQueue.inputIdentity));
   sending.value = true;
   try {
     if (!agentSelectionReady.value || !effectiveAgentId.value) return;
@@ -1684,7 +1717,7 @@ async function onSend() {
       const attempt = resolveAgentSendAttempt({ attempt: pendingAttempt.value, fingerprint, makeClientRequestId: createAgentClientRequestId });
       pendingAttempt.value = attempt;
       const acknowledged = await queue.submit({
-        sessionId: ensuredId, composerId, draft: submittedDraft, draftRevision: submittedRevision, images: submittedImages,
+        sessionId: ensuredId, composerId, draft: submittedDraft, draftRevision: submittedRevision, images: submittedImages, idleStartup,
         payload: { workspaceId: sendScope.workspaceId, clientRequestId: attempt.clientRequestId, stopGeneration: submittedStopGeneration,
           agentId: effectiveAgentId.value || undefined, uiLocale: getInitialLocale(), ...(sendText ? { text: sendText } : {}) },
       });
@@ -2177,6 +2210,7 @@ watch(
   ([workspaceId, sessionId, active, ready], previous) => {
     if (disposed) return;
     if (previous?.[2] && !active && previous[0] === workspaceId && previous[1] === sessionId) {
+      clearQueueStartup();
       saveScrollPosition();
       savedByTab = true;
     }
@@ -2190,6 +2224,7 @@ watch(
         sessionId,
       );
       timelineState.value = createAgentTimelineControllerState();
+      clearQueueStartup();
       detailByExecutionId.value = {};
       detailLoading.value = new Set();
       collapsedTodoPartIds.value = new Set();
@@ -2312,8 +2347,22 @@ watch(
   syncElapsedTimer,
   { immediate: true },
 );
-watch(queueSubmissionHandoff, entry => {
+watch(queueSubmissionHandoff, (entry, previous) => {
   if (!entry) return;
+  const requestId = entry.submission.payload.clientRequestId;
+  if (entry.submission.idleStartup && (entry.phase === "sending" || (!previous && entry.phase === "accepted"))) {
+    if (queueStartupRequestId.value !== requestId) {
+      clearQueueStartup();
+      queueStartupRequestId.value = requestId;
+    }
+  }
+  if (queueStartupRequestId.value === requestId) {
+    if (entry.phase === "accepted" && queueStartupTimer === null) {
+      queueStartupTimer = setTimeout(clearQueueStartup, 1000);
+    } else if (entry.phase === "unknown" || entry.phase === "rejected") {
+      clearQueueStartup();
+    }
+  }
   if (entry.phase === "accepted") {
     confirmQueueSubmission(entry.submission);
     return;
@@ -2334,6 +2383,7 @@ watch(queueSubmissionHandoff, entry => {
   }
 }, { immediate: true, flush: "sync" });
 onDeactivated(() => {
+  clearQueueStartup();
   closeQueueRecovery();
   closeModelErrorDetails();
   if (!savedByTab) saveScrollPosition();
@@ -2343,6 +2393,7 @@ onActivated(() => {
 });
 onBeforeUnmount(() => {
   disposed = true;
+  clearQueueStartup();
   terminalRunIds.value = new Set();
   cancelPendingScrollRestore();
   clearRefreshTimer();

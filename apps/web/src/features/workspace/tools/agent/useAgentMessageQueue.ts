@@ -13,6 +13,8 @@ export type QueueSubmission = {
   images: PendingAgentImage[];
   draft: string;
   draftRevision: number;
+  // Presentation-only hint, carried to the real Session's Pane during draft handoff.
+  idleStartup?: boolean;
 };
 type PendingControl = { kind: "resume"; body: AgentResumeMessageQueueRequest } | { kind: "abandon"; body: AgentAbandonUnconfirmedInputRequest };
 // Keep exact submissions (including Files) across session switches and KeepAlive

@@ -54,6 +54,17 @@ test("队列面板：只显示服务端 queued 数量，N=0 无文字与间距�
     assert.equal(wrapper.attributes("class"), undefined);
   } finally { wrapper.unmount(); }
 });
+test("队列面板：启动过渡仅隐藏展示，不修改快照，过渡结束恢复真实计数", async () => {
+  const queued = snapshot({ pendingCount: 1 });
+  const wrapper = panel({ snapshot: queued, hidePendingCount: true });
+  try {
+    assert.equal(wrapper.find('[data-testid="queue-pending-count"]').exists(), false);
+    assert.equal(wrapper.element.childElementCount, 0);
+    assert.equal(queued.pendingCount, 1);
+    await wrapper.setProps({ hidePendingCount: false });
+    assert.equal(wrapper.get('[data-testid="queue-pending-count"]').text(), "有 1 条消息等待处理");
+  } finally { wrapper.unmount(); }
+});
 test("队列面板：英文只显示数量", () => {
   const wrapper = panel({ snapshot: snapshot({ pendingCount: 5 }) }, "en-US");
   try { assert.equal(wrapper.text(), "5 messages waiting to be processed"); } finally { wrapper.unmount(); }
