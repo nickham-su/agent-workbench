@@ -38,37 +38,25 @@ function panelGlobal(locale = "zh-CN") {
     stubs: { "a-button": defineComponent({ props: { disabled: Boolean }, emits: ["click"], setup(props, { emit, slots }) { return () => h("button", { disabled: props.disabled, onClick: () => emit("click") }, slots.default?.()); } }) } };
 }
 function panel(props: Partial<InstanceType<typeof Panel>["$props"]> = {}, locale = "zh-CN") {
-  return mount(Panel, { props: { snapshot: snapshot(), error: false, busy: false, stopBlocked: false, unknownSubmission: false, unknownStop: false, unknownControl: null, ...props }, global: panelGlobal(locale) });
+  return mount(Panel, { props: { snapshot: snapshot(), ...props }, global: panelGlobal(locale) });
 }
 
-test("队列面板：N 只来自服务端 queued，暂停仍计数；N=0 时隐藏且 K 独立显示", async () => {
-  const wrapper = panel({ snapshot: snapshot({ queueVersion: 4, mode: "paused", pauseCode: "user_stop", pendingCount: 2 }), unknownSubmission: true });
+test("队列面板：只显示服务端 queued 数量，N=0 无文字与间距，不展示内部状态或管理入口", async () => {
+  const wrapper = panel({ snapshot: snapshot({ mode: "paused", pauseCode: "user_stop", pendingCount: 2,
+    unconfirmedInputCount: 1, stop: { state: "unknown", code: "transport_timeout", unresolvedOperationCount: 1, unresolvedTargetCount: 1 },
+    items: [{ ...queuedItem(), textPreview: "private queued text" }] }) });
   try {
-    assert.equal(wrapper.get('[data-testid="queue-pending-count"]').text(), "有 2 条消息等待处理");
-    await wrapper.setProps({ snapshot: snapshot({ mode: "paused", unconfirmedInputCount: 1, unconfirmedInputSetHash: "a".repeat(64) }) });
-    assert.equal(wrapper.find('[data-testid="queue-pending-count"]').exists(), false);
-    assert.match(wrapper.get('[data-testid="queue-unconfirmed-count"]').text(), /1 条正式输入/);
-    assert.equal(wrapper.find('[data-testid="queue-submission-unknown"]').exists(), true);
+    assert.equal(wrapper.text(), "有 2 条消息等待处理");
+    assert.equal(wrapper.findAll("button, details, li").length, 0);
+    await wrapper.setProps({ snapshot: snapshot({ mode: "paused", unconfirmedInputCount: 1 }) });
+    assert.equal(wrapper.text(), "");
+    assert.equal(wrapper.element.childElementCount, 0);
+    assert.equal(wrapper.attributes("class"), undefined);
   } finally { wrapper.unmount(); }
 });
-test("队列面板：停止屏障禁用全量放弃且不再展示继续按钮，仍可取消 FIFO 收件", async () => {
-  const receipt = accepted().receipt;
-  assert.equal(receipt.status, "queued");
-  if (receipt.status !== "queued") return;
-  const wrapper = panel({ snapshot: snapshot({ mode: "paused", pendingCount: 1, unconfirmedInputCount: 1, items: [{ ...receipt, textPreview: "queued text", attachmentCount: 1 }] }), stopBlocked: true });
-  try {
-    const buttons = wrapper.findAll("button");
-    assert.equal(buttons[0]!.attributes("disabled"), "");
-    assert.equal(buttons.length, 3);
-    assert.equal(buttons.some(button => button.text() === "继续处理"), false);
-    assert.equal(buttons.at(-1)!.attributes("disabled"), undefined);
-    await buttons.at(-1)!.trigger("click");
-    assert.deepEqual(wrapper.emitted("cancel"), [["receipt"]]);
-  } finally { wrapper.unmount(); }
-});
-test("队列面板：英文与离线提示不把最后可信计数置零", () => {
-  const wrapper = panel({ snapshot: snapshot({ pendingCount: 5 }), error: true }, "en-US");
-  try { assert.match(wrapper.text(), /5 messages waiting/); assert.match(wrapper.text(), /last confirmed state/); } finally { wrapper.unmount(); }
+test("队列面板：英文只显示数量", () => {
+  const wrapper = panel({ snapshot: snapshot({ pendingCount: 5 }) }, "en-US");
+  try { assert.equal(wrapper.text(), "5 messages waiting to be processed"); } finally { wrapper.unmount(); }
 });
 test("队列状态：低版本与旧 Session 回包不能覆盖新快照，断网保留计数", async () => {
   const old = deferred<AgentMessageQueueSnapshot>();
@@ -270,10 +258,7 @@ function productionScopeFixture(overrides: Partial<typeof api>) {
   const wrapper = mount(defineComponent({ setup() {
     queue = useAgentMessageQueue(() => ({ workspaceId: scope.workspaceId, sessionId: scope.sessionId,
       active: scope.active, running: runState.value.status === "running" }), { ...api, ...overrides });
-    return () => h(Panel, { snapshot: queue.snapshot.value, error: !!queue.error.value, busy: queue.busy.value,
-      stopBlocked: queue.stopBlocked.value, unknownSubmission: !!queue.unknownSubmission.value,
-      unknownStop: queue.unknownStop.value, unknownControl: queue.unknownControl.value?.kind ?? null,
-      onCancel: (id: string) => { void queue.cancel(id); } });
+    return () => h(Panel, { snapshot: queue.snapshot.value });
   } }), { global: panelGlobal() });
   const currentSnapshot = (overrides: Partial<AgentMessageQueueSnapshot> = {}) => snapshot({ workspaceId: scope.workspaceId, sessionId: scope.sessionId, ...overrides });
   return { scope, runState, queue, wrapper, currentSnapshot };
@@ -285,7 +270,7 @@ function queuedItem() {
   return { ...receipt, textPreview: "browser watch message", attachmentCount: 0 };
 }
 
-test("生产同形scope：重复Run快照保留展开节点、取消busy与800ms轮询期限", async t => {
+test("生产同形scope：重复Run快照保留数量节点、内部取消busy与800ms轮询期限", async t => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const cancelled = deferred<Awaited<ReturnType<typeof api.cancelAgentQueuedReceipt>>>();
   let polls = 0, cancels = 0;
@@ -297,25 +282,22 @@ test("生产同形scope：重复Run快照保留展开节点、取消busy与800ms
   await settle();
   const baselinePolls = polls;
   const trusted = f.queue.snapshot.value;
-  const details = f.wrapper.get('[data-testid="queue-items"]').element;
-  details.setAttribute("open", "");
+  const countNode = f.wrapper.get('[data-testid="queue-pending-count"]').element;
   t.mock.timers.tick(799);
   f.runState.value = { status: "running", revision: 1 }; await settle();
   assert.equal(f.queue.snapshot.value, trusted);
   assert.equal(polls, baselinePolls, "same primitive values must not trigger refresh or abort the poll");
-  assert.equal(f.wrapper.get('[data-testid="queue-items"]').element, details);
-  assert.equal(details.hasAttribute("open"), true);
+  assert.equal(f.wrapper.get('[data-testid="queue-pending-count"]').element, countNode);
   t.mock.timers.tick(1); await settle(); assert.equal(polls, baselinePolls + 1, "original poll deadline is preserved");
-  await f.wrapper.get('[data-receipt-id="receipt"]').findAll("button").at(-1)!.trigger("click");
+  const cancellation = f.queue.cancel("receipt");
   assert.equal(cancels, 1); assert.equal(f.queue.busy.value, true);
   f.runState.value = { status: "running", revision: 2 }; await settle();
   assert.equal(f.queue.busy.value, true); assert.equal(polls, baselinePolls + 1);
-  assert.equal(f.wrapper.get('[data-testid="queue-items"]').element, details);
-  assert.equal(details.hasAttribute("open"), true);
+  assert.equal(f.wrapper.get('[data-testid="queue-pending-count"]').element, countNode);
   cancelled.resolve({ receipt: { ...queuedItem(), status: "cancelled" }, queue: f.currentSnapshot({ queueVersion: 1 }) });
-  await settle();
+  await cancellation; await settle();
   assert.equal(f.queue.busy.value, false); assert.equal(f.queue.snapshot.value?.pendingCount, 0);
-  assert.equal(f.wrapper.find('[data-testid="queue-items"]').exists(), false);
+  assert.equal(f.wrapper.find('[data-testid="queue-pending-count"]').exists(), false);
 });
 
 for (const kind of ["stop", "resume"] as const) test(`生产同形scope：重复Run快照保留${kind}未知操作与在途确认`, async () => {
@@ -370,17 +352,15 @@ for (const field of ["workspaceId", "sessionId"] as const) test(`生产同形sco
   } finally { f.wrapper.unmount(); }
 });
 
-test("Stop pending and unknown are distinct; quiescence never clears the paused banner or changes N", async () => {
-  const wrapper=panel({snapshot:snapshot({mode:"paused",pendingCount:3,stop:{state:"pending",unresolvedOperationCount:1,unresolvedTargetCount:1,code:"stop_requested"}}),stopBlocked:true});
+test("队列面板：pending、unknown 与 quiescent 停止状态均不产生常驻提示", async () => {
+  const wrapper = panel();
   try {
-    assert.match(wrapper.get('[data-testid="queue-stop-barrier"]').text(),/停止确认中.*等待当前执行退出/);
-    assert.match(wrapper.get('[data-testid="queue-pending-count"]').text(),/3/);
-    await wrapper.setProps({snapshot:snapshot({mode:"paused",pendingCount:3,stop:{state:"unknown",unresolvedOperationCount:1,unresolvedTargetCount:1,code:"transport_timeout"}})});
-    const text=wrapper.get('[data-testid="queue-stop-barrier"]').text();assert.match(text,/停止状态未知/);assert.match(text,/离线排他维护/);assert.doesNotMatch(text,/force-resume|\/data\/|token/i);
-    await wrapper.setProps({snapshot:snapshot({mode:"paused",pendingCount:3,stop:{state:"quiescent",unresolvedOperationCount:0,unresolvedTargetCount:0,code:null}}),stopBlocked:false});
-    assert.equal(wrapper.find('[data-testid="queue-stop-barrier"]').exists(),false);assert.equal(wrapper.find('[data-testid="queue-paused"]').exists(),true);
-    assert.match(wrapper.get('[data-testid="queue-pending-count"]').text(),/3/);
-  } finally {wrapper.unmount();}
+    for (const state of ["pending", "unknown", "quiescent"] as const) {
+      await wrapper.setProps({ snapshot: snapshot({ stop: { state, code: "runner_not_quiescent", unresolvedOperationCount: 1, unresolvedTargetCount: 1 } }) });
+      assert.equal(wrapper.text(), "");
+      assert.equal(wrapper.find('[data-testid="queue-stop-barrier"]').exists(), false);
+    }
+  } finally { wrapper.unmount(); }
 });
 
 test("清空未知结果始终重试原 targets，不误删后来消息，busy 真实互斥", async () => {

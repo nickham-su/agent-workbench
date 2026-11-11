@@ -87,9 +87,6 @@
             :class="messageClass(row)"
             :data-message-id="row.message.id"
           >
-            <div v-if="row.message.inputReceipt && row.message.type === 'user' && row.id === conversation.find(item => item.message.id === row.message.id)?.id" class="text-xs text-amber-500" data-testid="message-input-receipt">
-              {{ t(row.message.inputReceipt.confirmationState === 'abandoned' ? 'agent.client.queueInputAbandoned' : row.message.inputReceipt.confirmationState === 'unconfirmed' ? 'agent.client.queueInputUnconfirmed' : row.message.inputReceipt.confirmationSource === 'local_fallback' ? 'agent.client.queueInputFallback' : 'agent.client.queueInputConfirmed') }}
-            </div>
             <AgentMessageActions
               v-if="isMessageActionTextRow(row) && (showFork(row.message) || showRevert(row.message))"
               :disabled="isSessionMessageMutationPending || queueHistoryBlocked"
@@ -236,16 +233,7 @@
           {{ formatPendingAgentImageLabel(image) }}</a-tag
         >
       </div>
-      <AgentMessageQueuePanel
-        :snapshot="queueSnapshot" :error="!!queueError" :busy="queueBusy || sending || queueSubmissionHandoff?.phase === 'sending'"
-        :stop-blocked="queueStopBlocked" :unknown-submission="!!queueUnknownSubmission"
-        :retained-submission="queueSubmissionHandoff?.phase !== 'accepted' ? queueSubmissionHandoff : null"
-        :unknown-clear="queueUnknownClear" :unknown-stop="queueUnknownStop" :unknown-control="queueUnknownControl?.kind ?? null"
-        @restore="restoreQueueSubmission"
-        @lookup="onResolveQueueSubmission(false)" @retry="onResolveQueueSubmission(true)"
-        @stop="onCancel" @clear="onQueueClear" @abandon="onQueueAbandon"
-        @cancel="onQueueCancel" @detail="onQueueDetail"
-      />
+      <AgentMessageQueuePanel :snapshot="queueSnapshot" />
       <a-textarea
         ref="inputEl"
         v-model:value="draft"
@@ -504,7 +492,7 @@ import { computed, h, inject, nextTick, onActivated, onBeforeUnmount, onDeactiva
 import { useI18n } from "vue-i18n";
 import AgentMessageQueuePanel from "./AgentMessageQueuePanel.vue";
 import { useAgentMessageQueue, type QueueSubmission } from "./useAgentMessageQueue";
-import { getAgentReceiptDetail, getAgentReceiptAttachmentContent } from "@/shared/api/agentMessageQueueApi";
+import { getAgentReceiptAttachmentContent } from "@/shared/api/agentMessageQueueApi";
 import AgentAttachmentPreviewModal from "./AgentAttachmentPreviewModal.vue";
 import AgentConversationToolCall from "./AgentConversationToolCall.vue";
 import AgentMessageActions from "./AgentMessageActions.vue";
@@ -688,7 +676,7 @@ const queue = useAgentMessageQueue(() => ({
   active: props.active && props.sessionReady && props.sessionKind !== "subtask",
   running: runState.value.status === "running",
 }));
-const { snapshot: queueSnapshot, error: queueError, busy: queueBusy, identity: queueIdentity,
+const { snapshot: queueSnapshot, busy: queueBusy, identity: queueIdentity,
   stopBlocked: queueStopBlocked, historyBlocked: queueHistoryBlocked,
   handoff: queueSubmissionHandoff, unknownSubmission: queueUnknownSubmission, unknownStop: queueUnknownStop, unknownClear: queueUnknownClear, unknownControl: queueUnknownControl } = queue;
 const queueIdentityLocked = computed(() => !!queueIdentity.value || queueStopBlocked.value || !!queueUnknownSubmission.value || !!queueUnknownControl.value);
@@ -1541,7 +1529,8 @@ function onInputKeydown(event: KeyboardEvent) {
   }
   if (event.key === "Escape" && runState.value.status === "running") {
     event.preventDefault();
-    if (event.repeat || queueBusy.value || sending.value || cancelling.value || queueStopBlocked.value || !queueSnapshot.value) return;
+    if (event.repeat || queueBusy.value || sending.value || cancelling.value) return;
+    if (showQueueRecovery() || !queueSnapshot.value) return;
     if (queueUnknownClear.value || queueSnapshot.value.pendingCount > 0) void onQueueClear();
     else void onCancel();
   }
@@ -1594,15 +1583,13 @@ async function onSend() {
     sending.value ||
     queueBusy.value ||
     cancelling.value ||
-    queueStopBlocked.value ||
-    !!queueUnknownControl.value ||
-    !!queueUnknownSubmission.value ||
     processingPastedImages.value ||
     isSessionModelSendBlocked({
       mutationPending: props.sessionModelMutationPending,
     })
   )
     return;
+  if (showQueueRecovery()) return;
   const sendScope = requestScope;
   const currentQueue = queueSnapshot.value;
   const trustedGeneration = currentQueue?.workspaceId === sendScope.workspaceId && currentQueue.sessionId === sendScope.sessionId
@@ -1738,14 +1725,82 @@ function restoreQueueSubmission() {
     const scope = requestScope;
     const revision = draftRevision;
     const images = pendingImages.value;
-    Modal.confirm({ title: t("agent.client.queueRestoreConfirm"), content: t("agent.client.queueRestoreDescription"),
+    closeQueueRecovery();
+    const modalToken = queueRecoveryToken;
+    queueRecoveryModal = Modal.confirm({ title: t("agent.client.queueRestoreConfirm"), content: t("agent.client.queueRestoreDescription"),
       onOk() {
-        if (isCurrentAgentRequestScope(requestScope, scope) && draftRevision === revision && pendingImages.value === images
+        if (modalToken !== queueRecoveryToken) return;
+        if (!disposed && props.active && isCurrentAgentRequestScope(requestScope, scope) && draftRevision === revision && pendingImages.value === images
           && queueSubmissionHandoff.value?.submission === submission) restore();
-      } });
+        closeQueueRecovery();
+      }, onCancel: () => { if (modalToken === queueRecoveryToken) closeQueueRecovery(); } });
   } else restore();
 }
+// Recovery is offered only after a failed action or a new user attempt, never
+// as persistent queue chrome. Closing it does not discard the original request.
+let queueRecoveryModal: ReturnType<typeof Modal.info> | null = null;
+let queueRecoveryToken = 0;
+function closeQueueRecovery() {
+  queueRecoveryToken += 1;
+  queueRecoveryModal?.destroy();
+  queueRecoveryModal = null;
+}
+function showQueueRecovery(includeRejected = false): boolean {
+  const handoff = queueSubmissionHandoff.value;
+  const control = queueUnknownControl.value;
+  const kind = queueUnknownStop.value ? "stop" : queueUnknownClear.value ? "clear"
+    : handoff && (handoff.phase === "unknown" || (includeRejected && handoff.phase === "rejected")) ? "submission"
+    : control ? "control" : null;
+  if (!kind) {
+    if (queueStopBlocked.value) {
+      message.warning(t(queueSnapshot.value?.stop.state === "pending" ? "agent.client.queueStopPending" : "agent.client.queueStopUnknown"));
+      return true;
+    }
+    // A handoff may belong to another mounted composer and still be in flight.
+    return !!queueUnknownSubmission.value;
+  }
+  if (disposed || !props.active) return true;
+  if (queueRecoveryModal) return true;
+  const scope = requestScope;
+  const modalToken = queueRecoveryToken;
+  const current = () => !disposed && props.active && isCurrentAgentRequestScope(requestScope, scope)
+    && !queueBusy.value && !sending.value && !cancelling.value;
+  const button = (key: string, action: () => void | Promise<void>) => h("button", {
+    type: "button", class: "mr-3 mt-3 underline", onClick: () => {
+      if (modalToken !== queueRecoveryToken || !current()) return;
+      closeQueueRecovery();
+      void action();
+    },
+  }, t(key));
+  let content;
+  if (kind === "submission" && handoff) {
+    const sameSubmission = () => queueSubmissionHandoff.value?.submission === handoff.submission;
+    content = h("div", [
+      h("p", t(handoff.phase === "unknown" ? "agent.client.queueSubmissionUnknown" : handoff.status === 507 ? "agent.client.queueRetentionFull" : "agent.client.queueSubmissionRejected")),
+      ...(handoff.phase === "unknown" ? [button("agent.client.queueLookup", async () => { if (sameSubmission()) await onResolveQueueSubmission(false); })] : []),
+      button("agent.client.queueRetryOriginal", async () => { if (sameSubmission()) await onResolveQueueSubmission(true); }),
+      button("agent.client.queueRestoreDraft", () => { if (sameSubmission()) restoreQueueSubmission(); }),
+    ]);
+  } else {
+    const key = kind === "stop" ? "agent.client.queueStopUnknown" : kind === "clear" ? "agent.client.queueClearUnknown" : "agent.client.queueControlUnknown";
+    content = h("div", [h("p", t(key)), button(kind === "stop" ? "agent.client.queueRetryStop" : kind === "clear" ? "agent.client.queueRetryClear" : "agent.client.queueRetryOperation", async () => {
+      if (kind === "stop") { if (queueUnknownStop.value) await onCancel(); }
+      else if (kind === "clear") { if (queueUnknownClear.value) await onQueueClear(); }
+      else if (control && queueUnknownControl.value === control) {
+        try { await queue.control(control.kind); await refreshStructuralTimeline(); }
+        catch (error) { if (current()) showQueueError(error); }
+      }
+    })]);
+  }
+  queueRecoveryModal = Modal.info({
+    title: t("agent.client.queueRecoveryTitle"), content,
+    onOk: () => { if (modalToken === queueRecoveryToken) closeQueueRecovery(); },
+  });
+  return true;
+}
+watch(() => [props.workspaceId, props.sessionId, props.active], closeQueueRecovery);
 function showQueueError(error: unknown) {
+  if (showQueueRecovery(true)) return;
   message.error(error instanceof ApiError && error.status === 507 ? t("agent.client.queueRetentionFull") : error instanceof Error ? error.message : String(error));
 }
 async function onResolveQueueSubmission(retry: boolean) {
@@ -1762,46 +1817,6 @@ async function onResolveQueueSubmission(retry: boolean) {
       await refreshStructuralTimeline();
     }
   } catch (error) { if (isCurrentAgentRequestScope(requestScope, scope)) showQueueError(error); }
-}
-async function onQueueCancel(receiptId: string) {
-  const scope = requestScope;
-  try { await queue.cancel(receiptId); } catch (error) { if (isCurrentAgentRequestScope(requestScope, scope)) showQueueError(error); }
-}
-let queueDetailModal: ReturnType<typeof Modal.info> | null = null;
-async function onQueueDetail(receiptId: string) {
-  const scope = requestScope;
-  try {
-    const detail = await getAgentReceiptDetail(scope.sessionId, scope.workspaceId, receiptId);
-    if (!isCurrentAgentRequestScope(requestScope, scope)) return;
-    queueDetailModal?.destroy();
-    queueDetailModal = Modal.info({ title: t("agent.client.queueView"), content: h("div", [
-      h("p", { style: { whiteSpace: "pre-wrap", overflowWrap: "anywhere" } }, detail.inputText ?? detail.text ?? ""),
-      ...detail.attachments.map(item => h("button", { type: "button", onClick: () => {
-        if (!isCurrentAgentRequestScope(requestScope, scope)) return;
-        openAttachmentPreview(detail.attachments.map(attachment => ({ attachmentId: attachment.id, filename: attachment.filename, mediaType: attachment.mediaType })), receiptId, detail.attachments.indexOf(item));
-      } }, item.filename)),
-    ]) });
-  } catch (error) { if (isCurrentAgentRequestScope(requestScope, scope)) showQueueError(error); }
-}
-function onQueueAbandon() {
-  if (queueStopBlocked.value || queueBusy.value) return;
-  const scope = requestScope;
-  const confirmedSnapshot = queueSnapshot.value;
-  Modal.confirm({
-    title: t("agent.client.queueAbandonConfirm"),
-    content: t("agent.client.queueAbandonDescription", { count: confirmedSnapshot?.unconfirmedInputCount ?? 0 }),
-    okText: t("agent.client.queueAbandon"), cancelText: t("common.cancel"),
-    okType: "danger",
-    async onOk() {
-      if (!isCurrentAgentRequestScope(requestScope, scope) || queueStopBlocked.value) return;
-      try {
-        const result = await queue.control("abandon", confirmedSnapshot);
-        if (!isCurrentAgentRequestScope(requestScope, scope)) return;
-        if (result && "runId" in result && result.runId) bridgeRunState(result.runId);
-        await refreshStructuralTimeline();
-      } catch (error) { if (isCurrentAgentRequestScope(requestScope, scope)) showQueueError(error); }
-    },
-  });
 }
 watch(() => queueSnapshot.value?.queueVersion, (version, previous) => {
   if (version !== undefined && previous !== undefined && version !== previous && props.active && props.sessionReady) {
@@ -1856,7 +1871,7 @@ function openAttachmentPreview(attachments: AttachmentPreviewPart[], receiptId: 
   void showPreviewAt(initialIndex);
 }
 function closeAttachmentPreview() {
-  queueDetailModal?.destroy(); queueDetailModal = null;
+  closeQueueRecovery();
   previewReceiptId.value = null;
   previewGeneration += 1;
   attachmentPreviewVisible.value = false;
@@ -2291,6 +2306,10 @@ watch(queueSubmissionHandoff, entry => {
     confirmQueueSubmission(entry.submission);
     return;
   }
+  // The draft Pane may already be gone when its first receipt fails. Its
+  // successor must expose that failure without relying on the old catch path.
+  if (entry.submission.composerId !== composerId && (entry.phase === "unknown" || entry.phase === "rejected"))
+    showQueueRecovery(true);
   if (entry.submission.composerId === composerId || adoptedQueueDraft?.submission === entry.submission) return;
   // Only pristine successor composers may adopt automatically. A retained
   // submission remains separately accessible when the user has already typed.
@@ -2303,6 +2322,7 @@ watch(queueSubmissionHandoff, entry => {
   }
 }, { immediate: true, flush: "sync" });
 onDeactivated(() => {
+  closeQueueRecovery();
   closeModelErrorDetails();
   if (!savedByTab) saveScrollPosition();
 });

@@ -60,7 +60,7 @@ class FakeXMLHttpRequest {
 
 Object.defineProperty(globalThis, "XMLHttpRequest", { value: FakeXMLHttpRequest, configurable: true, writable: true });
 
-const [{ mount }, component, { createI18n }, { KeepAlive, h, nextTick, ref }, { workspaceHostKey }, { message, notification }, enUS, zhCN] = await Promise.all([
+const [{ mount }, component, { createI18n }, { KeepAlive, h, nextTick, ref }, { workspaceHostKey }, { message, notification, Modal }, enUS, zhCN] = await Promise.all([
   import("@vue/test-utils"),
   import("./AgentToolView.vue"),
   import("vue-i18n"),
@@ -79,6 +79,7 @@ afterEach(async () => {
   await new Promise<void>((resolve) => setImmediate(resolve));
   message.destroy();
   notification.destroy();
+  Modal.destroyAll();
   // Use this vite-node module instance; the notification unmount is asynchronous.
   await nextTick();
   await new Promise<void>((resolve) => setImmediate(resolve));
@@ -181,7 +182,7 @@ function mountView(workspaceId = "ws-a", openSessionRequest?: { sessionId: strin
         "a-tab-pane": { template: "<div class='agent-tab-pane'><slot name='tab' /><slot /></div>" },
         "a-tooltip": { template: "<span><slot /></span>" },
         "a-button": { emits: ["click"], template: "<button @click='$emit(\"click\")'><slot /></button>" },
-        "a-modal": options.renderPicker ? { props: ["open"], template: "<div v-if='open'><slot /></div>" } : true,
+        "a-modal": options.renderPicker ? { props: ["open"], template: "<div v-if='open'><slot /></div>" } : options.renderRealPane ? false : true,
         "a-list": options.renderPicker ? { props: ["dataSource"], template: "<div><slot v-for='item in dataSource' name='renderItem' :item='item' /></div>" } : true,
         "a-list-item": options.renderPicker ? { emits: ["click"], template: "<div @click='$emit(\"click\")'><slot /></div>" } : true,
         "a-input": true,
@@ -2828,8 +2829,11 @@ for (const outcome of ["timeout-query", "timeout-retry", "507-retry", "507-edite
       assert.equal(vm.queue.handoff.value.submission.images[0].file, file);
       assert.equal(vm.queue.handoff.value.submission.draft, "original private draft");
       assert.equal(vm.queue.handoff.value.phase, outcome.startsWith("timeout") ? "unknown" : "rejected");
-      assert.equal(successor.find('[data-testid="queue-retained-submission"]').exists(), true);
-      await vm.onResolveQueueSubmission(outcome !== "timeout-query"); await settle();
+      assert.equal(successor.find('[data-testid="queue-retained-submission"]').exists(), false);
+      const actionText = enUS.default.agent.client[outcome === "timeout-query" ? "queueLookup" : "queueRetryOriginal"];
+      const action = [...document.body.querySelectorAll("button")].filter(button => button.textContent === actionText).at(-1);
+      assert.ok(action, "successor exposes recovery through an actual dialog action");
+      action.click(); await settle();
       assert.equal(acceptedIds.size, 1, "lookup/retry reconciles the same logical receipt, never a new execution");
       assert.deepEqual(postedIds, outcome === "timeout-query" ? [originalId] : [originalId, originalId]);
       assert.equal(vm.queue.handoff.value, null);

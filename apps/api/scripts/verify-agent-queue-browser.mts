@@ -243,6 +243,9 @@ async function main() {
     await page.goto(url, { waitUntil: "domcontentloaded" });
     await editor().waitFor({ state: "visible", timeout: 20_000 });
     assert.equal(await count().count(), 0); checks.initialZeroHidden = true;
+    const queueHeight = () => editor().evaluate(input => input.previousElementSibling!.getBoundingClientRect().height);
+    assert.ok((await queueHeight()) === 0);
+    checks.initialZeroTakesNoSpace = true;
     const send = async (text: string) => {
       await editor().fill(text); await editor().press("Enter");
       await page!.waitForFunction(() => [...document.querySelectorAll<HTMLTextAreaElement>('[data-testid="agent-message-queue"] + textarea')].some(input => input.getBoundingClientRect().height > 0 && input.value === ""), undefined, { timeout: 10_000 });
@@ -285,41 +288,22 @@ async function main() {
     assert.deepEqual(receipts().map(item => item.id), receiptIds); assert.deepEqual((await snapshot()).items.map(item => item.id), before.items.map(item => item.id));
     assert.equal(requests.length, 1); checks.refreshPreservesThreeWithoutDuplicate = true;
     await page.screenshot({ path: path.join(evidenceDir, "refreshed-three.png"), fullPage: true });
-    phase = "browser-cancel";
-    const cancel = before.items.find(item => item.textPreview === texts[1]); assert.ok(cancel);
-    phase = "browser-expand-queue";
-    const openBefore = await page.evaluate(() => document.querySelector('[data-testid="queue-items"]')?.hasAttribute("open"));
-    await page.evaluate(() => {
-      const details = document.querySelector('[data-testid="queue-items"]')!;
-      const debug = { changes: [] as boolean[], get connected() { return details.isConnected; } };
-      new MutationObserver(() => debug.changes.push(details.hasAttribute("open"))).observe(details, { attributes: true, attributeFilter: ["open"] });
-      (window as unknown as { queueDebug: typeof debug }).queueDebug = debug;
-    });
-    await page.locator('[data-testid="queue-items"] summary').click();
-    evidence.queueExpansion = { openBefore, openAfter: await page.evaluate(() => document.querySelector('[data-testid="queue-items"]')?.hasAttribute("open")) };
-    phase = "browser-expanded-run-poll";
+    phase = "browser-count-only";
+    assert.equal(await page.locator('[data-testid="agent-message-queue"]').innerText(), "有 3 条消息等待处理");
+    assert.equal(await page.locator('[data-testid="agent-message-queue"] button, [data-testid="agent-message-queue"] details, [data-testid="message-input-receipt"]').count(), 0);
+    checks.queueShowsOnlyCount = true;
     const runPoll = await page.waitForResponse(response => new URL(response.url()).pathname === `/api/agent/sessions/${sessionId}/run-state`, { timeout: 15_000 });
     assert.equal((await runPoll.json() as { status: string }).status, "running");
-    // Let the real response and Vue render commit; never mutate the product state.
     await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => resolve())));
-    assert.equal(await page.evaluate(() => (window as unknown as { queueDebug?: { connected: boolean } }).queueDebug?.connected === true
-      && document.querySelector('[data-testid="queue-items"]')?.hasAttribute("open") === true), true);
-    checks.realRunPollPreservesExpandedDetails = true;
-    phase = "browser-cancel-button";
-    // Ant Design inserts a visual space between two Chinese button characters.
-    await page.locator(`[data-receipt-id="${cancel.id}"]`).getByRole("button", { name: /^取\s*消$/ }).click();
-    await page.waitForFunction(() => document.querySelector('[data-testid="queue-pending-count"]')?.textContent?.trim() === "有 2 条消息等待处理");
-    const stableDetails = await page.evaluate(() => (window as unknown as { queueDebug?: { connected: boolean } }).queueDebug?.connected === true
-      && document.querySelector('[data-testid="queue-items"]')?.hasAttribute("open") === true);
-    assert.equal(stableDetails, true); checks.expandedDetailsSurviveRunSnapshotsAndCancel = true;
-    assert.equal((await snapshot()).pendingCount, 2); assert.equal(receipts().find(item => item.id === cancel.id)!.status, "cancelled");
-    assert.equal(requests.length, 1); checks.cancelViaBrowserShowsTwo = true;
-    await page.screenshot({ path: path.join(evidenceDir, "cancelled-two.png"), fullPage: true });
+    assert.equal(await count().innerText(), "有 3 条消息等待处理");
+    checks.realRunPollPreservesCount = true;
     phase = "same-run-injection";
     release();
     await waitUntil(() => getRunRecord(db!, runId)?.status === "completed", "same Run completes after releasing the whole tool round");
     await count().waitFor({ state: "hidden", timeout: 10_000 });
     assert.equal(await count().count(), 0); assert.equal((await snapshot()).pendingCount, 0); checks.finalZeroHidden = true;
+    assert.ok((await queueHeight()) === 0);
+    checks.finalZeroTakesNoSpace = true;
     assert.equal(requests.length, 2);
     const input = requests[1]!.input as Array<Record<string, unknown>>;
     const calls = input.filter(item => item.type === "function_call"), outputs = input.filter(item => item.type === "function_call_output");
@@ -328,18 +312,18 @@ async function main() {
     const callPositions = input.flatMap((item, index) => item.type === "function_call" ? [index] : []);
     const outputPositions = input.flatMap((item, index) => item.type === "function_call_output" ? [index] : []);
     assert.ok(Math.max(...callPositions) < Math.min(...outputPositions));
-    const userPositions = [texts[0]!, texts[2]!].map(text => input.findIndex(item => item.role === "user" && JSON.stringify(item.content).includes(text)));
-    assert.ok(userPositions[0]! > Math.max(...outputPositions) && userPositions[1]! > userPositions[0]!);
-    assert.ok(!JSON.stringify(input).includes(texts[1]!)); checks.actualProviderInputHasTwoUsersAfterCompleteToolRound = true;
+    const userPositions = texts.map(text => input.findIndex(item => item.role === "user" && JSON.stringify(item.content).includes(text)));
+    assert.ok(userPositions[0]! > Math.max(...outputPositions) && userPositions[1]! > userPositions[0]! && userPositions[2]! > userPositions[1]!);
+    checks.actualProviderInputHasThreeUsersAfterCompleteToolRound = true;
     const finalReceipts = receipts(); assert.equal(finalReceipts.length, 4);
-    assert.equal(finalReceipts.filter(item => item.status === "cancelled").length, 1);
+    assert.equal(finalReceipts.filter(item => item.status === "cancelled").length, 0);
     assert.ok(finalReceipts.filter(item => item.status === "injected").every(item => item.runId === runId));
     assert.equal((db.prepare("select count(*) as n from agent_run where session_id=?").get(sessionId) as { n: number }).n, 1); checks.sameRunNoDuplicateReceipts = true;
     await page.screenshot({ path: path.join(evidenceDir, "completed-zero.png"), fullPage: true });
-    evidence.run = { id: runId, status: "completed", receiptCount: 4, injectedCount: 3, cancelledCount: 1 };
+    evidence.run = { id: runId, status: "completed", receiptCount: 4, injectedCount: 4, cancelledCount: 0 };
     evidence.provider = { kind: "loopback-fake", requestCount: 2, callPositions, outputPositions, userPositions };
     evidence.network = { loopbackOnly: true, blockedHttp, blockedWebSocket };
-    evidence.screenshots = ["queued-three.png", "refreshed-three.png", "cancelled-two.png", "completed-zero.png"];
+    evidence.screenshots = ["queued-three.png", "refreshed-three.png", "completed-zero.png"];
     phase = "browser-esc-start-held-model";
     // A deliberately open provider stream (not a long tool) makes the Esc sequence deterministic.
     await api("/api/settings/agent/runtime", "PUT", { modelRequestMaxRetries: 0, modelIdleTimeoutMs: 30_000, modelTotalTimeoutMs: 30_000, autoCompactThresholdPct: 80 });
@@ -388,9 +372,7 @@ async function main() {
       await page.screenshot({ path: path.join(evidenceDir, "failure.png"), fullPage: true }).catch(() => undefined);
       evidence.failureDom = await page.evaluate(() => ({
         visibleTextareaCount: [...document.querySelectorAll("textarea")].filter(node => node.getBoundingClientRect().height > 0).length,
-        detailsOpen: document.querySelector('[data-testid="queue-items"]')?.hasAttribute("open"),
-        receiptRowCount: document.querySelectorAll('[data-receipt-id]').length,
-        debug: (window as unknown as { queueDebug?: { changes: boolean[]; connected: boolean } }).queueDebug,
+        queueText: document.querySelector('[data-testid="agent-message-queue"]')?.textContent?.trim(),
         countText: document.querySelector('[data-testid="queue-pending-count"]')?.textContent?.trim(),
       })).catch(() => null);
     }

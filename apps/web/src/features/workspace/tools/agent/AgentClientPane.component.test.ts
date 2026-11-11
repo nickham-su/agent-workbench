@@ -22,10 +22,15 @@ const [{ mount }, component, markdownComponent, { createI18n }, { nextTick, reac
 
 const AgentClientPane = component.default.__vccOpts ?? component.default;
 
+async function flushQueueUi() {
+  for (let i = 0; i < 5; i++) { await nextTick(); await new Promise<void>(resolve => setTimeout(resolve, 0)); }
+}
+
 async function clearComponentNotifications() {
   // Let a queued notice initialize before destroying the singleton instance.
   await nextTick();
   await new Promise<void>((resolve) => setImmediate(resolve));
+  Modal.destroyAll();
   message.destroy();
   notification.destroy();
   // notification.destroy() schedules unmounts but does not return a Promise.
@@ -177,6 +182,7 @@ function mountPane(options?: {
   contextLocale?: "zh-CN" | "en-US";
   renderRealTextarea?: boolean;
   renderModalSlots?: boolean;
+  renderRealModal?: boolean;
   metadataReadContext?: MetadataReadContext;
 }) {
   const runState = options?.runState ?? baseRunState();
@@ -218,7 +224,7 @@ function mountPane(options?: {
           },
         }),
       },
-    } : { ...createMountGlobal(statusStore, options?.contextLocale), components: options?.renderRealTextarea ? { ATextarea: Input.TextArea } : {}, provide: { ...createMountGlobal(statusStore).provide, ...(options?.metadataReadContext ? { [agentSessionMetadataReadContextKey as symbol]: options.metadataReadContext } : {}) } },
+    } : { ...createMountGlobal(statusStore, options?.contextLocale), stubs: { ...componentStubs, ...(options?.renderRealModal ? { "a-modal": false } : {}) }, components: options?.renderRealTextarea ? { ATextarea: Input.TextArea } : {}, provide: { ...createMountGlobal(statusStore).provide, ...(options?.metadataReadContext ? { [agentSessionMetadataReadContextKey as symbol]: options.metadataReadContext } : {}) } },
   });
   if (options?.initialQueue !== null) (wrapper.vm as any).queue.apply(options?.initialQueue ?? queueSnapshot());
   return {
@@ -2095,7 +2101,7 @@ test("真实 AgentClientPane：运行中普通消息使用 receipt，N 位于输
   } finally { wrapper.unmount(); http.restore(); }
 });
 test("真实 AgentClientPane：未知提交按原 ID 查询，确认旧提交不清掉后来编辑的文字和图片", async () => {
-  const http = mockContextRequests(); const { wrapper } = mountPane({ initialDraft: "original input" });
+  const http = mockContextRequests(); const { wrapper } = mountPane({ initialDraft: "original input", contextLocale: "zh-CN", active: true, renderRealModal: true });
   const vm = wrapper.vm as any;
   try {
     const originalImage = { id: "old-image", filename: "old.png", file: new File(["old"], "old.png", { type: "image/png" }) };
@@ -2104,37 +2110,33 @@ test("真实 AgentClientPane：未知提交按原 ID 查询，确认旧提交不
     const sending = vm.onSend(); const original = await http.waitFor(0);
     const requestId = JSON.parse(String((original.data as FormData).get("payload"))).clientRequestId;
     vm.draft = "later input"; vm.pendingImages = [originalImage, newImage];
-    http.reject(0, new Error("connection lost")); await sending;
-    assert.equal(wrapper.find('[data-testid="queue-submission-unknown"]').exists(), true);
+    http.reject(0, new Error("connection lost")); await sending; await flushQueueUi();
+    assert.equal(wrapper.find('[data-testid="queue-submission-unknown"]').exists(), false);
+    assert.equal(vm.$props.active, true);
+    assert.equal(vm.queueSubmissionHandoff?.phase, "unknown");
+    assert.match(document.body.textContent ?? "", /查询接收结果/);
     assert.equal(wrapper.find('[data-testid="queue-pending-count"]').exists(), false);
-    const lookup = vm.onResolveQueueSubmission(false); const request = await http.waitFor(1);
+    const lookupButton = [...document.body.querySelectorAll("button")].find(button => button.textContent === "查询接收结果");
+    assert.ok(lookupButton); lookupButton.click();
+    const request = await http.waitFor(1);
     assert.match(request.url || "", /receipts\/by-request$/); assert.equal(request.params.clientRequestId, requestId);
     const acknowledged = injectedReceipt("actual-recovered-run");
-    http.respond(1, { receipt: acknowledged.receipt, queue: acknowledged.queue }); await lookup;
+    http.respond(1, { receipt: acknowledged.receipt, queue: acknowledged.queue }); await flushQueueUi();
     assert.equal(vm.draft, "later input"); assert.deepEqual(vm.pendingImages.map((image: { id: string }) => image.id), ["new-image"]);
     assert.equal(wrapper.find('[data-testid="queue-submission-unknown"]').exists(), false);
   } finally { wrapper.unmount(); http.restore(); }
 });
-test("真实 AgentClientPane：放弃必须确认并使用确认时的全集 hash 和版本，不接收客户端 ID 数组", async () => {
-  const http = mockContextRequests(); const { wrapper } = mountPane({contextLocale:"zh-CN",renderModalSlots:true}); const vm = wrapper.vm as any;
-  const originalConfirm = Modal.confirm; let confirmation: any;
-  const modal = Modal as unknown as { confirm: typeof Modal.confirm };
-  modal.confirm = ((options: unknown) => { confirmation = options; return { destroy() {}, update() {} }; }) as typeof Modal.confirm;
+test("真实 AgentClientPane：未确认和暂停不展示标签、管理按钮或恢复说明", async () => {
+  const http = mockContextRequests(); const { wrapper } = mountPane({ contextLocale: "zh-CN" }); const vm = wrapper.vm as any;
   try {
     vm.queue.apply({ ...queueSnapshot(), queueVersion: 4, mode: "paused", unconfirmedInputCount: 1, unconfirmedInputSetHash: "a".repeat(64) });
-    vm.onQueueAbandon(); assert.ok(confirmation); assert.equal(http.requests.length, 0);
-    for (const text of ["1 条", "不可逆", "后续模型不再读取", "历史仍保留", "工具副作用", "留存额度不返还"]) assert.ok(confirmation.content.includes(text), text);
-    vm.queue.apply({ ...queueSnapshot(), queueVersion: 5, mode: "paused", unconfirmedInputCount: 2, unconfirmedInputSetHash: "b".repeat(64) });
-    assert.ok(confirmation.content.includes("1 条")); assert.equal(confirmation.content.includes("2 条"),false);
-    const action = confirmation.onOk(); const request = await http.waitFor(0); const body = JSON.parse(String(request.data));
-    assert.equal(body.expectedQueueVersion, 4); assert.equal(body.expectedUnconfirmedInputSetHash, "a".repeat(64)); assert.equal(body.confirmIrreversible, true); assert.equal("receiptIds" in body, false);
-    http.respond(0, { abandonedReceiptIds: ["r"], queue: { ...queueSnapshot(), queueVersion: 6, mode: "paused", pauseCode: "inputs_abandoned" } }); await action;
-    vm.queue.apply({...queueSnapshot(),queueVersion:7,mode:"paused",unconfirmedInputCount:1,unconfirmedInputSetHash:"c".repeat(64)});
-    vm.onQueueAbandon(); await wrapper.setProps({sessionId:"session-b"});
-    const beforeLateConfirm=http.requests.filter(item=>item.config.url?.includes("/message-queue/abandon-unconfirmed")).length;
-    await confirmation.onOk();
-    assert.equal(http.requests.filter(item=>item.config.url?.includes("/message-queue/abandon-unconfirmed")).length,beforeLateConfirm);
-  } finally { modal.confirm = originalConfirm; wrapper.unmount(); http.restore(); }
+    await nextTick();
+    assert.equal(wrapper.get('[data-testid="agent-message-queue"]').text(), "");
+    assert.equal(wrapper.find('[data-testid="message-input-receipt"]').exists(), false);
+    assert.equal(wrapper.find('[data-testid="queue-items"]').exists(), false);
+    assert.equal(wrapper.text().includes("放弃全部未确认输入"), false);
+    assert.equal(http.requests.length, 0);
+  } finally { wrapper.unmount(); http.restore(); }
 });
 test("真实 AgentClientPane：服务端执行身份锁定 Agent/model，停止未知时隐藏历史写操作但仍可编辑输入", async () => {
   const { wrapper } = mountPane({ modelValue: "agent-a" }); const vm = wrapper.vm as any;
