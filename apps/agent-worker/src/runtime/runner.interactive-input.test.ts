@@ -5,7 +5,7 @@ import { AGENT_QUEUE_INPUT_POLICY_VERSION, projectEffectiveUserContent } from "@
 import type { AgentInteractiveInputBinding } from "@agent-workbench/shared/internal-contracts/agent-api";
 import type { ExecutionProfile, PromptContext } from "./apiClient.js";
 import { ApiConflictError, InternalRpcNetworkError, InternalRpcInvalidResponseError, InternalRpcHttpError } from "./apiClient.js";
-import { QueueInputBudgetError } from "./queue-input-budget.js";
+import { buildQueueInputSnapshotView, queueInputSnapshotHash, QueueInputBudgetError } from "./queue-input-budget.js";
 import { AgentRunner } from "./runner.js";
 import { runtimeStopTargetsHash } from "@agent-workbench/shared/node/agent-run-stop";
 import type { ResolvedToolDefinition } from "./tools/types.js";
@@ -65,7 +65,7 @@ function fixture(input: { ctx?: PromptContext; failures?: number; providerError?
   });
   const access = runner as unknown as {
     toolRegistry: { listTools: () => Promise<ResolvedToolDefinition[]> };
-    prepareInteractiveModelStep: (input: Record<string, unknown>) => Promise<{ binding: AgentInteractiveInputBinding; budget: { B: number; I: number }; context: PromptContext }>;
+    prepareInteractiveModelStep: (input: Record<string, unknown>) => Promise<{ binding: AgentInteractiveInputBinding; materialized: unknown[]; context: PromptContext }>;
     runModelStep: (input: Record<string, unknown>) => Promise<{ interactiveContinue?: boolean; terminalIntentPersisted?: boolean }>;
     executeCompaction: () => Promise<unknown>;
   };
@@ -181,6 +181,23 @@ test("interactive oversized existing context proceeds without input_too_large or
   assert.equal(compactions, 0); assert.equal(f.requests.length, 1);
 });
 
+test("invalid request schemas fail before injecting queued input or creating an assistant", async () => {
+  const cycle: Record<string, unknown> = {}; cycle.self = cycle;
+  for (const inputSchema of [undefined, { value: NaN }, { value: Array(1) }, cycle, new Date(), { [Symbol("key")]: "invalid" }]) {
+    const f = fixture();
+    f.backend.prepareInteractiveInput = async () => ({ decision: "prepare", context: f.ctx,
+      candidates: [{ receipt: { id: "queued" }, text: "queued input", attachments: [] }] as never,
+      preparationSnapshotHash: "a".repeat(64), estimatorVersion: "queue-input-estimator-v1" });
+    f.access.toolRegistry.listTools = async () => [{ name: "read", source: "builtin", description: "invalid schema", inputSchema: inputSchema as ResolvedToolDefinition["inputSchema"] }];
+    await assert.rejects(f.invoke(), /non-JSON|sparse|symbol keys/);
+    assert.equal(f.injections, 0);
+    assert.equal(f.creates.length, 0);
+    assert.equal(f.requests.length, 0);
+    assert.equal(f.ctx.sessionRevision, 1);
+    assert.deepEqual(f.ctx.interactiveInput!.inputReceiptIds, ["receipt"]);
+  }
+});
+
 
 test("interactive prepare conflicts are retried within a finite preparation budget", async () => {
   const f = fixture(); let calls = 0; const prepare = f.backend.prepareInteractiveInput;
@@ -237,17 +254,22 @@ test("cancelled injection prefix is re-prepared and may finish without a spuriou
   await f.invoke(); assert.equal(prepares, 2); assert.equal(injections, 1); assert.equal(f.requests.length, 0); assert.equal(f.creates.length, 0);
 });
 
-test("actual OpenAI opaque replay participates in budget exactly once, not again as a debug copy", async () => {
+test("actual OpenAI opaque replay changes the binding hash and participates exactly once, not as a debug copy", async () => {
   const ctx = context(); ctx.messages.push({ role: "assistant", content: "prior answer" });
   const replay = (encryptedContent: string): NonNullable<PromptContext["providerReplay"]> => [{ assistantOrdinal: 1, parts: [{ type: "reasoning", text: "private reasoning", visibleIndex: 0,
     providerReplay: { version: 1, provider: { npm: "@ai-sdk/openai", api: "responses", providerId: "provider", model: "model" },
       item: { type: "reasoning", itemId: "reasoning-item", encryptedContent } } }] }];
   const opaque = "opaque-original-mark"; ctx.providerReplay = replay(opaque); const f = fixture({ ctx });
+  const tools: ResolvedToolDefinition[] = [{ name: "read", source: "builtin", description: "frozen", inputSchema: { type: "object", properties: {} } }];
+  f.access.toolRegistry.listTools = async () => tools;
   const first = await f.prepare(profile("@ai-sdk/openai"));
+  const materialized = JSON.stringify(first.materialized);
+  assert.equal(materialized.split(opaque).length - 1, 1);
+  const view = buildQueueInputSnapshotView({ system: ctx.system, messages: first.materialized, tools, providerReplay: [], images: [] });
+  assert.equal(first.binding.snapshotHash, queueInputSnapshotHash({ view, reserve: 4096, providerId: "provider", modelId: "model" }));
+  assert.notEqual(first.binding.snapshotHash, queueInputSnapshotHash({ view: { ...view, providerReplay: ctx.providerReplay }, reserve: 4096, providerId: "provider", modelId: "model" }));
   ctx.providerReplay = replay(opaque + "x".repeat(1000)); const second = await f.prepare(profile("@ai-sdk/openai"));
-  assert.equal(second.budget.B - first.budget.B, 1000);
-  const view = JSON.stringify((first.budget as { view?: unknown }).view);
-  assert.equal(view.split(opaque).length - 1, 1);
+  assert.notEqual(second.binding.snapshotHash, first.binding.snapshotHash);
 });
 
 

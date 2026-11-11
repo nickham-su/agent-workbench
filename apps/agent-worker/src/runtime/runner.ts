@@ -1,6 +1,6 @@
 import { AgentRuntimeRetirementNotifier } from "@agent-workbench/shared/node/agent-runtime-retirement";
 import { projectEffectiveUserContent, AGENT_QUEUE_INPUT_POLICY_VERSION } from "@agent-workbench/shared";
-import { estimateQueueInput, queueOutputReservation, queueInputSnapshotHash, canonicalQueueInputJson, QueueInputBudgetError, type BudgetImage } from "./queue-input-budget.js";
+import { buildQueueInputSnapshotView, queueOutputReservation, queueInputSnapshotHash, canonicalQueueInputJson, QueueInputBudgetError, type BudgetImage } from "./queue-input-budget.js";
 import type { AgentInteractiveInputBinding, AgentApiPrepareInteractiveInputResponse } from "@agent-workbench/shared/internal-contracts/agent-api";
 import { AgentRunStopRegistry, AgentRuntimeStopError } from "@agent-workbench/shared/node/agent-run-stop";
 import type { AgentWorkerStopRunsRequest } from "@agent-workbench/shared/internal-contracts/agent-worker";
@@ -2813,7 +2813,7 @@ export class AgentRunner {
     return generateSingleCallText(params.profile, params.input, { disableSdkRetries: true });
   }
 
-  /** A finite FIFO snapshot: at most 8 candidates, one actual request; estimates only bind its identity. */
+  /** A finite FIFO snapshot: at most 8 candidates, one actual request. */
   private async prepareInteractiveModelStep(params: { profile: ExecutionProfile; run: QueuedRun; context: PromptContext; signal: AbortSignal; recovering: boolean }) {
     const { profile, run, signal } = params;
     const scope = { workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId };
@@ -2830,9 +2830,11 @@ export class AgentRunner {
       const imageBudget: BudgetImage[] = [];
       const materialized = await materializePromptAttachments({ messages: providerMessages as PromptContext["messages"], attachmentStorage: this.attachmentStorage, run,
         providerNpm: profile.provider.npm, interactiveInput: context.interactiveInput, imageBudget });
-      const budget = estimateQueueInput({ contextWindowTokens: profile.model.contextWindowTokens, maxOutputTokens: reserve, system: context.system,
+      const view = buildQueueInputSnapshotView({ system: context.system,
         messages: materialized, tools: toolDefinitions, providerReplay: [], images: imageBudget });
-      return { context, runtimeOptions, adapter, invocation, providerMessages, toolDefinitions, materialized, budget };
+      // Validate and bind the complete request before injecting any queued input.
+      const snapshotHash = queueInputSnapshotHash({ view, reserve, providerId: profile.provider.id, modelId: profile.model.id });
+      return { context, runtimeOptions, adapter, invocation, providerMessages, toolDefinitions, materialized, snapshotHash };
     };
     for (let preparationAttempt = 0; preparationAttempt < 3; preparationAttempt++) {
       let prepared: AgentApiPrepareInteractiveInputResponse | null = null;
@@ -2899,7 +2901,7 @@ export class AgentRunner {
       }
       const binding: AgentInteractiveInputBinding = { inputReceiptIds: frozen.context.interactiveInput!.inputReceiptIds,
         effectiveInputPolicyVersion: AGENT_QUEUE_INPUT_POLICY_VERSION, inputRevision: frozen.context.sessionRevision,
-        snapshotHash: queueInputSnapshotHash({ view: frozen.budget.view, reserve, providerId: profile.provider.id, modelId: profile.model.id }) };
+        snapshotHash: frozen.snapshotHash };
       return { kind: "prepared" as const, ...frozen, binding };
     }
     throw new Error("Interactive preparation exhausted");
