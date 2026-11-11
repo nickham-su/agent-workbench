@@ -37,9 +37,9 @@ export class AgentQueueRecoveryStore {
     assertSessionRuntimeUnblocked(this.db, scope.workspaceId, scope.sessionId);
     if (this.queue.hasUndrainedExecution(scope) || getMessageRunState(this.db, scope.workspaceId, scope.sessionId)?.status !== "idle")
       throw new HttpError(409, "Previous execution is not drained", "AGENT_QUEUE_EXECUTION_NOT_DRAINED");
-    const ids = getVisibleMessageChain(this.db, scope).map(message => message.id);
-    if (hasNonTerminalVisibleMessageWork(this.db, scope) || this.db.prepare(`select 1 from agent_tool_execution e join agent_message_part p on p.id=e.call_part_id
-      where p.message_id in (select value from json_each(?)) and e.status='unknown' limit 1`).get(JSON.stringify(ids)))
+    // Once runtime exit is proven, unknown is a historical outcome, not live work.
+    // Keep it in the transcript with its side-effect warning; never replay it automatically.
+    if (hasNonTerminalVisibleMessageWork(this.db, scope))
       throw new HttpError(409, "Historical tools are not safe to continue", "AGENT_QUEUE_TOOL_STATE_UNSAFE");
     return snapshot;
   }

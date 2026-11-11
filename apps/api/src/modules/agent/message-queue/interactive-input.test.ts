@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
 import { AGENT_QUEUE_INPUT_POLICY_VERSION } from "@agent-workbench/shared";
 import type { AgentApiPromptContextResponse, AgentInteractiveInputBinding } from "@agent-workbench/shared/internal-contracts/agent-api";
-import { appendStreamingAssistant, flushStreamingParts, completeAssistantWithExecutions, replaceStreamingAssistant, resumeStreamingAssistant, updateToolExecution, getMessageSessionHead, getMessage, getRunRecord, createMessageSession, getMessageSession, commitCompactionMessageWithRunFence, convergeRunTerminal, persistRunTerminalIntent, updateMessageRunNotice } from "../agent-message.store.js";
+import { appendStreamingAssistant, flushStreamingParts, completeAssistantWithExecutions, replaceStreamingAssistant, resumeStreamingAssistant, updateToolExecution, getToolExecution, getMessageSessionHead, getMessage, getRunRecord, createMessageSession, getMessageSession, commitCompactionMessageWithRunFence, convergeRunTerminal, persistRunTerminalIntent, updateMessageRunNotice } from "../agent-message.store.js";
 import { ModelContextResolver, projectModelContextToPrompt } from "../read-side/model-context-resolver.js";
-import { RuntimeTranscriptProjector } from "../read-side/runtime-transcript-projector.js";
+import { RuntimeTranscriptProjector, UNKNOWN_TOOL_EXECUTION_RESULT } from "../read-side/runtime-transcript-projector.js";
 import { AgentRuntime } from "../agent.runtime.js";
 import type { LocalAgentRuntimeExecutionPort } from "../agent.runtime-port.js";
 import { AgentInteractiveInputService } from "./interactive-input.service.js";
@@ -581,15 +581,49 @@ test("oversized content at a stale head cannot mint a rejected operation", async
   staleHead = false; assert.equal((await service.prepare(request)).decision, "rejected");
 });
 
-test("normal send cannot bypass unsafe historical tool state after a failed Run", async t => {
+for (const ending of ["failed", "stopped"] as const) for (const action of ["send", "resume"] as const)
+test(`${action} after ${ending} Run preserves unknown tool outcomes and requires physical retirement`, async t => {
   const f = await fixture(t); await f.assistant();
-  flushStreamingParts(f.db, { ...f.run, messageId: "assistant", parts: [{ id: "unsafe-call", position: 0, type: "tool_call", toolName: "bash", input: { command: "fixture" } }], updatedAt: Date.now() });
-  completeAssistantWithExecutions(f.db, { ...f.run, messageId: "assistant", executions: [{ id: "unsafe-execution", callPartId: "unsafe-call", originSessionId: scope.sessionId, originRunId: f.runId, status: "queued" }], updatedAt: Date.now() });
-  updateToolExecution(f.db, { ...f.run, executionId: "unsafe-execution", status: "running", updatedAt: Date.now() });
-  updateToolExecution(f.db, { ...f.run, executionId: "unsafe-execution", status: "unknown", updatedAt: Date.now() });
-  f.finishFailure(); const before = f.store.snapshot(scope);
-  await assert.rejects(f.accept("unsafe-send"), errorIs(409, "AGENT_QUEUE_TOOL_STATE_UNSAFE"));
-  assert.deepEqual(f.store.snapshot(scope), before); assert.equal(f.enqueued.length, 1);
+  flushStreamingParts(f.db, { ...f.run, messageId: "assistant", parts: [{ id: "interrupted-call", position: 0, type: "tool_call", toolName: "bash", input: { command: "fixture" } }], updatedAt: Date.now() });
+  completeAssistantWithExecutions(f.db, { ...f.run, messageId: "assistant", executions: [{ id: "interrupted-execution", callPartId: "interrupted-call", originSessionId: scope.sessionId, originRunId: f.runId, status: "queued" }], updatedAt: Date.now() });
+  updateToolExecution(f.db, { ...f.run, executionId: "interrupted-execution", status: "running", updatedAt: Date.now() });
+  const recover = () => action === "send" ? f.accept("after-interruption") : f.service.resume(scope.sessionId, {
+    workspaceId: scope.workspaceId, operationId: "resume-after-interruption", expectedQueueVersion: f.store.snapshot(scope).queueVersion,
+  });
+  const assertBlocked = async (code: string) => {
+    const before = f.store.snapshot(scope);
+    await assert.rejects(recover(), errorIs(409, code));
+    assert.deepEqual(f.store.snapshot(scope), before); assert.equal(f.enqueued.length, 1);
+  };
+  if (ending === "stopped") {
+    const { record } = f.runtime.stopSession({ workspaceId: scope.workspaceId, rootSessionId: scope.sessionId, operationId: "stop-tool", clearQueued: true });
+    await assertBlocked("AGENT_SESSION_STOP_PENDING");
+    f.runtimeStore.markGroupUnknown(record, f.runtimeInstanceId, "transport_unavailable");
+    await assertBlocked("AGENT_SESSION_STOP_UNKNOWN");
+    f.runtimeStore.confirmStopGroup(record, f.runtimeInstanceId, {
+      workspaceId: scope.workspaceId, rootSessionId: scope.sessionId, operationId: record.operationId,
+      runtimeInstanceId: f.runtimeInstanceId, targetsHash: record.targetsHash, state: "quiescent", proofId: "tool-stop-proof", code: null,
+    });
+    assert.equal(f.store.snapshot(scope).stop.state, "quiescent");
+  } else {
+    f.finish(f.runId, "failed");
+    await assertBlocked("AGENT_QUEUE_EXECUTION_NOT_DRAINED");
+    assert.equal(f.runtimeStore.retireAdmission({ ...f.run, runtimeInstanceId: f.runtimeInstanceId }).retired, true);
+  }
+  assert.equal(getToolExecution(f.db, "interrupted-execution")!.status, "unknown");
+  assert.equal(f.store.hasUndrainedExecution(scope), false);
+  await recover();
+  if (action === "resume") await f.accept("after-interruption");
+  assert.equal(f.store.snapshot(scope).mode, "active");
+  assert.ok(await f.dispatcher.dispatchSession(scope));
+  assert.equal(f.enqueued.length, 2);
+  const next = f.enqueued[1]!; assert.notEqual(next.runId, f.runId);
+  const context = await f.getContext(next);
+  assert.deepEqual(context.pendingTools, []);
+  assert.ok(JSON.stringify(context.messages).includes(JSON.stringify(UNKNOWN_TOOL_EXECUTION_RESULT)));
+  const execution = getToolExecution(f.db, "interrupted-execution")!;
+  assert.equal(updateToolExecution(f.db, { ...f.run, executionId: execution.id, status: "completed", resultPreview: "late result", updatedAt: Date.now() }), "ignored");
+  assert.deepEqual(getToolExecution(f.db, execution.id), execution);
 });
 
 test("send continuation binds every unconfirmed input in chain order and cannot change their identity", async t => {
