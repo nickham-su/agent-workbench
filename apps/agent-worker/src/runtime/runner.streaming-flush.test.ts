@@ -600,6 +600,23 @@ test("runModelStep: ToolExecution 构造失败不重试且写唯一安全 failed
   }
 });
 
+test("runModelStep: 默认允许系统消息并保留模型显式配置", async () => {
+  for (const aiSdk of [undefined, {}, { temperature: 0.25 }, { allowSystemInMessages: false }]) {
+    const stream = createControlledStream();
+    const profile = baseProfile();
+    if (aiSdk !== undefined) profile.model.options = { aiSdk };
+    const started = startRunModelStep({ stream, profile });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const request = started.streamRequests[0] as Record<string, unknown>;
+    assert.equal(request.allowSystemInMessages, aiSdk?.allowSystemInMessages ?? true);
+
+    await stream.push({ type: "text-delta", text: "configured" });
+    await stream.finish();
+    await started.promise;
+  }
+});
+
 test("runModelStep: 共享 aiSdk settings 进入 Agent 主调用请求", async () => {
   const stream = createControlledStream();
   const profile = baseProfile();

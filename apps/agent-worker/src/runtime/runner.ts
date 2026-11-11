@@ -2973,6 +2973,8 @@ export class AgentRunner {
       system: context.system || undefined,
       messages: [], // Media must be opened anew for each attempt, not stored in the shared request.
       tools: toolSet,
+      // Historical system messages and compaction summaries are intentional.
+      allowSystemInMessages: true,
       ...runtimeOptions.aiSdk,
       maxRetries: 0,
     };
