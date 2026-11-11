@@ -31,6 +31,9 @@ async function clearComponentNotifications() {
   await nextTick();
   await new Promise<void>((resolve) => setImmediate(resolve));
   Modal.destroyAll();
+  // Static dialogs leave through rc-motion before their Teleport is unmounted.
+  // Do not let closing dialogs from the previous test masquerade as current UI.
+  await new Promise<void>((resolve) => setTimeout(resolve, 350));
   message.destroy();
   notification.destroy();
   // notification.destroy() schedules unmounts but does not return a Promise.
@@ -39,6 +42,26 @@ async function clearComponentNotifications() {
 }
 
 afterEach(clearComponentNotifications);
+
+function latestQueueDialog(): HTMLElement {
+  // Ant's destroyed dialogs remain mounted during their leave transition.
+  // Interact with the newest dialog, not an older closing DOM tree.
+  const dialog = [...document.body.querySelectorAll<HTMLElement>(".ant-modal-confirm")].at(-1);
+  assert.ok(dialog, "a real operation recovery dialog is rendered");
+  return dialog;
+}
+
+function queueDialogButton(text: string, dialog = latestQueueDialog()): HTMLButtonElement {
+  const button = [...dialog.querySelectorAll("button")].find(node => node.textContent?.replace(/\s/g, "") === text.replace(/\s/g, ""));
+  assert.ok(button, `real dialog action ${text} is reachable`);
+  return button;
+}
+
+function queueDialogConfirm(dialog = latestQueueDialog()): HTMLButtonElement {
+  const button = dialog.querySelector<HTMLButtonElement>(".ant-modal-confirm-btns .ant-btn-primary");
+  assert.ok(button, "real dialog confirmation action is reachable");
+  return button;
+}
 
 function queueSnapshot(sessionId = "session-a"): AgentMessageQueueSnapshot {
   return { workspaceId: "ws-a", sessionId, queueVersion: 0, stopGeneration: "0".repeat(64), mode: "active", pauseCode: null,
@@ -2152,15 +2175,16 @@ test("真实 AgentClientPane：服务端执行身份锁定 Agent/model，停止�
 });
 
 test("真实 AgentClientPane：组件重建后查询原未知提交不清除新编辑器中同文案的草稿", async () => {
-  const http = mockContextRequests(); let wrapper = mountPane({ initialDraft: "same draft" }).wrapper;
+  const http = mockContextRequests(); let wrapper = mountPane({ initialDraft: "same draft", active: true, contextLocale: "zh-CN", renderRealModal: true }).wrapper;
   try {
     const send = (wrapper.vm as any).onSend(); await http.waitFor(0);
     http.reject(0, new Error("timeout")); await send; wrapper.unmount();
-    wrapper = mountPane({ initialDraft: "same draft" }).wrapper;
+    wrapper = mountPane({ initialDraft: "same draft", active: true, contextLocale: "zh-CN", renderRealModal: true }).wrapper;
     const vm = wrapper.vm as any;
-    const lookup = vm.onResolveQueueSubmission(false); await http.waitFor(1);
+    await flushQueueUi();
+    queueDialogButton("查询接收结果").click(); await http.waitFor(1);
     const acknowledged = injectedReceipt("old-composer-run");
-    http.respond(1, { receipt: acknowledged.receipt, queue: acknowledged.queue }); await lookup;
+    http.respond(1, { receipt: acknowledged.receipt, queue: acknowledged.queue }); await flushQueueUi();
     assert.equal(vm.draft, "same draft", "a different composer never owns the previous submission's draft version");
   } finally { wrapper.unmount(); http.restore(); }
 });
@@ -2335,4 +2359,197 @@ for (const changed of ["workspace", "session"] as const) test(`fresh draft ensur
     vm.draft = "new scope draft"; created.resolve("newly-created-old-scope"); await sending;
     assert.equal(http.requests.length, 0); assert.equal(vm.draft, "new scope draft"); assert.equal(vm.queue.handoff.value, null);
   } finally { wrapper.unmount(); http.restore(); }
+});
+
+function acceptedQueuedSubmission(clientRequestId: string, version = 1) {
+  return { receipt: { ...injectedReceipt("recovery").receipt, id: `queued-${clientRequestId}`, clientRequestId,
+    status: "queued", messageId: null, runId: null, confirmationState: null, confirmationSource: null },
+    deduplicated: false, queue: { ...queueSnapshot(), queueVersion: version } };
+}
+
+function forgetTestSubmission(vm: any, submission = vm.queue.handoff.value?.submission) {
+  if (submission) vm.queue.acknowledgeHandoff(submission);
+}
+
+test("恢复弹窗关闭后 Enter 只重开恢复，不重发；原重试保留 requestId、generation 和真实 File", async () => {
+  const http = mockContextRequests({ autoTimeline: true });
+  const { wrapper } = mountPane({ initialDraft: "original", active: true, contextLocale: "zh-CN", renderRealTextarea: true, renderRealModal: true });
+  const vm = wrapper.vm as any, file = new File(["original-image"], "original.png", { type: "image/png" });
+  try {
+    vm.pendingImages = [{ id: "reopen-image", filename: file.name, file }];
+    await wrapper.get("textarea").trigger("keydown", { key: "Enter" });
+    const first = await http.waitFor(0), payload = sendPayload(first);
+    http.reject(0, new Error("unknown receipt")); await flushQueueUi();
+    const oldDialog = latestQueueDialog(), oldRetry = queueDialogButton("重试原提交", oldDialog);
+    queueDialogConfirm(oldDialog).click(); await flushQueueUi();
+    assert.equal(http.requests.length, 1, "closing recovery neither retries nor abandons");
+    vm.draft = "new user input";
+    await wrapper.get("textarea").trigger("keydown", { key: "Enter" }); await flushQueueUi();
+    const currentDialog = latestQueueDialog(); assert.notEqual(currentDialog, oldDialog);
+    oldRetry.click(); await flushQueueUi(); assert.equal(http.requests.length, 1, "closing invalidates old saved DOM actions");
+    assert.equal(vm.draft, "new user input"); assert.equal(vm.pendingImages[0].file, file);
+    queueDialogButton("重试原提交", currentDialog).click();
+    const retry = await http.waitFor(1);
+    assert.deepEqual(sendPayload(retry), payload);
+    assert.equal(vm.queue.handoff.value.submission.images[0].file, file);
+    const sentImage = (retry.data as FormData).get("images") as File;
+    assert.equal(sentImage.name, file.name); assert.deepEqual(await sentImage.arrayBuffer(), await file.arrayBuffer());
+    http.respond(1, acceptedQueuedSubmission(payload.clientRequestId)); await flushQueueUi();
+    assert.equal(vm.draft, "new user input"); assert.equal(vm.pendingImages.length, 0);
+    assert.equal(vm.queue.handoff.value, null);
+  } finally { forgetTestSubmission(vm); wrapper.unmount(); http.restore(); }
+});
+
+for (const control of ["clear", "stop"] as const) test(`未知 ${control} 从真实恢复按钮重试原操作，不能扩大作用范围`, async () => {
+  const http = mockContextRequests({ autoTimeline: true });
+  const { wrapper } = mountPane({ initialDraft: "keep draft", active: true, contextLocale: "zh-CN", renderRealTextarea: true, renderRealModal: true,
+    runState: baseRunState({ status: "running", activeRunId: `unknown-${control}` }) });
+  const vm = wrapper.vm as any;
+  const item = (id: string, sequence: number) => ({ id, clientRequestId: `request-${id}`, sequence, createdAt: 1, updatedAt: 1,
+    status: "queued" as const, messageId: null, runId: null, confirmationState: null, confirmationSource: null, textPreview: id, attachmentCount: 0 });
+  try {
+    if (control === "clear") vm.queue.apply({ ...queueSnapshot(), queueVersion: 1, pendingCount: 1, items: [item("original", 1)] });
+    await wrapper.get("textarea").trigger("keydown", { key: "Escape" });
+    const first = await http.waitFor(0), body = JSON.parse(String(first.data));
+    assert.match(first.url || "", new RegExp(`/${control}$`));
+    http.reject(0, new Error("reply lost")); await flushQueueUi();
+    assert.equal(vm.draft, "keep draft");
+    // A newer snapshot must not grow a previously frozen clear request.
+    vm.queue.apply({ ...queueSnapshot(), queueVersion: 2, pendingCount: 2, items: [item("original", 1), item("later", 2)] });
+    queueDialogButton(control === "stop" ? "重试原停止操作" : "重试原清空").click();
+    const retry = await http.waitFor(1);
+    assert.deepEqual(JSON.parse(String(retry.data)), body);
+    if (control === "clear") {
+      assert.deepEqual(body.receiptIds, ["original"]);
+      http.respond(1, { cancelledCount: 1, queue: { ...queueSnapshot(), queueVersion: 3, pendingCount: 1, items: [item("later", 2)] } });
+    } else {
+      assert.equal(typeof body.operationId, "string");
+      http.respond(1, { stopOperation: { operationId: body.operationId, acceptedQueueVersion: 3, targetCount: 1 }, queue: { ...queueSnapshot(), queueVersion: 3,
+        mode: "paused", pauseCode: "user_stop", stop: { state: "quiescent", unresolvedOperationCount: 0, unresolvedTargetCount: 0, code: null } } });
+    }
+    await flushQueueUi();
+    assert.equal(http.requests.length, 2, "recovery dispatches only the original control, never a fallback Stop or new send");
+    assert.equal(vm.queue.unknownClear.value, false); assert.equal(vm.queue.unknownStop.value, false);
+    assert.equal(vm.draft, "keep draft");
+  } finally { wrapper.unmount(); http.restore(); }
+});
+
+for (const change of ["session", "inactive", "unmount"] as const) test(`恢复弹窗的旧按钮在 ${change} 后失效`, async () => {
+  const http = mockContextRequests({ autoTimeline: true });
+  const { wrapper } = mountPane({ initialDraft: "old draft", active: true, contextLocale: "zh-CN", renderRealTextarea: true, renderRealModal: true });
+  const vm = wrapper.vm as any; let unmounted = false;
+  try {
+    const sending = vm.onSend(); await http.waitFor(0); http.reject(0, new Error("unknown")); await sending; await flushQueueUi();
+    const dialog = latestQueueDialog(), lookup = queueDialogButton("查询接收结果", dialog), retry = queueDialogButton("重试原提交", dialog), restore = queueDialogButton("恢复提交草稿", dialog);
+    const original = vm.queue.handoff.value.submission;
+    if (change === "session") await wrapper.setProps({ sessionId: "session-b" });
+    else if (change === "inactive") await wrapper.setProps({ active: false });
+    else { wrapper.unmount(); unmounted = true; }
+    vm.draft = "later draft";
+    lookup.click(); retry.click(); restore.click(); queueDialogConfirm(dialog).click(); await flushQueueUi();
+    assert.equal(http.requests.length, 1); assert.equal(vm.draft, "later draft");
+    assert.equal(original.draft, "old draft");
+    vm.queue.acknowledgeHandoff(original);
+  } finally { forgetTestSubmission(vm); if (!unmounted) wrapper.unmount(); http.restore(); }
+});
+
+for (const change of ["edit", "session", "inactive", "unmount"] as const) test(`恢复草稿覆盖确认在 ${change} 后不能覆盖后来输入`, async () => {
+  const http = mockContextRequests({ autoTimeline: true });
+  const { wrapper } = mountPane({ initialDraft: "original", active: true, contextLocale: "zh-CN", renderRealTextarea: true, renderRealModal: true });
+  const vm = wrapper.vm as any, originalFile = new File(["original"], "original.png", { type: "image/png" }), laterFile = new File(["later"], "later.png", { type: "image/png" });
+  let unmounted = false, originalSubmission: any;
+  try {
+    vm.pendingImages = [{ id: "original", filename: originalFile.name, file: originalFile }];
+    const sending = vm.onSend(); await http.waitFor(0);
+    http.reject(0, new ApiError({ status: 507, code: "AGENT_QUEUE_RETENTION_FULL", message: "retention full" })); await sending; await flushQueueUi();
+    originalSubmission = vm.queue.handoff.value.submission;
+    vm.draft = "before confirmation";
+    queueDialogButton("恢复提交草稿").click(); await flushQueueUi();
+    const confirmation = latestQueueDialog(), confirm = queueDialogConfirm(confirmation);
+    assert.match(confirmation.textContent || "", /替换当前草稿/);
+    if (change === "session") await wrapper.setProps({ sessionId: "session-b" });
+    else if (change === "inactive") await wrapper.setProps({ active: false });
+    else if (change === "unmount") { wrapper.unmount(); unmounted = true; }
+    vm.draft = "later edited draft"; vm.pendingImages = [{ id: "later", filename: laterFile.name, file: laterFile }];
+    confirm.click(); await flushQueueUi();
+    assert.equal(vm.draft, "later edited draft"); assert.equal(vm.pendingImages[0].file, laterFile);
+    assert.equal(http.requests.length, 1);
+  } finally { forgetTestSubmission(vm, originalSubmission); if (!unmounted) wrapper.unmount(); http.restore(); }
+});
+
+test("sending handoff 期间新 Pane 的 Enter 不展示失败恢复，也不自动重发", async () => {
+  const http = mockContextRequests({ autoTimeline: true });
+  const origin = mountPane({ initialDraft: "still sending", active: true, contextLocale: "zh-CN", renderRealTextarea: true, renderRealModal: true }).wrapper;
+  let successor: typeof origin | undefined;
+  try {
+    const sending = (origin.vm as any).onSend(); const first = await http.waitFor(0);
+    origin.unmount();
+    successor = mountPane({ active: true, contextLocale: "zh-CN", renderRealTextarea: true, renderRealModal: true }).wrapper;
+    await flushQueueUi();
+    const before = document.body.querySelectorAll(".ant-modal-confirm").length;
+    await successor.get("textarea").trigger("keydown", { key: "Enter" }); await flushQueueUi();
+    assert.equal((successor.vm as any).queueSubmissionHandoff.phase, "sending");
+    assert.equal(document.body.querySelectorAll(".ant-modal-confirm").length, before);
+    assert.equal(http.requests.length, 1);
+    http.respond(0, acceptedQueuedSubmission(sendPayload(first).clientRequestId)); await sending; await flushQueueUi();
+    assert.equal((successor.vm as any).draft, ""); assert.equal((successor.vm as any).queueSubmissionHandoff, null);
+  } finally { if (successor) { forgetTestSubmission(successor.vm); successor.unmount(); } else origin.unmount(); http.restore(); }
+});
+
+test("明确拒绝后：恢复副本保留真实 File，原重试冻结旧 generation，新 Enter 使用新 ID 和可信 generation", async () => {
+  const http = mockContextRequests({ autoTimeline: true });
+  const { wrapper } = mountPane({ initialDraft: "original", active: true, contextLocale: "zh-CN", renderRealTextarea: true, renderRealModal: true });
+  const vm = wrapper.vm as any, file = new File(["original"], "original.png", { type: "image/png" });
+  try {
+    vm.pendingImages = [{ id: "rejected-original", filename: file.name, file }];
+    const sending = vm.onSend(); const first = await http.waitFor(0), original = sendPayload(first);
+    http.reject(0, new ApiError({ status: 507, code: "AGENT_QUEUE_RETENTION_FULL", message: "retention full" })); await sending; await flushQueueUi();
+    vm.draft = "newer input"; vm.pendingImages = [];
+    queueDialogButton("恢复提交草稿").click(); await flushQueueUi(); queueDialogConfirm().click(); await flushQueueUi();
+    assert.equal(vm.draft, "original"); assert.equal(vm.pendingImages[0].file, file);
+    assert.equal(http.requests.length, 1, "restoring the copy never resends it");
+    await wrapper.get("textarea").trigger("keydown", { key: "Enter" });
+    const explicit = await http.waitFor(1), next = sendPayload(explicit);
+    assert.notEqual(next.clientRequestId, original.clientRequestId, "ordinary sending after a definite rejection is a new request, not a mutated original retry");
+    http.reject(1, new ApiError({ status: 409, code: "AGENT_QUEUE_STOP_GENERATION_CHANGED", message: "generation changed" })); await flushQueueUi();
+    vm.queue.apply({ ...stoppedQueue(), queueVersion: 2 });
+    queueDialogButton("重试原提交").click(); const retry = await http.waitFor(2);
+    assert.deepEqual(sendPayload(retry), next, "explicit original retry keeps its rejected generation");
+    assert.equal(vm.queue.handoff.value.submission.images[0].file, file);
+    const sentImage = (retry.data as FormData).get("images") as File;
+    assert.equal(sentImage.name, file.name); assert.deepEqual(await sentImage.arrayBuffer(), await file.arrayBuffer());
+    http.reject(2, new ApiError({ status: 409, code: "AGENT_QUEUE_STOP_GENERATION_CHANGED", message: "still stale" })); await flushQueueUi();
+    queueDialogConfirm().click(); await flushQueueUi();
+    await wrapper.get("textarea").trigger("keydown", { key: "Enter" });
+    const fresh = await http.waitFor(3), freshPayload = sendPayload(fresh);
+    assert.notEqual(freshPayload.clientRequestId, next.clientRequestId);
+    assert.equal(freshPayload.stopGeneration, "b".repeat(64)); assert.equal(vm.queue.handoff.value.submission.images[0].file, file);
+    assert.deepEqual(await ((fresh.data as FormData).get("images") as File).arrayBuffer(), await file.arrayBuffer());
+    http.respond(3, { ...acceptedQueuedSubmission(freshPayload.clientRequestId, 3), queue: { ...queueSnapshot(), queueVersion: 3, stopGeneration: "b".repeat(64) } });
+    await flushQueueUi(); assert.equal(vm.draft, ""); assert.equal(vm.pendingImages.length, 0);
+  } finally { forgetTestSubmission(vm); wrapper.unmount(); http.restore(); }
+});
+
+test("明确拒绝后新编辑的文字和 File 可作为独立请求发送，旧弹窗不能重发旧副本", async () => {
+  const http = mockContextRequests({ autoTimeline: true });
+  const { wrapper } = mountPane({ initialDraft: "rejected draft", active: true, contextLocale: "zh-CN", renderRealTextarea: true, renderRealModal: true });
+  const vm = wrapper.vm as any, oldFile = new File(["old"], "old.png", { type: "image/png" }), newFile = new File(["new"], "new.png", { type: "image/png" });
+  try {
+    vm.pendingImages = [{ id: "old-rejected", filename: oldFile.name, file: oldFile }];
+    const sending = vm.onSend(); const first = await http.waitFor(0), payload = sendPayload(first);
+    http.reject(0, new ApiError({ status: 507, code: "AGENT_QUEUE_RETENTION_FULL", message: "retention full" })); await sending; await flushQueueUi();
+    const original = vm.queue.handoff.value.submission, dialog = latestQueueDialog(), retry = queueDialogButton("重试原提交", dialog);
+    queueDialogConfirm(dialog).click(); await flushQueueUi();
+    vm.draft = "new independent draft"; vm.pendingImages = [{ id: "new-independent", filename: newFile.name, file: newFile }];
+    vm.queue.apply(stoppedQueue());
+    await wrapper.get("textarea").trigger("keydown", { key: "Enter" }); const fresh = await http.waitFor(1), next = sendPayload(fresh);
+    assert.notEqual(next.clientRequestId, payload.clientRequestId); assert.equal(next.stopGeneration, "b".repeat(64));
+    assert.equal(next.text, "new independent draft"); assert.equal(vm.queue.handoff.value.submission.images[0].file, newFile);
+    assert.deepEqual(await ((fresh.data as FormData).get("images") as File).arrayBuffer(), await newFile.arrayBuffer());
+    retry.click(); await flushQueueUi(); assert.equal(http.requests.length, 2);
+    assert.equal(original.draft, "rejected draft"); assert.equal(original.images[0].file, oldFile);
+    assert.equal(vm.draft, "new independent draft"); assert.equal(vm.pendingImages[0].file, newFile);
+    http.respond(1, { ...acceptedQueuedSubmission(next.clientRequestId, 3), queue: { ...queueSnapshot(), queueVersion: 3, stopGeneration: "b".repeat(64) } });
+    await flushQueueUi(); assert.equal(vm.draft, ""); assert.equal(vm.pendingImages.length, 0);
+  } finally { forgetTestSubmission(vm); wrapper.unmount(); http.restore(); }
 });

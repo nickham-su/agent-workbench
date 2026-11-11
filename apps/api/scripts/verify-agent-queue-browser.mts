@@ -23,6 +23,7 @@ import { AgentWorkerClient } from "../src/modules/agent/agent.worker-client.js";
 type Bounds = { x: number; y: number; width: number; height: number };
 interface Locator {
   fill(text: string): Promise<void>;
+  evaluate<T>(callback: (element: HTMLElement) => T): Promise<T>;
   press(key: string): Promise<void>;
   click(): Promise<void>;
   count(): Promise<number>;

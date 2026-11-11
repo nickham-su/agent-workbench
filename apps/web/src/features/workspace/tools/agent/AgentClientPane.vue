@@ -1669,6 +1669,10 @@ async function onSend() {
     } else {
       const sendText = action.text;
       const fingerprint = createAgentSendAttemptFingerprint({ draft: sendText, images: submittedImages });
+      // A definite rejection is not an unknown delivery: an ordinary new send
+      // gets a new identity and the current generation. Only the recovery action
+      // retries the retained submission with its original immutable payload.
+      if (queueSubmissionHandoff.value?.phase === "rejected") pendingAttempt.value = null;
       const attempt = resolveAgentSendAttempt({ attempt: pendingAttempt.value, fingerprint, makeClientRequestId: createAgentClientRequestId });
       pendingAttempt.value = attempt;
       const acknowledged = await queue.submit({
