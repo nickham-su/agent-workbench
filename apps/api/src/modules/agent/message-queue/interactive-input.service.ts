@@ -12,7 +12,7 @@ import { HttpError } from "../../../app/errors.js";
 import { appendMessage, completeAssistantWithExecutions, getMessageRunState, getMessageSessionHead, getRunRecord, insertMessageClientRequestDedup, persistRunTerminalIntent } from "../agent-message.store.js";
 import { assertSessionRuntimeUnblocked } from "../runtime-control/runtime-control.store.js";
 import { AgentMessageQueueStore, queueIdentity, queuePayloadHash, sameQueueIdentity, toQueueReceipt, type QueueScope } from "./message-queue.store.js";
-import { interactiveRunEnabled, type InputConfirmationSource, type InteractiveScope } from "./interactive-input-binding.store.js";
+import { interactiveRunEnabled, type InputBindingSource, type InteractiveScope } from "./interactive-input-binding.store.js";
 
 type OperationKind = "prepare" | "inject" | "complete_or_continue";
 type Operation = QueueScope & { operationId: string };
@@ -210,9 +210,8 @@ export class AgentInteractiveInputService {
           type: "user", status: "completed", originRunId: input.runId, replacesMessageId: null, createdAt: at,
           parts: [{ id: `part-${row.id}-text`, position: 0, type: "text", text: row.text! }, ...images.map((image, index) => ({
             id: `part-${row.id}-image-${index}`, position: index + 1, type: "image" as const, attachmentId: image.id, mediaType: image.mediaType, filename: image.filename }))] });
-        this.db.prepare("update agent_user_message_receipt set status='injected',message_id=?,injected_run_id=?,confirmation_state='unconfirmed',updated_at=? where id=? and status='queued'")
+        this.db.prepare("update agent_user_message_receipt set status='injected',message_id=?,injected_run_id=?,updated_at=? where id=? and status='queued'")
           .run(messageId, input.runId, at, row.id);
-        this.db.prepare("insert into agent_interactive_run_input(workspace_id,session_id,run_id,receipt_id) values (?,?,?,?)").run(input.workspaceId, input.sessionId, input.runId, row.id);
         insertMessageClientRequestDedup(this.db, { ...input, clientRequestId: row.client_request_id, messageId, createdAt: at });
       }
       this.db.prepare("update agent_session_queue_control set queue_version=queue_version+1,updated_at=? where workspace_id=? and session_id=?").run(at, input.workspaceId, input.sessionId);
@@ -224,7 +223,7 @@ export class AgentInteractiveInputService {
     if (slot?.preparationSnapshotHash === input.preparationSnapshotHash) this.frozen.release(this.runKey(input));
     return response;
   }
-  complete(input: AgentApiCompleteInteractiveAssistantRequest, source: InputConfirmationSource = "worker_model"): AgentApiCompleteInteractiveAssistantResponse {
+  complete(input: AgentApiCompleteInteractiveAssistantRequest, source: InputBindingSource = "worker_model"): AgentApiCompleteInteractiveAssistantResponse {
     const request = { ...input, source };
     const response = this.db.transaction(() => {
       const replay = this.replay<AgentApiCompleteInteractiveAssistantResponse>(input, "complete_or_continue", request);

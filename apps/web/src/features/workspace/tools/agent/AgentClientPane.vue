@@ -790,7 +790,7 @@ watch(
     const snapshot = queueSnapshot.value;
     // Only this first receipt gets a grace period. Never conceal real backlog or recovery.
     if (queueStopBlocked.value || cancelling.value ||
-      (snapshot && (snapshot.stop.state !== "none" || snapshot.unconfirmedInputCount > 0 ||
+      (snapshot && (snapshot.stop.state !== "none" ||
         (snapshot.pendingCount > 0 && (snapshot.pendingCount !== 1 || snapshot.items[0]?.clientRequestId !== requestId))))) {
       clearQueueStartup();
     } else if (snapshot?.pendingCount === 0 &&
@@ -1667,7 +1667,7 @@ async function onSend() {
   const idleStartup = !!(!showRunLoading.value && runState.value.status !== "running" &&
     !queueStopBlocked.value && !queueUnknownSubmission.value &&
     (creatingFreshSession || (!!trustedGeneration && currentQueue &&
-      currentQueue.pendingCount === 0 && currentQueue.unconfirmedInputCount === 0 &&
+      currentQueue.pendingCount === 0 &&
       currentQueue.stop.state === "none" && !currentQueue.inputIdentity)));
   sending.value = true;
   try {

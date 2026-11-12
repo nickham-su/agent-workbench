@@ -12,7 +12,7 @@ test("ordinary send atomically creates one formal user and Run; duplicate never 
   const first = await f.accept("first", "hello");
   assert.equal(first.receipt.status, "injected");
   assert.equal(first.queue.pendingCount, 0);
-  assert.equal(first.queue.unconfirmedInputCount, 1);
+
   assert.equal(f.enqueued.length, 1);
   const again = await f.service.accept(scope.sessionId, { ...scope, clientRequestId: "first", text: "hello" });
   assert.equal(again.deduplicated, true);
@@ -67,7 +67,7 @@ for (const status of ["completed","failed","cancelled"] as const) test(`${status
   const queued=await f.accept("remaining");
   f.finish(first.receipt.runId,status);
   assert.equal(f.store.get(scope,queued.receipt.id).status,"cancelled");
-  assert.equal(f.store.get(scope,first.receipt.id).confirmation_state,"unconfirmed");
+  assert.equal(f.store.get(scope,first.receipt.id).injected_run_id,first.receipt.runId);
   assert.equal(f.store.snapshot(scope).pendingCount,0);
   assert.equal((f.db.prepare("select count(*) as n from agent_message where type='user'").get() as {n:number}).n,1);
   assert.equal(f.enqueued.length,1);
@@ -126,14 +126,17 @@ test("Stop clears supplements, rejects pending/unknown inputs, and replay never 
   assert.equal(f.enqueued.length,1);
 });
 
-test("explicit ordinary send after failure binds existing formal inputs and creates its own user exactly once",async t=>{
+test("explicit ordinary send after failure triggers a new message without reclaiming old receipts",async t=>{
   const f=await queueFixture(t);const old=await f.accept("old");assert.equal(old.receipt.status,"injected");await f.accept("discard");
   f.finish(old.receipt.runId,"failed");f.runtimeStore.retireAdmission({...scope,runId:old.receipt.runId,runtimeInstanceId:f.runtimeInstanceId});
   const next=await f.accept("next");assert.equal(next.receipt.status,"injected");
   assert.equal((f.db.prepare("select count(*) as n from agent_message where type='user'").get() as {n:number}).n,2);
-  const bound=f.db.prepare("select receipt_id from agent_interactive_run_input where run_id=?").all(next.receipt.runId) as Array<{receipt_id:string}>;
-  assert.deepEqual(bound.map(r=>r.receipt_id).sort(),[old.receipt.id,next.receipt.id].sort());
-  assert.equal(f.store.get(scope,old.receipt.id).confirmation_state,"unconfirmed");
+  const bound=f.db.prepare("select id from agent_user_message_receipt where injected_run_id=?").all(next.receipt.runId) as Array<{id:string}>;
+  assert.deepEqual(bound.map(r=>r.id),[next.receipt.id]);
+  assert.equal(f.store.get(scope,old.receipt.id).injected_run_id,old.receipt.runId);
+  assert.notEqual(next.receipt.runId,old.receipt.runId);
+  assert.notEqual(next.receipt.messageId,old.receipt.messageId);
+  assert.equal(getRunRecord(f.db,next.receipt.runId)!.triggerMessageId,next.receipt.messageId);
   assert.equal(getMessageRunState(f.db,scope.workspaceId,scope.sessionId)!.activeRunId,next.receipt.runId);
 });
 

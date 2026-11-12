@@ -88,7 +88,6 @@ function materializeBlock(input: { source: CompactionSource; block: CompactionSo
   const validated = validateCompactionSourceBlock(block);
   const messages: PrimaryProviderNeutralMessage[] = [];
   const effective = effectiveUserInput({ messageId: block.sourceMessageId, triggerMessageId: source.triggerMessageId, policy: source.interactiveInput });
-  if (!effective.include) return { sourceBlockId: block.sourceMessageId, sourceMessageType: block.message.type, messages: [], isProjectionEmpty: true, canStartRetainedTail: false };
 
   if (block.message.type === "user") {
     const text = validated.parts.filter((part) => part.type === "text").map((part) => part.text).join("");

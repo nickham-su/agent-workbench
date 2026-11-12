@@ -30,7 +30,7 @@ async function fixture(t: TestContext) {
   const workspacePath = path.join(dataDir, "workspaces", "w1"); await fs.mkdir(workspacePath, { recursive: true });
   db.prepare("insert into workspaces(id,dir_name,title,path,created_at,updated_at) values ('w1','w1','Test',?,1,1)").run(workspacePath);
   db.prepare("insert into agent_session(id,workspace_id,title,kind,created_at,updated_at) values ('s1','w1','Session','primary',1,1)").run();
-  db.prepare("insert into agent_session_queue_control(workspace_id,session_id,mode,queue_version,next_sequence,updated_at) values ('w1','s1','active',0,1,1)").run();
+  db.prepare("insert into agent_session_queue_control(workspace_id,session_id,queue_version,next_sequence,updated_at) values ('w1','s1',0,1,1)").run();
   t.after(async () => { workspaceDeletingFence.end("w1"); db.close(); await fs.rm(dataDir, { recursive: true, force: true }); });
   const upload = (suffix: string = randomUUID(), bytes = PNG) => stageAgentImageUpload({
     dataDir, attachmentId: `att_${suffix}`, tempId: `tmp_${suffix}`, filename: "picture.png",

@@ -36,10 +36,9 @@ const uncertain = (error: unknown) => !(error instanceof ApiError) || error.stat
 function versionedQueueFields(q: AgentMessageQueueSnapshot) {
   const identity = (value: AgentMessageQueueSnapshot["pendingIdentity"]) => value ? [value.agentId, value.providerId, value.modelId] : null;
   return JSON.stringify([q.stopGeneration, q.pendingCount, q.pendingBytes, identity(q.pendingIdentity),
-    q.unconfirmedInputCount, q.unconfirmedInputSetHash, identity(q.recoveryIdentity),
     [q.stop.state, q.stop.unresolvedOperationCount, q.stop.unresolvedTargetCount, q.stop.code],
     q.items.map(item => [item.id, item.clientRequestId, item.sequence, item.createdAt, item.updatedAt,
-      item.status, item.messageId, item.runId, item.confirmationState, item.confirmationSource, item.textPreview, item.attachmentCount])]);
+      item.status, item.messageId, item.runId, item.textPreview, item.attachmentCount])]);
 }
 
 export function useAgentMessageQueue(getScope: () => Scope, api = queueApi) {
@@ -55,8 +54,8 @@ export function useAgentMessageQueue(getScope: () => Scope, api = queueApi) {
   let stopped = false;
   let diagnosedConflictVersion: number | null = null;
   const stopBlocked = computed(() => unknownStop.value || snapshot.value?.stop.state === "pending" || snapshot.value?.stop.state === "unknown");
-  const historyBlocked = computed(() => !snapshot.value || stopBlocked.value || !!unknownSubmission.value || snapshot.value.pendingCount > 0 || snapshot.value.unconfirmedInputCount > 0);
-  const identity = computed(() => snapshot.value?.inputIdentity ?? snapshot.value?.recoveryIdentity ?? snapshot.value?.pendingIdentity ?? null);
+  const historyBlocked = computed(() => !snapshot.value || stopBlocked.value || !!unknownSubmission.value || snapshot.value.pendingCount > 0);
+  const identity = computed(() => snapshot.value?.inputIdentity ?? snapshot.value?.pendingIdentity ?? null);
   function apply(next: AgentMessageQueueSnapshot, scope = getScope(), token = generation) {
     const current = getScope();
     if (stopped || token !== generation || keyOf(scope) !== keyOf(current) || next.workspaceId !== current.workspaceId || next.sessionId !== current.sessionId) return;
@@ -77,7 +76,7 @@ export function useAgentMessageQueue(getScope: () => Scope, api = queueApi) {
     clearTimeout(timer);
     if (stopped || !getScope().active) return;
     const q = snapshot.value;
-    const frequent = getScope().running || !q || q.pendingCount > 0 || q.unconfirmedInputCount > 0 || (q.stop.state === "pending" || q.stop.state === "unknown") || unknownSubmission.value || unknownStop.value;
+    const frequent = getScope().running || !q || q.pendingCount > 0 || (q.stop.state === "pending" || q.stop.state === "unknown") || unknownSubmission.value || unknownStop.value;
     timer = setTimeout(() => void refresh(), frequent ? 800 : 3000);
   }
   async function refresh() {

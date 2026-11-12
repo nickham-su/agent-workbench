@@ -65,12 +65,11 @@ function queueDialogConfirm(dialog = latestQueueDialog()): HTMLButtonElement {
 }
 
 function queueSnapshot(sessionId = "session-a"): AgentMessageQueueSnapshot {
-  return { workspaceId: "ws-a", sessionId, queueVersion: 0, stopGeneration: "0".repeat(64), pendingCount: 0, pendingBytes: 0, pendingIdentity: null, inputIdentity: null, unconfirmedInputCount: 0,
-    unconfirmedInputSetHash: null, recoveryIdentity: null, stop: { state: "none", unresolvedOperationCount: 0, unresolvedTargetCount: 0, code: null }, items: [] };
+  return { workspaceId: "ws-a", sessionId, queueVersion: 0, stopGeneration: "0".repeat(64), pendingCount: 0, pendingBytes: 0, pendingIdentity: null, inputIdentity: null, stop: { state: "none", unresolvedOperationCount: 0, unresolvedTargetCount: 0, code: null }, items: [] };
 }
 function injectedReceipt(runId: string, sessionId = "session-a") {
   return { receipt: { id: `receipt-${runId}`, clientRequestId: "test-request", sequence: 1, createdAt: 1, updatedAt: 1,
-    status: "injected", messageId: `message-${runId}`, runId, confirmationState: "confirmed", confirmationSource: "worker_model" },
+    status: "injected", messageId: `message-${runId}`, runId },
     deduplicated: true, queue: queueSnapshot(sessionId) };
 }
 
@@ -2088,7 +2087,7 @@ for (const backlog of ["second", "other"] as const) test(`空闲首条消息：$
   } finally { wrapper.unmount(); http.restore(); }
 });
 
-for (const blocked of ["unconfirmed", "stop_pending", "stop_unknown"] as const) test(`空闲首条消息：${blocked} 不隐藏真实等待`, async () => {
+for (const blocked of ["stop_pending", "stop_unknown"] as const) test(`空闲首条消息：${blocked} 不隐藏真实等待`, async () => {
   const http = mockContextRequests({ autoTimeline: true });
   const { wrapper } = mountPane({ initialDraft: "start", contextLocale: "zh-CN" }); const vm = wrapper.vm as any;
   try {
@@ -2096,7 +2095,6 @@ for (const blocked of ["unconfirmed", "stop_pending", "stop_unknown"] as const) 
     const accepted = queuedStartupResponse(sendPayload(request).clientRequestId);
     http.respond(0, accepted); await sending; await nextTick();
     vm.queue.apply({ ...accepted.queue, queueVersion: 2,
-      ...(blocked === "unconfirmed" ? { unconfirmedInputCount: 1, unconfirmedInputSetHash: "a".repeat(64) } : {}),
       ...(blocked.startsWith("stop_") ? { stop: { state: blocked === "stop_pending" ? "pending" : "unknown",
         unresolvedOperationCount: 1, unresolvedTargetCount: 1, code: "transport_timeout" } } : {}),
     });
@@ -2162,7 +2160,7 @@ test("真实 AgentClientPane：运行中普通消息使用 receipt，N 位于输
     assert.equal(wrapper.get("a-textarea").attributes("readonly"), undefined);
     vm.draft = "new draft entered while receipt was pending";
     const receipt = { id: "queued-receipt", clientRequestId: JSON.parse(String(request.data)).clientRequestId, sequence: 1, createdAt: 1, updatedAt: 1,
-      status: "queued", messageId: null, runId: null, confirmationState: null, confirmationSource: null };
+      status: "queued", messageId: null, runId: null };
     http.respond(0, { receipt, deduplicated: false, queue: { ...queueSnapshot(), queueVersion: 1, pendingCount: 1,
       items: [{ ...receipt, textPreview: "first", attachmentCount: 0 }] } });
     await send; await nextTick();
@@ -2199,10 +2197,29 @@ test("真实 AgentClientPane：未知提交按原 ID 查询，确认旧提交不
     assert.equal(wrapper.find('[data-testid="queue-submission-unknown"]').exists(), false);
   } finally { wrapper.unmount(); http.restore(); }
 });
-test("真实 AgentClientPane：未确认和暂停不展示标签、管理按钮或恢复说明", async () => {
+for (const stopState of ["pending", "unknown", "quiescent"] as const) test(`真实 AgentClientPane：取消后 ${stopState} 的 Fork/回退只受执行屏障约束`, async () => {
+  const { wrapper } = mountPane({ sessionReady: false }); const vm = wrapper.vm as any;
+  try {
+    await setTimeline(wrapper, [
+      textMessage({ id: "cancelled-user", type: "user", inCurrentOperationRange: true }),
+      textMessage({ id: "cancelled-response", depth: 1, type: "assistant", status: "cancelled", inCurrentOperationRange: true }),
+    ]);
+    vm.queue.apply({ ...queueSnapshot(), queueVersion: 1, stop: { state: stopState,
+      unresolvedOperationCount: stopState === "quiescent" ? 0 : 1, unresolvedTargetCount: stopState === "quiescent" ? 0 : 1, code: null } });
+    await nextTick();
+    const actions = wrapper.findAllComponents({ name: "AgentMessageActions" });
+    assert.equal(actions.length, 2);
+    for (const action of actions) assert.equal(action.props("showFork"), stopState === "quiescent");
+    assert.equal(actions[0]!.props("showRevert"), stopState === "quiescent");
+    assert.equal(actions[1]!.props("showRevert"), false);
+    assert.equal(vm.queue.historyBlocked.value, stopState !== "quiescent");
+  } finally { wrapper.unmount(); }
+});
+
+test("真实 AgentClientPane：安全取消后不展示输入状态或恢复入口", async () => {
   const http = mockContextRequests(); const { wrapper } = mountPane({ contextLocale: "zh-CN" }); const vm = wrapper.vm as any;
   try {
-    vm.queue.apply({ ...queueSnapshot(), queueVersion: 4, unconfirmedInputCount: 1, unconfirmedInputSetHash: "a".repeat(64) });
+    vm.queue.apply({ ...queueSnapshot(), queueVersion: 4, stop: { state: "quiescent", unresolvedOperationCount: 0, unresolvedTargetCount: 0, code: null } });
     await nextTick();
     assert.equal(wrapper.get('[data-testid="agent-message-queue"]').text(), "");
     assert.equal(wrapper.find('[data-testid="message-input-receipt"]').exists(), false);
@@ -2257,7 +2274,7 @@ test("真实 AgentClientPane：执行、恢复和等待身份均使用锁定 Age
       sessionModelStates: { "agent-c": staleState },
     });
     let version = 0;
-    for (const field of ["inputIdentity", "recoveryIdentity", "pendingIdentity"] as const) {
+    for (const field of ["inputIdentity", "pendingIdentity"] as const) {
       vm.queue.apply({ ...queueSnapshot(), queueVersion: ++version, [field]: { agentId: "agent-c", providerId: "p", modelId: "m" } });
       await nextTick();
       assert.equal(vm.effectiveAgentId, "agent-c");
@@ -2342,7 +2359,7 @@ test("真实 textarea：Esc 两次独立按键先清队列再停止，repeat/IME
   const { wrapper } = mountPane({ contextLocale: "zh-CN", renderRealTextarea: true, runState: baseRunState({ status: "running", activeRunId: "esc-running" }), initialDraft: "keep draft" });
   const vm = wrapper.vm as any;
   const item = { id: "esc-queued", clientRequestId: "esc-request", sequence: 1, createdAt: 1, updatedAt: 1, status: "queued" as const,
-    messageId: null, runId: null, confirmationState: null, confirmationSource: null, textPreview: "waiting", attachmentCount: 0 };
+    messageId: null, runId: null, textPreview: "waiting", attachmentCount: 0 };
   try {
     assert.equal(wrapper.get("textarea").attributes("placeholder"), "输入消息加入队列，Esc 停止运行");
     assert.equal(wrapper.text().includes("取消运行"), false); assert.equal(wrapper.text().includes("继续处理"), false);
@@ -2377,7 +2394,7 @@ test("真实 textarea：过期快照清空实际0条仍不停止；停止完成�
   const http = mockContextRequests(); const { wrapper, setRunState } = mountPane({ contextLocale: "zh-CN", renderRealTextarea: true, runState: baseRunState({ status: "running", activeRunId: "r" }) });
   const vm = wrapper.vm as any;
   try {
-    vm.queue.apply({ ...queueSnapshot(), queueVersion: 1, pendingCount: 1, items: [{ id: "stale", clientRequestId: "stale", sequence: 1, createdAt: 1, updatedAt: 1, status: "queued", messageId: null, runId: null, confirmationState: null, confirmationSource: null, textPreview: "stale", attachmentCount: 0 }] }); await nextTick();
+    vm.queue.apply({ ...queueSnapshot(), queueVersion: 1, pendingCount: 1, items: [{ id: "stale", clientRequestId: "stale", sequence: 1, createdAt: 1, updatedAt: 1, status: "queued", messageId: null, runId: null, textPreview: "stale", attachmentCount: 0 }] }); await nextTick();
     await wrapper.get("textarea").trigger("keydown", { key: "Escape" }); const clear = await http.waitFor(0);
     assert.match(clear.url || "", /\/clear$/);
     http.respond(0, { cancelledCount: 0, queue: { ...queueSnapshot(), queueVersion: 2 } });
@@ -2493,7 +2510,7 @@ for (const changed of ["workspace", "session"] as const) test(`fresh draft ensur
 
 function acceptedQueuedSubmission(clientRequestId: string, version = 1) {
   return { receipt: { ...injectedReceipt("recovery").receipt, id: `queued-${clientRequestId}`, clientRequestId,
-    status: "queued", messageId: null, runId: null, confirmationState: null, confirmationSource: null },
+    status: "queued", messageId: null, runId: null },
     deduplicated: false, queue: { ...queueSnapshot(), queueVersion: version } };
 }
 
@@ -2536,7 +2553,7 @@ for (const control of ["clear", "stop"] as const) test(`${control} 失败：清�
     runState: baseRunState({ status: "running", activeRunId: `unknown-${control}` }) });
   const vm = wrapper.vm as any;
   const item = (id: string, sequence: number) => ({ id, clientRequestId: `request-${id}`, sequence, createdAt: 1, updatedAt: 1,
-    status: "queued" as const, messageId: null, runId: null, confirmationState: null, confirmationSource: null, textPreview: id, attachmentCount: 0 });
+    status: "queued" as const, messageId: null, runId: null, textPreview: id, attachmentCount: 0 });
   try {
     if (control === "clear") vm.queue.apply({ ...queueSnapshot(), queueVersion: 1, pendingCount: 1, items: [item("original", 1)] });
     const dialogsBefore = document.querySelectorAll(".ant-modal-confirm").length;

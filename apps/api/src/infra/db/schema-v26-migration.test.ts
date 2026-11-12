@@ -26,10 +26,10 @@ function releasedV26() {
   return db;
 }
 function data(db:Database.Database) {
-  return ["agent_session","agent_message","agent_run","agent_interactive_run_input","agent_attachment_publication_intent","agent_user_message_receipt"].map(table=>({table,rows:(db.prepare(`select * from ${table} order by rowid`).all() as Record<string,unknown>[]).map(({target_run_id:_added,...row})=>row)}));
+  return ["agent_session","agent_message","agent_run","agent_attachment_publication_intent","agent_user_message_receipt"].map(table=>({table,rows:(db.prepare(`select * from ${table} order by rowid`).all() as Record<string,unknown>[]).map(({target_run_id:_added,confirmation_state:_state,confirmed_at:_confirmed,confirmation_source:_source,confirmed_by_assistant_id:_assistant,abandoned_at:_abandoned,...row})=>row)}));
 }
 
-test("v26 to v27 removes only mode columns, retaining history, unconfirmed binding, dedup tombstones and attachment ledger",()=>{
+test("v26 upgrades in place, dropping queue modes and input states but retaining history, dedup tombstones and attachment ledger",()=>{
   const db=releasedV26();try {
     const before=data(db);assert.deepEqual(initSchema(db),{fileCleanupPending:false});
     assert.deepEqual(data(db),before);assert.equal(db.pragma("foreign_keys",{simple:true}),1);

@@ -1,6 +1,6 @@
 import { discardRunQueuedReceipts } from "./message-queue/queued-receipt-cancellation.js";
 import type { AgentInteractiveInputBinding } from "@agent-workbench/shared/internal-contracts/agent-api";
-import { bindInteractiveAssistant, replaceInteractiveAssistantBinding, claimInteractiveAssistantBinding, confirmInteractiveAssistantInput, interactiveRunEnabled, readEffectiveInputPolicy, type InputConfirmationSource } from "./message-queue/interactive-input-binding.store.js";
+import { bindInteractiveAssistant, replaceInteractiveAssistantBinding, claimInteractiveAssistantBinding, assertInteractiveAssistantBinding, interactiveRunEnabled, type InputBindingSource } from "./message-queue/interactive-input-binding.store.js";
 import { assertSessionQueueUnoccupied } from "./message-queue/message-queue.guard.js";
 import { assertSessionRuntimeUnblocked, registerRunRuntimeAdmission } from "./runtime-control/runtime-control.store.js";
 import { HttpError } from "../../app/errors.js";
@@ -416,8 +416,6 @@ export function createMessageSession(db: Db, input: { id: string; workspaceId: s
       if (!message || message.workspaceId !== input.workspaceId) throw new Error("invalid fork message");
       const ancestors = db.prepare(`with recursive ancestors(id) as (select ? union select m.previous_message_id from agent_message m join ancestors a on m.id=a.id where m.workspace_id=? and m.previous_message_id is not null) select id from ancestors`)
         .all(message.id, input.workspaceId) as Array<{ id: string }>;
-      if (readEffectiveInputPolicy(db, { workspaceId: input.workspaceId, sessionId: sourceSessionId ?? input.id }, ancestors.map(row => row.id)).inputs.some(item => item.state === "unconfirmed"))
-        throw new HttpError(409, "Selected fork history contains unconfirmed input", "SESSION_HAS_PENDING_INPUT");
     }
     db.prepare(`insert into agent_session (id,workspace_id,title,kind,head_message_id,context_root_message_id,revision,forked_from_session_id,forked_from_message_id,created_at,updated_at,visibility) values (@id,@workspaceId,@title,@kind,@headMessageId,@contextRootMessageId,0,@forkedFromSessionId,@forkedFromMessageId,@createdAt,@createdAt,@visibility)`).run({ ...input, visibility, headMessageId: input.headMessageId ?? null, contextRootMessageId: input.contextRootMessageId ?? null, forkedFromSessionId: input.forkedFromSessionId ?? null, forkedFromMessageId: input.forkedFromMessageId ?? null });
     db.prepare(`insert into session_run_state (workspace_id,session_id,status,active_run_id,run_notice_text,retry_count,next_retry_at,active_assistant_message_id,non_terminal_message_ids_json,non_terminal_tool_execution_ids_json,updated_at) values (@workspaceId,@id,'idle',null,'',0,null,null,'[]','[]',@createdAt)`).run(input);
@@ -568,7 +566,7 @@ export function hasNonTerminalVisibleMessageWork(db: Db, input: { workspaceId: s
   return Boolean(db.prepare(`select 1 from agent_tool_execution execution join agent_message_part part on part.id=execution.call_part_id where part.message_id in (${placeholders}) and execution.status in ('queued','running') limit 1`).get(...messages.map((message) => message.id)));
 }
 
-export function appendStreamingAssistant(db: Db, input: Omit<Parameters<typeof appendMessage>[1], "type" | "status" | "parts"> & { runId: string; inputBinding?: AgentInteractiveInputBinding; inputSource?: InputConfirmationSource }) {
+export function appendStreamingAssistant(db: Db, input: Omit<Parameters<typeof appendMessage>[1], "type" | "status" | "parts"> & { runId: string; inputBinding?: AgentInteractiveInputBinding; inputSource?: InputBindingSource }) {
   return db.transaction(() => {
     const existing = messageRow(db, input.id);
     if (existing) {
@@ -676,7 +674,7 @@ export function flushStreamingParts(db: Db, input: { workspaceId: string; sessio
 
 /** 仅当前 fenced Run 可认领恢复事务准备的 active streaming Assistant。 */
 export function resumeStreamingAssistant(db: Db, input: {
-  workspaceId: string; sessionId: string; runId: string; messageId: string; inputBinding?: AgentInteractiveInputBinding; inputSource?: InputConfirmationSource;
+  workspaceId: string; sessionId: string; runId: string; messageId: string; inputBinding?: AgentInteractiveInputBinding; inputSource?: InputBindingSource;
 }): FencedWriteResult {
   return db.transaction(() => {
     const message = messageRow(db, input.messageId);
@@ -688,7 +686,7 @@ export function resumeStreamingAssistant(db: Db, input: {
   })();
 }
 
-export function completeAssistantWithExecutions(db: Db, input: { workspaceId: string; sessionId: string; runId: string; messageId: string; executions: AgentToolExecutionInput[]; inputSource?: InputConfirmationSource; interactiveDecision?: boolean; responseTotalTokens?: number | null; updatedAt: number }): FencedWriteResult {
+export function completeAssistantWithExecutions(db: Db, input: { workspaceId: string; sessionId: string; runId: string; messageId: string; executions: AgentToolExecutionInput[]; inputSource?: InputBindingSource; interactiveDecision?: boolean; responseTotalTokens?: number | null; updatedAt: number }): FencedWriteResult {
   return db.transaction(() => {
     const message = messageRow(db, input.messageId);
     if (!message) return "missing";
@@ -712,7 +710,7 @@ export function completeAssistantWithExecutions(db: Db, input: { workspaceId: st
       db.prepare(`insert into agent_tool_execution (id,call_part_id,origin_session_id,origin_run_id,status,result_preview,result_truncated,result_artifact_path,structured_result_json,error,updated_revision,created_at,updated_at,started_at,completed_at) values (@id,@callPartId,@originSessionId,@originRunId,'queued',@resultPreview,@resultTruncated,@resultArtifactPath,@structuredResultJson,@error,@revision,@updatedAt,@updatedAt,@startedAt,@completedAt)`).run({ ...execution, resultPreview: execution.resultPreview ?? null, resultTruncated: execution.resultTruncated ? 1 : 0, resultArtifactPath: execution.resultArtifactPath ?? null, structuredResultJson: execution.structuredResult == null ? null : JSON.stringify(execution.structuredResult), error: execution.error ?? null, startedAt: execution.startedAt ?? null, completedAt: execution.completedAt ?? null, revision, updatedAt: input.updatedAt });
     }
     db.prepare("update agent_message set status='completed',updated_revision=?,updated_at=? where id=?").run(revision, input.updatedAt, input.messageId);
-    if (input.executions.length > 0 || input.interactiveDecision) confirmInteractiveAssistantInput(db, { ...input, source: input.inputSource ?? "worker_model" });
+    if (input.executions.length > 0 || input.interactiveDecision) assertInteractiveAssistantBinding(db, { ...input, source: input.inputSource ?? "worker_model" });
     indexEligibleCompletedTextParts(db, input.messageId, input.updatedAt);
     db.prepare("update agent_session set revision=?,updated_at=? where id=? and workspace_id=?").run(revision, input.updatedAt, input.sessionId, input.workspaceId);
     const state = getMessageRunState(db, input.workspaceId, input.sessionId)!;
@@ -787,7 +785,7 @@ export function updateMessageRunNotice(db: Db, input: { workspaceId: string; ses
   })();
 }
 
-export function replaceStreamingAssistant(db: Db, input: { workspaceId: string; sessionId: string; runId: string; inputBinding?: AgentInteractiveInputBinding & { mode: "retry_same_input" | "recovery_reprepare" }; inputSource?: InputConfirmationSource; oldMessageId: string; newMessageId: string; expectedHeadMessageId: string | null; expectedRevision: number; runNoticeText: string; modelRequestError?: AgentModelRequestError | null; retryCount: number; nextRetryAt: number | null; createdAt: number }): { result: FencedWriteResult; message: AgentOrdinaryMessage | null } {
+export function replaceStreamingAssistant(db: Db, input: { workspaceId: string; sessionId: string; runId: string; inputBinding?: AgentInteractiveInputBinding & { mode: "retry_same_input" | "recovery_reprepare" }; inputSource?: InputBindingSource; oldMessageId: string; newMessageId: string; expectedHeadMessageId: string | null; expectedRevision: number; runNoticeText: string; modelRequestError?: AgentModelRequestError | null; retryCount: number; nextRetryAt: number | null; createdAt: number }): { result: FencedWriteResult; message: AgentOrdinaryMessage | null } {
   return db.transaction((): { result: FencedWriteResult; message: AgentOrdinaryMessage | null } => {
     const old = messageRow(db, input.oldMessageId);
     if (!old) return { result: "missing", message: null };
@@ -986,12 +984,6 @@ export function commitCompactionMessageWithRunFence(db: Db, input: {
       return exactReplay ? asCompactionMessage(getMessage(db, input.id)!) : null;
     }
     if (!assertFence(db, input)) return null;
-    const protectedIds = readEffectiveInputPolicy(db, input).inputs.filter(item => item.state === "unconfirmed").map(item => item.messageId);
-    if (protectedIds.length) {
-      if (!input.retainedFromMessageId) return null;
-      const anchor = messageRow(db, input.retainedFromMessageId);
-      if (!anchor || protectedIds.some(id => (messageRow(db, id)?.depth ?? -1) < anchor.depth)) return null;
-    }
     // Cancellation may have persisted a terminal intent before convergence
     // releases the session fence. A late proactive commit must not append to
     // a Run whose work phase has already ended.

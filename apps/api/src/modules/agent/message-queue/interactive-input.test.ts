@@ -2,14 +2,13 @@ import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
 import { AGENT_QUEUE_INPUT_POLICY_VERSION } from "@agent-workbench/shared";
 import type { AgentApiPromptContextResponse, AgentInteractiveInputBinding } from "@agent-workbench/shared/internal-contracts/agent-api";
-import { appendStreamingAssistant, flushStreamingParts, completeAssistantWithExecutions, replaceStreamingAssistant, resumeStreamingAssistant, updateToolExecution, getToolExecution, getMessageSessionHead, getMessage, getRunRecord, createMessageSession, getMessageSession, commitCompactionMessageWithRunFence, convergeRunTerminal, persistRunTerminalIntent, updateMessageRunNotice } from "../agent-message.store.js";
+import { appendStreamingAssistant, flushStreamingParts, completeAssistantWithExecutions, replaceStreamingAssistant, resumeStreamingAssistant, updateToolExecution, getToolExecution, getMessageSessionHead, getMessage, getRunRecord, createMessageSession, commitCompactionMessageWithRunFence, convergeRunTerminal, persistRunTerminalIntent, updateMessageRunNotice, revertBeforeUserMessage } from "../agent-message.store.js";
 import { ModelContextResolver, projectModelContextToPrompt } from "../read-side/model-context-resolver.js";
 import { RuntimeTranscriptProjector, UNKNOWN_TOOL_EXECUTION_RESULT } from "../read-side/runtime-transcript-projector.js";
 import { AgentRuntime } from "../agent.runtime.js";
 import type { LocalAgentRuntimeExecutionPort } from "../agent.runtime-port.js";
 import { AgentInteractiveInputService } from "./interactive-input.service.js";
 import { workspaceDeletingFence } from "../lifecycle/workspace-deleting-fence.js";
-import { AgentQueueRecoveryStore } from "./queue-recovery.store.js";
 import { queuePayloadHash, toQueueReceipt } from "./message-queue.store.js";
 import { queueFixture, scope, identity, errorIs } from "./message-queue.testkit.js";
 
@@ -50,7 +49,7 @@ test("interactive create and input binding commit together; a stale input set/re
   for (const bad of [{ ...original, inputReceiptIds: [] }, { ...original, inputRevision: original.inputRevision + 1 }]) {
     assert.throws(() => appendStreamingAssistant(f.db, { ...f.run, id: "bad", expectedHeadMessageId: head.headMessageId, expectedRevision: head.revision, createdAt: Date.now(), inputBinding: bad }), errorIs(409));
     assert.equal(getMessage(f.db, "bad"), null); assert.deepEqual(getMessageSessionHead(f.db, scope), head);
-    assert.equal(f.store.snapshot(scope).unconfirmedInputCount, 1);
+
   }
   const a = await f.assistant();
   assert.ok(f.db.prepare("select 1 from agent_queue_input_binding where assistant_message_id=? and state='active'").get(a.id));
@@ -58,15 +57,15 @@ test("interactive create and input binding commit together; a stale input set/re
   assert.equal(resumeStreamingAssistant(f.db, { ...f.run, messageId: a.id, inputBinding: { ...a.inputBinding, snapshotHash: "0".repeat(64) } }), "ignored");
 });
 
-test("two-tool round remains closed to injection until every result; legal completion confirms the bound input atomically", async t => {
+test("two-tool round remains closed to injection until every result; legal completion preserves input ownership", async t => {
   const f = await fixture(t); await f.assistant();
   flushStreamingParts(f.db, { ...f.run, messageId: "assistant", parts: [0, 1].map(position => ({ id: `call-${position}`, position, type: "tool_call" as const, toolName: "read", input: { path: "x" }, providerToolCallId: `provider-${position}` })), updatedAt: Date.now() });
   completeAssistantWithExecutions(f.db, { ...f.run, messageId: "assistant", executions: [0, 1].map(index => ({ id: `execution-${index}`, callPartId: `call-${index}`, originSessionId: scope.sessionId, originRunId: f.runId, status: "queued" as const })), updatedAt: Date.now() });
-  assert.equal(f.store.get(scope, f.first.receipt.id).confirmation_state, "confirmed");
-  assert.equal(f.store.get(scope, f.first.receipt.id).confirmation_source, "worker_model");
+  assert.equal(f.store.get(scope, f.first.receipt.id).status, "injected");
+
   const snapshot = f.store.snapshot(scope);
-  assert.equal(snapshot.pendingCount, 0); assert.equal(snapshot.unconfirmedInputCount, 0);
-  assert.deepEqual(snapshot.inputIdentity, identity, "confirmed running Run retains its authoritative input identity");
+  assert.equal(snapshot.pendingCount, 0);
+  assert.deepEqual(snapshot.inputIdentity, identity, "running Run retains its authoritative input identity");
   const queued = await f.accept("during-tool", "next");
   await assert.rejects(f.inputs.prepare({ ...f.run, operationId: "before-results" }), errorIs(409));
   updateToolExecution(f.db, { ...f.run, executionId: "execution-0", status: "running", updatedAt: Date.now() });
@@ -88,7 +87,7 @@ test("prepare freezes at most eight FIFO candidates; inject replay does not cons
   await f.accept("after-snapshot");
   const request = { ...f.run, operationId: "inject", expectedHeadMessageId: prepared.context.headMessageId, expectedRevision: prepared.context.sessionRevision,
     receiptIds: prepared.candidates.map(item => item.receipt.id), preparationSnapshotHash: prepared.preparationSnapshotHash, estimatorVersion: prepared.estimatorVersion };
-  const injected = f.inputs.inject(request); assert.equal(injected.queue.pendingCount, 3); assert.equal(injected.queue.unconfirmedInputCount, 9);
+  const injected = f.inputs.inject(request); assert.equal(injected.queue.pendingCount, 3);
   await f.accept("after-commit"); assert.deepEqual(f.inputs.inject(request), { ...injected, queue: f.store.snapshot(scope) });
   assert.throws(() => f.inputs.inject({ ...request, receiptIds: request.receiptIds.slice(1) }), errorIs(409));
   assert.equal((f.db.prepare("select count(*) as n from agent_message where type='user'").get() as { n: number }).n, 9);
@@ -110,10 +109,10 @@ test("finish replay cannot turn into continue when a message arrives after commi
   const request = { ...f.run, operationId: "finish", messageId: "assistant", updatedAt: Date.now() };
   const finished = f.inputs.complete(request); assert.equal(finished.decision, "finish");
   await assert.rejects(f.accept("later"),errorIs(409,"AGENT_SUPPLEMENT_TARGET_CLOSED")); assert.deepEqual(f.inputs.complete(request), { ...finished, queue: f.store.snapshot(scope) });
-  assert.equal(f.store.snapshot(scope).pendingCount, 0); assert.equal(f.store.snapshot(scope).unconfirmedInputCount, 0);
+  assert.equal(f.store.snapshot(scope).pendingCount, 0);
 });
 
-test("retry replacement inherits binding, superseded late completion cannot confirm, replacement replay is strict", async t => {
+test("retry replacement inherits binding, superseded late completion is ignored, replacement replay is strict", async t => {
   const f = await fixture(t), a = await f.assistant();
   const head = getMessageSessionHead(f.db, scope)!;
   const request = { ...f.run, oldMessageId: a.id, newMessageId: "replacement", expectedHeadMessageId: head.headMessageId, expectedRevision: head.revision,
@@ -121,100 +120,58 @@ test("retry replacement inherits binding, superseded late completion cannot conf
   assert.equal(replaceStreamingAssistant(f.db, request).result, "updated"); assert.equal(replaceStreamingAssistant(f.db, request).result, "updated");
   assert.throws(() => replaceStreamingAssistant(f.db, { ...request, inputBinding: { ...request.inputBinding, snapshotHash: "0".repeat(64) } }), errorIs(409));
   assert.equal(completeAssistantWithExecutions(f.db, { ...f.run, messageId: a.id, executions: [], updatedAt: Date.now() }), "ignored");
-  assert.equal(f.store.snapshot(scope).unconfirmedInputCount, 1);
+
   f.text("replacement"); f.inputs.complete({ ...f.run, operationId: "replacement-complete", messageId: "replacement", updatedAt: Date.now() });
-  assert.equal(f.store.snapshot(scope).unconfirmedInputCount, 0);
+
 });
 
-test("resume requires physical retirement, reuses the earliest original User and associates every unconfirmed receipt", async t => {
-  const f = await fixture(t); const original = getMessage(f.db, f.first.receipt.messageId!)!;
-  f.finish(f.runId, "failed"); const recovery = new AgentQueueRecoveryStore(f.db);
-  const input = { ...scope, operationId: "resume", expectedQueueVersion: f.store.snapshot(scope).queueVersion };
-  assert.throws(() => recovery.resume(input, "continued", Date.now()), errorIs(409));
-  f.runtimeStore.retireAdmission({ ...f.run, runtimeInstanceId: f.runtimeInstanceId });
-  const result = recovery.resume(input, "continued", Date.now()); assert.equal(result.activated, true); assert.equal(result.response.action, "continued_unconfirmed");
-  assert.equal(getRunRecord(f.db, "continued")!.triggerMessageId, original.id); assert.deepEqual(getMessage(f.db, original.id), original);
-  assert.equal(getMessageSession(f.db, scope.workspaceId, scope.sessionId)!.headMessageId, original.id);
-  assert.equal(recovery.resume(input, "must-not-exist", Date.now()).activated, false); assert.equal(getRunRecord(f.db, "must-not-exist"), null);
-});
-
-test("abandon is full-set/version CAS, does not depend on old profile, preserves Timeline but excludes input in forks", async t => {
-  const f = await fixture(t); const queued = await f.accept("still-queued"); f.finishFailure(); f.setProfileError(new Error("profile removed"));
-  const snapshot = f.store.snapshot(scope), recovery = new AgentQueueRecoveryStore(f.db);
-  const input = { ...scope, operationId: "abandon", expectedQueueVersion: snapshot.queueVersion, expectedUnconfirmedInputSetHash: snapshot.unconfirmedInputSetHash!, confirmIrreversible: true as const };
-  assert.throws(() => recovery.abandon({ ...input, expectedUnconfirmedInputSetHash: "0".repeat(64) }), errorIs(409, "AGENT_UNCONFIRMED_SET_CONFLICT"));
-  const result = f.service.abandon(scope.sessionId, input); assert.deepEqual(result.abandonedReceiptIds, [f.first.receipt.id]);
-  assert.equal(result.queue.pendingCount, 0); assert.equal(f.store.get(scope, queued.receipt.id).status, "cancelled");
-  assert.ok(getMessage(f.db, f.first.receipt.messageId!));
-  createMessageSession(f.db, { id: "fork", ...scope, title: "fork", kind: "primary", createdAt: Date.now(), forkedFromSessionId: scope.sessionId,
-    forkedFromMessageId: f.first.receipt.messageId, headMessageId: f.first.receipt.messageId });
-  assert.deepEqual(f.resolver.resolve({ workspaceId: scope.workspaceId, sessionId: "fork" }).messages, []);
-  f.service.stop(scope, "new-stop");
-  const replay = recovery.abandon(input); assert.deepEqual(replay.abandonedReceiptIds, result.abandonedReceiptIds);
-  assert.deepEqual(replay.queue, f.store.snapshot(scope)); assert.ok(replay.queue.queueVersion > result.queue.queueVersion);
+test("cancelled response no longer blocks Fork or revert once Stop is safely quiescent", async t => {
+  const f = await fixture(t); await f.assistant();
+  const { record } = f.runtime.stopSession({ workspaceId: scope.workspaceId, rootSessionId: scope.sessionId, operationId: "stop-history", clearQueued: true });
+  const head = getMessageSessionHead(f.db, scope)!;
+  const revert = () => revertBeforeUserMessage(f.db, { ...scope, expectedHeadMessageId: head.headMessageId, expectedRevision: head.revision, targetMessageId: f.first.receipt.messageId!, updatedAt: Date.now() });
+  assert.throws(revert);
+  f.runtimeStore.markGroupUnknown(record, f.runtimeInstanceId, "transport_unavailable");
+  assert.throws(revert);
+  f.runtimeStore.confirmStopGroup(record, f.runtimeInstanceId, {
+    workspaceId: scope.workspaceId, rootSessionId: scope.sessionId, operationId: record.operationId,
+    runtimeInstanceId: f.runtimeInstanceId, targetsHash: record.targetsHash, state: "quiescent", proofId: "history-proof", code: null,
   });
+  assert.equal(f.store.snapshot(scope).stop.state, "quiescent");
+  createMessageSession(f.db, { id: "fork", workspaceId: scope.workspaceId, title: "fork", kind: "primary", createdAt: Date.now(),
+    forkedFromSessionId: scope.sessionId, forkedFromMessageId: f.first.receipt.messageId, headMessageId: f.first.receipt.messageId });
+  const history = f.resolver.resolve({ workspaceId: scope.workspaceId, sessionId: "fork" });
+  assert.deepEqual(history.messages.map(message => message.id), [f.first.receipt.messageId]);
+  const next = await f.service.accept("fork", { workspaceId: scope.workspaceId, clientRequestId: "fork-new", text: "new trigger" });
+  assert.equal(next.receipt.status, "injected");
+  const context = await f.getContext({ ...scope, sessionId: "fork", runId: next.receipt.runId! });
+  assert.deepEqual(context.interactiveInput!.inputReceiptIds, [next.receipt.id]);
+  assert.equal(getRunRecord(f.db, next.receipt.runId!)!.triggerMessageId, next.receipt.messageId);
+  assert.equal(f.store.get(scope, f.first.receipt.id).injected_run_id, f.runId);
+  revert();
+  assert.equal(getMessageSessionHead(f.db, scope)!.headMessageId, null);
+  assert.ok(getMessage(f.db, f.first.receipt.messageId!), "revert preserves formal history and its receipt");
+});
 
-
-test("service resume uses lifecycle admission, links every unconfirmed user without re-insertion, and replay cannot undo a later Stop", async t => {
+test("current Run supplement images are real, but the next explicit Run sees them only as ordinary historical paths", async t => {
   const f = await fixture(t);
-  const second = await f.accept("unconfirmed-2"), third = await f.accept("unconfirmed-3");
-  const prepared = await f.inputs.prepare({ ...f.run, operationId: "prepare-extra" }); assert.equal(prepared.decision, "prepare");
-  f.inputs.inject({ ...f.run, operationId: "inject-extra", expectedHeadMessageId: prepared.context.headMessageId,
-    expectedRevision: prepared.context.sessionRevision, receiptIds: [second.receipt.id, third.receipt.id],
-    preparationSnapshotHash: prepared.preparationSnapshotHash, estimatorVersion: prepared.estimatorVersion });
+  const image = await f.service.accept(scope.sessionId, { ...scope, targetRunId: f.runId, clientRequestId: "image-supplement", text: "inspect this", images: [await f.upload()] });
+  const prepared = await f.inputs.prepare({ ...f.run, operationId: "image-prepare" }); assert.equal(prepared.decision, "prepare");
+  f.inputs.inject({ ...f.run, operationId: "image-inject", expectedHeadMessageId: prepared.context.headMessageId,
+    expectedRevision: prepared.context.sessionRevision, receiptIds: [image.receipt.id], preparationSnapshotHash: prepared.preparationSnapshotHash, estimatorVersion: prepared.estimatorVersion });
+  const current = await f.getContext(f.run);
+  assert.ok(JSON.stringify(current.messages).includes('"type":"attachment_ref"'));
+  const charged = f.service.retention().chargedBytes;
   f.finishFailure();
-  const snapshot = f.store.snapshot(scope), request = { workspaceId: scope.workspaceId, operationId: "resume-service", expectedQueueVersion: snapshot.queueVersion };
-  const response = await f.service.resume(scope.sessionId, request);
-  assert.equal(response.action, "continued_unconfirmed"); assert.ok(response.runId); assert.notEqual(response.runId, f.runId);
-  assert.equal(f.enqueued.length, 2); assert.equal(f.enqueued[1]!.runId, response.runId);
-  assert.equal(getRunRecord(f.db, response.runId!)!.triggerMessageId, f.first.receipt.messageId);
-  assert.equal((f.db.prepare("select count(*) as n from agent_message where type='user'").get() as { n: number }).n, 3);
-  assert.equal((f.db.prepare("select count(*) as n from agent_interactive_run_input where run_id=?").get(response.runId) as { n: number }).n, 3);
-  assert.equal(f.store.get(scope, second.receipt.id).injected_run_id, f.runId);
-  f.service.stop(scope, "stop-after-resume");
-  await f.runtime.reconcileStops();
-  const stoppedVersion = f.store.snapshot(scope).queueVersion;
-  const replay = await f.service.resume(scope.sessionId, request);
-  assert.equal(replay.action, response.action); assert.equal(replay.runId, response.runId);
-  assert.deepEqual(replay.queue, f.store.snapshot(scope)); assert.ok(replay.queue.queueVersion > response.queue.queueVersion);
-  assert.equal(f.enqueued.length, 2); assert.equal(f.store.snapshot(scope).queueVersion, stoppedVersion);
-});
-
-for (const winner of ["resume", "abandon"] as const) test(`same-version recovery competition: ${winner} wins and the other operation cannot change it`, async t => {
-  const f = await fixture(t); f.finishFailure(); const snapshot = f.store.snapshot(scope);
-  const resume = { workspaceId: scope.workspaceId, operationId: "resume-race", expectedQueueVersion: snapshot.queueVersion };
-  const abandon = { ...scope, operationId: "abandon-race", expectedQueueVersion: snapshot.queueVersion,
-    expectedUnconfirmedInputSetHash: snapshot.unconfirmedInputSetHash!, confirmIrreversible: true as const };
-  if (winner === "resume") {
-    await f.service.resume(scope.sessionId, resume);
-    assert.throws(() => f.service.abandon(scope.sessionId, abandon), errorIs(409));
-    assert.equal(f.store.get(scope, f.first.receipt.id).confirmation_state, "unconfirmed");
-  } else {
-    f.service.abandon(scope.sessionId, abandon);
-    await assert.rejects(f.service.resume(scope.sessionId, resume), errorIs(409));
-    assert.equal(f.enqueued.length, 1); assert.equal(f.store.get(scope, f.first.receipt.id).confirmation_state, "abandoned");
-  }
-});
-
-test("legacy resume with no formal unconfirmed input cannot start a buffered Run", async t => {
-  const f = await queueFixture(t);
-  const result = await f.service.resume(scope.sessionId, { workspaceId: scope.workspaceId, operationId: "nothing-to-resume", expectedQueueVersion: f.store.snapshot(scope).queueVersion });
-  assert.equal(result.action, "no_unconfirmed"); assert.equal(result.runId, null); assert.equal(f.enqueued.length, 0);
-});
-
-test("profile removal blocks resume but abandon keeps published image retention charged", async t => {
-  const f = await queueFixture(t); const image = await f.upload();
-  const accepted = await f.service.accept(scope.sessionId, { workspaceId: scope.workspaceId, clientRequestId: "image-trigger", text: "image", images: [image] });
-  const activated = await f.currentRun(); assert.ok(activated);
-  f.finish(activated.runId, "failed"); f.runtimeStore.retireAdmission({ ...scope, runId: activated.runId, runtimeInstanceId: f.runtimeInstanceId });
-  const snapshot = f.store.snapshot(scope); f.setProfileError(new Error("profile removed"));
-  await assert.rejects(f.service.resume(scope.sessionId, { workspaceId: scope.workspaceId, operationId: "missing-profile", expectedQueueVersion: snapshot.queueVersion }), /profile removed/);
-  const before = f.db.prepare("select state,byte_size from agent_attachment_publication_intent where receipt_id=?").get(accepted.receipt.id);
-  f.service.abandon(scope.sessionId, { workspaceId: scope.workspaceId, operationId: "abandon-image", expectedQueueVersion: snapshot.queueVersion,
-    expectedUnconfirmedInputSetHash: snapshot.unconfirmedInputSetHash!, confirmIrreversible: true });
-  const after = f.db.prepare("select state,byte_size from agent_attachment_publication_intent where receipt_id=?").get(accepted.receipt.id) as { state: string; byte_size: number };
-  assert.ok(before); assert.equal(after.state, "retained"); assert.ok(after.byte_size > 0);
-  assert.equal(f.store.get(scope, accepted.receipt.id).confirmation_state, "abandoned");
+  const next = await f.accept("new-text-trigger", "continue with history"); assert.equal(next.receipt.status, "injected");
+  const later = await f.getContext({ ...scope, runId: next.receipt.runId });
+  assert.equal(JSON.stringify(later.messages).includes('"type":"attachment_ref"'), false);
+  assert.match(JSON.stringify(later.messages), /inspect this/);
+  assert.match(JSON.stringify(later.messages), /\.awb\/agent\/attachments\//);
+  assert.deepEqual(later.interactiveInput!.inputReceiptIds, [next.receipt.id]);
+  assert.equal(f.store.get(scope, image.receipt.id).injected_run_id, f.runId);
+  assert.equal(f.store.attachments(scope, image.receipt.id).length, 1);
+  assert.equal(f.service.retention().chargedBytes, charged);
 });
 
 test("persisted interactive operation replay still respects Workspace deletion fencing", async t => {
@@ -225,7 +182,7 @@ test("persisted interactive operation replay still respects Workspace deletion f
 });
 
 
-test("real local fallback continues the same Run and confirms echo-only input as local_fallback", { timeout: 10_000 }, async t => {
+test("real local fallback continues the same Run and preserves input ownership for echo-only input", { timeout: 10_000 }, async t => {
   const f = await fixture(t); let reads = 0; const decisions: string[] = []; let queuedId: string | undefined;
   const image = await f.upload();
   const port: Pick<LocalAgentRuntimeExecutionPort, "getPromptContextForRun" | "prepareInteractiveInputFromWorker" | "injectInteractiveInputFromWorker" | "completeInteractiveAssistantFromWorker" | "createStreamingAssistantFromWorker" | "flushAssistantPartsFromWorker" | "persistRunTerminalIntentFromWorker" | "convergeRunTerminalFromWorker" | "updateRunNoticeFromWorker"> = {
@@ -254,7 +211,7 @@ test("real local fallback continues the same Run and confirms echo-only input as
   assert.equal(getRunRecord(f.db, f.runId)!.status, "completed");
   assert.ok(queuedId);
   for (const id of [f.first.receipt.id, queuedId]) {
-    const receipt = f.store.get(scope, id); assert.equal(receipt.confirmation_state, "confirmed"); assert.equal(receipt.confirmation_source, "local_fallback"); assert.equal(receipt.injected_run_id, f.runId);
+    const receipt = f.store.get(scope, id); assert.equal(receipt.status, "injected"); assert.equal(receipt.injected_run_id, f.runId);
   }
   assert.equal((f.db.prepare("select count(*) as n from agent_run").get() as { n: number }).n, 1);
   const resolved = f.resolver.resolve(scope); const echo = resolved.messages.filter(message => message.type === "assistant").at(-1)!;
@@ -263,27 +220,25 @@ test("real local fallback continues the same Run and confirms echo-only input as
 });
 
 
-test("compaction commit cannot omit or move its retained anchor past the earliest unconfirmed input", async t => {
-  const f = await fixture(t); const second = await f.accept("second-unconfirmed");
+test("ordinary input history can be compacted without an input-state retained boundary; stale fences still fail", async t => {
+  const f = await fixture(t); const second = await f.accept("second-input");
   const prepared = await f.inputs.prepare({ ...f.run, operationId: "prepare-for-compact" }); assert.equal(prepared.decision, "prepare");
   const injected = f.inputs.inject({ ...f.run, operationId: "inject-for-compact", expectedHeadMessageId: prepared.context.headMessageId,
     expectedRevision: prepared.context.sessionRevision, receiptIds: [second.receipt.id], preparationSnapshotHash: prepared.preparationSnapshotHash, estimatorVersion: prepared.estimatorVersion });
-  const input = { ...f.run, id: "illegal-compaction", expectedHeadMessageId: injected.headMessageId, expectedRevision: injected.revision,
-    textPartId: "summary", text: "must not hide protected inputs", createdAt: Date.now() };
-  assert.equal(commitCompactionMessageWithRunFence(f.db, input), null);
-  assert.equal(commitCompactionMessageWithRunFence(f.db, { ...input, retainedFromMessageId: injected.headMessageId }), null);
-  assert.equal(getMessage(f.db, input.id), null); assert.equal(f.store.snapshot(scope).unconfirmedInputCount, 2);
+  const input = { ...f.run, id: "compaction", expectedHeadMessageId: injected.headMessageId, expectedRevision: injected.revision,
+    textPartId: "summary", text: "ordinary history summary", createdAt: Date.now() };
+  assert.ok(commitCompactionMessageWithRunFence(f.db, input));
+  assert.ok(getMessage(f.db, input.id));
+  assert.throws(() => commitCompactionMessageWithRunFence(f.db, { ...input, id: "stale-compaction" }), /SESSION_HEAD_CONFLICT/);
+  assert.equal(f.store.get(scope, f.first.receipt.id).injected_run_id, f.runId);
 });
 
-test("pending or unknown runtime Stop evidence blocks both recovery exits even after DB convergence", async t => {
-  const f = await fixture(t); f.service.stop(scope, "stop-before-exits"); await f.runtime.reconcileStops();
-  const snapshot = f.store.snapshot(scope); assert.notEqual(snapshot.stop.state, "quiescent");
-  await assert.rejects(f.service.resume(scope.sessionId, { workspaceId: scope.workspaceId, operationId: "resume-pending", expectedQueueVersion: snapshot.queueVersion }), errorIs(409));
-  assert.throws(() => f.service.abandon(scope.sessionId, { workspaceId: scope.workspaceId, operationId: "abandon-pending", expectedQueueVersion: snapshot.queueVersion,
-    expectedUnconfirmedInputSetHash: snapshot.unconfirmedInputSetHash!, confirmIrreversible: true }), errorIs(409));
-  assert.equal(f.enqueued.length, 1); assert.equal(f.store.get(scope, f.first.receipt.id).confirmation_state, "unconfirmed");
+test("pending or unknown runtime Stop evidence still blocks a new ordinary send", async t => {
+  const f = await fixture(t); f.service.stop(scope, "stop-before-send"); await f.runtime.reconcileStops();
+  assert.notEqual(f.store.snapshot(scope).stop.state, "quiescent");
+  await assert.rejects(f.accept("blocked-send"), errorIs(409));
+  assert.equal(f.enqueued.length, 1); assert.equal(f.store.get(scope, f.first.receipt.id).status, "injected");
 });
-
 
 test("only an empty streaming continuation offers reusable recovery metadata; partial Parts require replacement", async t => {
   const f = await fixture(t); const assistant = await f.assistant();
@@ -303,7 +258,7 @@ for (const first of ["inject", "stop"] as const) test(`inject and Stop preserve 
   if (first === "inject") {
     const injected = f.inputs.inject(request); f.service.stop(scope, "stop-after-inject");
     assert.deepEqual(f.inputs.inject(request), { ...injected, queue: f.store.snapshot(scope) });
-    assert.equal(f.store.get(scope, queued.receipt.id).status, "injected"); assert.equal(f.store.get(scope, queued.receipt.id).confirmation_state, "unconfirmed");
+    assert.equal(f.store.get(scope, queued.receipt.id).status, "injected"); assert.equal(f.store.get(scope, queued.receipt.id).status, "injected");
   } else {
     f.service.stop(scope, "stop-before-inject"); assert.throws(() => f.inputs.inject(request), errorIs(409));
     assert.equal(f.store.get(scope, queued.receipt.id).status, "cancelled"); assert.equal(f.store.snapshot(scope).pendingCount, 0);
@@ -332,26 +287,18 @@ test("closing input admission fences an awaited preparation and new injections b
   assert.equal(f.store.get(scope, queued.receipt.id).status, "queued");
   const completion = { ...f.run, operationId: "complete-during-drain", messageId: assistant.id, updatedAt: Date.now() };
   assert.equal(inputs.complete(completion).decision, "continue");
-  assert.equal(f.store.get(scope, f.first.receipt.id).confirmation_state, "confirmed");
+  assert.equal(f.store.get(scope, f.first.receipt.id).status, "injected");
   assert.equal(f.store.get(scope, queued.receipt.id).status, "queued");
 });
 
 
-test("resume replay reports later confirmation with the original action/run and no new lifecycle admission", async t => {
+test("receipt replay after a failed Run returns its old ownership and never creates a continuation", async t => {
   const f = await fixture(t); f.finishFailure();
-  const request = { workspaceId: scope.workspaceId, operationId: "resume-before-confirm", expectedQueueVersion: f.store.snapshot(scope).queueVersion };
-  const original = await f.service.resume(scope.sessionId, request); assert.ok(original.runId);
-  const resumed = { ...scope, runId: original.runId }, context = await f.getContext(resumed);
-  const inputBinding: AgentInteractiveInputBinding = { inputReceiptIds: context.interactiveInput!.inputReceiptIds, effectiveInputPolicyVersion: AGENT_QUEUE_INPUT_POLICY_VERSION,
-    snapshotHash: queuePayloadHash(context.messages), inputRevision: context.sessionRevision };
-  appendStreamingAssistant(f.db, { ...resumed, id: "confirmed-after-resume", expectedHeadMessageId: context.headMessageId, expectedRevision: context.sessionRevision, createdAt: Date.now(), inputBinding });
-  flushStreamingParts(f.db, { ...resumed, messageId: "confirmed-after-resume", parts: [{ id: "confirm-text", position: 0, type: "text", text: "done" }], updatedAt: Date.now() });
-  f.inputs.complete({ ...resumed, operationId: "confirm-after-resume", messageId: "confirmed-after-resume", updatedAt: Date.now() });
-  const before = f.store.snapshot(scope), admissions = f.enqueued.length;
-  const replay = await f.service.resume(scope.sessionId, request);
-  assert.equal(replay.action, original.action); assert.equal(replay.runId, original.runId);
-  assert.deepEqual(replay.queue, before); assert.equal(replay.queue.unconfirmedInputCount, 0); assert.ok(before.queueVersion > original.queue.queueVersion);
-  assert.equal(f.enqueued.length, admissions); assert.deepEqual(f.store.snapshot(scope), before);
+  const before = f.store.snapshot(scope);
+  const replay = await f.service.accept(scope.sessionId, { ...scope, clientRequestId: "trigger", text: "initial" });
+  assert.equal(replay.deduplicated, true);
+  assert.deepEqual(replay.receipt, f.first.receipt);
+  assert.deepEqual(f.store.snapshot(scope), before); assert.equal(f.enqueued.length, 1);
 });
 
 test("prepare singleflight preserves frozen contents with fresh queue and stores no prompt, body or path", async t => {
@@ -471,7 +418,7 @@ test("oversized prepare persists only a stable rejected tombstone; replay is fre
   assert.deepEqual(JSON.parse(row.json), { runId: f.runId, response: { operationId: request.operationId, decision: "rejected", reason: "snapshot_too_large" } });
   const restarted = new AgentInteractiveInputService(f.db, async () => { throw new Error("must not rebuild rejected content"); });
   t.after(() => restarted.closeAdmission()); assert.deepEqual(await restarted.prepare(request), await service.prepare(request));
-  assert.equal(f.store.get(scope, f.first.receipt.id).confirmation_state, "unconfirmed");
+  assert.equal(f.store.get(scope, f.first.receipt.id).status, "injected");
   assert.equal(f.store.get(scope, queued.receipt.id).status, "queued");
 });
 
@@ -561,7 +508,7 @@ for (const reason of ["snapshot_too_large", "cache_capacity"] as const) test(`fa
   assert.equal(prepares, 1); assert.equal(creates, 0); assert.equal(retired, 1);
   assert.equal(getRunRecord(f.db, f.runId)!.status, "failed");
   const snapshot = f.store.snapshot(scope); assert.equal(snapshot.pendingCount,0);
-  assert.equal(f.store.get(scope, f.first.receipt.id).confirmation_state, "unconfirmed");
+  assert.equal(f.store.get(scope, f.first.receipt.id).status, "injected");
   assert.equal(f.store.get(scope, queued.receipt.id).status, "cancelled");
   assert.equal(await f.currentRun(), null);
 });
@@ -576,15 +523,13 @@ test("oversized content at a stale head cannot mint a rejected operation", async
   staleHead = false; assert.equal((await service.prepare(request)).decision, "rejected");
 });
 
-for (const ending of ["failed", "stopped"] as const) for (const action of ["send", "resume"] as const)
-test(`${action} after ${ending} Run preserves unknown tool outcomes and requires physical retirement`, async t => {
+for (const ending of ["failed", "stopped"] as const)
+test(`send after ${ending} Run preserves unknown tool outcomes and requires physical retirement`, async t => {
   const f = await fixture(t); await f.assistant();
   flushStreamingParts(f.db, { ...f.run, messageId: "assistant", parts: [{ id: "interrupted-call", position: 0, type: "tool_call", toolName: "bash", input: { command: "fixture" } }], updatedAt: Date.now() });
   completeAssistantWithExecutions(f.db, { ...f.run, messageId: "assistant", executions: [{ id: "interrupted-execution", callPartId: "interrupted-call", originSessionId: scope.sessionId, originRunId: f.runId, status: "queued" }], updatedAt: Date.now() });
   updateToolExecution(f.db, { ...f.run, executionId: "interrupted-execution", status: "running", updatedAt: Date.now() });
-  const recover = () => action === "send" ? f.accept("after-interruption") : f.service.resume(scope.sessionId, {
-    workspaceId: scope.workspaceId, operationId: "resume-after-interruption", expectedQueueVersion: f.store.snapshot(scope).queueVersion,
-  });
+  const recover = () => f.accept("after-interruption");
   const assertBlocked = async (code: string) => {
     const before = f.store.snapshot(scope);
     await assert.rejects(recover(), errorIs(409, code));
@@ -608,7 +553,6 @@ test(`${action} after ${ending} Run preserves unknown tool outcomes and requires
   assert.equal(getToolExecution(f.db, "interrupted-execution")!.status, "unknown");
   assert.equal(f.store.hasUndrainedExecution(scope), false);
   await recover();
-  if (action === "resume") await f.accept("after-interruption");
   assert.ok(await f.currentRun());
   assert.equal(f.enqueued.length, 2);
   const next = f.enqueued[1]!; assert.notEqual(next.runId, f.runId);
@@ -620,18 +564,22 @@ test(`${action} after ${ending} Run preserves unknown tool outcomes and requires
   assert.deepEqual(getToolExecution(f.db, execution.id), execution);
 });
 
-test("send continuation binds every unconfirmed input in chain order and cannot change their identity", async t => {
+test("new send uses a new trigger and only its own receipt; old Run inputs remain ordinary history", async t => {
   const f = await fixture(t), second = await f.accept("second-original");
   const prepared = await f.inputs.prepare({ ...f.run, operationId: "multi-original-prepare" }); assert.equal(prepared.decision, "prepare");
   const injected = f.inputs.inject({ ...f.run, operationId: "multi-original-inject", expectedHeadMessageId: prepared.context.headMessageId,
     expectedRevision: prepared.context.sessionRevision, receiptIds: [second.receipt.id], preparationSnapshotHash: prepared.preparationSnapshotHash, estimatorVersion: prepared.estimatorVersion });
   const originals = [f.first.receipt.id, injected.receipts[0]!.id];
-  f.finishFailure(); const before = f.store.snapshot(scope);
-  await assert.rejects(f.service.accept(scope.sessionId, { ...scope, clientRequestId: "conflicting-recovery-send", text: "wrong identity", agentId: "different-agent" }), errorIs(409, "AGENT_QUEUE_AGENT_CONFLICT"));
-  assert.deepEqual(f.store.snapshot(scope), before);
-  const next = await f.accept("send-after-two-unconfirmed"), continuation = f.enqueued.at(-1)!;
+  f.finishFailure();
+  const next = await f.service.accept(scope.sessionId, { ...scope, clientRequestId: "new-input", text: "new trigger", agentId: "different-agent" });
+  const continuation = f.enqueued.at(-1)!;
   assert.notEqual(continuation.runId, f.runId); assert.equal(next.receipt.status, "injected");
-  assert.deepEqual(f.db.prepare("select i.receipt_id from agent_interactive_run_input i join agent_user_message_receipt r on r.id=i.receipt_id where i.run_id=? order by r.sequence").all(continuation.runId), [...originals,next.receipt.id].map(receipt_id => ({ receipt_id })));
+  assert.notEqual(next.receipt.messageId, f.first.receipt.messageId);
+  for (const id of originals) assert.equal(f.store.get(scope,id).injected_run_id, f.runId);
+  const context = await f.getContext(continuation);
+  assert.deepEqual(context.interactiveInput!.inputReceiptIds, [next.receipt.id]);
+  assert.deepEqual(context.interactiveInput!.inputs.filter(input => input.currentRunInput).map(input => input.receiptId), [next.receipt.id]);
+  assert.equal(context.messages.filter(message => message.role === "user").length, 3);
   assert.equal((f.db.prepare("select count(*) as n from agent_message where type='user'").get() as { n: number }).n, 3);
   assert.equal(getRunRecord(f.db, continuation.runId)!.triggerMessageId, next.receipt.messageId);
 });

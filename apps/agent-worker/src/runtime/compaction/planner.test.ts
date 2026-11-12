@@ -91,9 +91,8 @@ test("planner can summarize a user image before a long completed tool loop", () 
     assert.equal(JSON.stringify(imageSummary).includes("attachment_ref"), false);
   }
   source.interactiveInput = { version: AGENT_QUEUE_INPUT_POLICY_VERSION, interactive: true, inputReceiptIds: ["receipt"],
-    inputs: [{ receiptId: "receipt", messageId: "m1", state: "unconfirmed", currentRunInput: true, attachments: [] }] };
-  assert.deepEqual(planCompaction({ source, profile: testProfile, mode: "proactive" }), { kind: "retained_tail_unavailable", reason: "budget" });
-  source.interactiveInput.inputs[0]!.state = "confirmed";
+    inputs: [{ receiptId: "receipt", messageId: "m1", currentRunInput: true, attachments: [] }] };
+  assert.equal(planCompaction({ source, profile: testProfile, mode: "proactive" }).kind, "planned");
   assert.equal(planCompaction({ source, profile: testProfile, mode: "proactive" }).kind, "planned");
 });
 
@@ -154,25 +153,23 @@ test("profile fingerprint changes only with normalized profile semantics", () =>
 });
 
 
-test("unconfirmed input is a hard retained boundary even before the ordinary fixed tail", () => {
+test("current Run receipt ownership does not pin ordinary historical input before the fixed tail", () => {
   const source = plannedSource();
   source.interactiveInput = { version: AGENT_QUEUE_INPUT_POLICY_VERSION, interactive: true, inputReceiptIds: ["receipt"],
-    inputs: [{ receiptId: "receipt", messageId: "m1", state: "unconfirmed", currentRunInput: true, attachments: [] }] };
-  assert.deepEqual(planCompaction({ source, profile: testProfile, mode: "proactive" }), { kind: "retained_tail_unavailable", reason: "budget" });
-  source.interactiveInput.inputs[0]!.state = "confirmed";
+    inputs: [{ receiptId: "receipt", messageId: "m1", currentRunInput: true, attachments: [] }] };
+  assert.equal(planCompaction({ source, profile: testProfile, mode: "proactive" }).kind, "planned");
   const confirmed = planCompaction({ source, profile: testProfile, mode: "proactive" });
   assert.equal(confirmed.kind, "planned");
   if (confirmed.kind === "planned") assert.deepEqual(confirmed.plan.prefixSourceBlockIds, ["m1"]);
 });
 
-test("abandoned inputs are absent from both retained content and summarizer prefix", () => {
-  const source = testSource({ texts: ["old ".repeat(14_000), "abandoned secret", "recent ".repeat(6_000), "trigger"] });
+test("all ordinary visible inputs are included in compaction planning", () => {
+  const source = testSource({ texts: ["old ".repeat(14_000), "ordinary history", "recent ".repeat(6_000), "trigger"] });
   source.interactiveInput = { version: AGENT_QUEUE_INPUT_POLICY_VERSION, interactive: true, inputReceiptIds: [],
-    inputs: [{ receiptId: "receipt", messageId: "m2", state: "abandoned", currentRunInput: false, attachments: [] }] };
+    inputs: [{ receiptId: "receipt", messageId: "m2", currentRunInput: false, attachments: [] }] };
   const result = planCompaction({ source, profile: testProfile, mode: "manual" });
   assert.equal(result.kind, "planned");
   if (result.kind === "planned") {
-    assert.ok(!result.plan.prefixSourceBlockIds.includes("m2")); assert.ok(!result.plan.retainedSourceBlockIds.includes("m2"));
-    assert.ok(!JSON.stringify(result.plan).includes("abandoned secret"));
+    assert.ok(result.plan.prefixSourceBlockIds.includes("m2") || result.plan.retainedSourceBlockIds.includes("m2"));
   }
 });

@@ -10,7 +10,7 @@ import {
 import type { Db } from "../../../infra/db/db.js";
 import { HttpError } from "../../../app/errors.js";
 import { newSortableId } from "../../../utils/ids.js";
-import { getMessageSession, getVisibleMessageChain, getRunRecord, getMessageRunState } from "../agent-message.store.js";
+import { getMessageSession, getRunRecord, getMessageRunState } from "../agent-message.store.js";
 import type { PublishedQueueImage } from "../attachments/agent-attachment-publication.service.js";
 import { AgentAttachmentPublicationStore } from "../attachments/agent-attachment-publication.store.js";
 import { workspaceDeletingFence } from "../lifecycle/workspace-deleting-fence.js";
@@ -23,18 +23,16 @@ export type QueueReceiptRow = {
   payload_hash: string; status: "queued" | "injected" | "cancelled"; text: string | null; input_text: string | null;
   payload_bytes: number; attachment_count: number; agent_id: string; provider_id: string; model_id: string;
   ui_locale: "zh-CN" | "en-US" | null; message_id: string | null; injected_run_id: string | null; target_run_id: string | null;
-  confirmation_state: "unconfirmed" | "confirmed" | "abandoned" | null;
-  confirmation_source: "worker_model" | "local_fallback" | null; created_at: number; updated_at: number;
+  created_at: number; updated_at: number;
 };
 export const queueIdentity = (row: Pick<QueueReceiptRow, "agent_id" | "provider_id" | "model_id">): AgentQueueIdentity => ({ agentId: row.agent_id, providerId: row.provider_id, modelId: row.model_id });
 export const sameQueueIdentity = (a: AgentQueueIdentity, b: AgentQueueIdentity) => a.agentId === b.agentId && a.providerId === b.providerId && a.modelId === b.modelId;
 export const queuePayloadHash = (value: unknown) => createHash("sha256").update(canonicalRuntimeStopJson(value)).digest("hex");
 export function toQueueReceipt(row: QueueReceiptRow): AgentUserMessageReceipt {
   const common = { id: row.id, clientRequestId: row.client_request_id, sequence: row.sequence, createdAt: row.created_at, updatedAt: row.updated_at };
-  if (row.status !== "injected") return { ...common, status: row.status, messageId: null, runId: null, confirmationState: null, confirmationSource: null };
-  const injected = { ...common, status: "injected" as const, messageId: row.message_id!, runId: row.injected_run_id! };
-  return row.confirmation_state === "confirmed" ? { ...injected, confirmationState: "confirmed", confirmationSource: row.confirmation_source! }
-    : { ...injected, confirmationState: row.confirmation_state as "unconfirmed" | "abandoned", confirmationSource: null };
+  return row.status === "injected"
+    ? { ...common, status: "injected", messageId: row.message_id!, runId: row.injected_run_id! }
+    : { ...common, status: row.status, messageId: null, runId: null };
 }
 
 /** One SQLite authority for accepted receipts, independent queue versions and snapshots. */
@@ -72,14 +70,6 @@ export class AgentMessageQueueStore {
       .all(scope.workspaceId, scope.sessionId, ...(runId ? [runId] : [])) as QueueReceiptRow[];
   }
 
-  /** Only the authoritative visible ancestry can contribute recovery inputs. */
-  listUnconfirmed(scope: QueueScope) {
-    const ids = getVisibleMessageChain(this.db, scope).map(message => message.id);
-    if (ids.length === 0) return [];
-    return this.db.prepare(`select * from agent_user_message_receipt where workspace_id=? and status='injected'
-      and confirmation_state='unconfirmed' and message_id in (select value from json_each(?))`).all(scope.workspaceId, JSON.stringify(ids)) as QueueReceiptRow[];
-  }
-
   /** DB terminal alone is not a runtime-exit proof. Retirement is owned by S3. */
   hasUndrainedExecution(scope: QueueScope) {
     return !!this.db.prepare(`select 1 from agent_run where workspace_id=? and session_id=? and execution_phase<>'terminal'
@@ -92,10 +82,9 @@ export class AgentMessageQueueStore {
     const current = this.db.prepare(`select r.agent_id,r.provider_id,r.model_id from agent_run r join session_run_state s on s.active_run_id=r.run_id
       where s.workspace_id=? and s.session_id=? and s.status='running' and r.run_kind='user' and r.interactive_queue_enabled=1
       and r.execution_phase in ('work_pending','work_in_progress')`).get(scope.workspaceId, scope.sessionId) as Parameters<typeof queueIdentity>[0] | undefined;
-    const unconfirmed = this.listUnconfirmed(scope);
     const queued = this.listQueued(scope);
-    const identity = current ? queueIdentity(current) : unconfirmed[0] ? queueIdentity(unconfirmed[0]) : queued[0] ? queueIdentity(queued[0]) : null;
-    if (identity && [...unconfirmed, ...queued].some(row => !sameQueueIdentity(identity, queueIdentity(row)))) {
+    const identity = current ? queueIdentity(current) : queued[0] ? queueIdentity(queued[0]) : null;
+    if (identity && queued.some(row => !sameQueueIdentity(identity, queueIdentity(row)))) {
       throw new HttpError(409, "Session input identities are inconsistent", "AGENT_QUEUE_IDENTITY_INVARIANT");
     }
     return identity;
@@ -188,10 +177,7 @@ export class AgentMessageQueueStore {
       this.assertScope(scope);
       const control = this.db.prepare("select queue_version as queueVersion from agent_session_queue_control where session_id=?")
         .get(scope.sessionId) as { queueVersion: number } | undefined;
-      const rows = this.listQueued(scope); const unconfirmed = this.listUnconfirmed(scope);
-      // Chain order, not receipt sequence across different source Sessions, is authoritative.
-      const positions = new Map(getVisibleMessageChain(this.db, scope).map((message, index) => [message.id, index]));
-      unconfirmed.sort((a, b) => positions.get(a.message_id!)! - positions.get(b.message_id!)!);
+      const rows = this.listQueued(scope);
       const barriers = this.db.prepare(`select b.operation_id as operationId,b.state,b.last_error_code as code,b.created_at as createdAt,
           (select count(*) from agent_session_stop_target t where t.workspace_id=b.workspace_id and t.root_session_id=b.root_session_id
             and t.operation_id=b.operation_id and t.state<>'quiescent') as unresolvedTargets
@@ -204,11 +190,8 @@ export class AgentMessageQueueStore {
       return { workspaceId: scope.workspaceId, sessionId: scope.sessionId, queueVersion: control?.queueVersion ?? 0,
         inputIdentity: this.fixedIdentity(scope), stopGeneration: this.stopGeneration(scope),
         pendingCount: rows.length, pendingBytes: rows.reduce((sum, row) => sum + row.payload_bytes, 0), pendingIdentity: rows[0] ? queueIdentity(rows[0]) : null,
-        unconfirmedInputCount: unconfirmed.length, recoveryIdentity: unconfirmed[0] ? queueIdentity(unconfirmed[0]) : null,
-        unconfirmedInputSetHash: unconfirmed.length ? queuePayloadHash({ version: "agent-unconfirmed-input-set-v1", workspaceId: scope.workspaceId, sessionId: scope.sessionId,
-          inputs: unconfirmed.map(row => ({ receiptId: row.id, messageId: row.message_id!, ...queueIdentity(row) })) }) : null,
         stop: { state, unresolvedOperationCount: unresolved.length, unresolvedTargetCount: unresolved.reduce((sum, row) => sum + row.unresolvedTargets, 0), code: selected?.code ?? (state === "pending" ? "stop_requested" : null) },
-        items: rows.map(row => ({ ...toQueueReceipt(row), status: "queued" as const, messageId: null, runId: null, confirmationState: null, confirmationSource: null,
+        items: rows.map(row => ({ ...toQueueReceipt(row), status: "queued" as const, messageId: null, runId: null,
           textPreview: [...(row.text ?? "")].slice(0, 256).join(""), attachmentCount: row.attachment_count })) };
     })();
   }

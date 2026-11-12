@@ -8,7 +8,7 @@ export const AGENT_QUEUE_MAX_PENDING_BYTES = 64 * 1024 * 1024;
 export const AGENT_QUEUE_MAX_TEXT_BYTES = 64 * 1024;
 export const AGENT_QUEUE_MAX_INJECT_BATCH = 8;
 export const AGENT_ATTACHMENT_RETENTION_LIMIT_BYTES = 1024 * 1024 * 1024;
-export const AGENT_QUEUE_INPUT_POLICY_VERSION = "agent-effective-input-v1";
+export const AGENT_QUEUE_INPUT_POLICY_VERSION = "agent-effective-input-v2";
 export const AGENT_QUEUE_INPUT_ESTIMATOR_VERSION = "queue-input-estimator-v1";
 /** SHA-256 of JSON.stringify([]); only fresh creation may assume this without a snapshot. */
 export const AGENT_QUEUE_INITIAL_STOP_GENERATION =
@@ -26,8 +26,6 @@ export const AgentQueueStopDiagnosticCodeSchema = literals([
   "invalid_stop_response", "runtime_instance_mismatch", "runtime_exit_unproven", "runtime_identity_unverified"
 ] as const);
 export type AgentQueueStopDiagnosticCode = Static<typeof AgentQueueStopDiagnosticCodeSchema>;
-export const AgentQueueConfirmationSourceSchema = literals(["worker_model", "local_fallback"] as const);
-export type AgentQueueConfirmationSource = Static<typeof AgentQueueConfirmationSourceSchema>;
 export const AgentQueueIdentitySchema = Type.Object({
   agentId: AgentQueueIdSchema, providerId: AgentQueueIdSchema, modelId: AgentQueueIdSchema
 }, strict);
@@ -39,18 +37,15 @@ const receiptFields = {
   createdAt: AgentQueueVersionSchema, updatedAt: AgentQueueVersionSchema
 };
 export const AgentQueuedUserMessageReceiptSchema = Type.Object({
-  ...receiptFields, status: Type.Literal("queued"), messageId: Type.Null(), runId: Type.Null(),
-  confirmationState: Type.Null(), confirmationSource: Type.Null()
+  ...receiptFields, status: Type.Literal("queued"), messageId: Type.Null(), runId: Type.Null()
 }, strict);
 const cancelledReceipt = Type.Object({
-  ...receiptFields, status: Type.Literal("cancelled"), messageId: Type.Null(), runId: Type.Null(),
-  confirmationState: Type.Null(), confirmationSource: Type.Null()
+  ...receiptFields, status: Type.Literal("cancelled"), messageId: Type.Null(), runId: Type.Null()
 }, strict);
 const injectedBase = { ...receiptFields, status: Type.Literal("injected"), messageId: AgentQueueIdSchema, runId: AgentQueueIdSchema };
 export const AgentUserMessageReceiptSchema = Type.Union([
   AgentQueuedUserMessageReceiptSchema, cancelledReceipt,
-  Type.Object({ ...injectedBase, confirmationState: literals(["unconfirmed", "abandoned"] as const), confirmationSource: Type.Null() }, strict),
-  Type.Object({ ...injectedBase, confirmationState: Type.Literal("confirmed"), confirmationSource: AgentQueueConfirmationSourceSchema }, strict)
+  Type.Object(injectedBase, strict)
 ]);
 export type AgentUserMessageReceipt = Static<typeof AgentUserMessageReceiptSchema>;
 export const AgentQueueStopSnapshotSchema = Type.Object({
@@ -67,9 +62,6 @@ export const AgentMessageQueueSnapshotSchema = Type.Object({
   pendingIdentity: Type.Union([AgentQueueIdentitySchema, Type.Null()]),
   /** Authoritative identity for the next accepted input, including a running interactive Run. */
   inputIdentity: Type.Optional(Type.Union([AgentQueueIdentitySchema, Type.Null()])),
-  unconfirmedInputCount: AgentQueueVersionSchema,
-  unconfirmedInputSetHash: Type.Union([AgentQueueHashSchema, Type.Null()]),
-  recoveryIdentity: Type.Union([AgentQueueIdentitySchema, Type.Null()]),
   stop: AgentQueueStopSnapshotSchema,
   items: Type.Array(Type.Object({
     ...AgentQueuedUserMessageReceiptSchema.properties,
@@ -135,24 +127,6 @@ export const AgentStopMessageQueueResponseSchema = Type.Object({
   queue: AgentMessageQueueSnapshotSchema
 }, strict);
 export type AgentStopMessageQueueResponse = Static<typeof AgentStopMessageQueueResponseSchema>;
-export const AgentResumeMessageQueueRequestSchema = Type.Object({
-  ...AgentStopMessageQueueRequestSchema.properties, expectedQueueVersion: AgentQueueVersionSchema
-}, strict);
-export type AgentResumeMessageQueueRequest = Static<typeof AgentResumeMessageQueueRequestSchema>;
-export const AgentResumeMessageQueueResponseSchema = Type.Union([
-  Type.Object({ action: Type.Literal("continued_unconfirmed"), runId: AgentQueueIdSchema, queue: AgentMessageQueueSnapshotSchema }, strict),
-  Type.Object({ action: Type.Literal("no_unconfirmed"), runId: nullableId, queue: AgentMessageQueueSnapshotSchema }, strict)
-]);
-export type AgentResumeMessageQueueResponse = Static<typeof AgentResumeMessageQueueResponseSchema>;
-export const AgentAbandonUnconfirmedInputRequestSchema = Type.Object({
-  ...AgentResumeMessageQueueRequestSchema.properties,
-  expectedUnconfirmedInputSetHash: AgentQueueHashSchema, confirmIrreversible: Type.Literal(true)
-}, strict);
-export type AgentAbandonUnconfirmedInputRequest = Static<typeof AgentAbandonUnconfirmedInputRequestSchema>;
-export const AgentAbandonUnconfirmedInputResponseSchema = Type.Object({
-  abandonedReceiptIds: Type.Array(AgentQueueIdSchema, { minItems: 1, uniqueItems: true }), queue: AgentMessageQueueSnapshotSchema
-}, strict);
-export type AgentAbandonUnconfirmedInputResponse = Static<typeof AgentAbandonUnconfirmedInputResponseSchema>;
 export const AgentAttachmentRetentionResponseSchema = Type.Object({
   scope: Type.Literal("agent_web_queue_v1"), limitBytes: Type.Literal(AGENT_ATTACHMENT_RETENTION_LIMIT_BYTES),
   chargedBytes: AgentQueueVersionSchema, reservedBytes: AgentQueueVersionSchema, retainedBytes: AgentQueueVersionSchema
@@ -169,17 +143,15 @@ export const AgentMessageQueueEndpoints = {
   cancel: { method: "POST", path: "/api/agent/sessions/:sessionId/receipts/:receiptId/cancel" },
   clear: { method: "POST", path: "/api/agent/sessions/:sessionId/message-queue/clear" },
   stop: { method: "POST", path: "/api/agent/sessions/:sessionId/message-queue/stop" },
-  resume: { method: "POST", path: "/api/agent/sessions/:sessionId/message-queue/resume" },
-  abandon: { method: "POST", path: "/api/agent/sessions/:sessionId/message-queue/abandon-unconfirmed" },
   retention: { method: "GET", path: "/api/agent/attachment-retention" }
 } as const;
 
 export const AgentQueueErrorCodeSchema = literals([
   "AGENT_QUEUE_AGENT_CONFLICT", "AGENT_REQUEST_PAYLOAD_CONFLICT", "AGENT_REQUEST_ID_NAMESPACE_CONFLICT",
-  "AGENT_RECEIPT_ALREADY_INJECTED", "AGENT_QUEUE_VERSION_CONFLICT", "AGENT_UNCONFIRMED_SET_CONFLICT",
+  "AGENT_RECEIPT_ALREADY_INJECTED", "AGENT_QUEUE_VERSION_CONFLICT",
   "AGENT_SESSION_STOP_PENDING", "AGENT_SESSION_STOP_UNKNOWN", "AGENT_RUNTIME_INSTANCE_MISMATCH",
   "AGENT_STOP_OPERATION_CONFLICT", "AGENT_QUEUE_RUN_DRAINING", "AGENT_QUEUE_RUN_ACTIVE",
-  "AGENT_NO_UNCONFIRMED_INPUT", "AGENT_QUEUE_INPUT_NOT_CONFIRMED", "AGENT_ATTACHMENT_PUBLICATION_UNCERTAIN",
+  "AGENT_ATTACHMENT_PUBLICATION_UNCERTAIN",
   "AGENT_QUEUE_STOP_GENERATION_CHANGED", "AGENT_QUEUE_EXECUTION_NOT_DRAINED", "AGENT_QUEUE_TOOL_STATE_UNSAFE",
   "SESSION_HAS_PENDING_INPUT", "AGENT_SUPPLEMENT_TARGET_CLOSED", "AGENT_QUEUE_TEXT_TOO_LARGE",
   "AGENT_QUEUE_CAPACITY_EXCEEDED", "AGENT_ATTACHMENT_RETENTION_CAPACITY_EXCEEDED"

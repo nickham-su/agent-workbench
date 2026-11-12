@@ -1,4 +1,3 @@
-import type { AgentResumeMessageQueueRequest } from "@agent-workbench/shared";
 import { HttpError } from "../../../app/errors.js";
 import { AgentAttachmentCommitError } from "../attachments/agent-attachment-storage.js";
 import { workspaceDeletingFence } from "./workspace-deleting-fence.js";
@@ -281,21 +280,6 @@ export class RunLifecycleApplication {
       runId: activation.runId,
       deduplicated: false
     };
-  }
-
-  /** Receipt activation shares the ordinary activation authority and exact fenced handoff. */
-  async resumeQueuedSession(command: AgentResumeMessageQueueRequest & { sessionId: string; runtime: StartUserRunCommand["runtime"] }) {
-    if (this.closed) throw new HttpError(503, "Agent lifecycle is stopping", "AGENT_LIFECYCLE_STOPPING");
-    workspaceDeletingFence.assertWritable(command.workspaceId);
-    const context = this.dependencies.workspaceRunContextReader.get(command.workspaceId);
-    if (!context) throw new HttpError(404, "Workspace not found");
-    const activate = this.dependencies.persistence.resumeQueuedSession;
-    if (!activate) throw new Error("Queue continuation persistence is not configured");
-    const { runtime, ...request } = command;
-    const activation = activate.call(this.dependencies.persistence, request, this.dependencies.ids.newId("run"), this.dependencies.clock.nowMs());
-    if (activation.activated && activation.response.action === "continued_unconfirmed") await this.enqueueActivatedRunOrReconcile({ runtime,
-      run: { workspaceId: command.workspaceId, sessionId: command.sessionId, runId: activation.response.runId, inputText: activation.inputText, ...context } });
-    return activation.response;
   }
 
   /** A receipt transaction already activated this continuation; never activate it twice. */

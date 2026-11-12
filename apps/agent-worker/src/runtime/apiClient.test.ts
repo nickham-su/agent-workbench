@@ -2444,12 +2444,12 @@ for (const method of ["prepareInteractiveInput", "injectInteractiveInput", "comp
     const schema = method === "prepareInteractiveInput" ? AgentApiPrepareInteractiveInputResponseSchema
       : method === "injectInteractiveInput" ? AgentApiInjectInteractiveInputResponseSchema : AgentApiCompleteInteractiveAssistantResponseSchema;
     const queue = { workspaceId: "WORKSPACE", sessionId: "SESSION", queueVersion: 1, stopGeneration: "0".repeat(64),
-      pendingCount: 0, pendingBytes: 0, pendingIdentity: null, unconfirmedInputCount: 0, unconfirmedInputSetHash: null, recoveryIdentity: null,
+      pendingCount: 0, pendingBytes: 0, pendingIdentity: null,
       stop: { state: "none", unresolvedOperationCount: 0, unresolvedTargetCount: 0, code: null }, items: [] };
     const body = method === "prepareInteractiveInput" ? { operationId: "same-operation", context: validPromptContextResponse, candidates: [], inputReceiptIds: [],
-      preparationSnapshotHash: "a".repeat(64), effectiveInputPolicyVersion: "agent-effective-input-v1", estimatorVersion: "queue-input-estimator-v1", decision: "prepare", queue }
+      preparationSnapshotHash: "a".repeat(64), effectiveInputPolicyVersion: "agent-effective-input-v2", estimatorVersion: "queue-input-estimator-v1", decision: "prepare", queue }
       : method === "injectInteractiveInput" ? { operationId: "same-operation", headMessageId: "HEAD", revision: 1, receipts: [{ id: "RECEIPT", clientRequestId: "request", sequence: 1,
-        createdAt: 1, updatedAt: 1, status: "injected", messageId: "HEAD", runId: "RUN", confirmationState: "unconfirmed", confirmationSource: null }], queue }
+        createdAt: 1, updatedAt: 1, status: "injected", messageId: "HEAD", runId: "RUN" }], queue }
       : { operationId: "same-operation", decision: "finish", queue };
     assert.ok(Value.Check(schema, body), JSON.stringify([...Value.Errors(schema, body)]));
     const fixture = await startTestServer(request => request.attempt === 1 ? { status: 200, destroySocket: true } : { status: 200, body: request.attempt === 2 ? body : {} });

@@ -5,8 +5,8 @@ import {
   AGENT_QUEUE_MAX_PENDING_COUNT, AGENT_QUEUE_MAX_PENDING_BYTES, AGENT_QUEUE_MAX_TEXT_BYTES,
   AGENT_QUEUE_MAX_INJECT_BATCH, AGENT_ATTACHMENT_RETENTION_LIMIT_BYTES,
   AgentAcceptUserMessageRequestSchema, AgentAcceptUserMessageResponseSchema,
-  AgentAcceptUserMessageMultipartPayloadSchema, AgentAbandonUnconfirmedInputRequestSchema,
-  AgentInputReceiptMetadataSchema, AgentMessageQueueSnapshotSchema, AgentResumeMessageQueueResponseSchema, AgentStopMessageQueueRequestSchema,
+  AgentAcceptUserMessageMultipartPayloadSchema,
+  AgentMessageQueueSnapshotSchema, AgentStopMessageQueueRequestSchema,
   AgentUserMessageReceiptSchema, AgentSendMessageResponseSchema
 } from "../src/index.js";
 import {
@@ -24,9 +24,8 @@ import { AgentApiEndpoints } from "../src/internal-contracts/agent-api.js";
 
 const hash = "a".repeat(64);
 const runtime = "00000000-0000-4000-8000-000000000001";
-const receipt = { id: "receipt", clientRequestId: "request", sequence: 1, status: "queued", messageId: null, runId: null, confirmationState: null, confirmationSource: null, createdAt: 1, updatedAt: 1 };
+const receipt = { id: "receipt", clientRequestId: "request", sequence: 1, status: "queued", messageId: null, runId: null, createdAt: 1, updatedAt: 1 };
 const queue = { workspaceId: "w", sessionId: "s", queueVersion: 1, stopGeneration: "0".repeat(64), pendingCount: 1, pendingBytes: 5, pendingIdentity: { agentId: "a", providerId: "p", modelId: "m" },
-  unconfirmedInputCount: 0, unconfirmedInputSetHash: null, recoveryIdentity: null,
   stop: { state: "none", unresolvedOperationCount: 0, unresolvedTargetCount: 0, code: null },
   items: [{ ...receipt, textPreview: "hello", attachmentCount: 0 }] };
 
@@ -39,14 +38,14 @@ test("new receipt success has no invented run while the legacy response remains 
   assert.equal(Value.Check(AgentSendMessageResponseSchema, { sessionId: "s", messageId: null, runId: null, deduplicated: false }), false);
   assert.equal(Value.Check(AgentSendMessageResponseSchema, { sessionId: "s", messageId: "m", runId: "r", deduplicated: false }), true);
   assert.equal(Value.Check(AgentUserMessageReceiptSchema, { ...receipt, status: "injected" }), false);
-  const injected = { ...receipt, status: "injected", messageId: "m", runId: "r", confirmationState: "unconfirmed" };
+  const injected = { ...receipt, status: "injected", messageId: "m", runId: "r" };
   assert.equal(Value.Check(AgentUserMessageReceiptSchema, injected), true);
   assert.equal(Value.Check(AgentUserMessageReceiptSchema, { ...injected, confirmationState: "confirmed" }), false);
-  assert.equal(Value.Check(AgentUserMessageReceiptSchema, { ...injected, confirmationState: "confirmed", confirmationSource: "worker_model" }), true);
+  assert.equal(Value.Check(AgentUserMessageReceiptSchema, { ...injected, confirmationState: "confirmed", confirmationSource: "worker_model" }), false);
   assert.equal(Value.Check(AgentUserMessageReceiptSchema, { ...injected, confirmationState: "abandoned", confirmationSource: "worker_model" }), false);
 });
 
-test("public acceptance, Stop and Abandon reject extra fields without mutating the request", () => {
+test("public acceptance and Stop reject extra fields without mutating the request", () => {
   const request = { workspaceId: "w", clientRequestId: "q", text: "hello" };
   assert.equal(Value.Check(AgentAcceptUserMessageRequestSchema, request), true);
   assert.equal(Value.Check(AgentAcceptUserMessageMultipartPayloadSchema, { workspaceId: "w", clientRequestId: "q" }), true);
@@ -54,21 +53,15 @@ test("public acceptance, Stop and Abandon reject extra fields without mutating t
   const stop = { workspaceId: "w", operationId: "stop" };
   assert.equal(Value.Check(AgentStopMessageQueueRequestSchema, stop), true);
   assert.equal(Value.Check(AgentStopMessageQueueRequestSchema, { ...stop, expectedQueueVersion: 1 }), false);
-  const abandon = { ...stop, expectedQueueVersion: 1, expectedUnconfirmedInputSetHash: hash, confirmIrreversible: true };
-  assert.equal(Value.Check(AgentAbandonUnconfirmedInputRequestSchema, abandon), true);
-  for (const invalid of [{ ...abandon, receiptIds: ["receipt"] }, { ...abandon, confirmIrreversible: false }, { ...abandon, expectedQueueVersion: 1.5 }, { ...abandon, expectedQueueVersion: Number.MAX_SAFE_INTEGER + 1 }, { ...abandon, expectedUnconfirmedInputSetHash: hash.toUpperCase() }])
-    assert.equal(Value.Check(AgentAbandonUnconfirmedInputRequestSchema, invalid), false);
   assert.equal(Value.Check(AgentAcceptUserMessageRequestSchema, { ...request, confirmationSource: "worker_model" }), false);
   assert.deepEqual(request, { workspaceId: "w", clientRequestId: "q", text: "hello" });
 });
 
-test("queue snapshot and resume action prohibit impossible primitive shapes", () => {
+test("queue snapshot prohibit impossible primitive shapes", () => {
   assert.equal(Value.Check(AgentMessageQueueSnapshotSchema, queue), true);
   assert.equal(Value.Check(AgentMessageQueueSnapshotSchema, { ...queue, queueVersion: 0.5 }), false);
   assert.equal(Value.Check(AgentMessageQueueSnapshotSchema, { ...queue, pendingCount: 101 }), false);
   assert.equal(Value.Check(AgentMessageQueueSnapshotSchema, { ...queue, items: [{ ...queue.items[0], status: "injected" }] }), false);
-  assert.equal(Value.Check(AgentResumeMessageQueueResponseSchema, { action: "continued_unconfirmed", runId: null, queue }), false);
-  assert.equal(Value.Check(AgentResumeMessageQueueResponseSchema, { action: "continued_unconfirmed", runId: "r", queue }), true);
 });
 
 const stop = { workspaceId: "w", rootSessionId: "s", operationId: "stop", runtimeInstanceId: runtime, targetsHash: hash,
@@ -88,7 +81,7 @@ test("precise runtime stop identifies the incarnation and refuses duplicate targ
 
 test("legacy assistant and enqueue requests remain compatible while interactive metadata is strict", () => {
   const scope = { workspaceId: "w", sessionId: "s", runId: "r" };
-  const inputBinding = { inputReceiptIds: ["receipt"], effectiveInputPolicyVersion: "agent-effective-input-v1", snapshotHash: hash, inputRevision: 3 };
+  const inputBinding = { inputReceiptIds: ["receipt"], effectiveInputPolicyVersion: "agent-effective-input-v2", snapshotHash: hash, inputRevision: 3 };
   const create = { ...scope, messageId: "m", createdAt: 1 };
   const resume = { ...scope, messageId: "m" };
   const replace = { ...scope, oldMessageId: "old", newMessageId: "new", runNoticeText: "", retryCount: 0, nextRetryAt: null, createdAt: 1 };
@@ -126,17 +119,12 @@ test("inject is a bounded metadata-only request and new endpoints do not replace
 });
 
 
-test("timeline input receipt metadata preserves confirmation state/source without granting write authority", () => {
-  for (const confirmationSource of ["worker_model", "local_fallback"]) {
-    assert.equal(Value.Check(AgentInputReceiptMetadataSchema, { receiptId: "r", confirmationState: "confirmed", confirmationSource }), true);
-  }
-  for (const confirmationState of ["unconfirmed", "abandoned"]) {
-    assert.equal(Value.Check(AgentInputReceiptMetadataSchema, { receiptId: "r", confirmationState, confirmationSource: null }), true);
-    assert.equal(Value.Check(AgentInputReceiptMetadataSchema, { receiptId: "r", confirmationState, confirmationSource: "worker_model" }), false);
-  }
-  assert.equal(Value.Check(AgentInputReceiptMetadataSchema, { receiptId: "r", confirmationState: "confirmed", confirmationSource: null }), false);
-  assert.equal(Value.Check(AgentAcceptUserMessageRequestSchema, { workspaceId: "w", clientRequestId: "request", text: "x", inputReceipt: { receiptId: "r", confirmationState: "confirmed", confirmationSource: "worker_model" } }), false);
+test("removed input state metadata is rejected by public writes and queue snapshots", () => {
+  assert.equal(Value.Check(AgentAcceptUserMessageRequestSchema, { workspaceId: "w", clientRequestId: "request", text: "x", inputReceipt: { receiptId: "r", confirmationState: "confirmed" } }), false);
+  assert.equal(Value.Check(AgentMessageQueueSnapshotSchema, { ...queue, unconfirmedInputCount: 1 }), false);
+  assert.equal(Value.Check(AgentMessageQueueSnapshotSchema, { ...queue, recoveryIdentity: null }), false);
 });
+
 test("prepare rejected is a strict authoritative decision with no frozen body", () => {
   for (const reason of ["snapshot_too_large", "cache_capacity"]) {
     const result = { operationId: "op", decision: "rejected", reason, queue };

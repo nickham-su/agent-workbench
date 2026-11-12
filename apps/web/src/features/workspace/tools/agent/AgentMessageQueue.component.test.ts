@@ -13,12 +13,11 @@ import { useAgentMessageQueue, type QueueSubmission } from "./useAgentMessageQue
 
 const identity = { agentId: "server-agent", providerId: "server-provider", modelId: "server-model" };
 function snapshot(overrides: Partial<AgentMessageQueueSnapshot> = {}): AgentMessageQueueSnapshot {
-  return { workspaceId: "queue-w", sessionId: "queue-s", queueVersion: 0, stopGeneration: "0".repeat(64), pendingCount: 0, pendingBytes: 0, inputIdentity: null, pendingIdentity: null, recoveryIdentity: null,
-    unconfirmedInputCount: 0, unconfirmedInputSetHash: null, stop: { state: "none", unresolvedOperationCount: 0, unresolvedTargetCount: 0, code: null }, items: [], ...overrides };
+  return { workspaceId: "queue-w", sessionId: "queue-s", queueVersion: 0, stopGeneration: "0".repeat(64), pendingCount: 0, pendingBytes: 0, inputIdentity: null, pendingIdentity: null, stop: { state: "none", unresolvedOperationCount: 0, unresolvedTargetCount: 0, code: null }, items: [], ...overrides };
 }
 function accepted(queue = snapshot()): AgentAcceptUserMessageResponse {
   return { queue, deduplicated: false, receipt: { id: "receipt", clientRequestId: "fixed-request", sequence: 1,
-    createdAt: 1, updatedAt: 1, status: "queued", messageId: null, runId: null, confirmationState: null, confirmationSource: null } };
+    createdAt: 1, updatedAt: 1, status: "queued", messageId: null, runId: null } };
 }
 function deferred<T>() { let resolve!: (value: T) => void; let reject!: (error: unknown) => void; const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; }
 async function settle() { for (let i = 0; i < 8; i++) { await Promise.resolve(); await nextTick(); } }
@@ -41,13 +40,12 @@ function panel(props: Partial<InstanceType<typeof Panel>["$props"]> = {}, locale
 }
 
 test("队列面板：只显示服务端 queued 数量，N=0 无文字与间距，不展示内部状态或管理入口", async () => {
-  const wrapper = panel({ snapshot: snapshot({ pendingCount: 2,
-    unconfirmedInputCount: 1, stop: { state: "unknown", code: "transport_timeout", unresolvedOperationCount: 1, unresolvedTargetCount: 1 },
+  const wrapper = panel({ snapshot: snapshot({ pendingCount: 2, stop: { state: "unknown", code: "transport_timeout", unresolvedOperationCount: 1, unresolvedTargetCount: 1 },
     items: [{ ...queuedItem(), textPreview: "private queued text" }] }) });
   try {
     assert.equal(wrapper.text(), "有 2 条消息等待处理");
     assert.equal(wrapper.findAll("button, details, li").length, 0);
-    await wrapper.setProps({ snapshot: snapshot({ unconfirmedInputCount: 1 }) });
+    await wrapper.setProps({ snapshot: snapshot({ }) });
     assert.equal(wrapper.text(), "");
     assert.equal(wrapper.element.childElementCount, 0);
     assert.equal(wrapper.attributes("class"), undefined);
@@ -85,7 +83,7 @@ test("队列状态：低版本与旧 Session 回包不能覆盖新快照，断�
     assert.equal(disconnected.queue.snapshot.value?.pendingCount, 3); assert.ok(disconnected.queue.error.value);
   } finally { disconnected.wrapper.unmount(); }
 });
-test("队列轮询：idle 3000ms，running/queued/unconfirmed 800ms，可见性恢复立即查询", async t => {
+test("队列轮询：idle 3000ms，running/queued 800ms，可见性恢复立即查询", async t => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   let calls = 0;
   let server = snapshot();
@@ -99,12 +97,12 @@ test("队列轮询：idle 3000ms，running/queued/unconfirmed 800ms，可见性�
   t.mock.timers.tick(1); await settle(); assert.equal(calls, 4);
   f.scope.running = false; server = snapshot({ queueVersion: 1, pendingCount: 1 }); await settle();
   const before = calls; t.mock.timers.tick(800); await settle(); assert.equal(calls, before + 1);
-  for (const next of [snapshot({ queueVersion: 2, pendingCount: 1 }), snapshot({ queueVersion: 3, unconfirmedInputCount: 1 })]) {
+  for (const next of [snapshot({ queueVersion: 2, pendingCount: 1 }), snapshot({ queueVersion: 3, pendingCount: 1 })]) {
     server = next; await f.queue.refresh(); const n: number = calls; t.mock.timers.tick(800); await settle(); assert.equal(calls, n + 1);
   }
   document.dispatchEvent(new Event("visibilitychange")); await settle(); assert.ok(calls > before + 2);
 });
-test("权威执行身份：无 queued/unconfirmed 的 running Run 仍锁定服务端身份", () => {
+test("权威执行身份：无 queued 的 running Run 仍锁定服务端身份", () => {
   const f = fixture();
   try { f.queue.apply(snapshot({ inputIdentity: identity })); assert.deepEqual(f.queue.identity.value, identity); assert.equal(f.queue.snapshot.value?.pendingCount, 0); }
   finally { f.wrapper.unmount(); }
@@ -155,11 +153,11 @@ test("同版本队列冲突保留可信快照，诊断限次且不包含正文�
   t.mock.method(console, "warn", (...args: unknown[]) => logs.push(args));
   const f = fixture();
   try {
-    const trusted = snapshot({ queueVersion: 8, pendingCount: 1, pendingIdentity: identity, unconfirmedInputSetHash: "private-hash" });
+    const trusted = snapshot({ queueVersion: 8, pendingCount: 1, pendingIdentity: identity });
     f.queue.apply(trusted);
     const conflict = { ...trusted, pendingCount: 2, pendingIdentity: { ...identity, agentId: "private-agent" } };
     f.queue.apply(conflict); f.queue.apply(conflict);
-    f.queue.apply({ ...trusted, items: [{ id: "private-receipt", clientRequestId: "private-request", sequence: 1, createdAt: 1, updatedAt: 1, status: "queued", messageId: null, runId: null, confirmationState: null, confirmationSource: null, textPreview: "private-body private-file.png", attachmentCount: 1 }] });
+    f.queue.apply({ ...trusted, items: [{ id: "private-receipt", clientRequestId: "private-request", sequence: 1, createdAt: 1, updatedAt: 1, status: "queued", messageId: null, runId: null, textPreview: "private-body private-file.png", attachmentCount: 1 }] });
     assert.equal(f.queue.snapshot.value, trusted);
     assert.equal((f.queue.error.value as ApiError).code, "AGENT_QUEUE_SAME_VERSION_CONFLICT");
     assert.deepEqual(logs, [["AGENT_QUEUE_SAME_VERSION_CONFLICT", { queueVersion: 8 }]]);

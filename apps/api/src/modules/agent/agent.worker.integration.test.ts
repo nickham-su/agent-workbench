@@ -1801,8 +1801,8 @@ for (const round of queueToolRounds) test(`worker 队列: ${round.name}整轮闭
   release.at(-1)!.resolve();
   await waitRunIdle(fixture.baseUrl, session.id, fixture.workspaceId);
   const receipt = queue.service.detail(scope, accepted.receipt.id).receipt;
-  assert.equal(receipt.status, "injected"); assert.equal(receipt.runId, activated.runId); assert.equal(receipt.confirmationState, "confirmed");
-  assert.equal(receipt.confirmationSource, "worker_model"); assert.equal(queue.service.detail(scope, first.receipt.id).receipt.confirmationState, "confirmed");
+  assert.equal(receipt.status, "injected"); assert.equal(receipt.runId, activated.runId); assert.equal(receipt.status, "injected");
+  assert.equal(queue.service.detail(scope, first.receipt.id).receipt.status, "injected");
   assert.equal(getRunRecord(fixture.db, activated.runId)!.status, "completed");
   assert.equal((fixture.db.prepare("select count(*) as n from agent_run where session_id=?").get(session.id) as { n: number }).n, 1);
   assert.equal(fixture.llmStub!.requests.length, 2);
@@ -1896,11 +1896,11 @@ for (const mode of ["prepare", "continue", "finish", "persistent_continue"] as c
   assert.equal(repeated.length, damaged + 1); assert.ok(repeated.every(call => JSON.stringify(call.body) === JSON.stringify(repeated[0]!.body)));
   assert.equal(f.fixture.llmStub!.requests.length, mode === "continue" || mode === "persistent_continue" ? 2 : 1);
   assert.equal((f.fixture.db.prepare("select count(*) as n from agent_run where session_id=?").get(f.scope.sessionId) as { n: number }).n, 1);
-  assert.equal(f.queue.service.detail(f.scope, first.receipt.id).receipt.confirmationState, "confirmed");
+  assert.equal(f.queue.service.detail(f.scope, first.receipt.id).receipt.status, "injected");
   if (mode === "finish") { assert.equal(queued, undefined); assert.equal(f.queue.service.snapshot(f.scope).pendingCount, 0); }
   else {
     assert.ok(queued); const input = f.queue.service.detail(f.scope, queued.receipt.id).receipt;
-    assert.equal(input.status, "injected"); assert.equal(input.runId, activated.runId); assert.equal(input.confirmationState, "confirmed");
+    assert.equal(input.status, "injected"); assert.equal(input.runId, activated.runId); assert.equal(input.status, "injected");
   }
   assert.equal(f.fixture.internalRpcCalls.filter(call => call.url === AgentApiEndpoints.retireRuntimeAdmission.path && !(call.responseBody as { retired?: boolean }).retired).length, 0);
 });
@@ -1967,7 +1967,7 @@ for(const fault of ["request_lost","continuous_failure","committed_reply_lost"] 
   const activated=await f.startRun();assert.ok(activated);
   await waitUntil(async()=>{
     const receipt=queued&&f.queue.service.detail(f.scope,queued.receipt.id).receipt;
-    return !!receipt&&receipt.status==="injected"&&receipt.confirmationState==="confirmed"&&attempts===failures+1;
+    return !!receipt&&receipt.status==="injected"&&getRunRecord(f.fixture.db,receipt.runId)?.status==="completed"&&attempts===failures+1;
   },25_000);
   await waitRunIdle(f.fixture.baseUrl,f.scope.sessionId,f.scope.workspaceId);
   assert.ok(queued);const receipt=f.queue.service.detail(f.scope,queued.receipt.id).receipt;
@@ -2022,8 +2022,8 @@ for (const networkUnknown of [false, true]) test(`worker 队列H2: 真实容量�
     call.url === AgentApiEndpoints.retireRuntimeAdmission.path && (call.responseBody as { retired?: boolean })?.retired === true), 10_000);
   const run = getRunRecord(f.fixture.db, activated.runId)!; assert.equal(run.status, "failed"); assert.equal(run.executionPhase, "terminal");
   const snapshot = f.queue.service.snapshot(f.scope);
-  assert.equal(snapshot.pendingCount, 0); assert.equal(snapshot.unconfirmedInputCount, 1);
-  assert.equal(f.queue.service.detail(f.scope, first.receipt.id).receipt.confirmationState, "unconfirmed");
+  assert.equal(snapshot.pendingCount, 0);
+  assert.equal(f.queue.service.detail(f.scope, first.receipt.id).receipt.status, "injected");
   assert.equal(f.queue.service.detail(f.scope, queued.receipt.id).receipt.status, "cancelled");
   const calls = f.fixture.internalRpcCalls.filter(call => call.url === AgentApiEndpoints.prepareInteractiveInput.path);
   assert.equal(calls.length, networkUnknown ? 2 : 1); assert.equal(attempts, calls.length);
@@ -2041,22 +2041,16 @@ for (const networkUnknown of [false, true]) test(`worker 队列H2: 真实容量�
   const replay = await f.fixture.app.inject({ method: "POST", url: calls[0]!.url,
     headers: { "x-awb-agent-internal-token": f.fixture.ctx.agentInternalToken!, "content-type": "application/json" }, payload: JSON.stringify(calls[0]!.body) });
   assert.equal(replay.statusCode, 200); assert.equal(replay.json().decision, "rejected"); assert.equal(contextReads, 1);
-  if (!networkUnknown) {
-    // After correcting the context, only an explicit user resume starts another Run.
-    oversized = false;
-    const resumed = await f.queue.service.resume(f.scope.sessionId, { workspaceId: f.scope.workspaceId,
-      operationId: "h2-explicit-resume", expectedQueueVersion: snapshot.queueVersion });
-    await f.startRun();
-    assert.equal(resumed.action, "continued_unconfirmed"); assert.ok(resumed.runId); assert.notEqual(resumed.runId, activated.runId);
-    await waitRunIdle(f.fixture.baseUrl, f.scope.sessionId, f.scope.workspaceId);
-    assert.equal(getRunRecord(f.fixture.db, resumed.runId)!.status, "completed");
-    assert.equal(f.queue.service.snapshot(f.scope).unconfirmedInputCount, 0);
-    assert.equal(f.fixture.llmStub!.requests.length, 1);
-    return;
-  }
-  // Existing explicit recovery remains usable; abandoning does not delete or confirm User input.
-  const abandoned = f.queue.service.abandon(f.scope.sessionId, { workspaceId: f.scope.workspaceId, operationId: "h2-explicit-abandon",
-    expectedQueueVersion: snapshot.queueVersion, expectedUnconfirmedInputSetHash: snapshot.unconfirmedInputSetHash!, confirmIrreversible: true });
-  assert.equal(abandoned.queue.unconfirmedInputCount, 0); assert.equal(abandoned.queue.pendingCount, 0);
-  assert.equal(f.queue.service.detail(f.scope, first.receipt.id).receipt.confirmationState, "abandoned");
+  // Correcting the context never resumes old input: an explicit new send starts a new Run.
+  oversized = false;
+  const next = await f.accept("h2-explicit-new-send");
+  assert.equal(next.receipt.status, "injected"); assert.ok(next.receipt.runId);
+  assert.notEqual(next.receipt.runId, activated.runId);
+  assert.notEqual(next.receipt.messageId, first.receipt.messageId);
+  await f.startRun();
+  await waitRunIdle(f.fixture.baseUrl, f.scope.sessionId, f.scope.workspaceId);
+  assert.equal(getRunRecord(f.fixture.db, next.receipt.runId)!.status, "completed");
+  assert.equal(getRunRecord(f.fixture.db, next.receipt.runId)!.triggerMessageId, next.receipt.messageId);
+  assert.equal(f.queue.service.detail(f.scope, first.receipt.id).receipt.runId, activated.runId);
+  assert.equal(f.fixture.llmStub!.requests.length, 1);
 });

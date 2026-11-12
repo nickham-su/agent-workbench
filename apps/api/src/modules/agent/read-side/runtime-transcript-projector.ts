@@ -102,7 +102,6 @@ export class RuntimeTranscriptProjector {
 
       if (message.type === "user") {
         const effective = effectiveUserInput({ messageId: message.id, triggerMessageId: input.triggerMessageId, policy: input.interactiveInput });
-        if (!effective.include) continue;
         const text = parts.filter((part) => part.type === "text").map((part) => part.text).join("");
         const images = parts.filter((part) => part.type === "image");
         const located = images.map((image) => ({ path: input.attachmentPaths?.get(image.id) ?? null }));

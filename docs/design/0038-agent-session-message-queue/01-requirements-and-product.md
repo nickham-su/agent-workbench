@@ -1,6 +1,6 @@
 # 临时补充输入缓冲：需求与产品规则
 
-> 本页是本轮改造的现行产品规则。0038 其他文档中有关持久可靠队列、`mode` / `pause_code`、暂停与恢复 queued、后台 dispatcher 自动创建 Run 的内容属于历史设计，不再适用。Stop、运行准入、正式输入确认、附件安全和 Worker 写入 fence 等既有边界继续有效。本轮实现仍待独立审查，历史验收结论不覆盖此次变更。
+> 本页是本轮改造的现行产品规则。0038 其他文档中有关持久可靠队列、`mode` / `pause_code`、暂停与恢复 queued、后台 dispatcher 自动创建 Run 的内容属于历史设计，不再适用。本轮进一步删除输入 `confirmed / unconfirmed / abandoned` 三态、确认／放弃字段及队列 resume／abandon 恢复机制；其他页面中的相应语义也属历史设计。Stop、运行准入、本 Run 输入绑定、附件安全和 Worker 写入 fence 等独立边界继续有效。本轮实现仍待独立审查，历史验收结论不覆盖此次变更。
 
 ## 定位与范围
 
@@ -28,9 +28,10 @@
 
 - queued 尚未进入正式历史；消费时才生成正式 user。首发例外：在接收事务内立即正式化。
 - 丢弃统一取消 receipt，不物理删除 receipt；保留去重墓碑、queueVersion 单调性和附件 retain 账本。
-- injected / unconfirmed 已是正式输入，不能随缓冲清理而 abandon、删除或丢失其绑定，也不能删除助手输出和工具结果。
-- 安全条件满足后的新普通发送创建本次新 user / Run，并承接可见的全部未确认正式输入；不重复插入旧 user，不自动重放旧工具。
-- 后端兼容 resume 仅可续接正式 unconfirmed；没有正式输入时返回 `no_unconfirmed`，不恢复 queued。兼容 abandon 仍需原显式不可逆确认、版本和完整输入集合校验，不由补充失败自动调用。Web 不增加相关恢复入口。
+- injected 只有正式消息和原注入 Run 归属，不再有输入确认／放弃状态。缓冲清理不得删除正式 user、助手输出、工具结果或附件账本。
+- 历史决定上下文，Run 决定执行。取消／失败后，下一次显式发送创建新 user、新 Run，以新消息触发；旧 receipt 保持原 Run 归属，不重新认领或跨 Run 自动续接。原请求重试只返回原 receipt，不能借幂等重放启动 Run。
+- 删除 resume／abandon 路由、请求与响应、相关错误码及恢复集合，不保留语义兼容层。旧 abandoned 消息作为普通可见历史进入上下文；Fork、回退及压缩不再按旧输入状态过滤或保护原文。
+- Stop 安全完成且执行已收敛后，首条响应中途取消不再因历史输入阻塞 Fork／回退；queued、head／revision、Session 类型与 Stop pending／unknown 等独立限制继续有效。
 
 ## 输入区、草稿与数量
 
@@ -53,13 +54,13 @@
 
 ## 身份、图片与同步
 
-- 补充固定当前 Run 的 Agent / provider / model；普通发送承接未确认正式输入的身份，不静默切模型。配置错误仅拒绝当前请求，不建立暂停状态。
-- 图片维持原数量 / 大小限制、受控读取、路径与软链边界。发布前独立预留，DataDir 留存额度维持 1 GiB；取消、终态、逻辑删除不释放已发布额度，不删除附件文件或账本。
+- 补充固定当前 Run 的 Agent / provider / model；空闲普通发送独立解析本次身份，不受旧 receipt 身份锁定。配置错误仅拒绝当前请求，不建立暂停状态。
+- 图片维持原数量 / 大小限制、受控读取、路径与软链边界；仅触发消息或本 Run 输入装载真实图片，跨 Run 历史图片按普通路径提示投影。发布前独立预留，DataDir 留存额度维持 1 GiB；取消、终态、逻辑删除不释放已发布额度，不删除附件文件或账本。
 - queueVersion 独立于消息 revision；低版本回包不能覆盖高版本，同版本不同快照需要诊断。
-- 活动页面 running / queued / unconfirmed 时 800 ms 轮询，完全 idle 时 3000 ms；恢复可见立即刷新。断网保留最近可信快照，不能伪置 0；切换 Session 隔离旧回包。
+- 活动页面 running / queued 时 800 ms 轮询，完全 idle 时 3000 ms；恢复可见立即刷新。断网保留最近可信快照，不能伪置 0；切换 Session 隔离旧回包。
 
 ## 数据升级与验证边界
 
-v26 → v27 前向迁移删除 control 表中的 `mode` / `pause_code`，保留 control 版本和序号、receipt、正式历史、绑定、去重墓碑、附件账本；receipt 增加 `target_run_id`。保留严格旧 canonical 识别、事务回滚和 FK 校验。迁移本身不清 queued，首次 API 开放收件负责取消遗留缓冲。
+v26 → v27 前向迁移删除 control 表中的 `mode` / `pause_code`，保留 control 版本和序号、receipt、正式历史、绑定、去重墓碑、附件账本；receipt 增加 `target_run_id`。v27 → v28 局部迁移物理删除 receipt 的确认／放弃字段、`agent_interactive_run_input` 和 `agent_queue_model_input`；Run 归属保留在 receipt，绑定快照的 receipt 集合收敛到 `agent_queue_input_binding.input_receipt_ids_json`。保留正式历史、Run、请求幂等墓碑、工具、附件和发布账本，不清库；旧 confirmed binding 转 active，superseded 保持；保留注入操作幂等结果的原消息／Run 身份，移除其旧确认字段和不再使用的历史队列快照。保留 v23～v27 严格 canonical 识别、事务回滚和 FK 校验。迁移本身不清 queued，首次 API 开放收件负责取消遗留缓冲。
 
-本轮验证覆盖迁移、发布晚到、终态 / Stop fence、正式输入承接、Worker 重放及前端元信息。独立审查、真实用户数据库与外部 provider / 多端人工验收不能由作者自测代替。
+本轮验证覆盖迁移、发布晚到、终态 / Stop fence、新发送与旧历史分离、Fork／回退、Worker 重放及前端元信息。独立审查、真实用户数据库与外部 provider / 多端人工验收不能由作者自测代替。

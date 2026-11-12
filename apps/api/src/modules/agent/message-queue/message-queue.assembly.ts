@@ -8,7 +8,7 @@ import { AgentMessageQueueStore } from "./message-queue.store.js";
 
 /** Lifecycle-owned assembly; remains sealed until trusted runtime recovery completes. */
 export function createAgentMessageQueueAssembly(input: {
-  db: Db; dataDir: string; lifecycle: Pick<RunLifecycleApplication, "activateAcceptedUserRun" | "resumeQueuedSession" | "handoffQueuedContinuation">;
+  db: Db; dataDir: string; lifecycle: Pick<RunLifecycleApplication, "activateAcceptedUserRun" | "handoffQueuedContinuation">;
   runtimeControl: AgentRuntimeControlService; resolveProfile: QueueProfileResolver;
   closeInputAdmission?: () => void;
 }) {
@@ -17,7 +17,6 @@ export function createAgentMessageQueueAssembly(input: {
   const service = new AgentMessageQueueService(store, { ...input, publications, admissionInitiallyClosed: true,
     activateOrdinarySend: command => ({ ...input.lifecycle.activateAcceptedUserRun(command), inputText: store.get(command, command.receiptId).input_text! }),
     handoffContinuation: run => input.lifecycle.handoffQueuedContinuation({ ...run, runtime: input.runtimeControl }),
-    resumeSession: request => input.lifecycle.resumeQueuedSession({ ...request, runtime: input.runtimeControl }),
   });
   let opened = false;
   let closed = false;

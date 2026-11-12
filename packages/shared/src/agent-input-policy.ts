@@ -8,16 +8,9 @@ export function effectiveUserInput(input: {
   policy?: AgentEffectiveInputPolicy;
 }) {
   const receipt = input.policy?.inputs.find(item => item.messageId === input.messageId);
-  if (receipt?.state === "abandoned") return { include: false, realAttachments: false, protected: false };
   return {
-    include: true,
-    realAttachments: input.messageId === input.triggerMessageId || receipt?.currentRunInput === true || receipt?.state === "unconfirmed",
-    protected: receipt?.state === "unconfirmed"
+    realAttachments: input.messageId === input.triggerMessageId || receipt?.currentRunInput === true
   };
-}
-
-export function protectedInputMessageIds(policy?: AgentEffectiveInputPolicy): string[] {
-  return policy?.inputs.filter(item => item.state === "unconfirmed").map(item => item.messageId) ?? [];
 }
 
 export type { AgentEffectiveInputPolicy };

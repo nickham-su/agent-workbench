@@ -1,4 +1,3 @@
-import { protectedInputMessageIds } from "@agent-workbench/shared";
 import { createHash, randomUUID } from "node:crypto";
 import type { ExecutionProfile } from "../apiClient.js";
 import { ESTIMATOR_VERSION, estimatePrimaryMaterializedBlock } from "./estimator-v1.js";
@@ -103,15 +102,6 @@ export function planCompaction(input: { source: CompactionSource; profile: Execu
     while (legalIndex >= 0 && !canStart(retainableOriginal[legalIndex]!, profile)) legalIndex -= 1;
     if (legalIndex < 0) return { kind: "retained_tail_unavailable", reason: "invalid_start" };
     retained = retainableOriginal.slice(legalIndex);
-    total = retained.reduce((sum, block) => sum + block.estimatedTokens, 0);
-    if (total > COMPACTION_KEEP_RECENT_TOKENS) return { kind: "retained_tail_unavailable", reason: "budget" };
-  }
-
-  const protectedIds = new Set(protectedInputMessageIds(source.interactiveInput));
-  const protectedIndex = retainableOriginal.findIndex(block => protectedIds.has(block.primary.sourceBlockId));
-  if (protectedIndex >= 0) {
-    const start = retainableOriginal.findIndex(block => block.primary.sourceBlockId === retained[0]!.primary.sourceBlockId);
-    if (start > protectedIndex) retained = retainableOriginal.slice(protectedIndex);
     total = retained.reduce((sum, block) => sum + block.estimatedTokens, 0);
     if (total > COMPACTION_KEEP_RECENT_TOKENS) return { kind: "retained_tail_unavailable", reason: "budget" };
   }

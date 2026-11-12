@@ -17,7 +17,7 @@ function context(): PromptContext {
   return { headMessageId: "user", sessionRevision: 1, system: "trusted system", messages: [{ role: "user", content: "initial" }],
     tools: [], pendingTools: [], lastResponseTotalTokens: null, uiLocale: null, externalSkills: [], workspaceRepoNames: [], providerReplay: [],
     interactiveInput: { version: AGENT_QUEUE_INPUT_POLICY_VERSION, interactive: true, inputReceiptIds: ["receipt"],
-      inputs: [{ receiptId: "receipt", messageId: "user", state: "unconfirmed", currentRunInput: true, attachments: [] }] } };
+      inputs: [{ receiptId: "receipt", messageId: "user", currentRunInput: true, attachments: [] }] } };
 }
 function profile(npm = "@ai-sdk/anthropic"): ExecutionProfile {
   return { model: { id: "model", contextWindowTokens: 100_000, options: {} }, provider: { id: "provider", npm, options: {} },
@@ -159,7 +159,7 @@ test("interactive oversized FIFO input is injected in order without estimate-bas
       f.ctx.headMessageId = "message-queued-next"; f.ctx.sessionRevision += candidates.length;
       f.ctx.interactiveInput!.inputReceiptIds.push(...request.receiptIds);
       f.ctx.interactiveInput!.inputs.push(...candidates.map(candidate => ({ receiptId: candidate.receipt.id,
-        messageId: `message-queued-${candidate.receipt.id}`, state: "unconfirmed" as const, currentRunInput: true, attachments: [] })));
+        messageId: `message-queued-${candidate.receipt.id}`, currentRunInput: true, attachments: [] })));
       return { headMessageId: f.ctx.headMessageId, revision: f.ctx.sessionRevision };
     },
     async getPromptContext() { return f.ctx; },
@@ -292,11 +292,11 @@ for (const responseKind of ["reasoning", "replay-only"] as const) for (const dec
   });
 }
 
-test("interactive truly empty response remains a provider failure and cannot confirm input or finish the Run", async () => {
+test("interactive truly empty response remains a provider failure and cannot finish the Run", async () => {
   const f = fixture({ responseKind: "empty" });
   await assert.rejects(f.invoke(profile(), false, 5), /model stream completed without visible text or tool calls/);
   assert.equal(f.completions, 0); assert.equal(f.injections, 0);
-  assert.equal(f.ctx.interactiveInput!.inputs[0]!.state, "unconfirmed");
+  assert.equal(f.ctx.interactiveInput!.inputs[0]!.currentRunInput, true);
 });
 
 for (const decision of ["continue", "finish"] as const) test(`invalid committed ${decision} response replays the original operation without another provider attempt`, async () => {

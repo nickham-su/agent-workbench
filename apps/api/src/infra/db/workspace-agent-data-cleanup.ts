@@ -21,9 +21,7 @@ export function deleteWorkspaceAgentData(db: Db, workspaceId: string) {
   db.prepare("delete from agent_session_stop_target where workspace_id=?").run(workspaceId);
   db.prepare("delete from agent_session_stop_barrier where workspace_id=?").run(workspaceId);
   db.prepare("delete from agent_run_runtime_admission where workspace_id=?").run(workspaceId);
-  db.prepare("delete from agent_queue_model_input where workspace_id=?").run(workspaceId);
   db.prepare("delete from agent_queue_input_binding where workspace_id=?").run(workspaceId);
-  db.prepare("delete from agent_interactive_run_input where workspace_id=?").run(workspaceId);
   db.prepare("delete from agent_user_message_receipt_attachment where workspace_id=?").run(workspaceId);
   db.prepare("delete from agent_user_message_receipt where workspace_id=?").run(workspaceId);
   db.prepare("delete from agent_queue_operation where workspace_id=?").run(workspaceId);

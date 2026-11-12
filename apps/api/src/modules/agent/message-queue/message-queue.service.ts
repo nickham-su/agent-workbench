@@ -1,5 +1,3 @@
-import type { AgentResumeMessageQueueRequest, AgentResumeMessageQueueResponse, AgentAbandonUnconfirmedInputRequest } from "@agent-workbench/shared";
-import { AgentQueueRecoveryStore } from "./queue-recovery.store.js";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import {
@@ -11,6 +9,8 @@ import { workspaceRoot } from "../../../infra/fs/paths.js";
 import { AGENT_IMAGE_MAX_COUNT, AGENT_IMAGE_MAX_TOTAL_BYTES } from "../attachments/agent-attachment-limits.js";
 import { AgentAttachmentPublicationService, type StagedQueuePublicationImage } from "../attachments/agent-attachment-publication.service.js";
 import { resolveSafeWorkspaceAgentAttachment, removeAgentAttachmentTempFile } from "../attachments/agent-attachment-storage.js";
+import { getMessageRunState, hasNonTerminalVisibleMessageWork } from "../agent-message.store.js";
+import { assertSessionRuntimeUnblocked } from "../runtime-control/runtime-control.store.js";
 import type { AgentRuntimeControlService } from "../runtime-control/runtime-control.service.js";
 import { AgentMessageQueueStore, queuePayloadHash, sameQueueIdentity, toQueueReceipt, type QueueScope } from "./message-queue.store.js";
 
@@ -28,7 +28,6 @@ export class AgentMessageQueueService {
     resolveProfile: QueueProfileResolver;
     activateOrdinarySend?: (input: QueueScope & { receiptId: string }) => { runId: string; inputText: string };
     handoffContinuation?: (run: QueueScope & { runId: string; inputText: string }) => Promise<void>;
-    resumeSession?: (request: AgentResumeMessageQueueRequest & { sessionId: string }) => Promise<AgentResumeMessageQueueResponse>;
   }) { this.accepting = !dependencies.admissionInitiallyClosed; }
 
   openAdmission() { if (!this.closed) this.accepting = true; }
@@ -100,10 +99,9 @@ export class AgentMessageQueueService {
         if (this.store.stopGeneration(scope) !== stopGeneration)
           throw new HttpError(409, "A Stop superseded this send; send again explicitly", "AGENT_QUEUE_STOP_GENERATION_CHANGED");
       };
-      const recovery = new AgentQueueRecoveryStore(this.store.db);
       assertSendGeneration();
       if (input.targetRunId) this.store.assertSupplementTarget(scope, input.targetRunId);
-      else recovery.validateSend(scope);
+      else this.assertOrdinarySendAllowed(scope);
       const payloadBytes = Buffer.byteLength(inputText, "utf8") + images.reduce((sum, image) => sum + image.byteSize, 0);
       // Predictable validation before publication; repeat it after await inside the actual receipt transaction.
       this.store.assertCapacity(scope, payloadBytes);
@@ -115,7 +113,7 @@ export class AgentMessageQueueService {
         if (duplicate) return { receiptId: duplicate.id, value: { receipt: toQueueReceipt(duplicate), deduplicated: true } };
         assertSendGeneration();
         if (input.targetRunId) this.store.assertSupplementTarget(scope, input.targetRunId);
-        else recovery.validateSend(scope);
+        else this.assertOrdinarySendAllowed(scope);
         const identity = this.resolveProfile(scope, input);
         const row = this.store.insert({ ...scope, clientRequestId: input.clientRequestId, payloadHash, inputText, text: inputText.trim(),
           payloadBytes, targetRunId: input.targetRunId, identity, uiLocale: input.uiLocale ?? null, images: published });
@@ -136,6 +134,14 @@ export class AgentMessageQueueService {
         await Promise.all(images.map(image => removeAgentAttachmentTempFile({ dataDir: this.dependencies.dataDir, tempId: image.tempId }).catch(() => undefined)));
       } finally { this.activeAccepts.delete(pending); settled(); }
     }
+  }
+
+  private assertOrdinarySendAllowed(scope: QueueScope) {
+    assertSessionRuntimeUnblocked(this.store.db, scope.workspaceId, scope.sessionId);
+    if (this.store.hasUndrainedExecution(scope) || getMessageRunState(this.store.db, scope.workspaceId, scope.sessionId)?.status !== "idle")
+      throw new HttpError(409, "Previous execution is not drained", "AGENT_QUEUE_EXECUTION_NOT_DRAINED");
+    if (hasNonTerminalVisibleMessageWork(this.store.db, scope))
+      throw new HttpError(409, "Historical tools are not safe to continue", "AGENT_QUEUE_TOOL_STATE_UNSAFE");
   }
 
   snapshot(scope: QueueScope) { return this.store.snapshot(scope); }
@@ -162,30 +168,6 @@ export class AgentMessageQueueService {
     const stopped = this.dependencies.runtimeControl.stopSession({ workspaceId: scope.workspaceId, rootSessionId: scope.sessionId, operationId, clearQueued: true });
     if (!stopped.replayed) void this.dependencies.runtimeControl.reconcileStops().catch(() => undefined);
     return { stopOperation: { operationId: stopped.record.operationId, acceptedQueueVersion: stopped.record.acceptedQueueVersion, targetCount: stopped.record.targetCount }, queue: this.store.snapshot(scope) };
-  }
-  async resume(sessionId: string, input: AgentResumeMessageQueueRequest): Promise<AgentResumeMessageQueueResponse> {
-    this.assertAccepting();
-    const scope = { ...input, sessionId };
-    const replay = new AgentQueueRecoveryStore(this.store.db).replay<AgentResumeMessageQueueResponse>(scope, "resume");
-    if (replay) return replay;
-    new AgentQueueRecoveryStore(this.store.db).validateResume(scope, () => {
-      const fixedIdentity = this.store.fixedIdentity(scope);
-      if (fixedIdentity) {
-        const receipts = [...this.store.listUnconfirmed(scope), ...this.store.listQueued(scope)];
-        const resolved = this.dependencies.resolveProfile({ ...scope, fixedIdentity, hasImages: receipts.some(row => row.attachment_count > 0) });
-        if (!sameQueueIdentity(fixedIdentity, resolved)) throw new HttpError(409, "Recovery profile is unavailable", "AGENT_QUEUE_PROFILE_UNAVAILABLE");
-      }
-    });
-    if (!this.dependencies.resumeSession) throw new HttpError(503, "Queue recovery is not assembled", "AGENT_QUEUE_RECOVERY_UNAVAILABLE");
-    let settled!: () => void;
-    const pending = new Promise<void>(resolve => { settled = resolve; });
-    this.activeAccepts.add(pending);
-    try { return await this.dependencies.resumeSession(scope); }
-    finally { this.activeAccepts.delete(pending); settled(); }
-  }
-  abandon(sessionId: string, input: AgentAbandonUnconfirmedInputRequest) {
-    this.assertAccepting();
-    return new AgentQueueRecoveryStore(this.store.db).abandon({ ...input, sessionId });
   }
   retention() { return this.dependencies.publications.getRetention(); }
 

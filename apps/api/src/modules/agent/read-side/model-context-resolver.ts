@@ -1,4 +1,4 @@
-import { effectiveUserInput, type AgentEffectiveInputPolicy } from "@agent-workbench/shared";
+import { type AgentEffectiveInputPolicy } from "@agent-workbench/shared";
 import { readEffectiveInputPolicy } from "../message-queue/interactive-input-binding.store.js";
 import type {
   AgentImageMediaType,
@@ -903,7 +903,6 @@ export class ModelContextResolver {
 
   private hydrate(workspaceId: string, session: SessionRow, selected: MessageRow[], policy?: AgentEffectiveInputPolicy): ResolvedModelContext {
     const interactiveInput = policy ?? readEffectiveInputPolicy(this.db, { workspaceId, sessionId: session.sessionId }, selected.map(message => message.id));
-    selected = selected.filter(message => message.type !== "user" || effectiveUserInput({ messageId: message.id, triggerMessageId: null, policy: interactiveInput }).include);
     if (selected.length === 0) {
       return {
         workspaceId,

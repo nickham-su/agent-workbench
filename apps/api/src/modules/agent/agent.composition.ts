@@ -1,4 +1,4 @@
-import type { InputConfirmationSource } from "./message-queue/interactive-input-binding.store.js";
+import type { InputBindingSource } from "./message-queue/interactive-input-binding.store.js";
 import { AgentInteractiveInputService } from "./message-queue/interactive-input.service.js";
 import type { AgentApiPrepareInteractiveInputRequest, AgentApiInjectInteractiveInputRequest, AgentApiCompleteInteractiveAssistantRequest } from "@agent-workbench/shared/internal-contracts/agent-api";
 import { createAgentMessageQueueAssembly } from "./message-queue/message-queue.assembly.js";
@@ -2368,10 +2368,10 @@ function createAgentApplications(
   }
   function prepareInteractiveInputFromWorker(params: AgentApiPrepareInteractiveInputRequest) { return interactiveInputs().prepare(params); }
   function injectInteractiveInputFromWorker(params: AgentApiInjectInteractiveInputRequest) { return interactiveInputs().inject(params); }
-  function completeInteractiveAssistantFromWorker(params: AgentApiCompleteInteractiveAssistantRequest, source: InputConfirmationSource = "worker_model") { return interactiveInputs().complete(params, source); }
+  function completeInteractiveAssistantFromWorker(params: AgentApiCompleteInteractiveAssistantRequest, source: InputBindingSource = "worker_model") { return interactiveInputs().complete(params, source); }
 
   function createStreamingAssistantFromWorker(
-    params: AgentApiCreateStreamingAssistantRequest, source: InputConfirmationSource = "worker_model",
+    params: AgentApiCreateStreamingAssistantRequest, source: InputBindingSource = "worker_model",
   ) {
     workspaceDeletingFence.assertWritable(params.workspaceId);
     // A response-loss replay already has a durable Message and must not read
@@ -2426,14 +2426,14 @@ function createAgentApplications(
   }
 
   function resumeStreamingAssistantFromWorker(
-    params: AgentApiResumeStreamingAssistantRequest, source: InputConfirmationSource = "worker_model",
+    params: AgentApiResumeStreamingAssistantRequest, source: InputBindingSource = "worker_model",
   ) {
     workspaceDeletingFence.assertWritable(params.workspaceId);
     return { result: resumeStreamingAssistant(environment.db, { ...params, inputSource: source }) };
   }
 
   function replaceStreamingAssistantFromWorker(
-    params: AgentApiReplaceStreamingAssistantRequest, source: InputConfirmationSource = "worker_model",
+    params: AgentApiReplaceStreamingAssistantRequest, source: InputBindingSource = "worker_model",
   ) {
     workspaceDeletingFence.assertWritable(params.workspaceId);
     const head = getMessageSessionHead(environment.db, params);

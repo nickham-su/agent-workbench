@@ -279,15 +279,15 @@ test("Primary materializer refuses a source that includes its pending boundary",
 });
 
 
-test("non-trigger unconfirmed and current-Run images remain real; abandoned images disappear", () => {
-  const source = testSource({ texts: ["old", "protected image", "current"], triggerIndex: 1, mediaTrigger: true });
+test("non-trigger images are paths in ordinary history, while current Run images remain real", () => {
+  const source = testSource({ texts: ["old", "historical image", "current"], triggerIndex: 1, mediaTrigger: true });
   source.triggerMessageId = "m3";
-  source.interactiveInput = { version: AGENT_QUEUE_INPUT_POLICY_VERSION, interactive: true, inputReceiptIds: ["receipt"],
-    inputs: [{ receiptId: "receipt", messageId: "m2", state: "unconfirmed", currentRunInput: false, attachments: [] }] };
+  source.interactiveInput = { version: AGENT_QUEUE_INPUT_POLICY_VERSION, interactive: true, inputReceiptIds: [],
+    inputs: [{ receiptId: "receipt", messageId: "m2", currentRunInput: false, attachments: [] }] };
+  const historical = materializePrimaryBlocks({ source, profile: testProfile })[1]!;
+  assert.equal(JSON.stringify(historical).includes("attachment_ref"), false);
+  assert.equal(historical.isProjectionEmpty, false);
+  assert.match(JSON.stringify(historical), /historical image/);
+  source.interactiveInput.inputs[0]!.currentRunInput = true;
   assert.ok(JSON.stringify(materializePrimaryBlocks({ source, profile: testProfile })[1]).includes("attachment_ref"));
-  source.interactiveInput.inputs[0]!.state = "confirmed"; source.interactiveInput.inputs[0]!.currentRunInput = true;
-  assert.ok(JSON.stringify(materializePrimaryBlocks({ source, profile: testProfile })[1]).includes("attachment_ref"));
-  source.interactiveInput.inputs[0]!.state = "abandoned";
-  const abandoned = materializePrimaryBlocks({ source, profile: testProfile })[1]!;
-  assert.deepEqual(abandoned.messages, []); assert.equal(abandoned.isProjectionEmpty, true);
 });

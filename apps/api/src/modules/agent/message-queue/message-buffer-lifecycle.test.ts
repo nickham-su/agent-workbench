@@ -16,7 +16,7 @@ test("API startup discards every legacy buffer once; Worker ready/reconnect pres
   assembly.openAfterRuntimeRecovery();
   assert.equal(f.store.get(scope,old.receipt.id).status,"cancelled");
   assert.equal(f.store.get(orphan,leftover.id).status,"cancelled");
-  assert.equal(f.store.get(scope,initial.receipt.id).confirmation_state,"unconfirmed");
+  assert.equal(f.store.get(scope,initial.receipt.id).status,"injected");
   const fresh=await assembly.service.accept(scope.sessionId,{...scope,targetRunId:initial.receipt.runId,clientRequestId:"after-ready",text:"fresh"});
   assembly.openAfterRuntimeRecovery();assembly.openAfterRuntimeRecovery();
   assert.equal(f.store.get(scope,fresh.receipt.id).status,"queued");assert.equal(f.enqueued.length,1);

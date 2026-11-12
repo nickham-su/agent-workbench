@@ -1,5 +1,3 @@
-import type { AgentResumeMessageQueueRequest } from "@agent-workbench/shared";
-import type { QueueResumeActivation } from "../message-queue/queue-recovery.store.js";
 import type { AgentImageMediaType } from "@agent-workbench/shared/internal-contracts/agent-api-session";
 import type { AgentMessageControlResult, AgentMessageSessionRunState } from "@agent-workbench/shared";
 import type { AgentRunExecutionPhase, AgentRunKind, AgentTerminalResultCode, AgentTerminalRunStatus } from "@agent-workbench/shared";
@@ -61,7 +59,6 @@ export type RunCompletedEventPublisher = {
 export type AtomicLifecyclePersistence = {
   listActiveSessionIdsForCancel(input: CancelSessionsInput): string[];
   activateUserRun(input: UserRunActivationInput, publishImages?: () => void): UserRunActivationResult;
-  resumeQueuedSession?(input: AgentResumeMessageQueueRequest & { sessionId: string }, runId: string, createdAt: number): QueueResumeActivation;
   activateAcceptedUserRun?(input: { workspaceId: string; sessionId: string; receiptId: string; runId: string; createdAt: number }): UserRunActivationResult;
   canEnqueueUserRunIfCurrent(input: { workspaceId: string; sessionId: string; runId: string }): boolean;
   failRunAfterEnqueueFailureIfCurrent(input: EnqueueFailureInput): EnqueueFailureSettlement;

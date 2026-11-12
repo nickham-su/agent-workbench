@@ -3,7 +3,9 @@ import type { Db } from "./db.js";
 
 /** Independent DataDir authority: never cascade/drop it with the Agent domain. */
 export const AGENT_QUEUE_INDEPENDENT_TABLES = ["agent_attachment_publication_intent", "agent_runtime_instance"] as const;
-export const AGENT_QUEUE_DOMAIN_TABLES = ["agent_session_queue_control", "agent_user_message_receipt", "agent_user_message_receipt_attachment", "agent_queue_operation", "agent_interactive_run_input", "agent_queue_input_binding", "agent_queue_model_input", "agent_run_runtime_admission", "agent_session_stop_barrier", "agent_session_stop_target"] as const;
+export const LEGACY_AGENT_QUEUE_DOMAIN_TABLES = ["agent_session_queue_control", "agent_user_message_receipt", "agent_user_message_receipt_attachment", "agent_queue_operation", "agent_interactive_run_input", "agent_queue_input_binding", "agent_queue_model_input", "agent_run_runtime_admission", "agent_session_stop_barrier", "agent_session_stop_target"] as const;
+export const AGENT_QUEUE_DOMAIN_TABLES = LEGACY_AGENT_QUEUE_DOMAIN_TABLES.filter(table =>
+  table !== "agent_interactive_run_input" && table !== "agent_queue_model_input");
 export const INTERACTIVE_QUEUE_COLUMN = "interactive_queue_enabled integer not null default 0 check (interactive_queue_enabled in (0, 1))";
 export const ADD_INTERACTIVE_QUEUE_COLUMN = `alter table agent_run add column ${INTERACTIVE_QUEUE_COLUMN}`;
 
@@ -46,7 +48,7 @@ create table agent_runtime_instance (
     and exit_proof_json is null and exit_observed_at is null), 0))
 );
 `;
-const domainDdl = (legacyV26: boolean) => `
+const domainDdl = (legacyV26 = false, legacyInputState = false) => `
 create unique index uq_agent_session_scope on agent_session(workspace_id, id);
 create unique index uq_agent_attachment_scope on agent_attachment(workspace_id, id);
 create unique index uq_agent_run_scope on agent_run(workspace_id, session_id, run_id);
@@ -74,12 +76,12 @@ create table agent_user_message_receipt (
   message_id text unique,
   injected_run_id text,
   ${legacyV26 ? "" : "target_run_id text,"}
-  confirmation_state text check(confirmation_state in ('unconfirmed','confirmed','abandoned')),
+${legacyV26 || legacyInputState ? `  confirmation_state text check(confirmation_state in ('unconfirmed','confirmed','abandoned')),
   confirmed_at integer,
   confirmation_source text check(confirmation_source in ('worker_model','local_fallback')),
   confirmed_by_assistant_id text,
   abandoned_at integer,
-  created_at integer not null,
+` : ""}  created_at integer not null,
   updated_at integer not null,
   unique(workspace_id, session_id, id),
   unique(workspace_id, session_id, client_request_id),
@@ -90,7 +92,7 @@ create table agent_user_message_receipt (
     references agent_message(workspace_id, origin_session_id, id) on delete restrict,
   foreign key(workspace_id, session_id, injected_run_id)
     references agent_run(workspace_id, session_id, run_id) on delete restrict,
-  foreign key(workspace_id, session_id, confirmed_by_assistant_id)
+${legacyV26 || legacyInputState ? `  foreign key(workspace_id, session_id, confirmed_by_assistant_id)
     references agent_message(workspace_id, origin_session_id, id) on delete restrict,
   check((status='queued' and text is not null and input_text is not null
           and message_id is null and injected_run_id is null and confirmation_state is null)
@@ -105,13 +107,16 @@ create table agent_user_message_receipt (
      or (confirmation_state='unconfirmed' and confirmed_at is null
           and confirmation_source is null and confirmed_by_assistant_id is null and abandoned_at is null)
      or (confirmation_state is null and confirmed_at is null
-          and confirmation_source is null and confirmed_by_assistant_id is null and abandoned_at is null), 0))
+          and confirmation_source is null and confirmed_by_assistant_id is null and abandoned_at is null), 0))` : `  check((status='queued' and text is not null and input_text is not null
+           and message_id is null and injected_run_id is null)
+     or (status='cancelled' and message_id is null and injected_run_id is null)
+     or (status='injected' and message_id is not null and injected_run_id is not null))`}
 );
 create index idx_agent_receipt_queued
   on agent_user_message_receipt(session_id, sequence) where status='queued';
-create index idx_agent_receipt_unconfirmed
+${legacyV26 || legacyInputState ? `create index idx_agent_receipt_unconfirmed
   on agent_user_message_receipt(session_id, sequence)
-  where status='injected' and confirmation_state='unconfirmed';
+  where status='injected' and confirmation_state='unconfirmed';` : `create index idx_agent_receipt_run on agent_user_message_receipt(injected_run_id) where status='injected';`}
 
 create table agent_user_message_receipt_attachment (
   workspace_id text not null,
@@ -131,13 +136,13 @@ create table agent_user_message_receipt_attachment (
 create table agent_queue_operation (
   workspace_id text not null, session_id text not null,
   operation_id text not null,
-  kind text not null check(kind in ('stop','resume','abandon','prepare','inject','complete_or_continue')),
+  kind text not null check(kind in (${legacyV26 || legacyInputState ? "'stop','resume','abandon'," : "'stop',"}'prepare','inject','complete_or_continue')),
   request_hash text not null, result_json text not null, created_at integer not null,
   primary key(workspace_id, session_id, operation_id),
   foreign key(workspace_id, session_id)
     references agent_session_queue_control(workspace_id, session_id) on delete cascade
 );
-create table agent_interactive_run_input (
+${legacyV26 || legacyInputState ? `create table agent_interactive_run_input (
   workspace_id text not null, session_id text not null,
   run_id text not null, receipt_id text not null,
   primary key(run_id, receipt_id),
@@ -146,12 +151,13 @@ create table agent_interactive_run_input (
   foreign key(workspace_id, session_id, receipt_id)
     references agent_user_message_receipt(workspace_id, session_id, id) on delete restrict
 );
-create table agent_queue_input_binding (
+` : ""}create table agent_queue_input_binding (
   workspace_id text not null, session_id text not null,
   assistant_message_id text primary key not null, run_id text not null,
   snapshot_hash text not null, input_revision integer not null check(typeof(input_revision)='integer' and input_revision between 0 and 9007199254740991),
   source text not null check(source in ('worker_model','local_fallback')),
-  state text not null check(state in ('active','superseded','confirmed')),
+  state text not null check(state in (${legacyV26 || legacyInputState ? "'active','superseded','confirmed'" : "'active','superseded'"})),
+  ${legacyV26 || legacyInputState ? "" : "input_receipt_ids_json text not null check(json_valid(input_receipt_ids_json) and json_type(input_receipt_ids_json)='array'),"}
   replaces_assistant_id text, created_at integer not null,
   unique(workspace_id, session_id, assistant_message_id),
   foreign key(workspace_id, session_id, assistant_message_id)
@@ -161,7 +167,7 @@ create table agent_queue_input_binding (
   foreign key(replaces_assistant_id)
     references agent_queue_input_binding(assistant_message_id) on delete set null
 );
-create table agent_queue_model_input (
+${legacyV26 || legacyInputState ? `create table agent_queue_model_input (
   workspace_id text not null, session_id text not null,
   assistant_message_id text not null, receipt_id text not null,
   primary key(assistant_message_id, receipt_id),
@@ -170,7 +176,7 @@ create table agent_queue_model_input (
   foreign key(workspace_id, session_id, receipt_id)
     references agent_user_message_receipt(workspace_id, session_id, id) on delete restrict
 );
-
+` : ""}
 create table agent_run_runtime_admission (
   workspace_id text not null, session_id text not null, run_id text primary key not null,
   runtime_instance_id text,
@@ -283,8 +289,8 @@ export const QUEUE_CONTROL_SQL = `create table agent_session_queue_control (
     references agent_session(workspace_id, id) on delete cascade
 );`;
 
-export function createAgentQueueDomainSchema(db: Db, legacyV26 = false) {
-  db.exec(domainDdl(legacyV26));
+export function createAgentQueueDomainSchema(db: Db, legacyV26 = false, legacyInputState = false) {
+  db.exec(domainDdl(legacyV26, legacyInputState));
 }
 
 /** Caller holds the writer transaction with FK enforcement temporarily disabled.
@@ -296,4 +302,47 @@ export function upgradeAgentQueueBufferSchema(db: Db) {
     insert into agent_session_queue_control select * from queue_control_backup;
     drop table queue_control_backup;
     alter table agent_user_message_receipt add column target_run_id text;`);
+}
+
+/** Drop input-consumption bookkeeping without changing history, receipt identity or attachment ownership.
+ * Caller holds the migration transaction with FK enforcement temporarily disabled. */
+export function upgradeAgentInputHistorySchema(db: Db) {
+  const reference = new Database(":memory:");
+  try {
+    const ddl = domainDdl();
+    reference.exec(ddl.slice(ddl.indexOf("create table agent_session_queue_control")));
+    db.exec(`create temp table input_receipt_backup as select id,workspace_id,session_id,client_request_id,sequence,
+        payload_hash,status,input_text,text,payload_bytes,attachment_count,agent_id,provider_id,model_id,ui_locale,
+        message_id,injected_run_id,target_run_id,created_at,updated_at from agent_user_message_receipt;
+      create temp table input_binding_backup as select b.workspace_id,b.session_id,b.assistant_message_id,b.run_id,
+        b.snapshot_hash,b.input_revision,b.source,case when b.state='superseded' then 'superseded' else 'active' end as state,
+        (select json_group_array(receipt_id) from
+          (select receipt_id from agent_queue_model_input m where m.assistant_message_id=b.assistant_message_id order by receipt_id collate binary)) as input_receipt_ids_json,
+        b.replaces_assistant_id,b.created_at from agent_queue_input_binding b;
+      create temp table input_operation_backup as select * from agent_queue_operation where kind not in ('resume','abandon');
+      -- Keep exact-operation tombstones, but not obsolete public input-state fields.
+      -- Queue snapshots are live on replay; the stable injection result keeps its original message/Run ownership.
+      update input_operation_backup set result_json=json_remove(result_json,'$.response.queue') where json_valid(result_json);
+      update input_operation_backup set result_json=json_set(result_json,'$.response.receipts',
+        json((select json_group_array(json_remove(value,'$.confirmationState','$.confirmationSource'))
+          from json_each(input_operation_backup.result_json,'$.response.receipts'))))
+        where kind='inject' and case when json_valid(result_json)
+          then json_type(result_json,'$.response.receipts')='array' else 0 end;
+      drop table agent_queue_model_input;
+      drop table agent_interactive_run_input;
+      drop table agent_queue_input_binding;
+      drop table agent_queue_operation;
+      drop table agent_user_message_receipt;`);
+    for (const table of ["agent_user_message_receipt", "agent_queue_operation", "agent_queue_input_binding"]) {
+      const objects = definitions(reference, table) as Array<{ type: string; sql: string | null }>;
+      for (const object of objects.filter(row => row.type === "table")) if (object.sql) db.exec(object.sql);
+      for (const object of objects.filter(row => row.type === "index")) if (object.sql) db.exec(object.sql);
+    }
+    db.exec(`insert into agent_user_message_receipt select * from input_receipt_backup;
+      insert into agent_queue_operation select * from input_operation_backup;
+      insert into agent_queue_input_binding select * from input_binding_backup;
+      drop table input_receipt_backup;
+      drop table input_binding_backup;
+      drop table input_operation_backup;`);
+  } finally { reference.close(); }
 }

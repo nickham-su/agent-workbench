@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createAgentTestFixture, createTestWorkspace } from "../testkit/agent-testkit.js";
 import { configureDefaultAgentSettings } from "../testkit/agent-integration-testkit.js";
-import { createMessageSession } from "../agent-message.store.js";
+import { createMessageSession, getRunRecord } from "../agent-message.store.js";
 import { waitForAgentRuntimeReadiness } from "../startup/agent-runtime-readiness.js";
 import { AgentRuntime } from "../agent.runtime.js";
 import { AgentMessageQueueService } from "./message-queue.service.js";
@@ -40,7 +40,7 @@ test("production routes retain the application authentication boundary", async t
   assert.equal(response.statusCode, 401);
   assert.equal((f.db.prepare("select count(*) as n from agent_user_message_receipt").get() as { n: number }).n, 0);
 });
-test("production explicit send executes fallback and the timeline reports only local_fallback confirmation", async t => {
+test("production explicit send executes fallback and timeline contains ordinary history without input-state metadata", async t => {
   const f = await createAgentTestFixture({ withApp: true });
   t.after(() => f.dispose()); assert.ok(f.app);
   await configureDefaultAgentSettings(f.app);
@@ -52,16 +52,16 @@ test("production explicit send executes fallback and the timeline reports only l
   for (let attempt = 0; attempt < 100; attempt++) {
     const lookup: { statusCode: number; json<T>(): T } = await f.app.inject({ method: "GET", url: `${base}/receipts/by-request?workspaceId=${workspace.id}&clientRequestId=fallback-receipt` });
     assert.equal(lookup.statusCode, 200); receipt = lookup.json<AgentReceiptResponse>();
-    if (receipt.receipt.status === "injected" && receipt.receipt.confirmationState === "confirmed") break;
+    if (receipt.receipt.status === "injected" && getRunRecord(f.db, receipt.receipt.runId)?.status === "completed") break;
     await new Promise(resolve => setTimeout(resolve, 20));
   }
   assert.ok(receipt); assert.equal(receipt.receipt.status, "injected");
   if (receipt.receipt.status !== "injected") return;
-  assert.equal(receipt.receipt.confirmationState, "confirmed"); assert.equal(receipt.receipt.confirmationSource, "local_fallback");
   const timeline = await f.app.inject({ method: "GET", url: `${base}/timeline?workspaceId=${workspace.id}&mode=snapshot` });
   assert.equal(timeline.statusCode, 200);
   const message = timeline.json<AgentTimelineDeltaResponse>().messages.find(item => item.id === receipt!.receipt.messageId);
-  assert.deepEqual(message?.inputReceipt, { receiptId: receipt.receipt.id, confirmationState: "confirmed", confirmationSource: "local_fallback" });
+  assert.ok(message); assert.equal("inputReceipt" in message, false);
+  assert.equal(getRunRecord(f.db, receipt.receipt.runId)?.status, "completed");
 });
 test("production close does not treat close(false) as a drained publisher; it seals and waits again after exact runtime shutdown", async t => {
   const f = await createAgentTestFixture({ withApp: true });

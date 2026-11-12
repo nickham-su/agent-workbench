@@ -1,5 +1,4 @@
 import { AgentClearMessageQueueRequestSchema, AgentClearMessageQueueResponseSchema, type AgentClearMessageQueueRequest } from "@agent-workbench/shared";
-import { AgentResumeMessageQueueRequestSchema, AgentResumeMessageQueueResponseSchema, AgentAbandonUnconfirmedInputRequestSchema, AgentAbandonUnconfirmedInputResponseSchema, type AgentResumeMessageQueueRequest, type AgentAbandonUnconfirmedInputRequest } from "@agent-workbench/shared";
 import { Type, type TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import type { FastifyInstance } from "fastify";
@@ -72,14 +71,6 @@ export async function registerAgentMessageQueueRoutes(app: FastifyInstance, depe
     if (!Value.Check(AgentStopMessageQueueRequestSchema, req.body)) throw new HttpError(400, "Invalid queue stop");
     const { workspaceId, operationId } = req.body as AgentStopMessageQueueRequest;
     return service.stop({ workspaceId, sessionId: (req.params as { sessionId: string }).sessionId }, operationId);
-  });
-  app.post(AgentMessageQueueEndpoints.resume.path, schemas({ params: sessionParams, body: AgentResumeMessageQueueRequestSchema, response: { 200: AgentResumeMessageQueueResponseSchema } }), async req => {
-    if (!Value.Check(AgentResumeMessageQueueRequestSchema, req.body)) throw new HttpError(400, "Invalid queue resume");
-    return service.resume((req.params as { sessionId: string }).sessionId, req.body as AgentResumeMessageQueueRequest);
-  });
-  app.post(AgentMessageQueueEndpoints.abandon.path, schemas({ params: sessionParams, body: AgentAbandonUnconfirmedInputRequestSchema, response: { 200: AgentAbandonUnconfirmedInputResponseSchema } }), async req => {
-    if (!Value.Check(AgentAbandonUnconfirmedInputRequestSchema, req.body)) throw new HttpError(400, "Invalid input abandonment");
-    return service.abandon((req.params as { sessionId: string }).sessionId, req.body as AgentAbandonUnconfirmedInputRequest);
   });
   app.get(AgentMessageQueueEndpoints.retention.path, schemas({ querystring: Type.Object({}, { additionalProperties: false }), response: { 200: AgentAttachmentRetentionResponseSchema } }), async () => service.retention());
 }

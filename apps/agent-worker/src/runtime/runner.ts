@@ -2878,7 +2878,7 @@ export class AgentRunner {
         messages: [...base.messages, ...candidates.map(candidate => ({ role: "user" as const, content: projectEffectiveUserContent({ workspaceId: run.workspaceId, text: candidate.text,
           images: candidate.attachments.map(image => ({ attachmentId: image.id, mediaType: image.mediaType, filename: image.filename, path: image.path })) }) }))],
         interactiveInput: { ...policy, inputReceiptIds: [...policy.inputReceiptIds, ...candidates.map(item => item.receipt.id)], inputs: [...policy.inputs, ...candidates.map(candidate => ({
-          receiptId: candidate.receipt.id, messageId: `message-queued-${candidate.receipt.id}`, state: "unconfirmed" as const, currentRunInput: true,
+          receiptId: candidate.receipt.id, messageId: `message-queued-${candidate.receipt.id}`, currentRunInput: true,
           attachments: candidate.attachments.map(image => ({ attachmentId: image.id, byteSha256: image.byteSha256, byteSize: image.byteSize })) }))] } };
       const frozen = await evaluate(context);
       if (candidates.length > 0 && prepared) {

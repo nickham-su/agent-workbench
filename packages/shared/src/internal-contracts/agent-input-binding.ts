@@ -3,7 +3,7 @@ import {
   AGENT_QUEUE_INPUT_POLICY_VERSION, AgentQueueHashSchema, AgentQueueIdSchema, AgentQueueVersionSchema
 } from "../contracts/agent-queue.js";
 
-/** Trusted snapshot metadata; confirmation source is derived by the receiving capability. */
+/** Trusted snapshot metadata; input source is derived by the receiving capability. */
 export const AgentInteractiveInputBindingSchema = Type.Object({
   inputReceiptIds: Type.Array(AgentQueueIdSchema, { uniqueItems: true }),
   effectiveInputPolicyVersion: Type.Literal(AGENT_QUEUE_INPUT_POLICY_VERSION),
@@ -24,7 +24,6 @@ export const AgentEffectiveInputPolicySchema = Type.Object({
   inputs: Type.Array(Type.Object({
     receiptId: AgentQueueIdSchema,
     messageId: AgentQueueIdSchema,
-    state: Type.Union([Type.Literal("unconfirmed"), Type.Literal("confirmed"), Type.Literal("abandoned")]),
     currentRunInput: Type.Boolean(),
     attachments: Type.Array(Type.Object({
       attachmentId: AgentQueueIdSchema, byteSha256: AgentQueueHashSchema, byteSize: Type.Integer({ minimum: 1 })

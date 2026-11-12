@@ -77,8 +77,7 @@ export async function queueFixture(t: TestContext, runtimeKind: "worker" | "loca
   const publications = new AgentAttachmentPublicationService({ db, dataDir });
   const service = new AgentMessageQueueService(store, { dataDir, publications, runtimeControl: runtime, resolveProfile,
     activateOrdinarySend: input => ({ ...lifecycle.activateAcceptedUserRun(input), inputText: store.get(input, input.receiptId).input_text! }),
-    handoffContinuation: run => lifecycle.handoffQueuedContinuation({ ...run, runtime }),
-    resumeSession: request => lifecycle.resumeQueuedSession({ ...request, runtime }) });
+    handoffContinuation: run => lifecycle.handoffQueuedContinuation({ ...run, runtime }) });
   const currentRun = async () => {
     const state = getMessageRunState(db, scope.workspaceId, scope.sessionId);
     if (state?.status !== "running" || !state.activeRunId) return null;
