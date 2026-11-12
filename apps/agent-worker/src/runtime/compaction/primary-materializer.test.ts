@@ -28,7 +28,6 @@ test("Primary materializer preserves trigger attachment references without readi
     { type: "text", text: "now" },
     { type: "attachment_ref", workspaceId: "ws", attachmentId: "attachment", mediaType: "image/png", filename: "screen.png", path: "repo/screen.png" },
   ] }]);
-  assert.equal(trigger!.containsTriggerMedia, true);
   assert.equal(JSON.stringify(trigger).includes("bytes"), false);
 });
 
@@ -290,5 +289,5 @@ test("non-trigger unconfirmed and current-Run images remain real; abandoned imag
   assert.ok(JSON.stringify(materializePrimaryBlocks({ source, profile: testProfile })[1]).includes("attachment_ref"));
   source.interactiveInput.inputs[0]!.state = "abandoned";
   const abandoned = materializePrimaryBlocks({ source, profile: testProfile })[1]!;
-  assert.deepEqual(abandoned.messages, []); assert.equal(abandoned.containsTriggerMedia, false); assert.equal(abandoned.isProjectionEmpty, true);
+  assert.deepEqual(abandoned.messages, []); assert.equal(abandoned.isProjectionEmpty, true);
 });

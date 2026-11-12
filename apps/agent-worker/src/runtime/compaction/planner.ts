@@ -94,8 +94,7 @@ export function planCompaction(input: { source: CompactionSource; profile: Execu
     firstCandidate = cursor;
   }
   if (firstCandidate === retainableOriginal.length) {
-    const trigger = retainableOriginal.find((block) => block.primary.containsTriggerMedia);
-    return trigger ? { kind: "media_requires_resend", triggerMessageId: trigger.primary.sourceBlockId } : { kind: "retained_tail_unavailable", reason: "budget" };
+    return { kind: "retained_tail_unavailable", reason: "budget" };
   }
 
   let retained = retainableOriginal.slice(firstCandidate);
@@ -106,18 +105,6 @@ export function planCompaction(input: { source: CompactionSource; profile: Execu
     retained = retainableOriginal.slice(legalIndex);
     total = retained.reduce((sum, block) => sum + block.estimatedTokens, 0);
     if (total > COMPACTION_KEEP_RECENT_TOKENS) return { kind: "retained_tail_unavailable", reason: "budget" };
-  }
-
-  const triggerIndex = retainableOriginal.findIndex((block) => block.primary.containsTriggerMedia);
-  if (triggerIndex >= 0) {
-    const retainedStartIndex = retainableOriginal.findIndex((block) => block.primary.sourceBlockId === retained[0]!.primary.sourceBlockId);
-    if (retainedStartIndex > triggerIndex) {
-      retained = retainableOriginal.slice(triggerIndex);
-      total = retained.reduce((sum, block) => sum + block.estimatedTokens, 0);
-    }
-    if (total > COMPACTION_KEEP_RECENT_TOKENS) {
-      return { kind: "media_requires_resend", triggerMessageId: retainableOriginal[triggerIndex]!.primary.sourceBlockId };
-    }
   }
 
   const protectedIds = new Set(protectedInputMessageIds(source.interactiveInput));
@@ -144,7 +131,6 @@ export function planCompaction(input: { source: CompactionSource; profile: Execu
   }));
   const estimatedBeforeCost = estimated.reduce((sum, block) => sum + block.estimatedTokens, 0);
   const estimatedPrefixCost = prefix.reduce((sum, block) => sum + block.estimatedTokens, 0);
-  const containsTriggerMedia = primary.some((block) => block.containsTriggerMedia);
   const policy = COMPACTION_MODE_POLICIES[input.mode];
   return {
     kind: "planned",
@@ -166,7 +152,6 @@ export function planCompaction(input: { source: CompactionSource; profile: Execu
       estimatedBeforeCost,
       estimatedPrefixCost,
       estimatedRetainedCost: total,
-      containsTriggerMedia,
       source: {
         workspaceId: source.workspaceId,
         sessionId: source.sessionId,

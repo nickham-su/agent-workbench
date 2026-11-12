@@ -2776,7 +2776,7 @@ export class AgentRunner {
     // model step. Normal model creation also clears the notice if this bounded
     // best-effort cleanup cannot reach the control plane.
     if (retryNoticeMayNeedClear && params.mode === "proactive" && !params.signal.aborted &&
-      (result.kind === "committed" || result.kind === "skipped" || result.kind === "blocked" || result.kind === "media_requires_resend" || result.kind === "unavailable")) {
+      (result.kind === "committed" || result.kind === "skipped" || result.kind === "blocked" || result.kind === "unavailable")) {
       const request = { workspaceId: params.run.workspaceId, sessionId: params.run.sessionId, runId: params.run.runId,
         runNoticeText: "", compactionExpectedRevision: noticeExpectedRevision, updatedAt: this.nowMsFn() };
       try {
@@ -4095,10 +4095,6 @@ export class AgentRunner {
         }
         if (compacted.kind === "blocked") {
           await finishOnce({ status: "failed", code: "compaction_pending_tools", detail: null });
-          return;
-        }
-        if (compacted.kind === "media_requires_resend") {
-          await finishOnce({ status: "completed", code: "compaction_media_requires_resend", detail: null });
           return;
         }
         await finishOnce({ status: "failed", code: "compaction_failed", detail: null });

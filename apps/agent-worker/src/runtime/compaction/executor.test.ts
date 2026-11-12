@@ -89,6 +89,44 @@ const args = {
   abortSignal: new AbortController().signal,
 };
 
+test("executor summarizes an old user image and commits after a long completed tool loop", async () => {
+  for (const mode of ["manual", "proactive"] as const) {
+    const source = testSource({
+      texts: ["", ...Array(4).fill("x".repeat(18_000))],
+      types: ["user", "assistant", "assistant", "assistant", "assistant"],
+      triggerIndex: 0,
+      mediaTrigger: true,
+    });
+    source.runKind = mode === "manual" ? "manual_compaction" : "user";
+    for (const block of source.blocks.slice(1)) addAssistantReplay(block, "@ai-sdk/openai");
+    const original = structuredClone(source);
+    const { executor, requests, summaries } = createExecutor({ source });
+    const result = await executor.execute({ ...args, mode });
+    assert.equal(result.kind, "committed");
+    assert.equal(summaries.length, 1);
+    const summaryInput = JSON.stringify(summaries[0]!.messages);
+    assert.match(summaryInput, /Image path: repo\/screen\.png; contents not included in summary/);
+    assert.equal(summaryInput.includes("attachment_ref"), false);
+    assert.equal(summaryInput.includes("PRIVATE_ENCRYPTED_REPLAY"), false);
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0]!.retainedFromMessageId, "m4");
+    assert.equal(requests[0]!.summaryText, "brief summary");
+    assert.deepEqual(source, original);
+  }
+});
+
+test("executor classifies an oversized latest block normally even when it contains a user image", async () => {
+  for (const mode of ["manual", "proactive"] as const) {
+    for (const mediaTrigger of [false, true]) {
+      const source = testSource({ texts: ["old", "trigger ".repeat(15_000)], mediaTrigger });
+      const { executor, requests, summaries } = createExecutor({ source });
+      assert.deepEqual(await executor.execute({ ...args, mode }), { kind: "skipped", reason: "oversized_tail" });
+      assert.equal(summaries.length, 0);
+      assert.equal(requests.length, 0);
+    }
+  }
+});
+
 test("executor consumes only frozen compaction source, summaries sanitized SummaryInput, and atomically commits retained anchor", async () => {
   const source = testSource({ texts: ["x".repeat(100_000), "recent"] });
   const { executor, requests, summaries } = createExecutor({ source });

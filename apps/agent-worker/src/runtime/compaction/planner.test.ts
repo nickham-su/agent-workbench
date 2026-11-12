@@ -4,7 +4,7 @@ import { AGENT_QUEUE_INPUT_POLICY_VERSION } from "@agent-workbench/shared";
 import { estimatePrimaryMaterializedBlock } from "./estimator-v1.js";
 import { COMPACTION_MODE_POLICIES, computeCompactionProfileFingerprint, planCompaction } from "./planner.js";
 import { materializePrimaryBlocks } from "./primary-materializer.js";
-import { testProfile, testSource } from "./test-fixtures.js";
+import { addAssistantReplay, testProfile, testSource } from "./test-fixtures.js";
 
 function plannedSource() {
   return testSource({ texts: ["old ".repeat(14_000), "recent ".repeat(6_000), "trigger"] });
@@ -25,7 +25,6 @@ test("planner freezes the complete source split, costs, coordinates and non-wire
   assert.deepEqual(result.plan.retainedSourceBlockIds, ["m2", "m3"]);
   assert.equal(result.plan.retainedFromMessageId, "m2");
   assert.equal(result.plan.estimatedBeforeCost, result.plan.estimatedPrefixCost + result.plan.estimatedRetainedCost);
-  assert.equal(result.plan.containsTriggerMedia, false);
   assert.equal(result.plan.profileFingerprint.includes("secret"), false);
   assert.equal(result.plan.profileFingerprint.length, 64);
   assert.equal(result.plan.modePolicy, COMPACTION_MODE_POLICIES.manual);
@@ -59,7 +58,7 @@ test("planner blocks pending source before materialization", () => {
   });
 });
 
-test("planner forces trigger media into B and reports resend when its suffix cannot fit", () => {
+test("planner retains a recent user image under the ordinary tail budget", () => {
   const small = planCompaction({
     source: testSource({ texts: ["old ".repeat(14_000), "recent", "trigger"], mediaTrigger: true }),
     profile: testProfile,
@@ -67,14 +66,45 @@ test("planner forces trigger media into B and reports resend when its suffix can
   });
   assert.equal(small.kind, "planned");
   if (small.kind === "planned") {
-    assert.equal(small.plan.containsTriggerMedia, true);
     assert.equal(small.plan.retainedSourceBlockIds.includes("m3"), true);
+    assert.match(JSON.stringify(small.retainedBlocks), /attachment_ref/);
   }
-  const oversized = testSource({ texts: ["old", "trigger ".repeat(15_000)], mediaTrigger: true });
-  assert.deepEqual(planCompaction({ source: oversized, profile: testProfile, mode: "manual" }), {
-    kind: "media_requires_resend",
-    triggerMessageId: "m2",
+});
+
+test("planner can summarize a user image before a long completed tool loop", () => {
+  const source = testSource({
+    texts: ["question with image", ...Array(4).fill("x".repeat(18_000))],
+    types: ["user", "assistant", "assistant", "assistant", "assistant"],
+    triggerIndex: 0,
+    mediaTrigger: true,
   });
+  for (const block of source.blocks.slice(1)) addAssistantReplay(block, "@ai-sdk/openai");
+  for (const mode of ["manual", "proactive"] as const) {
+    const result = planCompaction({ source, profile: testProfile, mode });
+    assert.equal(result.kind, "planned");
+    if (result.kind !== "planned") continue;
+    assert.deepEqual(result.plan.prefixSourceBlockIds, ["m1", "m2", "m3"]);
+    assert.deepEqual(result.plan.retainedSourceBlockIds, ["m4", "m5"]);
+    assert.ok(result.plan.estimatedRetainedCost <= 20_000);
+    const imageSummary = result.summaryBlocks.find(block => block.sourceBlockId === "m1");
+    assert.match(JSON.stringify(imageSummary), /Image path: repo\/screen\.png; contents not included in summary/);
+    assert.equal(JSON.stringify(imageSummary).includes("attachment_ref"), false);
+  }
+  source.interactiveInput = { version: AGENT_QUEUE_INPUT_POLICY_VERSION, interactive: true, inputReceiptIds: ["receipt"],
+    inputs: [{ receiptId: "receipt", messageId: "m1", state: "unconfirmed", currentRunInput: true, attachments: [] }] };
+  assert.deepEqual(planCompaction({ source, profile: testProfile, mode: "proactive" }), { kind: "retained_tail_unavailable", reason: "budget" });
+  source.interactiveInput.inputs[0]!.state = "confirmed";
+  assert.equal(planCompaction({ source, profile: testProfile, mode: "proactive" }).kind, "planned");
+});
+
+test("planner handles an oversized latest block identically with or without a user image", () => {
+  for (const mediaTrigger of [false, true]) {
+    const oversized = testSource({ texts: ["old", "trigger ".repeat(15_000)], mediaTrigger });
+    assert.deepEqual(planCompaction({ source: oversized, profile: testProfile, mode: "manual" }), {
+      kind: "retained_tail_unavailable",
+      reason: "budget",
+    });
+  }
 });
 
 test("planner gives zero cost and no retained eligibility to projection-empty blocks", () => {

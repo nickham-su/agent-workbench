@@ -157,7 +157,6 @@ export class CompactionExecutor {
         const planned = planCompaction({ source, profile, mode: params.mode });
         this.remaining(deadline, deadlineController.signal, params.abortSignal);
         if (planned.kind === "blocked") return { kind: "blocked", reason: planned.reason };
-        if (planned.kind === "media_requires_resend") return { kind: "media_requires_resend" };
         if (planned.kind === "no_prefix") return { kind: "skipped", reason: "no_prefix" };
         if (planned.kind === "retained_tail_unavailable") {
           return { kind: "skipped", reason: planned.reason === "budget" ? "oversized_tail" : "no_prefix" };

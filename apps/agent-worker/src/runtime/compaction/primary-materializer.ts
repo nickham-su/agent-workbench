@@ -88,8 +88,7 @@ function materializeBlock(input: { source: CompactionSource; block: CompactionSo
   const validated = validateCompactionSourceBlock(block);
   const messages: PrimaryProviderNeutralMessage[] = [];
   const effective = effectiveUserInput({ messageId: block.sourceMessageId, triggerMessageId: source.triggerMessageId, policy: source.interactiveInput });
-  const containsTriggerMedia = effective.include && effective.realAttachments && block.message.type === "user" && validated.parts.some(part => part.type === "image");
-  if (!effective.include) return { sourceBlockId: block.sourceMessageId, sourceMessageType: block.message.type, messages: [], isProjectionEmpty: true, canStartRetainedTail: false, containsTriggerMedia: false };
+  if (!effective.include) return { sourceBlockId: block.sourceMessageId, sourceMessageType: block.message.type, messages: [], isProjectionEmpty: true, canStartRetainedTail: false };
 
   if (block.message.type === "user") {
     const text = validated.parts.filter((part) => part.type === "text").map((part) => part.text).join("");
@@ -171,7 +170,6 @@ function materializeBlock(input: { source: CompactionSource; block: CompactionSo
     messages,
     isProjectionEmpty,
     canStartRetainedTail: !isProjectionEmpty && (block.message.type === "user" || block.message.type === "system" || (block.message.type === "assistant" && hasAssistantMessage)),
-    containsTriggerMedia,
   };
 }
 
