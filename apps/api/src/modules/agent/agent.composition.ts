@@ -1,3 +1,9 @@
+import type { InputConfirmationSource } from "./message-queue/interactive-input-binding.store.js";
+import { AgentInteractiveInputService } from "./message-queue/interactive-input.service.js";
+import type { AgentApiPrepareInteractiveInputRequest, AgentApiInjectInteractiveInputRequest, AgentApiCompleteInteractiveAssistantRequest } from "@agent-workbench/shared/internal-contracts/agent-api";
+import { createAgentMessageQueueAssembly } from "./message-queue/message-queue.assembly.js";
+import type { AgentRuntimeControlService } from "./runtime-control/runtime-control.service.js";
+import { AgentRuntimeControlStore } from "./runtime-control/runtime-control.store.js";
 import { resolvePromptWorkspaceContext, readSafeContextFile } from "../workspaces/workspace-context.service.js";
 import path from "node:path";
 import { Value } from "@sinclair/typebox/value";
@@ -1177,6 +1183,9 @@ function createLifecycleFacadeCapabilities<
     | "discardStreamingAssistantFromWorker"
     | "completeAssistantFromWorker"
     | "completeTerminalAssistantFromWorker"
+    | "prepareInteractiveInputFromWorker"
+    | "injectInteractiveInputFromWorker"
+    | "completeInteractiveAssistantFromWorker"
     | "updateToolExecutionFromWorker"
     | "updateRunNoticeFromWorker"
     | "markRunWorkInProgressFromWorker"
@@ -1198,6 +1207,9 @@ function createLifecycleFacadeCapabilities<
   | "discardStreamingAssistantFromWorker"
   | "completeAssistantFromWorker"
   | "completeTerminalAssistantFromWorker"
+    | "prepareInteractiveInputFromWorker"
+    | "injectInteractiveInputFromWorker"
+    | "completeInteractiveAssistantFromWorker"
   | "updateToolExecutionFromWorker"
   | "updateRunNoticeFromWorker"
   | "markRunWorkInProgressFromWorker"
@@ -1215,6 +1227,9 @@ function createLifecycleFacadeCapabilities<
     discardStreamingAssistantFromWorker,
     completeAssistantFromWorker,
     completeTerminalAssistantFromWorker,
+    prepareInteractiveInputFromWorker,
+    injectInteractiveInputFromWorker,
+    completeInteractiveAssistantFromWorker,
     updateToolExecutionFromWorker,
     updateRunNoticeFromWorker,
     markRunWorkInProgressFromWorker,
@@ -1232,6 +1247,9 @@ function createLifecycleFacadeCapabilities<
     discardStreamingAssistantFromWorker,
     completeAssistantFromWorker,
     completeTerminalAssistantFromWorker,
+    prepareInteractiveInputFromWorker,
+    injectInteractiveInputFromWorker,
+    completeInteractiveAssistantFromWorker,
     updateToolExecutionFromWorker,
     updateRunNoticeFromWorker,
     markRunWorkInProgressFromWorker,
@@ -2335,8 +2353,25 @@ function createAgentApplications(
     return runLifecycleApplication.recoverRunsOnStartup(params);
   }
 
+  let interactiveInputService: AgentInteractiveInputService | undefined;
+  let interactiveInputAdmissionClosed = false;
+  function interactiveInputs() {
+    if (!interactiveInputService) {
+      interactiveInputService = new AgentInteractiveInputService(environment.db, getPromptContextForRun);
+      if (interactiveInputAdmissionClosed) interactiveInputService.closeAdmission();
+    }
+    return interactiveInputService;
+  }
+  function closeInteractiveInputAdmission() {
+    interactiveInputAdmissionClosed = true;
+    interactiveInputService?.closeAdmission();
+  }
+  function prepareInteractiveInputFromWorker(params: AgentApiPrepareInteractiveInputRequest) { return interactiveInputs().prepare(params); }
+  function injectInteractiveInputFromWorker(params: AgentApiInjectInteractiveInputRequest) { return interactiveInputs().inject(params); }
+  function completeInteractiveAssistantFromWorker(params: AgentApiCompleteInteractiveAssistantRequest, source: InputConfirmationSource = "worker_model") { return interactiveInputs().complete(params, source); }
+
   function createStreamingAssistantFromWorker(
-    params: AgentApiCreateStreamingAssistantRequest,
+    params: AgentApiCreateStreamingAssistantRequest, source: InputConfirmationSource = "worker_model",
   ) {
     workspaceDeletingFence.assertWritable(params.workspaceId);
     // A response-loss replay already has a durable Message and must not read
@@ -2344,25 +2379,29 @@ function createAgentApplications(
     const existing = getMessage(environment.db, params.messageId);
     try {
       if (existing) {
-        return {
+        const result = {
           message: appendStreamingAssistant(environment.db, {
-            ...params,
+            ...params, inputSource: source,
             expectedHeadMessageId: existing.previousMessageId,
             expectedRevision: 0,
             id: params.messageId, originRunId: params.runId, replacesMessageId: null,
           }),
         };
+        if (params.inputBinding) interactiveInputService?.releaseBound(params,params.inputBinding.inputRevision);
+        return result;
       }
       const head = getMessageSessionHead(environment.db, params);
       if (!head) throw new HttpError(404, "session not found");
-      return {
+      const result = {
         message: appendStreamingAssistant(environment.db, {
-          ...params,
+          ...params, inputSource: source,
           expectedHeadMessageId: head.headMessageId,
           expectedRevision: head.revision,
           id: params.messageId, originRunId: params.runId, replacesMessageId: null,
         }),
       };
+      if (params.inputBinding) interactiveInputService?.releaseBound(params,params.inputBinding.inputRevision);
+      return result;
     } catch (err) {
       if (err instanceof AgentStreamingAssistantReplayMismatchError) {
         throw new HttpError(409, err.message, err.code);
@@ -2387,20 +2426,20 @@ function createAgentApplications(
   }
 
   function resumeStreamingAssistantFromWorker(
-    params: AgentApiResumeStreamingAssistantRequest,
+    params: AgentApiResumeStreamingAssistantRequest, source: InputConfirmationSource = "worker_model",
   ) {
     workspaceDeletingFence.assertWritable(params.workspaceId);
-    return { result: resumeStreamingAssistant(environment.db, params) };
+    return { result: resumeStreamingAssistant(environment.db, { ...params, inputSource: source }) };
   }
 
   function replaceStreamingAssistantFromWorker(
-    params: AgentApiReplaceStreamingAssistantRequest,
+    params: AgentApiReplaceStreamingAssistantRequest, source: InputConfirmationSource = "worker_model",
   ) {
     workspaceDeletingFence.assertWritable(params.workspaceId);
     const head = getMessageSessionHead(environment.db, params);
     if (!head) throw new HttpError(404, "session not found");
     return replaceStreamingAssistant(environment.db, {
-      ...params,
+      ...params, inputSource: source,
       expectedHeadMessageId: head.headMessageId,
       expectedRevision: head.revision,
     });
@@ -2618,7 +2657,10 @@ function createAgentApplications(
 
   function convergeRunTerminalFromWorker(params: AgentApiConvergeRunTerminalRequest) {
     workspaceDeletingFence.assertWritable(params.workspaceId);
-    return runLifecycleApplication.convergeRunTerminal(params);
+    const result = runLifecycleApplication.convergeRunTerminal(params);
+    const run = getRunRecord(environment.db,params.runId);
+    if (!run || run.executionPhase === "terminal") interactiveInputService?.releaseRun(params);
+    return result;
   }
 
   function resolveSubtaskParentContext(params: {
@@ -2737,7 +2779,11 @@ function createAgentApplications(
     params: AgentApiSubtaskStartRequest,
   ) {
     workspaceDeletingFence.assertWritable(params.workspaceId);
-    return await subtaskApplication.startSubtask(params);
+    const result = await subtaskApplication.startSubtask(params);
+    const runtimeControl = new AgentRuntimeControlStore(environment.db);
+    const parentInstance = runtimeControl.boundRuntimeInstance(params.parentRunId);
+    if (parentInstance && !result.reused) runtimeControl.bindAdmission({workspaceId:params.workspaceId,sessionId:result.sessionId,runId:result.runId},parentInstance);
+    return result;
   }
 
   function resolveSubtaskForkBoundaryMessageId(params: {
@@ -2952,6 +2998,7 @@ function createAgentApplications(
           .map((execution) => execution.id),
       };
     return {
+      ...(resolved.interactiveInput == null ? {} : { interactiveInput: resolved.interactiveInput }),
       workspaceId: resolved.workspaceId,
       sessionId: resolved.sessionId,
       runId: resolved.run.runId,
@@ -3007,6 +3054,7 @@ function createAgentApplications(
       lastResponseTotalTokens: source.lastResponseTotalTokens,
       uiLocale: source.run.uiLocale,
       messages: projected.messages,
+      interactiveInput: source.interactiveInput,
       providerReplay: projected.providerReplay,
     };
   }
@@ -3232,6 +3280,9 @@ function createAgentApplications(
     discardStreamingAssistantFromWorker,
     completeAssistantFromWorker,
     completeTerminalAssistantFromWorker,
+    prepareInteractiveInputFromWorker,
+    injectInteractiveInputFromWorker,
+    completeInteractiveAssistantFromWorker,
     updateToolExecutionFromWorker,
     updateRunNoticeFromWorker,
     markRunWorkInProgressFromWorker,
@@ -3271,7 +3322,26 @@ function createAgentApplications(
     serviceCapabilities,
     testOnly,
     runtimeHandoffCoordinator,
-    dispose: () => runLifecycleApplication.dispose(),
+    // Expose a dormant factory only. S6 owns registration and the trusted recovery/start/close ordering.
+    createMessageQueue: (runtimeControl: AgentRuntimeControlService) => createAgentMessageQueueAssembly({
+      db: environment.db, dataDir: environment.dataDir, lifecycle: runLifecycleApplication, runtimeControl,
+      closeInputAdmission: closeInteractiveInputAdmission,
+      onScanError: () => logger.warn("message queue scan failed; retrying without activating new inputs"),
+      resolveProfile: (input) => {
+        if (!input.fixedIdentity) return resolvePrimarySessionModel(input);
+        const profile = environment.resolveExecutionProfile({
+          surface: "user", requestedAgentId: input.fixedIdentity.agentId,
+          workspaceEnablement: environment.getWorkspaceEnabledAgentIds(input.workspaceId),
+          modelOverride: { providerId: input.fixedIdentity.providerId, modelId: input.fixedIdentity.modelId },
+        });
+        return { agentId: profile.agent.id, providerId: profile.provider.id, modelId: profile.model.id };
+      },
+    }),
+    publishCommittedTerminalConvergence: runLifecycleApplication.publishCommittedTerminalConvergence.bind(runLifecycleApplication),
+    dispose: () => {
+      closeInteractiveInputAdmission();
+      runLifecycleApplication.dispose();
+    },
   };
 }
 
@@ -3305,15 +3375,18 @@ function createLocalRuntimeExecutionPort(
     archiveSearchFromWorker: (params) =>
       capabilities.worker.archiveSearchFromWorker(params),
     createStreamingAssistantFromWorker: (params) =>
-      capabilities.lifecycle.createStreamingAssistantFromWorker(params),
+      capabilities.lifecycle.createStreamingAssistantFromWorker(params, "local_fallback"),
     flushAssistantPartsFromWorker: (params) =>
       capabilities.lifecycle.flushAssistantPartsFromWorker(params),
     resumeStreamingAssistantFromWorker: (params) =>
-      capabilities.lifecycle.resumeStreamingAssistantFromWorker(params),
+      capabilities.lifecycle.resumeStreamingAssistantFromWorker(params, "local_fallback"),
     replaceStreamingAssistantFromWorker: (params) =>
-      capabilities.lifecycle.replaceStreamingAssistantFromWorker(params),
+      capabilities.lifecycle.replaceStreamingAssistantFromWorker(params, "local_fallback"),
     discardStreamingAssistantFromWorker: (params) =>
       capabilities.lifecycle.discardStreamingAssistantFromWorker(params),
+    prepareInteractiveInputFromWorker: params => capabilities.lifecycle.prepareInteractiveInputFromWorker(params),
+    injectInteractiveInputFromWorker: params => capabilities.lifecycle.injectInteractiveInputFromWorker(params),
+    completeInteractiveAssistantFromWorker: params => capabilities.lifecycle.completeInteractiveAssistantFromWorker(params, "local_fallback"),
     completeAssistantFromWorker: (params) =>
       capabilities.lifecycle.completeAssistantFromWorker(params),
     completeTerminalAssistantFromWorker: (params) =>
@@ -3370,7 +3443,7 @@ export function createAgentComposition(
   dependencies?: AgentCompositionDependencies,
 ) {
   const environment = createAgentCompositionEnvironment(ctx, logger);
-  const { serviceCapabilities, testOnly, runtimeHandoffCoordinator, dispose } = createAgentApplications(
+  const { serviceCapabilities, testOnly, runtimeHandoffCoordinator, createMessageQueue, publishCommittedTerminalConvergence, dispose } = createAgentApplications(
     environment,
     logger,
     runCompletedEventHub,
@@ -3389,6 +3462,8 @@ export function createAgentComposition(
     startupCoordinator,
     testOnly,
     runtimeHandoffCoordinator,
+    publishCommittedTerminalConvergence,
+    createMessageQueue,
     dispose,
   };
 }

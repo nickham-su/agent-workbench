@@ -1,3 +1,9 @@
+import type { AgentResumeMessageQueueRequest } from "@agent-workbench/shared";
+import { AgentQueueRecoveryStore } from "../message-queue/queue-recovery.store.js";
+import { assertSessionQueueUnoccupied } from "../message-queue/message-queue.guard.js";
+import { AgentMessageQueueStore, queueIdentity } from "../message-queue/message-queue.store.js";
+import { randomUUID } from "node:crypto";
+import { listCurrentRunScopesForStop, AgentRuntimeControlStore, assertSessionRuntimeUnblocked } from "../runtime-control/runtime-control.store.js";
 import type { Db } from "../../../infra/db/db.js";
 import type { AgentImageMediaType } from "@agent-workbench/shared/internal-contracts/agent-api-session";
 import { assertSubtaskSessionVisibility } from "../session/session-visibility.js";
@@ -45,14 +51,14 @@ function toSessionTitleFromFirstMessage(text: string) {
   return toAutomaticSessionTitle(text, "新会话");
 }
 
-function validateUserRunImages(input: UserRunActivationInput) {
+function validateUserRunImages(input: UserRunActivationInput, alreadyPublished = false) {
   const attachmentIds = new Set<string>();
   const storageKeys = new Set<string>();
   for (let index = 0; index < input.images.length; index += 1) {
     const image = input.images[index]!;
     if (image.position !== index) throw new Error("invalid agent image position");
     assertAgentAttachmentId(image.attachmentId);
-    assertAgentAttachmentTempId(image.tempId);
+    if (!alreadyPublished) assertAgentAttachmentTempId(image.tempId);
     if (
       image.filename.length < 1 ||
       [...image.filename].length > 255 ||
@@ -75,13 +81,48 @@ export class SqliteRunLifecyclePersistence
 {
   constructor(private readonly db: Db) {}
 
+  /** Queue activation delegates the ordinary message/Run authority in one transaction. */
+  resumeQueuedSession(input: AgentResumeMessageQueueRequest & { sessionId: string }, runId: string, createdAt: number) {
+    return new AgentQueueRecoveryStore(this.db).resume(input, runId, createdAt);
+  }
+
+  activateQueuedUserRun(input: { workspaceId: string; sessionId: string; receiptId: string; runId: string; createdAt: number; assertDispatchAdmission?: () => void }): UserRunActivationResult {
+    return this.db.transaction(() => {
+      input.assertDispatchAdmission?.();
+      const queue = new AgentMessageQueueStore(this.db);
+      queue.assertScope(input);
+      const receipt = queue.get(input, input.receiptId);
+      if (receipt.status === "injected") return { kind: "deduplicated" as const, messageId: receipt.message_id!, runId: receipt.injected_run_id! };
+      assertSessionRuntimeUnblocked(this.db, input.workspaceId, input.sessionId);
+      // A cleared current pointer is not proof that a draining/older execution has exited.
+      if (queue.hasUndrainedExecution(input))
+        return { kind: "session-running" as const };
+      const snapshot = queue.snapshot(input);
+      if (receipt.status !== "queued" || snapshot.mode !== "active" || snapshot.unconfirmedInputCount > 0 || snapshot.items[0]?.id !== receipt.id)
+        throw new HttpError(409, "Message queue is not dispatchable", "AGENT_QUEUE_NOT_DISPATCHABLE");
+      input.assertDispatchAdmission?.();
+      return this.activateUserRunInternal({ ...input, clientRequestId: receipt.client_request_id, text: receipt.text!, ...queueIdentity(receipt),
+        uiLocale: receipt.ui_locale, images: queue.attachments(input, receipt.id).map(image => ({
+          attachmentId: image.id, storageKey: image.storageKey, filename: image.filename, mediaType: image.mediaType,
+          byteSize: image.byteSize, position: image.position, tempId: "",
+        })) }, undefined, receipt.id);
+    }).immediate();
+  }
+
   activateUserRun(input: UserRunActivationInput, publishImages?: () => void): UserRunActivationResult {
+    return this.activateUserRunInternal(input, publishImages);
+  }
+
+  private activateUserRunInternal(input: UserRunActivationInput, publishImages?: () => void, queueReceiptId?: string): UserRunActivationResult {
     const transaction = this.db.transaction(() => {
+      if (!queueReceiptId && this.db.prepare("select 1 from agent_user_message_receipt where workspace_id=? and session_id=? and client_request_id=?")
+        .get(input.workspaceId, input.sessionId, input.clientRequestId)) throw new HttpError(409, "Request identity belongs to the message queue", "AGENT_REQUEST_ID_NAMESPACE_CONFLICT");
       const dedup = findMessageClientRequestDedup(this.db, {
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
         clientRequestId: input.clientRequestId,
         expectedSessionVisibility: input.expectedSessionVisibility,
+        queueReceiptId,
       });
       // Visibility is stable identity, unlike pristine head/title/revision.
       // Check it even on an accepted replay, before the idempotency shortcut.
@@ -92,6 +133,8 @@ export class SqliteRunLifecyclePersistence
         throw new HttpError(409, "Scheduled session identity changed before Run activation", "SESSION_ID_CONFLICT");
       }
       if (dedup) return { kind: "deduplicated" as const, ...dedup };
+      if (!queueReceiptId) assertSessionQueueUnoccupied(this.db, input.workspaceId, input.sessionId);
+      assertSessionRuntimeUnblocked(this.db,input.workspaceId,input.sessionId);
       const runState = getMessageRunState(
         this.db,
         input.workspaceId,
@@ -129,7 +172,7 @@ export class SqliteRunLifecyclePersistence
         session.revision !== expected.revision)) {
         throw new HttpError(409, "Scheduled fork session changed before Run activation", "SESSION_ID_CONFLICT");
       }
-      validateUserRunImages(input);
+      validateUserRunImages(input, !!queueReceiptId);
       // All ordinary idempotency, state and fork conflicts have been decided in
       // this synchronous SQLite transaction. Do not yield before publishing.
       publishImages?.();
@@ -138,7 +181,7 @@ export class SqliteRunLifecyclePersistence
           (id, workspace_id, storage_key, filename, media_type, byte_size, created_at)
           values (@attachmentId, @workspaceId, @storageKey, @filename, @mediaType, @byteSize, @createdAt)`,
       );
-      for (const image of input.images) {
+      for (const image of queueReceiptId ? [] : input.images) {
         insertAttachment.run({
           ...image,
           workspaceId: input.workspaceId,
@@ -190,6 +233,7 @@ export class SqliteRunLifecyclePersistence
         uiLocale: input.uiLocale,
         modelId: input.modelId,
         runKind: "user",
+        interactiveQueue: !!queueReceiptId,
         subtaskDepth: 0,
         parentRunId: null,
         parentToolExecutionId: null,
@@ -204,6 +248,14 @@ export class SqliteRunLifecyclePersistence
         runId: input.runId,
         createdAt: input.createdAt,
       });
+      if (queueReceiptId) {
+        this.db.prepare(`update agent_user_message_receipt set status='injected',message_id=?,injected_run_id=?,confirmation_state='unconfirmed',updated_at=? where id=? and status='queued'`)
+          .run(message.id, input.runId, input.createdAt, queueReceiptId);
+        this.db.prepare("insert into agent_interactive_run_input(workspace_id,session_id,run_id,receipt_id) values (?,?,?,?)")
+          .run(input.workspaceId, input.sessionId, input.runId, queueReceiptId);
+        this.db.prepare("update agent_session_queue_control set queue_version=queue_version+1,updated_at=? where workspace_id=? and session_id=?")
+          .run(input.createdAt, input.workspaceId, input.sessionId);
+      }
       startMessageRun(this.db, {
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
@@ -386,54 +438,25 @@ export class SqliteRunLifecyclePersistence
   }
 
   listActiveSessionIdsForCancel(input: CancelSessionsInput): string[] {
-    const visited = new Set<string>();
-    const queue = [input.rootSessionId];
-    const sessionIds: string[] = [];
-    while (queue.length > 0) {
-      const sessionId = queue.shift();
-      if (!sessionId || visited.has(sessionId)) continue;
-      visited.add(sessionId);
-      const session = getMessageSessionById(this.db, sessionId);
-      if (!session || session.workspaceId !== input.workspaceId) continue;
-      const state = getMessageRunState(this.db, session.workspaceId, session.id);
-      if (!state?.activeRunId || state.status !== "running") continue;
-      sessionIds.push(session.id);
-      for (const childSessionId of input.listActiveChildSessionIds({
-        workspaceId: session.workspaceId,
-        sessionId: session.id,
-        runId: state.activeRunId,
-      })) {
-        if (!visited.has(childSessionId)) queue.push(childSessionId);
-      }
-    }
-    return sessionIds;
+    return listCurrentRunScopesForStop(this.db,input.workspaceId,input.rootSessionId,input.listActiveChildSessionIds).map(run=>run.sessionId);
   }
 
   cancelSessions(input: CancelSessionsInput): CancelSessionsResult {
-    const transaction = this.db.transaction(() => {
+    const transaction = this.db.transaction((selectedRunIds: string[]) => {
       const cancelledRunIds = new Set<string>();
       const terminalIntents: Array<{ workspaceId: string; sessionId: string; runId: string }> = [];
+      const terminalConvergences: NonNullable<CancelSessionsResult["terminalConvergences"]> = [];
       const sessionIds = this.listActiveSessionIdsForCancel(input);
-      for (const sessionId of sessionIds) {
-        const session = getMessageSessionById(this.db, sessionId);
-        if (!session) continue;
-        const messageState = getMessageRunState(this.db, session.workspaceId, session.id);
-        if (!messageState?.activeRunId || messageState.status !== "running") continue;
-        const runKey = {
-          workspaceId: session.workspaceId,
-          sessionId: session.id,
-          runId: messageState.activeRunId,
-        };
-        // A commit may already have atomically persisted a completed intent.
-        // Converge that fact rather than overwriting it with cancellation.
-        if (!getPersistedRunTerminalIntent(this.db, runKey)) {
-          persistRunTerminalIntent(this.db, {
-            ...runKey, status: "cancelled", code: "run_cancelled", detail: null,
-            updatedAt: input.updatedAt,
-          });
+      const captured = this.db.prepare(`select workspace_id as workspaceId,session_id as sessionId,run_id as runId
+        from agent_run where workspace_id=? and run_id in (select value from json_each(?)) and execution_phase<>'terminal'`)
+        .all(input.workspaceId,JSON.stringify(selectedRunIds)) as Array<{workspaceId:string;sessionId:string;runId:string}>;
+      for (const runKey of captured) {
+        if (!getPersistedRunTerminalIntent(this.db,runKey)) {
+          persistRunTerminalIntent(this.db,{...runKey,status:"cancelled",code:"run_cancelled",detail:null,updatedAt:input.updatedAt});
           cancelledRunIds.add(runKey.runId);
         }
         terminalIntents.push(runKey);
+        terminalConvergences.push({...runKey,result:convergeRunTerminal(this.db,{...runKey,updatedAt:input.updatedAt})});
       }
       const root = getMessageSessionById(this.db, input.rootSessionId);
       if (!root) throw new Error("cancel root session not found after cancel");
@@ -442,9 +465,12 @@ export class SqliteRunLifecyclePersistence
         runtimeCancelSessionIds: sessionIds,
         cancelledRunIds: [...cancelledRunIds],
         terminalIntents,
+        terminalConvergences,
       };
     });
-    return transaction();
+    const stopOperationId = input.stopOperationId ?? randomUUID();
+    const stopped = new AgentRuntimeControlStore(this.db).stop({workspaceId:input.workspaceId,rootSessionId:input.rootSessionId,operationId:stopOperationId}, transaction, () => listCurrentRunScopesForStop(this.db,input.workspaceId,input.rootSessionId,input.listActiveChildSessionIds));
+    return stopped.result ? {...stopped.result,stopOperationId,stopReplayed:false} : {rootSessionId:input.rootSessionId,runtimeCancelSessionIds:[],cancelledRunIds:[],terminalIntents:[],stopOperationId,stopReplayed:true};
   }
 
   markRunWorkInProgress(input: import("./run-lifecycle-ports.js").TerminalControlInput) {

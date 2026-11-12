@@ -20,6 +20,7 @@ const DEFAULT_RUN_STATE = (sessionId = ""): AgentMessageSessionRunState => ({
   status: "idle",
   activeRunId: null,
   runNoticeText: "",
+  modelRequestError: null,
   retryCount: 0,
   nextRetryAt: null,
   activeAssistantMessageId: null,

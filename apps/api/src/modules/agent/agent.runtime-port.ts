@@ -1,3 +1,4 @@
+import type { AgentApiPrepareInteractiveInputRequest, AgentApiPrepareInteractiveInputResponse, AgentApiInjectInteractiveInputRequest, AgentApiInjectInteractiveInputResponse, AgentApiCompleteInteractiveAssistantRequest, AgentApiCompleteInteractiveAssistantResponse } from "@agent-workbench/shared/internal-contracts/agent-api";
 import type { AgentSessionRecord } from "@agent-workbench/shared/internal-contracts/agent-api-session";
 import type {
   AgentApiCompleteAssistantRequest,
@@ -32,6 +33,9 @@ export type AgentRuntimePort = RuntimeControlPort;
  * service's unrelated route, startup, or configuration responsibilities.
  */
 export type LocalAgentRuntimeExecutionPort = {
+  prepareInteractiveInputFromWorker?(params: AgentApiPrepareInteractiveInputRequest): Promise<AgentApiPrepareInteractiveInputResponse>;
+  injectInteractiveInputFromWorker?(params: AgentApiInjectInteractiveInputRequest): AgentApiInjectInteractiveInputResponse;
+  completeInteractiveAssistantFromWorker?(params: AgentApiCompleteInteractiveAssistantRequest): AgentApiCompleteInteractiveAssistantResponse;
   getPromptContextForRun(params: AgentApiPromptContextRequest): Promise<AgentApiPromptContextResponse>;
   archiveReadFromWorker(params: AgentApiArchiveReadRequest): AgentApiArchivePageResponse;
   archiveSearchFromWorker(params: AgentApiArchiveSearchRequest): AgentApiArchivePageResponse;

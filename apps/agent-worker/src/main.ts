@@ -28,7 +28,7 @@ const runner = new AgentRunner(
   mcpManager,
   console,
   env.concurrency,
-  { attachmentStorage, analyticsSignals, dataDir: env.dataDir },
+  { attachmentStorage, analyticsSignals, dataDir: env.dataDir, runtimeInstanceId: env.runtimeInstanceId },
 );
 startBashToolProbe(console);
 const server = createWorkerServer({
@@ -51,7 +51,11 @@ if (env.pidFilePath) {
   await fs.writeFile(env.pidFilePath, String(process.pid), "utf8");
 }
 
+let shuttingDown = false;
 const shutdown = async () => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  await runner.shutdownRetirements();
   if (env.pidFilePath) {
     try {
       await fs.rm(env.pidFilePath, { force: true });

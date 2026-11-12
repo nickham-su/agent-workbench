@@ -13,7 +13,8 @@ import {
   forkMessageSession,
   startMessageRun,
   settleMessageRunIfCurrent,
-  updateToolExecution
+  updateToolExecution,
+  updateMessageRunNotice
 } from "../agent-message.store.js";
 import { createMessageRunRecord } from "../agent-message.store.js";
 import { HttpError } from "../../../app/errors.js";
@@ -485,4 +486,19 @@ test("run state 投影最近响应 Token、当前 Run 起点与最近终态 Run 
   assert.equal(idleState.activeRunStartedAt, null);
   assert.equal(idleState.lastRunDurationMs, 60);
   db.close();
+});
+
+
+test("public run-state exposes the separate model response detail and observes clearing", () => {
+  const { db, query } = createFixture();
+  try {
+    createMessageRunRecord(db, { runId: "run", workspaceId: "ws", sessionId: "session", triggerMessageId: null, agentId: "agent", providerId: "provider", modelId: "model", status: "running", createdAt: 2 });
+    startMessageRun(db, { workspaceId: "ws", sessionId: "session", runId: "run", updatedAt: 2 });
+    const base = { workspaceId: "ws", sessionId: "session", runId: "run" };
+    const detail = { statusCode: 400, responseBody: "invalid model", message: "HTTP 400", truncated: false };
+    updateMessageRunNotice(db, { ...base, runNoticeText: "Request failed", modelRequestError: detail, updatedAt: 3 });
+    assert.deepEqual(query.getRunState({ workspaceId: "ws", sessionId: "session" }).modelRequestError, detail);
+    updateMessageRunNotice(db, { ...base, runNoticeText: "", modelRequestError: null, updatedAt: 4 });
+    assert.equal(query.getRunState({ workspaceId: "ws", sessionId: "session" }).modelRequestError, null);
+  } finally { db.close(); }
 });

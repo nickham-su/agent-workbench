@@ -1,3 +1,4 @@
+import { listenAgentTestApp } from "../agent/testkit/agent-testkit.js";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
@@ -176,7 +177,7 @@ test("客户端取消大媒体请求后释放文件句柄，后续 Range 请求�
     if (args[0] === absolutePath) opened.push(handle);
     return handle;
   });
-  const origin = await app.listen({ host: "127.0.0.1", port: 0 });
+  const origin = await listenAgentTestApp(app, 0);
   let received = 0;
   await new Promise<void>((resolve, reject) => {
     let cancelled = false;
@@ -223,7 +224,7 @@ test("客户端在安全打开过程中断连也会关闭稍后返回的文件�
     }
     return handle;
   });
-  const origin = await app.listen({ host: "127.0.0.1", port: 0 });
+  const origin = await listenAgentTestApp(app, 0);
   const request = http.get(`${origin}${url("opening.mp4")}`);
   const disconnected = new Promise<void>((resolve) => request.once("close", resolve));
   request.on("error", () => {}); // Expected ECONNRESET when aborting before response headers.

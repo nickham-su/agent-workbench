@@ -1,3 +1,4 @@
+import { listenAgentTestApp } from "../testkit/agent-testkit.js";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AgentApiSubtaskStartRequest, AgentApiSubtaskStartResponse, AgentApiUpdateToolExecutionRequest } from "@agent-workbench/shared/internal-contracts/agent-api";
@@ -44,7 +45,7 @@ for (const mode of ["caller", "other", "new", "existing", "implicit", "implicit-
     await enableSubtask(fixture);
     // Listening completes fallback startup recovery before we create live Runs.
     // Starting the listener later would correctly recover our fixtures as stale.
-    const apiOrigin = await fixture.app.listen({ port: 0, host: "127.0.0.1" });
+    const apiOrigin = await listenAgentTestApp(fixture.app, 0);
     const caller = mode === "implicit" ? createSubtaskSessionForTest(fixture) : await createSession(fixture.app, fixture.workspaceId);
     const parentRun = createMessageRunForTest({ fixture, sessionId: caller.id, subtaskDepth: mode === "implicit" ? 1 : 0,
       text: "caller stable history" });

@@ -156,9 +156,10 @@ test("bootstrap disables real navigation while preserving link and cancellation 
   `);
 });
 
-test("default component list contains thirty unique files including view_image preview", () => {
-  assert.equal(componentTests.length, 30);
-  assert.equal(new Set(componentTests).size, 30);
+test("default component list contains thirty-one unique files including message queue and view_image preview", () => {
+  assert.equal(componentTests.length, 31);
+  assert.equal(new Set(componentTests).size, 31);
+  assert.ok(componentTests.includes("src/features/workspace/tools/agent/AgentMessageQueue.component.test.ts"));
   assert.ok(componentTests.includes("src/features/workspace/WorkspaceLayout.component.test.ts"));
   assert.ok(componentTests.includes("src/features/workspace/tools/code-review/CodeReviewState.component.test.ts"));
   assert.ok(componentTests.includes("src/features/workspace/tools/code-review/CodeReviewToolView.component.test.ts"));

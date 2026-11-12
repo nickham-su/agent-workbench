@@ -90,7 +90,7 @@ test("RuntimeTranscriptProjector still rejects current images without a trusted 
     ]
   };
   for (const attachmentPaths of [undefined, new Map<string, string | null>(), new Map([["image", null]]), new Map([["image", ""]])]) {
-    assert.throws(() => projector.project({ ...input, attachmentPaths }), /current Run image has no trusted Workspace path/);
+    assert.throws(() => projector.project({ ...input, attachmentPaths }), /Current input image has no trusted Workspace path/);
   }
 });
 

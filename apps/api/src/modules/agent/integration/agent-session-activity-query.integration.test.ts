@@ -1,3 +1,4 @@
+import { listenAgentTestApp } from "../testkit/agent-testkit.js";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -18,7 +19,7 @@ async function createFixture(t: TestContext, authToken: string | null = null) {
   const app = fixture.app;
   if (!app) throw new Error("session activity HTTP fixture requires an app");
   const workspace = await createTestWorkspace(fixture);
-  const origin = await app.listen({ host: "127.0.0.1", port: 0 });
+  const origin = await listenAgentTestApp(app, 0);
   const queryUrl = `${origin}/api/agent/sessions/query?workspaceId=${encodeURIComponent(workspace.id)}&updatedWithinSeconds=3600`;
   return {
     ...fixture, app, origin, workspaceId: workspace.id, queryUrl,

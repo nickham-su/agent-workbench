@@ -1,3 +1,4 @@
+import { AgentEffectiveInputPolicySchema } from "./agent-input-binding.js";
 import { Type, type Static } from "@sinclair/typebox";
 import {
   AgentContextToolNameSchema,
@@ -173,6 +174,7 @@ const AgentApiCompactionPendingBoundarySchema = Type.Union([
 ]);
 
 export const AgentApiCompactionSourceResponseSchema = Type.Object({
+  interactiveInput: Type.Optional(AgentEffectiveInputPolicySchema),
   workspaceId: Type.String({ minLength: 1 }),
   sessionId: Type.String({ minLength: 1 }),
   runId: Type.String({ minLength: 1 }),
@@ -281,6 +283,7 @@ const AgentApiPromptProviderReplaySourceSchema = Type.Object({
 }, { additionalProperties: false });
 
 export const AgentApiPromptContextResponseSchema = Type.Object({
+  interactiveInput: Type.Optional(AgentEffectiveInputPolicySchema),
   headMessageId: Type.Union([Type.String({ minLength: 1 }), Type.Null()]),
   sessionRevision: Type.Integer({ minimum: 0 }),
   system: Type.String(),

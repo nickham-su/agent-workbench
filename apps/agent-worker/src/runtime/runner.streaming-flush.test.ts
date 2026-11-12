@@ -600,6 +600,23 @@ test("runModelStep: ToolExecution 构造失败不重试且写唯一安全 failed
   }
 });
 
+test("runModelStep: 默认允许系统消息并保留模型显式配置", async () => {
+  for (const aiSdk of [undefined, {}, { temperature: 0.25 }, { allowSystemInMessages: false }]) {
+    const stream = createControlledStream();
+    const profile = baseProfile();
+    if (aiSdk !== undefined) profile.model.options = { aiSdk };
+    const started = startRunModelStep({ stream, profile });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const request = started.streamRequests[0] as Record<string, unknown>;
+    assert.equal(request.allowSystemInMessages, aiSdk?.allowSystemInMessages ?? true);
+
+    await stream.push({ type: "text-delta", text: "configured" });
+    await stream.finish();
+    await started.promise;
+  }
+});
+
 test("runModelStep: 共享 aiSdk settings 进入 Agent 主调用请求", async () => {
   const stream = createControlledStream();
   const profile = baseProfile();
@@ -753,7 +770,9 @@ test("runModelStep: modelRequestMaxRetries 为 0 时首次 Provider 失败直接
 
     await assert.rejects(started.promise, (error) => error === providerError);
     assert.equal(started.streamRequests.length, 1);
-    assert.equal(started.runNoticeUpdates.length, 0);
+    assert.equal(started.runNoticeUpdates.length, 1);
+    assert.match(String(started.runNoticeUpdates[0]!.runNoticeText), /^Request failed:/);
+    assert.equal(started.runNoticeUpdates[0]!.nextRetryAt, null);
     assert.deepEqual(scheduledDelays, []);
     assert.equal(started.discardRequests.length, 0);
   } finally {
@@ -818,13 +837,14 @@ test("manual and proactive compaction retry notices contain only attempts and de
         };
         (harness.runner as any).runModelStep = async () => {
           modelSteps += 1;
+          if (modelSteps === 1) return { aborted: false, toolCallCount: 1, responseTotalTokens: 80_000 };
           assert.equal(harness.runNoticeUpdates.at(-1)?.runNoticeText, "");
           return { aborted: false, toolCallCount: 0, hasVisibleText: true, terminalIntentPersisted: false };
         };
       }
       await (harness.runner as any).processRun({ ...baseRun(), ...(mode === "manual" ? { runKind: "manual_compaction" } : {}) }, new AbortController().signal);
       assert.equal(calls, 2);
-      assert.equal(modelSteps, mode === "proactive" ? 1 : 0);
+      assert.equal(modelSteps, mode === "proactive" ? 2 : 0);
       const retryNotices = harness.runNoticeUpdates.filter(({ runNoticeText }) => String(runNoticeText).includes("压缩上下文") && String(runNoticeText).includes("重试"));
       assert.equal(retryNotices.length, 1);
       assert.equal(retryNotices[0]?.compactionExpectedRevision, 7);
@@ -858,7 +878,10 @@ test("compaction notices are best-effort: permanent and transient notice errors 
         attempts += 1;
         throw new Error("private provider response");
       };
-      if (mode === "proactive") (harness.runner as any).shouldAutoCompact = () => true;
+      if (mode === "proactive") {
+        (harness.runner as any).shouldAutoCompact = () => true;
+        (harness.runner as any).runModelStep = async () => ({ aborted: false, toolCallCount: 1, responseTotalTokens: 80_000 });
+      }
       await (harness.runner as any).processRun({ ...baseRun(), ...(mode === "manual" ? { runKind: "manual_compaction" } : {}) }, new AbortController().signal);
       assert.equal(attempts, 3, `${mode} must make the initial summary call and two configured retries`);
       assert.equal(harness.runNoticeUpdates.length, 1, "notice RPC must not retry without bound");
@@ -895,11 +918,12 @@ test("committed proactive compaction survives a failed notice cleanup and contin
     let modelSteps = 0;
     (harness.runner as any).runModelStep = async () => {
       modelSteps += 1;
+      if (modelSteps === 1) return { aborted: false, toolCallCount: 1, responseTotalTokens: 80_000 };
       return { aborted: false, toolCallCount: 0, hasVisibleText: true, terminalIntentPersisted: false };
     };
     await (harness.runner as any).processRun(baseRun(), new AbortController().signal);
     assert.equal(attempts, 2);
-    assert.equal(modelSteps, 1);
+    assert.equal(modelSteps, 2);
     assert.equal(harness.runNoticeUpdates.length, 2, "cleanup should try once, never retry forever");
     assert.equal(harness.runNoticeUpdates[1]?.runNoticeText, "");
     assert.equal(harness.terminalCompletions.at(-1)?.status, "completed");
@@ -908,7 +932,7 @@ test("committed proactive compaction survives a failed notice cleanup and contin
   }
 });
 
-test("processRun: fenced cleanup after confirmed commit stops stale Run without a model request or failed terminal", async () => {
+test("processRun: fenced cleanup after confirmed commit stops stale Run without another model request or failed terminal", async () => {
   const originalSetTimeout = globalThis.setTimeout;
   (globalThis as any).setTimeout = ((handler: (...args: any[]) => void, _ms?: number, ...args: any[]) => originalSetTimeout(handler, 0, ...args)) as typeof setTimeout;
   try {
@@ -929,9 +953,12 @@ test("processRun: fenced cleanup after confirmed commit stops stale Run without 
       };
       (harness.runner as any).shouldAutoCompact = () => true;
       let modelRequests = 0;
-      (harness.runner as any).runModelStep = async () => { modelRequests++; throw new Error("stale run requested model"); };
+      (harness.runner as any).runModelStep = async () => {
+        if (++modelRequests === 1) return { aborted: false, toolCallCount: 1, responseTotalTokens: 80_000 };
+        throw new Error("stale run requested model");
+      };
       await (harness.runner as any).processRun(baseRun(), new AbortController().signal);
-      assert.equal(modelRequests, 0);
+      assert.equal(modelRequests, 1);
       assert.equal(harness.terminalCompletions.length, 0);
       assert.equal(harness.runNoticeUpdates.length, 2);
       assert.equal(warnings.filter((line) => line.includes("cleanup fence lost")).length, 1);
@@ -955,9 +982,12 @@ test("compaction notice fence loss is not silently ignored", async () => {
     (harness.runner as any).generateSingleCallSummary = async () => { attempts += 1; throw new Error("summary failed"); };
     (harness.runner as any).shouldAutoCompact = () => true;
     let modelRequests = 0;
-    (harness.runner as any).runModelStep = async () => { modelRequests++; throw new Error("stale run requested model"); };
+    (harness.runner as any).runModelStep = async () => {
+      if (++modelRequests === 1) return { aborted: false, toolCallCount: 1, responseTotalTokens: 80_000 };
+      throw new Error("stale run requested model");
+    };
     await (harness.runner as any).processRun(baseRun(), new AbortController().signal);
-    assert.equal(modelRequests, 0);
+    assert.equal(modelRequests, 1);
     assert.equal(harness.terminalCompletions.length, 0);
     assert.equal(attempts, 1);
   } finally {
@@ -1223,6 +1253,7 @@ test("runModelStep: tool-call step 前未达阈值文本会在 completed 中保�
   const result = await started.promise;
 
   assert.equal(result.toolCallCount, 1);
+  assert.equal(result.responseTotalTokens, 3);
   const completed = started.completions;
   assert.equal(completed.length, 1);
   assert.equal(completed[0]?.messageId ? "preface" : undefined, "preface");
@@ -1268,8 +1299,9 @@ test("runModelStep: 失败 attempt 的 usage 不会污染无 usage 的成功 att
     void failed.push({ type: "error", error: new Error("retry after usage") }).catch(() => undefined);
     void successful.push({ type: "text-delta", text: "ok" });
     void successful.finish({ usage: {} });
-    await started.promise;
+    const result = await started.promise;
 
+    assert.equal(result.responseTotalTokens, null);
     assert.equal(started.completions[0]?.responseTotalTokens, null);
   } finally {
     globalThis.setTimeout = originalSetTimeout;
@@ -1288,8 +1320,9 @@ test("runModelStep: 重试成功后只上报最终 attempt 的 usage", async () 
     void failed.push({ type: "error", error: new Error("retry after usage") }).catch(() => undefined);
     void successful.push({ type: "text-delta", text: "ok" });
     void successful.finish({ usage: { totalTokens: 7 } });
-    await started.promise;
+    const result = await started.promise;
 
+    assert.equal(result.responseTotalTokens, 7);
     assert.equal(started.completions[0]?.responseTotalTokens, 7);
   } finally {
     globalThis.setTimeout = originalSetTimeout;
@@ -2457,4 +2490,28 @@ test("runModelStep: 非 OpenAI Provider 不要求 Responses terminal raw", async
   await stream.finish({ terminal: false });
   await promise;
   assert.equal(harness.completions.length, 1);
+});
+test("processRun: actual tool response usage triggers compaction only after tools close, never after the final answer", async () => {
+  const toolStream = createControlledStream();
+  const finalStream = createControlledStream();
+  const events: string[] = [];
+  const harness = createRunnerHarness({
+    streams: [toolStream, finalStream],
+    profile: { ...baseProfile(), model: { ...baseProfile().model, contextWindowTokens: 100_000 },
+      runtime: { ...baseProfile().runtime, autoCompactThresholdPct: 80 } } as any,
+    promptContexts: [baseContext(), { ...baseContext(), pendingTools: [{ status: "queued", toolExecutionId: "tool" }] } as any, baseContext()],
+    onAssistantComplete: (_input, terminal) => { events.push(terminal ? "final-response" : "tool-response"); },
+  });
+  (harness.runner as any).executePendingTools = async () => { events.push("tools"); return { paused: false }; };
+  (harness.runner as any).executeCompaction = async () => { events.push("compact"); return { kind: "skipped", reason: "not_needed" }; };
+  const processing = (harness.runner as any).processRun(baseRun(), new AbortController().signal);
+  await toolStream.push({ type: "tool-call", toolName: "read", toolCallId: "tool-call", input: { filePath: "README.md" } });
+  await toolStream.finish({ usage: { inputTokens: 79_000, outputTokens: 1_000 } });
+  await finalStream.push({ type: "text-delta", text: "done" });
+  await finalStream.finish({ usage: { totalTokens: 99_999 } });
+  await processing;
+  assert.deepEqual(events, ["tool-response", "tools", "compact", "final-response"]);
+  assert.equal(harness.streamRequests.length, 2);
+  assert.equal(harness.completions[0]?.responseTotalTokens, 80_000);
+  assert.equal(harness.completions[1]?.responseTotalTokens, 99_999);
 });

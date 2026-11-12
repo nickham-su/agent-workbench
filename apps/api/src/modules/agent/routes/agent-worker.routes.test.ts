@@ -235,3 +235,33 @@ test("compaction confirmation route is token-protected and uses a strict identit
   assert.deepEqual(response.json(), { outcome: "committed" });
   assert.deepEqual(calls, [request]);
 });
+
+test("model error diagnostics pass both retry RPCs with token protection and bounded response bodies", async () => {
+  const app = Fastify(); apps.push(app);
+  const calls: unknown[] = [];
+  await registerAgentWorkerRoutes(app, {
+    internalToken: "internal-token",
+    service: {
+      updateRunNoticeFromWorker(input: unknown) { calls.push(input); return { result: "updated" }; },
+      replaceStreamingAssistantFromWorker(input: unknown) { calls.push(input); return { result: "updated", message: null }; },
+    },
+  } as unknown as AgentWorkerRouteDependencies);
+  await app.ready();
+  const detail = { statusCode: 503, responseBody: '{"error":"busy"}', message: "HTTP 503", truncated: false };
+  const base = { workspaceId: "workspace", sessionId: "session", runId: "run", runNoticeText: "Request failed", modelRequestError: detail };
+  const cases = [
+    { endpoint: AgentApiEndpoints.updateRunNotice, payload: { ...base, updatedAt: 1 } },
+    { endpoint: AgentApiEndpoints.replaceStreamingAssistant, payload: { ...base, oldMessageId: "old", newMessageId: "new", retryCount: 1, nextRetryAt: 99, createdAt: 1 } },
+  ];
+  for (const { endpoint, payload } of cases) {
+    const missingToken = await app.inject({ method: endpoint.method, url: endpoint.path, payload });
+    assert.equal(missingToken.statusCode, 401);
+    const response = await app.inject({ method: endpoint.method, url: endpoint.path, headers: { "x-awb-agent-internal-token": "internal-token" }, payload });
+    assert.equal(response.statusCode, 200, response.body);
+    assert.deepEqual(calls.at(-1), payload);
+    const oversized = await app.inject({ method: endpoint.method, url: endpoint.path, headers: { "x-awb-agent-internal-token": "internal-token" },
+      payload: { ...payload, modelRequestError: { ...detail, responseBody: "x".repeat(32_769) } } });
+    assert.equal(oversized.statusCode, 400);
+  }
+  assert.equal(calls.length, 2);
+});

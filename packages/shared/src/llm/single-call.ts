@@ -346,6 +346,8 @@ function buildSingleCallRequest(profile: SingleCallModelProfile, params: SingleC
     model: createLanguageModel(profile),
     messages: params.messages,
     abortSignal,
+    // Historical system messages and compaction summaries are intentional.
+    allowSystemInMessages: true,
     ...runtimeOptions.aiSdk,
   };
   if (options?.disableSdkRetries) {

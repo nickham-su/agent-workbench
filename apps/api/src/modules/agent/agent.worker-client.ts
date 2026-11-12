@@ -4,6 +4,11 @@ import { Value } from "@sinclair/typebox/value";
 import type { TSchema } from "@sinclair/typebox";
 import { AgentWorkerEndpoints } from "@agent-workbench/shared/internal-contracts/endpoints";
 import {
+  AgentWorkerRuntimeIdentityResponseSchema,
+  AgentWorkerStopRunsResponseSchema,
+  type AgentWorkerRuntimeIdentityResponse,
+  type AgentWorkerStopRunsRequest,
+  type AgentWorkerStopRunsResponse,
   AgentWorkerCancelSessionAndWaitRequestSchema,
   AgentWorkerCancelSessionAndWaitResponseSchema,
   AgentWorkerCancelSessionRequestSchema,
@@ -46,7 +51,7 @@ export class AgentWorkerClient implements AgentRuntimePort {
   ) {}
 
   private async postBySocket(pathname: string, body: unknown, timeoutMs: number): Promise<WorkerResponse> {
-    const payload = JSON.stringify(body);
+    const payload = this.methodFor(pathname) === "GET" ? null : JSON.stringify(body);
     return await new Promise<WorkerResponse>((resolve, reject) => {
       const req = httpRequest(
         {
@@ -55,7 +60,7 @@ export class AgentWorkerClient implements AgentRuntimePort {
           method: this.methodFor(pathname),
           headers: {
             "content-type": "application/json",
-            "content-length": Buffer.byteLength(payload),
+            ...(payload === null ? {} : {"content-length": Buffer.byteLength(payload)}),
             "x-awb-agent-internal-token": this.params.internalToken
           }
         },
@@ -75,12 +80,14 @@ export class AgentWorkerClient implements AgentRuntimePort {
         req.destroy(new Error("worker request timeout"));
       });
       req.on("error", reject);
-      req.write(payload);
+      if(payload !== null) req.write(payload);
       req.end();
     });
   }
 
   private methodFor(pathname: string) {
+    if (pathname === AgentWorkerEndpoints.runtimeIdentity.path) return AgentWorkerEndpoints.runtimeIdentity.method;
+    if (pathname === AgentWorkerEndpoints.stopRunsAndWait.path) return AgentWorkerEndpoints.stopRunsAndWait.method;
     if (pathname === AgentWorkerEndpoints.enqueueRun.path) return AgentWorkerEndpoints.enqueueRun.method;
     if (pathname === AgentWorkerEndpoints.cancelSession.path) return AgentWorkerEndpoints.cancelSession.method;
     if (pathname === AgentWorkerEndpoints.cancelSessionAndWait.path) return AgentWorkerEndpoints.cancelSessionAndWait.method;
@@ -101,7 +108,7 @@ export class AgentWorkerClient implements AgentRuntimePort {
             "content-type": "application/json",
             "x-awb-agent-internal-token": this.params.internalToken
           },
-          body: JSON.stringify(body),
+          body: this.methodFor(pathname) === "GET" ? undefined : JSON.stringify(body),
           signal: controller.signal
         });
         response = {
@@ -143,6 +150,18 @@ export class AgentWorkerClient implements AgentRuntimePort {
       return response;
     }
     throw validationError;
+  }
+
+  async getRuntimeIdentity(): Promise<AgentWorkerRuntimeIdentityResponse> {
+    const response = await this.post(AgentWorkerEndpoints.runtimeIdentity.path, {}, 2500);
+    if (!Value.Check(AgentWorkerRuntimeIdentityResponseSchema,response)) throw new Error("AGENT_RUNTIME_IDENTITY_INVALID");
+    return response;
+  }
+  async stopRunsAndWait(request: AgentWorkerStopRunsRequest): Promise<AgentWorkerStopRunsResponse> {
+    const response = await this.post(AgentWorkerEndpoints.stopRunsAndWait.path,request,request.timeoutMs+1000);
+    // Safety proofs always use strict validation, even if ordinary legacy responses use warn mode.
+    if (!Value.Check(AgentWorkerStopRunsResponseSchema,response)) throw new Error("AGENT_RUNTIME_STOP_RESPONSE_INVALID");
+    return response;
   }
 
   async enqueueRun(run: WorkerQueuedRun): Promise<void> {

@@ -52,7 +52,7 @@ function businessData(db: Database.Database) {
   const tables = ["workspaces", "agent_session", "agent_attachment", "agent_message", "agent_message_part", "agent_run", "agent_tool_execution",
     "agent_client_request", "session_run_state", "agent_archived_text_fts", "agent_text_part_fts_map", "scheduled_agent_task", "scheduled_agent_execution"];
   return tables.map((table) => ({ table, rows: (db.prepare(`select * from ${table} order by rowid`).all() as Record<string, unknown>[])
-    .map(({ visibility: _visibility, ...row }) => row) }));
+    .map(({ visibility: _visibility, model_request_error_json: _modelRequestError, interactive_queue_enabled: _interactiveQueue, ...row }) => row) }));
 }
 function actualStates(db: Database.Database) {
   return db.prepare("select workspace_id as workspaceId, session_id as sessionId, visible, updated_at as updatedAt from workspace_session_tab_state order by workspace_id,session_id").all();
@@ -415,7 +415,7 @@ test("two concurrent SQLite starters upgrade a real v23 once and then both obser
           db.pragma('busy_timeout=8000'); db.pragma('foreign_keys=ON'); initSchema(db);
           const row=db.prepare('select version from agent_schema_meta').get(); db.close(); parentPort.postMessage(row.version);
         })().catch(error => { throw error; });`, { eval: true, workerData: { filename, schemaUrl } });
-      worker.on("message", (version) => { try { assert.equal(version, 24); resolve(); } catch (e) { reject(e); } });
+      worker.on("message", (version) => { try { assert.equal(version, AGENT_SCHEMA_VERSION); resolve(); } catch (e) { reject(e); } });
       worker.on("error", reject); worker.on("exit", (code) => { if (code !== 0) reject(new Error(`starter exited ${code}`)); });
     });
     await Promise.all([start(), start()]);
@@ -438,7 +438,7 @@ test("offline backup and rollback restore the same v23 database and artifact sna
 
     const upgraded = await openDb(active);
     try {
-      assert.deepEqual(upgraded.prepare("select version from agent_schema_meta").get(), { version: 24 });
+      assert.deepEqual(upgraded.prepare("select version from agent_schema_meta").get(), { version: AGENT_SCHEMA_VERSION });
       assert.deepEqual(businessData(upgraded), expected);
       createMessageSession(upgraded, { workspaceId: "a", id: "after-upgrade", title: "after upgrade", kind: "primary", visibility: "unlisted", createdAt: 100 });
       writeFileSync(path.join(active, artifactRelative), "after-upgrade fixture");

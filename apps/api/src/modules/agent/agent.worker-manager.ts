@@ -47,6 +47,7 @@ type WorkerLiveSnapshot = { snapshotAt: number; activeCount: number; queueLength
 type WorkerLifecycleIntent = { version: 2; signal: AnalyticsSignalEvent; legacy?: boolean };
 type ChildLifetime = {
   generation: string;
+  runtimeInstanceId: string;
   epoch: number;
   exited: boolean;
   failedToSpawn: boolean;
@@ -98,6 +99,7 @@ export function buildAgentWorkerSpawnEnv(params: {
   responseValidation: "strict" | "warn";
   pidFilePath: string;
   analyticsProducerGeneration?: string;
+  runtimeInstanceId?: string;
 }): NodeJS.ProcessEnv {
   return {
     ...params.parentEnv,
@@ -111,6 +113,7 @@ export function buildAgentWorkerSpawnEnv(params: {
     AWB_INTERNAL_RPC_RESPONSE_VALIDATION: params.responseValidation,
     AWB_AGENT_WORKER_PID_FILE: params.pidFilePath,
     AWB_AGENT_ANALYTICS_GENERATION: params.analyticsProducerGeneration,
+    AWB_AGENT_RUNTIME_INSTANCE_ID: params.runtimeInstanceId,
     AWB_AGENT_REPO_ROOT: params.repoRoot
   };
 }
@@ -164,6 +167,9 @@ export class AgentWorkerProcessManager {
       pidFilePath: string;
       logger: FastifyBaseLogger;
       onReady?: (generation: number) => void | Promise<void>;
+      onRuntimeStarting?(runtimeInstanceId: string, processIdentity: {pid:null;spawnObservedAt:number;spawnNonce:string}): void;
+      onRuntimeReady?(runtimeInstanceId: string, processIdentity: {pid:number|null;spawnObservedAt:number;spawnNonce:string}): void | Promise<void>;
+      onRuntimeExit?(runtimeInstanceId: string, evidence: {pid:number|null;spawnObservedAt:number;spawnNonce:string;code:number|null;signal:NodeJS.Signals|null;observedAt:number}): void;
       diagnoseOutboxCorrupt?: (input: { producerGeneration: string; recordedAt?: number }) => Promise<boolean>;
       /** API-owned capability; no HTTP fallback when this transport is present. */
       dispatchAnalyticsSignal?: (signal: AnalyticsSignal) => Promise<AnalyticsSignalResult>;
@@ -235,6 +241,10 @@ export class AgentWorkerProcessManager {
 
     if (this.stopping || this.child) return;
     const analyticsProducerGeneration = randomUUID();
+    const runtimeInstanceId = randomUUID();
+    const spawnObservedAt = Date.now();
+    const spawnNonce = randomUUID();
+    this.params.onRuntimeStarting?.(runtimeInstanceId,{pid:null,spawnObservedAt,spawnNonce});
     const child = (this.params.spawnWorker ?? spawn)(command, args, {
       cwd: this.params.repoRoot,
       stdio: ["ignore", "pipe", "pipe"],
@@ -250,7 +260,8 @@ export class AgentWorkerProcessManager {
         internalToken: this.params.internalToken,
         responseValidation: this.params.responseValidation,
         pidFilePath: this.params.pidFilePath,
-        analyticsProducerGeneration
+        analyticsProducerGeneration,
+        runtimeInstanceId
       })
     });
     child.unref();
@@ -269,13 +280,15 @@ export class AgentWorkerProcessManager {
     });
     let resolveExit!: () => void;
     const lifetime: ChildLifetime = {
-      generation: analyticsProducerGeneration, epoch: childEpoch, exited: false, failedToSpawn: false,
+      generation: analyticsProducerGeneration, runtimeInstanceId, epoch: childEpoch, exited: false, failedToSpawn: false,
       exit: new Promise<void>((resolve) => { resolveExit = resolve; }),
       controlled: false, suppressRestart: false,
     };
     this.childLifetimes.set(child, lifetime);
     child.once("exit", (code, signal) => {
       lifetime.exited = true;
+      try { this.params.onRuntimeExit?.(runtimeInstanceId, {pid:child.pid ?? null,spawnObservedAt,spawnNonce,code,signal,observedAt:Date.now()}); }
+      catch { this.params.logger.warn({errorCode:"AGENT_RUNTIME_EXIT_PROOF_UNCOMMITTED"},"runtime exit proof could not be persisted"); }
       resolveExit();
       const current = this.child === child && this.childEpoch === childEpoch;
       const lifecycle = this.captureWorkerLifecycle(Date.now(), child, childEpoch);
@@ -302,6 +315,8 @@ export class AgentWorkerProcessManager {
     try {
       await (this.params.waitForWorkerReady?.() ?? this.waitUntilReady());
       if (lifetime.failedToSpawn) throw new Error("AGENT_WORKER_SPAWN_FAILED");
+      if (this.stopping || lifetime.exited || this.child !== child) return;
+      await this.params.onRuntimeReady?.(runtimeInstanceId,{pid:child.pid ?? null,spawnObservedAt,spawnNonce});
       if (this.stopping || lifetime.exited || this.child !== child) return;
       await completeAgentWorkerReady({
         generation: ++this.readyGeneration,

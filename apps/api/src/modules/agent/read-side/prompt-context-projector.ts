@@ -35,6 +35,7 @@ export type PromptContextProjectorDependencies<Message> = {
     uiLocale: AgentUiLocale | null;
     messages: Message[];
     providerReplay?: AgentApiPromptContextResponse["providerReplay"];
+    interactiveInput?: AgentApiPromptContextResponse["interactiveInput"];
   }>;
 };
 
@@ -87,6 +88,7 @@ export class PromptContextProjector<Message> {
       sessionRevision: dynamic.sessionRevision,
       system,
       messages: dynamic.messages,
+      ...(dynamic.interactiveInput == null ? {} : { interactiveInput: dynamic.interactiveInput }),
       workspaceRepoNames,
       ...(dynamic.providerReplay == null ? {} : { providerReplay: dynamic.providerReplay }),
       tools,

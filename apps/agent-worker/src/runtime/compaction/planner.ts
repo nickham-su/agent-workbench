@@ -1,3 +1,4 @@
+import { protectedInputMessageIds } from "@agent-workbench/shared";
 import { createHash, randomUUID } from "node:crypto";
 import type { ExecutionProfile } from "../apiClient.js";
 import { ESTIMATOR_VERSION, estimatePrimaryMaterializedBlock } from "./estimator-v1.js";
@@ -93,8 +94,7 @@ export function planCompaction(input: { source: CompactionSource; profile: Execu
     firstCandidate = cursor;
   }
   if (firstCandidate === retainableOriginal.length) {
-    const trigger = retainableOriginal.find((block) => block.primary.containsTriggerMedia);
-    return trigger ? { kind: "media_requires_resend", triggerMessageId: trigger.primary.sourceBlockId } : { kind: "retained_tail_unavailable", reason: "budget" };
+    return { kind: "retained_tail_unavailable", reason: "budget" };
   }
 
   let retained = retainableOriginal.slice(firstCandidate);
@@ -107,16 +107,13 @@ export function planCompaction(input: { source: CompactionSource; profile: Execu
     if (total > COMPACTION_KEEP_RECENT_TOKENS) return { kind: "retained_tail_unavailable", reason: "budget" };
   }
 
-  const triggerIndex = retainableOriginal.findIndex((block) => block.primary.containsTriggerMedia);
-  if (triggerIndex >= 0) {
-    const retainedStartIndex = retainableOriginal.findIndex((block) => block.primary.sourceBlockId === retained[0]!.primary.sourceBlockId);
-    if (retainedStartIndex > triggerIndex) {
-      retained = retainableOriginal.slice(triggerIndex);
-      total = retained.reduce((sum, block) => sum + block.estimatedTokens, 0);
-    }
-    if (total > COMPACTION_KEEP_RECENT_TOKENS) {
-      return { kind: "media_requires_resend", triggerMessageId: retainableOriginal[triggerIndex]!.primary.sourceBlockId };
-    }
+  const protectedIds = new Set(protectedInputMessageIds(source.interactiveInput));
+  const protectedIndex = retainableOriginal.findIndex(block => protectedIds.has(block.primary.sourceBlockId));
+  if (protectedIndex >= 0) {
+    const start = retainableOriginal.findIndex(block => block.primary.sourceBlockId === retained[0]!.primary.sourceBlockId);
+    if (start > protectedIndex) retained = retainableOriginal.slice(protectedIndex);
+    total = retained.reduce((sum, block) => sum + block.estimatedTokens, 0);
+    if (total > COMPACTION_KEEP_RECENT_TOKENS) return { kind: "retained_tail_unavailable", reason: "budget" };
   }
 
   const retainedIds = new Set(retained.map((block) => block.primary.sourceBlockId));
@@ -134,7 +131,6 @@ export function planCompaction(input: { source: CompactionSource; profile: Execu
   }));
   const estimatedBeforeCost = estimated.reduce((sum, block) => sum + block.estimatedTokens, 0);
   const estimatedPrefixCost = prefix.reduce((sum, block) => sum + block.estimatedTokens, 0);
-  const containsTriggerMedia = primary.some((block) => block.containsTriggerMedia);
   const policy = COMPACTION_MODE_POLICIES[input.mode];
   return {
     kind: "planned",
@@ -156,7 +152,6 @@ export function planCompaction(input: { source: CompactionSource; profile: Execu
       estimatedBeforeCost,
       estimatedPrefixCost,
       estimatedRetainedCost: total,
-      containsTriggerMedia,
       source: {
         workspaceId: source.workspaceId,
         sessionId: source.sessionId,

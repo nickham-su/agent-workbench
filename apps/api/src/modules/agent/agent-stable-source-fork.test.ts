@@ -433,7 +433,11 @@ test("creation conflicts roll back the whole operation, not leaving run-state-on
   fork(db);
   const sessions = db.prepare("select * from agent_session order by id").all();
   const states = db.prepare("select * from session_run_state order by session_id").all();
-  assert.throws(() => fork(db), (error: unknown) => error instanceof Error && "code" in error && error.code === "SQLITE_CONSTRAINT_PRIMARYKEY");
+  // SQLite may select either the id PK or the scoped parent UNIQUE index.
+  assert.throws(() => fork(db), (error: unknown) => error instanceof Error && "code" in error
+    && (error.code === "SQLITE_CONSTRAINT_PRIMARYKEY" || error.code === "SQLITE_CONSTRAINT_UNIQUE")
+    && /agent_session\.(?:workspace_id|id)/.test(error.message));
+
   assert.deepEqual(db.prepare("select * from agent_session order by id").all(), sessions);
   assert.deepEqual(db.prepare("select * from session_run_state order by session_id").all(), states);
 });

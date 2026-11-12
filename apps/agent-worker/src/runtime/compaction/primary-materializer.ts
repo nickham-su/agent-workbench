@@ -1,3 +1,4 @@
+import { effectiveUserInput } from "@agent-workbench/shared";
 import type { ExecutionProfile } from "../apiClient.js";
 import {
   hasPrimaryBlockVisibleProjection,
@@ -86,14 +87,15 @@ function materializeBlock(input: { source: CompactionSource; block: CompactionSo
   const { source, block, profile } = input;
   const validated = validateCompactionSourceBlock(block);
   const messages: PrimaryProviderNeutralMessage[] = [];
-  const containsTriggerMedia = sourceBlockContainsTriggerMedia(block, source.triggerMessageId);
+  const effective = effectiveUserInput({ messageId: block.sourceMessageId, triggerMessageId: source.triggerMessageId, policy: source.interactiveInput });
+  if (!effective.include) return { sourceBlockId: block.sourceMessageId, sourceMessageType: block.message.type, messages: [], isProjectionEmpty: true, canStartRetainedTail: false };
 
   if (block.message.type === "user") {
     const text = validated.parts.filter((part) => part.type === "text").map((part) => part.text).join("");
     const images = validated.parts.filter((part) => part.type === "image");
     if (images.length === 0) {
       if (text) messages.push({ role: "user", content: text });
-    } else if (block.sourceMessageId === source.triggerMessageId) {
+    } else if (effective.realAttachments) {
       const content: PrimaryUserPart[] = [{ type: "text", text: text || imageOnlyTriggerText(images.length) }];
       for (const image of images) {
         const attachment = validated.attachmentsByPartId.get(image.id);
@@ -168,7 +170,6 @@ function materializeBlock(input: { source: CompactionSource; block: CompactionSo
     messages,
     isProjectionEmpty,
     canStartRetainedTail: !isProjectionEmpty && (block.message.type === "user" || block.message.type === "system" || (block.message.type === "assistant" && hasAssistantMessage)),
-    containsTriggerMedia,
   };
 }
 

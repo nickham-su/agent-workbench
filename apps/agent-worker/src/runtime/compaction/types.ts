@@ -45,7 +45,6 @@ export type PrimaryMaterializedBlock = {
   messages: PrimaryProviderNeutralMessage[];
   isProjectionEmpty: boolean;
   canStartRetainedTail: boolean;
-  containsTriggerMedia: boolean;
 };
 
 export type SummaryInputPart =
@@ -127,7 +126,6 @@ export type FrozenCompactionPlan = {
   estimatedBeforeCost: number;
   estimatedPrefixCost: number;
   estimatedRetainedCost: number;
-  containsTriggerMedia: boolean;
   source: {
     workspaceId: string;
     sessionId: string;
@@ -160,7 +158,6 @@ export type CompactionPlanResult =
   | { kind: "planned"; plan: FrozenCompactionPlan; summaryBlocks: SummaryInputBlock[]; retainedBlocks: PrimaryMaterializedBlock[] }
   | { kind: "no_prefix"; reason: "no_effective_prefix" | "projection_empty" }
   | { kind: "blocked"; reason: "pending_tool_execution"; pendingBoundary: NonNullable<CompactionSource["pendingBoundary"]> }
-  | { kind: "media_requires_resend"; triggerMessageId: string }
   | { kind: "retained_tail_unavailable"; reason: "budget" | "invalid_start" | "full_mode_requires_execution" };
 
 export type CompactionCasState = { remaining: number };
@@ -169,7 +166,6 @@ export type CompactionExecutionResult =
   | { kind: "committed"; summaryMessageId: string; plan: FrozenCompactionPlan }
   | { kind: "skipped"; reason: "no_prefix" | "no_progress" | "oversized_tail" | "cas_conflict" | "profile_changed" }
   | { kind: "blocked"; reason: "pending_tool_execution" }
-  | { kind: "media_requires_resend" }
   | { kind: "unavailable"; reason: "transient" | "deadline" | "commit_response_loss" }
   | { kind: "failed"; reason: "provider" | "control" | "data_invariant" | "cancelled" | "commit_outcome_uncertain" };
 

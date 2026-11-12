@@ -1,3 +1,5 @@
+import { effectiveUserInput, type AgentEffectiveInputPolicy } from "@agent-workbench/shared";
+import { readEffectiveInputPolicy } from "../message-queue/interactive-input-binding.store.js";
 import type {
   AgentImageMediaType,
   AgentMessage,
@@ -80,6 +82,7 @@ export type ResolvedRunSnapshot = {
 };
 
 export type ResolvedModelContext = {
+  interactiveInput?: AgentEffectiveInputPolicy;
   workspaceId: string;
   sessionId: string;
   headMessageId: string | null;
@@ -343,6 +346,7 @@ export function projectModelContextToPrompt(input: {
     attachmentPaths?: ReadonlyMap<string, string | null>;
     stopBeforeAssistantMessageIds?: ReadonlySet<string>;
     includeEmptyAssistantMessageIds?: ReadonlySet<string>;
+    interactiveInput?: AgentEffectiveInputPolicy;
   }): { messages: Array<{ role: "system" | "user" | "assistant" | "tool"; content: unknown }>; assistantMessageIndexes: Map<string, number> } };
   /** Pending calls form a transcript boundary and are executed before model invocation. */
   stopBeforeAssistantMessageIds?: ReadonlySet<string>;
@@ -360,6 +364,7 @@ export function projectModelContextToPrompt(input: {
   const projected = input.projector.projectDetailed({
     workspaceId: input.workspaceId,
     triggerMessageId: input.triggerMessageId,
+    interactiveInput: input.resolved.interactiveInput,
     runId: input.resolved.run?.runId ?? null,
     attachmentPaths: new Map(input.resolved.blocks.flatMap((block) => block.attachments.map((attachment) => [attachment.partId, attachment.relativePath] as const))),
     messages: input.resolved.messages,
@@ -765,7 +770,8 @@ export class ModelContextResolver {
       runId: run.runId,
     }, chain) : [];
     const selected = this.selectLogicalMessages(session, chain);
-    const hydrated = this.hydrate(input.workspaceId, session, selected);
+    const policy = readEffectiveInputPolicy(this.db, input, chain.map(message => message.id));
+    const hydrated = this.hydrate(input.workspaceId, session, selected, policy);
     return {
       ...hydrated,
       run,
@@ -895,7 +901,9 @@ export class ModelContextResolver {
     });
   }
 
-  private hydrate(workspaceId: string, session: SessionRow, selected: MessageRow[]): ResolvedModelContext {
+  private hydrate(workspaceId: string, session: SessionRow, selected: MessageRow[], policy?: AgentEffectiveInputPolicy): ResolvedModelContext {
+    const interactiveInput = policy ?? readEffectiveInputPolicy(this.db, { workspaceId, sessionId: session.sessionId }, selected.map(message => message.id));
+    selected = selected.filter(message => message.type !== "user" || effectiveUserInput({ messageId: message.id, triggerMessageId: null, policy: interactiveInput }).include);
     if (selected.length === 0) {
       return {
         workspaceId,
@@ -1029,6 +1037,7 @@ export class ModelContextResolver {
       messages,
       executions,
       providerReplayByPartId: replayByPartId,
+      interactiveInput,
       run: null,
       pendingTools: [],
       pendingAssistantMessageIds: new Set(),

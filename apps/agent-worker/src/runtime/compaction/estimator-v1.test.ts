@@ -12,7 +12,6 @@ function block(messages: PrimaryMaterializedBlock["messages"]): PrimaryMateriali
     messages,
     isProjectionEmpty: messages.length === 0,
     canStartRetainedTail: true,
-    containsTriggerMedia: false,
   };
 }
 
@@ -206,7 +205,6 @@ test("EstimatorV1 gives projection-empty blocks exactly zero cost", () => {
     messages: [],
     isProjectionEmpty: true,
     canStartRetainedTail: false,
-    containsTriggerMedia: false,
   });
   assert.equal(result.estimatedTokens, 0);
   assert.equal(result.fixedCosts, 0);

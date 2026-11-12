@@ -1,7 +1,12 @@
+import type { AgentInteractiveInputBinding } from "@agent-workbench/shared/internal-contracts/agent-api";
+import { bindInteractiveAssistant, replaceInteractiveAssistantBinding, claimInteractiveAssistantBinding, confirmInteractiveAssistantInput, interactiveRunEnabled, readEffectiveInputPolicy, type InputConfirmationSource } from "./message-queue/interactive-input-binding.store.js";
+import { assertSessionQueueUnoccupied, pauseMessageQueue } from "./message-queue/message-queue.guard.js";
+import { assertSessionRuntimeUnblocked, registerRunRuntimeAdmission } from "./runtime-control/runtime-control.store.js";
 import { HttpError } from "../../app/errors.js";
 import { resolveSessionVisibility, type SessionVisibilityInput } from "./session/session-visibility.js";
 import { insertInitialAgentSessionTabState } from "../../infra/db/agent-session-tab-state.js";
 import type {
+  AgentQueuePauseCode,
   PrimaryProjectionProfile,
   AgentCompactionMessage,
   AgentOrdinaryMessage,
@@ -13,13 +18,14 @@ import type {
   AgentMessageType,
   AgentSessionMessageState,
   AgentMessageSessionRunState,
+  AgentModelRequestError,
   AgentToolExecution,
   AgentRunExecutionPhase,
   AgentTerminalResultCode,
   AgentTerminalRunStatus,
   AgentToolExecutionStatus
 } from "@agent-workbench/shared";
-import { AgentCompactionMessageSchema, AgentOrdinaryMessageSchema, isAgentTerminalCodeAllowed } from "@agent-workbench/shared";
+import { AgentCompactionMessageSchema, AgentOrdinaryMessageSchema, AgentModelRequestErrorSchema, isAgentTerminalCodeAllowed } from "@agent-workbench/shared";
 import { Value } from "@sinclair/typebox/value";
 import {
   assertAgentProviderReplayUpdateCompatible,
@@ -160,7 +166,7 @@ type SessionRow = {
 };
 type RunStateRow = {
   workspaceId: string; sessionId: string; status: "idle" | "running"; activeRunId: string | null;
-  runNoticeText: string; retryCount: number; nextRetryAt: number | null; activeAssistantMessageId: string | null;
+  runNoticeText: string; modelRequestErrorJson: string | null; retryCount: number; nextRetryAt: number | null; activeAssistantMessageId: string | null;
   nonTerminalMessageIdsJson: string; nonTerminalToolExecutionIdsJson: string; updatedAt: number;
   lastResponseTotalTokens: number | null; activeRunStartedAt: number | null;
   lastRunDurationMs: number | null;
@@ -188,7 +194,7 @@ function toSession(row: SessionRow): AgentSessionMessageState {
 function toRunState(row: RunStateRow): AgentMessageSessionRunState {
   return {
     workspaceId: row.workspaceId, sessionId: row.sessionId, status: row.status, activeRunId: row.activeRunId,
-    runNoticeText: row.runNoticeText, retryCount: Number(row.retryCount), nextRetryAt: row.nextRetryAt,
+    runNoticeText: row.runNoticeText, modelRequestError: row.modelRequestErrorJson == null ? null : Value.Parse(AgentModelRequestErrorSchema, JSON.parse(row.modelRequestErrorJson)), retryCount: Number(row.retryCount), nextRetryAt: row.nextRetryAt,
     lastResponseTotalTokens: row.lastResponseTotalTokens == null ? null : Number(row.lastResponseTotalTokens),
     activeRunStartedAt: row.activeRunStartedAt == null ? null : Number(row.activeRunStartedAt),
     lastRunDurationMs: row.lastRunDurationMs == null ? null : Number(row.lastRunDurationMs),
@@ -295,7 +301,7 @@ function terminalExecutionReplayMatches(execution: AgentToolExecution, input: { 
   };
   return executionReplayMatches(execution, request, input.updatedAt);
 }
-function replacementReplayMatches(db: Db, oldMessage: MessageRow, input: { workspaceId: string; sessionId: string; runId: string; oldMessageId: string; newMessageId: string; runNoticeText: string; retryCount: number; nextRetryAt: number | null; createdAt: number }) {
+function replacementReplayMatches(db: Db, oldMessage: MessageRow, input: { workspaceId: string; sessionId: string; runId: string; oldMessageId: string; newMessageId: string; runNoticeText: string; modelRequestError?: AgentModelRequestError | null; retryCount: number; nextRetryAt: number | null; createdAt: number }) {
   const replacement = messageRow(db, input.newMessageId);
   const session = sessionRow(db, input.workspaceId, input.sessionId);
   const state = getMessageRunState(db, input.workspaceId, input.sessionId);
@@ -305,6 +311,7 @@ function replacementReplayMatches(db: Db, oldMessage: MessageRow, input: { works
     && replacement.status === "streaming" && replacement.createdAt === input.createdAt && replacement.updatedAt === input.createdAt
     && session?.headMessageId === input.newMessageId && state?.activeAssistantMessageId === input.newMessageId
     && state.nonTerminalMessageIds.length === 1 && state.nonTerminalMessageIds[0] === input.newMessageId
+    && serializeModelRequestError(state.modelRequestError) === serializeModelRequestError(input.modelRequestError)
     && state.runNoticeText === input.runNoticeText && state.retryCount === input.retryCount && state.nextRetryAt === input.nextRetryAt && state.updatedAt === input.createdAt;
 }
 
@@ -359,20 +366,27 @@ function insertParts(db: Db, messageId: string, parts: AgentMessagePartInput[], 
     }
   }
 }
+function serializeModelRequestError(value: AgentModelRequestError | null | undefined) {
+  if (value == null) return null;
+  if (!Value.Check(AgentModelRequestErrorSchema, value)) throw new Error("invalid model request error detail");
+  return JSON.stringify({ statusCode: value.statusCode, responseBody: value.responseBody, message: value.message, truncated: value.truncated });
+}
+
 function writeRunState(db: Db, input: {
   workspaceId: string; sessionId: string; updatedAt: number;
   activeAssistantMessageId?: string | null; nonTerminalMessageIds?: string[];
-  nonTerminalToolExecutionIds?: string[]; runNoticeText?: string;
+  nonTerminalToolExecutionIds?: string[]; runNoticeText?: string; modelRequestError?: AgentModelRequestError | null;
   retryCount?: number; nextRetryAt?: number | null;
 }) {
   const current = getMessageRunState(db, input.workspaceId, input.sessionId);
   if (!current) throw new Error("agent session run state not found");
-  db.prepare(`update session_run_state set active_assistant_message_id=@activeAssistantMessageId, non_terminal_message_ids_json=@messages, non_terminal_tool_execution_ids_json=@executions, run_notice_text=@notice, retry_count=@retryCount, next_retry_at=@nextRetryAt, updated_at=@updatedAt where workspace_id=@workspaceId and session_id=@sessionId`).run({
+  db.prepare(`update session_run_state set active_assistant_message_id=@activeAssistantMessageId, non_terminal_message_ids_json=@messages, non_terminal_tool_execution_ids_json=@executions, run_notice_text=@notice, model_request_error_json=@modelRequestErrorJson, retry_count=@retryCount, next_retry_at=@nextRetryAt, updated_at=@updatedAt where workspace_id=@workspaceId and session_id=@sessionId`).run({
     ...input,
     activeAssistantMessageId: Object.hasOwn(input, "activeAssistantMessageId") ? input.activeAssistantMessageId ?? null : current.activeAssistantMessageId,
     messages: JSON.stringify(input.nonTerminalMessageIds ?? current.nonTerminalMessageIds),
     executions: JSON.stringify(input.nonTerminalToolExecutionIds ?? current.nonTerminalToolExecutionIds),
     notice: input.runNoticeText ?? current.runNoticeText,
+    modelRequestErrorJson: serializeModelRequestError(Object.hasOwn(input, "modelRequestError") ? input.modelRequestError : input.runNoticeText === undefined ? current.modelRequestError : null),
     retryCount: input.retryCount ?? current.retryCount,
     nextRetryAt: Object.hasOwn(input, "nextRetryAt") ? input.nextRetryAt ?? null : current.nextRetryAt
   });
@@ -393,10 +407,17 @@ function assertPrimaryProfileMatchesRun(run: AgentRunRecord | null, profile: Pri
 
 export function createMessageSession(db: Db, input: { id: string; workspaceId: string; title: string; kind: "primary" | "subtask"; createdAt: number; forkedFromSessionId?: string | null; forkedFromMessageId?: string | null; headMessageId?: string | null; contextRootMessageId?: string | null } & SessionVisibilityInput) {
   db.transaction(() => {
+    const sourceSessionId=input.contentSourceSessionId ?? input.forkedFromSessionId;
+    if(sourceSessionId) assertSessionRuntimeUnblocked(db,input.workspaceId,sourceSessionId);
+    if(input.executionParent) assertSessionRuntimeUnblocked(db,input.workspaceId,input.executionParent.sessionId);
     const visibility = resolveSessionVisibility(db, input.workspaceId, input);
     if (input.forkedFromMessageId) {
       const message = messageRow(db, input.forkedFromMessageId);
       if (!message || message.workspaceId !== input.workspaceId) throw new Error("invalid fork message");
+      const ancestors = db.prepare(`with recursive ancestors(id) as (select ? union select m.previous_message_id from agent_message m join ancestors a on m.id=a.id where m.workspace_id=? and m.previous_message_id is not null) select id from ancestors`)
+        .all(message.id, input.workspaceId) as Array<{ id: string }>;
+      if (readEffectiveInputPolicy(db, { workspaceId: input.workspaceId, sessionId: sourceSessionId ?? input.id }, ancestors.map(row => row.id)).inputs.some(item => item.state === "unconfirmed"))
+        throw new HttpError(409, "Selected fork history contains unconfirmed input", "SESSION_HAS_PENDING_INPUT");
     }
     db.prepare(`insert into agent_session (id,workspace_id,title,kind,head_message_id,context_root_message_id,revision,forked_from_session_id,forked_from_message_id,created_at,updated_at,visibility) values (@id,@workspaceId,@title,@kind,@headMessageId,@contextRootMessageId,0,@forkedFromSessionId,@forkedFromMessageId,@createdAt,@createdAt,@visibility)`).run({ ...input, visibility, headMessageId: input.headMessageId ?? null, contextRootMessageId: input.contextRootMessageId ?? null, forkedFromSessionId: input.forkedFromSessionId ?? null, forkedFromMessageId: input.forkedFromMessageId ?? null });
     db.prepare(`insert into session_run_state (workspace_id,session_id,status,active_run_id,run_notice_text,retry_count,next_retry_at,active_assistant_message_id,non_terminal_message_ids_json,non_terminal_tool_execution_ids_json,updated_at) values (@workspaceId,@id,'idle',null,'',0,null,null,'[]','[]',@createdAt)`).run(input);
@@ -418,7 +439,7 @@ export function getMessageRunState(db: Db, workspaceId: string, sessionId: strin
   const row = db.prepare(`
     select state.workspace_id as workspaceId, state.session_id as sessionId,
       state.status, state.active_run_id as activeRunId,
-      state.run_notice_text as runNoticeText, state.retry_count as retryCount,
+      state.run_notice_text as runNoticeText, state.model_request_error_json as modelRequestErrorJson, state.retry_count as retryCount,
       state.next_retry_at as nextRetryAt,
       state.active_assistant_message_id as activeAssistantMessageId,
       state.non_terminal_message_ids_json as nonTerminalMessageIdsJson,
@@ -443,25 +464,29 @@ export function getMessageRunState(db: Db, workspaceId: string, sessionId: strin
 
 /** 创建 Run 后的唯一运行态写入入口。 */
 export function startMessageRun(db: Db, input: { workspaceId: string; sessionId: string; runId: string; updatedAt: number; noticeText?: string }) {
+  assertSessionRuntimeUnblocked(db, input.workspaceId, input.sessionId);
   const result = db.prepare(`
     update session_run_state
     set status='running', active_run_id=@runId, active_assistant_message_id=null,
       non_terminal_message_ids_json='[]', non_terminal_tool_execution_ids_json='[]',
-      retry_count=0, next_retry_at=null, run_notice_text=@noticeText, updated_at=@updatedAt
+      retry_count=0, next_retry_at=null, run_notice_text=@noticeText, model_request_error_json=null, updated_at=@updatedAt
     where workspace_id=@workspaceId and session_id=@sessionId and status='idle'
   `).run({ ...input, noticeText: input.noticeText ?? "" });
   if (result.changes !== 1) throw new Error("session is not idle");
 }
 
 /** 仅当前 active Run 可以收敛运行态，晚到写回不会覆盖新 Run。 */
-export function settleMessageRunIfCurrent(db: Db, input: { workspaceId: string; sessionId: string; runId: string; updatedAt: number; noticeText?: string }) {
+export function settleMessageRunIfCurrent(db: Db, input: { workspaceId: string; sessionId: string; runId: string; updatedAt: number; noticeText?: string; preserveModelRequestError?: boolean }) {
   return db.prepare(`
     update session_run_state
     set status='idle', active_run_id=null, active_assistant_message_id=null,
       non_terminal_message_ids_json='[]', non_terminal_tool_execution_ids_json='[]',
-      retry_count=0, next_retry_at=null, run_notice_text=@noticeText, updated_at=@updatedAt
+      retry_count=0, next_retry_at=null,
+      run_notice_text=case when @preserveError=1 and model_request_error_json is not null and next_retry_at is null then run_notice_text else @noticeText end,
+      model_request_error_json=case when @preserveError=1 and next_retry_at is null then model_request_error_json else null end,
+      updated_at=@updatedAt
     where workspace_id=@workspaceId and session_id=@sessionId and status='running' and active_run_id=@runId
-  `).run({ ...input, noticeText: input.noticeText ?? "" }).changes === 1;
+  `).run({ ...input, preserveError: input.preserveModelRequestError ? 1 : 0, noticeText: input.noticeText ?? "" }).changes === 1;
 }
 
 export function appendMessage(db: Db, input: { id: string; workspaceId: string; sessionId: string; expectedHeadMessageId: string | null; expectedRevision: number; type: AgentMessageType; status: AgentMessageStatus; originRunId?: string | null; replacesMessageId?: string | null; parts: AgentMessagePartInput[]; createdAt: number; contextRootMessageId?: string | null }): AgentMessage {
@@ -543,7 +568,7 @@ export function hasNonTerminalVisibleMessageWork(db: Db, input: { workspaceId: s
   return Boolean(db.prepare(`select 1 from agent_tool_execution execution join agent_message_part part on part.id=execution.call_part_id where part.message_id in (${placeholders}) and execution.status in ('queued','running') limit 1`).get(...messages.map((message) => message.id)));
 }
 
-export function appendStreamingAssistant(db: Db, input: Omit<Parameters<typeof appendMessage>[1], "type" | "status" | "parts"> & { runId: string }) {
+export function appendStreamingAssistant(db: Db, input: Omit<Parameters<typeof appendMessage>[1], "type" | "status" | "parts"> & { runId: string; inputBinding?: AgentInteractiveInputBinding; inputSource?: InputConfirmationSource }) {
   return db.transaction(() => {
     const existing = messageRow(db, input.id);
     if (existing) {
@@ -563,6 +588,7 @@ export function appendStreamingAssistant(db: Db, input: Omit<Parameters<typeof a
         && state?.activeAssistantMessageId === input.id
         && state.nonTerminalMessageIds.includes(input.id);
       if (!matches) throw new AgentStreamingAssistantReplayMismatchError();
+      bindInteractiveAssistant(db, { ...input, messageId: input.id, source: input.inputSource ?? "worker_model" });
       return asOrdinaryMessage(getMessage(db, input.id)!);
     }
     if (!assertFence(db, input)) throw new Error("run fence rejected streaming assistant creation");
@@ -576,6 +602,7 @@ export function appendStreamingAssistant(db: Db, input: Omit<Parameters<typeof a
       // Clear only on the new-message path; a replay must not erase newer notices.
       runNoticeText: "", retryCount: 0, nextRetryAt: null,
     });
+    bindInteractiveAssistant(db, { ...input, messageId: input.id, source: input.inputSource ?? "worker_model" });
     return asOrdinaryMessage(message);
   })();
 }
@@ -649,7 +676,7 @@ export function flushStreamingParts(db: Db, input: { workspaceId: string; sessio
 
 /** 仅当前 fenced Run 可认领恢复事务准备的 active streaming Assistant。 */
 export function resumeStreamingAssistant(db: Db, input: {
-  workspaceId: string; sessionId: string; runId: string; messageId: string;
+  workspaceId: string; sessionId: string; runId: string; messageId: string; inputBinding?: AgentInteractiveInputBinding; inputSource?: InputConfirmationSource;
 }): FencedWriteResult {
   return db.transaction(() => {
     const message = messageRow(db, input.messageId);
@@ -657,17 +684,19 @@ export function resumeStreamingAssistant(db: Db, input: {
     if (!assertFence(db, input)) return "ignored";
     const state = getMessageRunState(db, input.workspaceId, input.sessionId);
     if (message.workspaceId !== input.workspaceId || message.originSessionId !== input.sessionId || message.originRunId !== input.runId || message.status !== "streaming" || state?.activeAssistantMessageId !== input.messageId) return "ignored";
-    return "updated";
+    return claimInteractiveAssistantBinding(db, { ...input, source: input.inputSource ?? "worker_model" }) ? "updated" : "ignored";
   })();
 }
 
-export function completeAssistantWithExecutions(db: Db, input: { workspaceId: string; sessionId: string; runId: string; messageId: string; executions: AgentToolExecutionInput[]; responseTotalTokens?: number | null; updatedAt: number }): FencedWriteResult {
+export function completeAssistantWithExecutions(db: Db, input: { workspaceId: string; sessionId: string; runId: string; messageId: string; executions: AgentToolExecutionInput[]; inputSource?: InputConfirmationSource; interactiveDecision?: boolean; responseTotalTokens?: number | null; updatedAt: number }): FencedWriteResult {
   return db.transaction(() => {
     const message = messageRow(db, input.messageId);
     if (!message) return "missing";
     if (message.status === "completed") return completeAssistantReplayMatches(db, message, input) ? "updated" : "ignored";
     if (!assertFence(db, input)) return "ignored";
     if (message.workspaceId !== input.workspaceId || message.originSessionId !== input.sessionId || message.originRunId !== input.runId || message.status !== "streaming") return "ignored";
+    const hasLegalContent = messageParts(db, input.messageId).some(part => (part.type === "text" || part.type === "reasoning") && !!part.text);
+    if (interactiveRunEnabled(db, input) && input.executions.length === 0 && hasLegalContent && !input.interactiveDecision) throw new Error("interactive terminal response requires complete-or-continue adjudication");
     const session = sessionRow(db, input.workspaceId, input.sessionId)!;
     const revision = session.revision + 1;
     const callParts = db.prepare("select id from agent_message_part where message_id = ? and type = 'tool_call' order by position").all(input.messageId) as Array<{ id: string }>;
@@ -683,6 +712,7 @@ export function completeAssistantWithExecutions(db: Db, input: { workspaceId: st
       db.prepare(`insert into agent_tool_execution (id,call_part_id,origin_session_id,origin_run_id,status,result_preview,result_truncated,result_artifact_path,structured_result_json,error,updated_revision,created_at,updated_at,started_at,completed_at) values (@id,@callPartId,@originSessionId,@originRunId,'queued',@resultPreview,@resultTruncated,@resultArtifactPath,@structuredResultJson,@error,@revision,@updatedAt,@updatedAt,@startedAt,@completedAt)`).run({ ...execution, resultPreview: execution.resultPreview ?? null, resultTruncated: execution.resultTruncated ? 1 : 0, resultArtifactPath: execution.resultArtifactPath ?? null, structuredResultJson: execution.structuredResult == null ? null : JSON.stringify(execution.structuredResult), error: execution.error ?? null, startedAt: execution.startedAt ?? null, completedAt: execution.completedAt ?? null, revision, updatedAt: input.updatedAt });
     }
     db.prepare("update agent_message set status='completed',updated_revision=?,updated_at=? where id=?").run(revision, input.updatedAt, input.messageId);
+    if (input.executions.length > 0 || input.interactiveDecision) confirmInteractiveAssistantInput(db, { ...input, source: input.inputSource ?? "worker_model" });
     indexEligibleCompletedTextParts(db, input.messageId, input.updatedAt);
     db.prepare("update agent_session set revision=?,updated_at=? where id=? and workspace_id=?").run(revision, input.updatedAt, input.sessionId, input.workspaceId);
     const state = getMessageRunState(db, input.workspaceId, input.sessionId)!;
@@ -721,7 +751,7 @@ export function updateToolExecution(db: Db, input: { workspaceId: string; sessio
   })();
 }
 
-export function updateMessageRunNotice(db: Db, input: { workspaceId: string; sessionId: string; runId: string; runNoticeText: string; compactionExpectedRevision?: number; retryCount?: number; nextRetryAt?: number | null; updatedAt: number }): FencedWriteResult {
+export function updateMessageRunNotice(db: Db, input: { workspaceId: string; sessionId: string; runId: string; runNoticeText: string; queuePauseCode?: AgentQueuePauseCode; modelRequestError?: AgentModelRequestError | null; compactionExpectedRevision?: number; retryCount?: number; nextRetryAt?: number | null; updatedAt: number }): FencedWriteResult {
   return db.transaction(() => {
     if (!assertFence(db, input)) return "ignored";
     // A delayed compaction progress RPC must not resurrect its notice after
@@ -736,8 +766,9 @@ export function updateMessageRunNotice(db: Db, input: { workspaceId: string; ses
       .slice(0, 1000);
     const current = getMessageRunState(db, input.workspaceId, input.sessionId);
     if (!current) return "missing";
-    db.prepare(`update session_run_state set run_notice_text=?, retry_count=?, next_retry_at=?, updated_at=? where workspace_id=? and session_id=? and active_run_id=? and status='running'`).run(
+    db.prepare(`update session_run_state set run_notice_text=?, model_request_error_json=?, retry_count=?, next_retry_at=?, updated_at=? where workspace_id=? and session_id=? and active_run_id=? and status='running'`).run(
       notice,
+      serializeModelRequestError(input.modelRequestError),
       input.retryCount ?? current.retryCount,
       Object.prototype.hasOwnProperty.call(input, "nextRetryAt") ? input.nextRetryAt ?? null : current.nextRetryAt,
       input.updatedAt,
@@ -745,16 +776,18 @@ export function updateMessageRunNotice(db: Db, input: { workspaceId: string; ses
       input.sessionId,
       input.runId
     );
+    if (input.queuePauseCode && interactiveRunEnabled(db, input)) pauseMessageQueue(db, input.workspaceId, input.sessionId, input.queuePauseCode, input.updatedAt);
     return "updated";
   })();
 }
 
-export function replaceStreamingAssistant(db: Db, input: { workspaceId: string; sessionId: string; runId: string; oldMessageId: string; newMessageId: string; expectedHeadMessageId: string | null; expectedRevision: number; runNoticeText: string; retryCount: number; nextRetryAt: number | null; createdAt: number }): { result: FencedWriteResult; message: AgentOrdinaryMessage | null } {
+export function replaceStreamingAssistant(db: Db, input: { workspaceId: string; sessionId: string; runId: string; inputBinding?: AgentInteractiveInputBinding & { mode: "retry_same_input" | "recovery_reprepare" }; inputSource?: InputConfirmationSource; oldMessageId: string; newMessageId: string; expectedHeadMessageId: string | null; expectedRevision: number; runNoticeText: string; modelRequestError?: AgentModelRequestError | null; retryCount: number; nextRetryAt: number | null; createdAt: number }): { result: FencedWriteResult; message: AgentOrdinaryMessage | null } {
   return db.transaction((): { result: FencedWriteResult; message: AgentOrdinaryMessage | null } => {
     const old = messageRow(db, input.oldMessageId);
     if (!old) return { result: "missing", message: null };
     if (old.status === "superseded") {
       const replayed = replacementReplayMatches(db, old, input);
+      if (replayed) replaceInteractiveAssistantBinding(db, { ...input, mode: input.inputBinding?.mode, source: input.inputSource ?? "worker_model" });
       return { result: replayed ? "updated" : "ignored", message: replayed ? asOrdinaryMessage(getMessage(db, input.newMessageId)!) : null };
     }
     if (!assertFence(db, input)) return { result: "ignored", message: null };
@@ -771,10 +804,12 @@ export function replaceStreamingAssistant(db: Db, input: { workspaceId: string; 
       activeAssistantMessageId: input.newMessageId,
       nonTerminalMessageIds: [...new Set([...state.nonTerminalMessageIds.filter((id) => id !== input.oldMessageId), input.newMessageId])],
       runNoticeText: input.runNoticeText,
+      modelRequestError: input.modelRequestError ?? null,
       retryCount: input.retryCount,
       nextRetryAt: input.nextRetryAt
     });
     updateSessionPointer(db, { workspaceId: input.workspaceId, sessionId: input.sessionId, headMessageId: input.newMessageId, contextRootMessageId: session.contextRootMessageId, revision, now: input.createdAt });
+    replaceInteractiveAssistantBinding(db, { ...input, mode: input.inputBinding?.mode, source: input.inputSource ?? "worker_model" });
     return { result: "updated", message: asOrdinaryMessage(getMessage(db, input.newMessageId)!) };
   })();
 }
@@ -814,6 +849,8 @@ export function discardStreamingAssistant(db: Db, input: {
 export function moveMessageHead(db: Db, input: { workspaceId: string; sessionId: string; expectedHeadMessageId: string | null; expectedRevision: number; nextHeadMessageId: string; updatedAt: number }) {
   db.transaction(() => {
     const session = assertCurrent(db, input);
+    assertSessionRuntimeUnblocked(db,input.workspaceId,input.sessionId);
+    assertSessionQueueUnoccupied(db, input.workspaceId, input.sessionId, { allowPaused: true });
     if (!isAncestor(db, input.workspaceId, input.expectedHeadMessageId, input.nextHeadMessageId)) throw new AgentMessageDomainError("MESSAGE_TARGET_INVALID");
     if (session.contextRootMessageId && !isAncestor(db, input.workspaceId, input.nextHeadMessageId, session.contextRootMessageId)) throw new AgentMessageDomainError("MESSAGE_TARGET_BEFORE_CONTEXT_ROOT");
     const target = messageRow(db, input.nextHeadMessageId);
@@ -829,6 +866,8 @@ export function moveMessageHead(db: Db, input: { workspaceId: string; sessionId:
 export function revertBeforeUserMessage(db: Db, input: { workspaceId: string; sessionId: string; expectedHeadMessageId: string | null; expectedRevision: number; targetMessageId: string; updatedAt: number }) {
   db.transaction(() => {
     const session = assertCurrent(db, input);
+    assertSessionRuntimeUnblocked(db, input.workspaceId, input.sessionId);
+    assertSessionQueueUnoccupied(db, input.workspaceId, input.sessionId, { allowPaused: true });
     if (!isAncestor(db, input.workspaceId, input.expectedHeadMessageId, input.targetMessageId)) throw new AgentMessageDomainError("MESSAGE_TARGET_INVALID");
     if (session.contextRootMessageId && !isAncestor(db, input.workspaceId, input.targetMessageId, session.contextRootMessageId)) throw new AgentMessageDomainError("MESSAGE_TARGET_BEFORE_CONTEXT_ROOT");
     const target = messageRow(db, input.targetMessageId);
@@ -883,7 +922,7 @@ function commitCompactionMessageCurrent(db: Db, input: { id: string; workspaceId
   insertParts(db, input.id, [{ id: input.textPartId, position: 0, type: "text", text: input.text }], revision, input.createdAt);
   indexEligibleCompletedTextParts(db, input.id, input.createdAt);
   updateSessionPointer(db, { workspaceId: input.workspaceId, sessionId: input.sessionId, headMessageId: input.id, contextRootMessageId: input.id, revision, now: input.createdAt });
-  db.prepare("update session_run_state set last_response_total_tokens=null, run_notice_text='', retry_count=0, next_retry_at=null, updated_at=? where workspace_id=? and session_id=?")
+  db.prepare("update session_run_state set last_response_total_tokens=null, run_notice_text='', model_request_error_json=null, retry_count=0, next_retry_at=null, updated_at=? where workspace_id=? and session_id=?")
     .run(input.createdAt, input.workspaceId, input.sessionId);
   return asCompactionMessage(getMessage(db, input.id)!);
 }
@@ -941,6 +980,12 @@ export function commitCompactionMessageWithRunFence(db: Db, input: {
       return exactReplay ? asCompactionMessage(getMessage(db, input.id)!) : null;
     }
     if (!assertFence(db, input)) return null;
+    const protectedIds = readEffectiveInputPolicy(db, input).inputs.filter(item => item.state === "unconfirmed").map(item => item.messageId);
+    if (protectedIds.length) {
+      if (!input.retainedFromMessageId) return null;
+      const anchor = messageRow(db, input.retainedFromMessageId);
+      if (!anchor || protectedIds.some(id => (messageRow(db, id)?.depth ?? -1) < anchor.depth)) return null;
+    }
     // Cancellation may have persisted a terminal intent before convergence
     // releases the session fence. A late proactive commit must not append to
     // a Run whose work phase has already ended.
@@ -968,6 +1013,7 @@ export function forkMessageSession(db: Db, input: {
 } & SessionVisibilityInput) {
   return db.transaction(() => {
     const source = assertCurrent(db, { workspaceId: input.workspaceId, sessionId: input.sourceSessionId, expectedHeadMessageId: input.expectedHeadMessageId, expectedRevision: input.expectedRevision });
+    assertSessionRuntimeUnblocked(db, input.workspaceId, input.sourceSessionId);
     const visibility = resolveSessionVisibility(db, input.workspaceId, { ...input, contentSourceSessionId: source.id });
     const state = getMessageRunState(db, input.workspaceId, input.sourceSessionId);
     const sourceHasActiveRun = state?.status === "running" && state.activeRunId != null;
@@ -1014,6 +1060,7 @@ export function forkStableSourceSession(db: Db, input: {
   id: string; workspaceId: string; sourceSessionId: string; title: string; createdAt: number;
 } & SessionVisibilityInput): AgentSessionMessageState {
   return db.transaction(() => {
+    assertSessionRuntimeUnblocked(db,input.workspaceId,input.sourceSessionId);
     const source = getMessageSession(db, input.workspaceId, input.sourceSessionId);
     if (!source || (source.kind !== "primary" && source.kind !== "subtask")) {
       throw new StableForkSourceError("SOURCE_UNAVAILABLE");
@@ -1125,6 +1172,7 @@ export function forkHistoricalMessageSession(db: Db, input: {
   title: string; createdAt: number;
 } & SessionVisibilityInput): AgentSessionMessageState {
   return db.transaction(() => {
+    assertSessionRuntimeUnblocked(db,input.workspaceId,input.sourceSessionId);
     const { source, ancestry } = historicalForkAnchor(db, input);
     const visibility = resolveSessionVisibility(db, input.workspaceId, { ...input, contentSourceSessionId: source.id });
     const existing = getMessageSessionById(db, input.id);
@@ -1363,11 +1411,16 @@ export type CreateMessageRunRecordInput = {
   agentId: string; providerId: string; modelId: string;
   uiLocale?: "zh-CN" | "en-US" | null;
   runKind?: AgentRunKind; subtaskDepth?: number | null;
+  /** Internal authority only: queue activation already validates receipt ownership. */
+  interactiveQueue?: boolean;
   parentRunId?: string | null; parentToolExecutionId?: string | null;
   status: AgentRunRecord["status"]; createdAt: number;
 };
 
 export function createMessageRunRecord(db: Db, params: CreateMessageRunRecordInput) {
+  db.transaction(() => {
+  assertSessionRuntimeUnblocked(db, params.workspaceId, params.sessionId);
+  if (!params.interactiveQueue) assertSessionQueueUnoccupied(db, params.workspaceId, params.sessionId);
   db.prepare(`
     insert into agent_run (
       run_id, workspace_id, session_id, trigger_message_id, agent_id, provider_id,
@@ -1390,6 +1443,9 @@ export function createMessageRunRecord(db: Db, params: CreateMessageRunRecordInp
       ? null
       : terminalResultCodeFor(params.runKind ?? "user", params.status),
   });
+  if (params.interactiveQueue) db.prepare("update agent_run set interactive_queue_enabled=1 where run_id=?").run(params.runId);
+  registerRunRuntimeAdmission(db, params);
+  })();
 }
 
 export function getRunRecord(db: Db, runId: string): AgentRunRecord | null {
@@ -1687,9 +1743,11 @@ export function convergeRunTerminal(db: Db, input: {
     if (terminalRun?.status !== intent.status || terminalRun.executionPhase !== "terminal") {
       throw new Error("terminal convergence run transition failed");
     }
-    if (!settleMessageRunIfCurrent(db, input)) {
+    if (!settleMessageRunIfCurrent(db, { ...input, preserveModelRequestError: intent.status === "failed" })) {
       throw new Error("terminal convergence active run unexpectedly changed");
     }
+    if (intent.status !== "completed") pauseMessageQueue(db, input.workspaceId, input.sessionId,
+      intent.status === "cancelled" ? "user_stop" : "run_failed", input.updatedAt);
     return { kind: "transitioned" as const, finalStatus: intent.status };
   })();
 }
@@ -1706,6 +1764,7 @@ export function completeTerminalAssistantWithIntent(db: Db, input: {
   responseTotalTokens?: number | null;
   status: "completed"; code: "run_completed" | "subtask_completed"; detail: null; updatedAt: number;
 }): FencedWriteResult {
+  if (interactiveRunEnabled(db, input)) throw new Error("interactive terminal response requires complete-or-continue adjudication");
   return db.transaction(() => {
     const run = getRunRecord(db, input.runId);
     if (!run || run.workspaceId !== input.workspaceId || run.sessionId !== input.sessionId) throw new Error("terminal assistant run is not eligible");
@@ -1836,7 +1895,10 @@ export function getLatestTerminalAssistantTextForMessageRun(db: Db, params: { ru
 
 export function findMessageClientRequestDedup(db: Db, params: {
   workspaceId: string; sessionId: string; clientRequestId: string; expectedSessionVisibility?: "listed" | "unlisted";
+  queueReceiptId?: string;
 }) {
+  if (!params.queueReceiptId && db.prepare("select 1 from agent_user_message_receipt where workspace_id=? and session_id=? and client_request_id=?")
+    .get(params.workspaceId, params.sessionId, params.clientRequestId)) throw new HttpError(409, "Request identity belongs to the message queue", "AGENT_REQUEST_ID_NAMESPACE_CONFLICT");
   const read = () => (db.prepare(`
     select message_id as messageId, run_id as runId
     from agent_client_request
@@ -1874,10 +1936,13 @@ export function updateAutoMessageSessionTitle(db: Db, params: { sessionId: strin
 }
 
 export function setManualMessageSessionTitle(db: Db, params: { sessionId: string; workspaceId: string; title: string }) {
-  return db.prepare(`
+  return db.transaction(() => {
+    assertSessionRuntimeUnblocked(db,params.workspaceId,params.sessionId);
+    return db.prepare(`
     update agent_session set title = @title, title_manually_set = 1
     where id = @sessionId and workspace_id = @workspaceId
-  `).run(params).changes > 0;
+    `).run(params).changes > 0;
+  })();
 }
 
 export function getSessionAgentModelOverride(db: Db, params: { sessionId: string; agentId: string }): SessionAgentModelOverrideRecord | null {

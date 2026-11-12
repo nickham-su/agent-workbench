@@ -140,6 +140,7 @@ test("Message cancellation converges queued ToolExecution through ToolExecution 
     status: "idle",
     activeRunId: null,
     runNoticeText: "",
+    modelRequestError: null,
     retryCount: 0,
     nextRetryAt: null,
     lastResponseTotalTokens: null,

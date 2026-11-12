@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+import { AGENT_STOP_PROTOCOL_VERSION } from "@agent-workbench/shared/internal-contracts/agent-worker";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import { createServer, type RequestListener } from "node:http";
@@ -270,4 +272,28 @@ test("AgentWorkerClient warn mode does not bypass non-2xx failures", async () =>
   assert.equal(spy.errors[0]?.message, "enqueue run to worker failed");
   assert.equal(spy.warnings.length, 1);
   assert.equal(spy.warnings[0]?.message, "cancel session in worker failed");
+});
+
+
+test("identity and precise stop use authenticated transport and require strict proof even in warn mode", async () => {
+  const instance=randomUUID();
+  const request={workspaceId:"w",rootSessionId:"s",operationId:"stop",runtimeInstanceId:instance,targets:[{sessionId:"s",runId:"r"}],targetsHash:"a".repeat(64),timeoutMs:1};
+  let invalid=false;
+  await withTcpServer((req,res)=>{
+    assert.equal(req.headers["x-awb-agent-internal-token"],"test-token");
+    if(req.url===AgentWorkerEndpoints.runtimeIdentity.path) {
+      assert.equal(req.method,"GET");
+      res.end(JSON.stringify({runtimeInstanceId:instance,stopProtocolVersion:AGENT_STOP_PROTOCOL_VERSION}));
+    } else {
+      assert.equal(req.method,"POST");
+      const {targets,timeoutMs,...scope}=request;
+      res.end(JSON.stringify(invalid ? {ok:true,idle:true} : {...scope,state:"quiescent",proofId:randomUUID(),code:null}));
+    }
+  },async workerOrigin=>{
+    const client=createClient({workerOrigin,responseValidation:"warn"});
+    assert.equal((await client.getRuntimeIdentity()).runtimeInstanceId,instance);
+    assert.equal((await client.stopRunsAndWait(request)).state,"quiescent");
+    invalid=true;
+    await assert.rejects(client.stopRunsAndWait(request),/STOP_RESPONSE_INVALID/);
+  });
 });

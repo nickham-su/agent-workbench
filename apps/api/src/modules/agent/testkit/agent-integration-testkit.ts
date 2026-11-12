@@ -66,7 +66,7 @@ export async function createAgentIntegrationFixture(
   }
 }
 
-async function configureDefaultAgentSettings(app: FastifyInstance, contextWindowTokens = 128000, headers: Record<string, string> = {}) {
+export async function configureDefaultAgentSettings(app: FastifyInstance, contextWindowTokens = 128000, headers: Record<string, string> = {}) {
   const providersRes = await app.inject({
     method: "PUT",
     url: "/api/settings/agent/providers",

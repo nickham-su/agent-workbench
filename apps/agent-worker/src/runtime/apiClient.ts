@@ -1,3 +1,5 @@
+import { AgentQueueApiEndpoints, AgentApiPrepareInteractiveInputResponseSchema, type AgentApiPrepareInteractiveInputRequest, type AgentApiPrepareInteractiveInputResponse, AgentApiInjectInteractiveInputResponseSchema, type AgentApiInjectInteractiveInputRequest, type AgentApiInjectInteractiveInputResponse, AgentApiCompleteInteractiveAssistantResponseSchema, type AgentApiCompleteInteractiveAssistantRequest, type AgentApiCompleteInteractiveAssistantResponse } from "@agent-workbench/shared/internal-contracts/agent-api";
+import { AgentApiCheckRuntimeAdmissionResponseSchema, AgentApiRetireRuntimeAdmissionResponseSchema, type AgentApiCheckRuntimeAdmissionRequest, type AgentApiCheckRuntimeAdmissionResponse, type AgentApiRetireRuntimeAdmissionResponse } from "@agent-workbench/shared/internal-contracts/agent-api";
 import type {
   PluginRuntimeSnapshotsResponse,
   PluginToolRpcExecuteRequest,
@@ -325,6 +327,9 @@ export class AgentApiClient {
   }
 
   static readonly publicMethodPolicies = {
+    prepareInteractiveInput: "idempotentControlWrite",
+    injectInteractiveInput: "idempotentControlWrite",
+    completeInteractiveAssistant: "idempotentControlWrite",
     createStreamingAssistant: "idempotentControlWrite",
     flushAssistantParts: "controlWrite",
     resumeStreamingAssistant: "controlWrite",
@@ -337,6 +342,8 @@ export class AgentApiClient {
     markRunWorkInProgress: "terminalControl",
     persistRunTerminalIntent: "terminalControl",
     convergeRunTerminal: "terminalControl",
+    checkRuntimeAdmission: "controlRead",
+    retireRuntimeAdmission: "idempotentControlWrite",
     getExecutionProfile: "controlRead",
     getWorkspaceEnvironment: "controlRead",
     getPromptContext: "controlRead",
@@ -673,6 +680,30 @@ export class AgentApiClient {
     }
   }
 
+  async prepareInteractiveInput(input: AgentApiPrepareInteractiveInputRequest) {
+    return await this.request<AgentApiPrepareInteractiveInputResponse>(AgentQueueApiEndpoints.prepareInteractiveInput.path, {
+      method: AgentQueueApiEndpoints.prepareInteractiveInput.method, body: input, conflictAsError: true, forceStrictResponseValidation: true,
+      responseSchema: AgentApiPrepareInteractiveInputResponseSchema, responseEndpoint: AgentQueueApiEndpoints.prepareInteractiveInput.path,
+      policy: AgentApiClient.publicMethodPolicies.prepareInteractiveInput,
+    });
+  }
+
+  async injectInteractiveInput(input: AgentApiInjectInteractiveInputRequest) {
+    return await this.request<AgentApiInjectInteractiveInputResponse>(AgentQueueApiEndpoints.injectInteractiveInput.path, {
+      method: AgentQueueApiEndpoints.injectInteractiveInput.method, body: input, conflictAsError: true, forceStrictResponseValidation: true,
+      responseSchema: AgentApiInjectInteractiveInputResponseSchema, responseEndpoint: AgentQueueApiEndpoints.injectInteractiveInput.path,
+      policy: AgentApiClient.publicMethodPolicies.injectInteractiveInput,
+    });
+  }
+
+  async completeInteractiveAssistant(input: AgentApiCompleteInteractiveAssistantRequest) {
+    return await this.request<AgentApiCompleteInteractiveAssistantResponse>(AgentQueueApiEndpoints.completeInteractiveAssistant.path, {
+      method: AgentQueueApiEndpoints.completeInteractiveAssistant.method, body: input, conflictAsError: true, forceStrictResponseValidation: true,
+      responseSchema: AgentApiCompleteInteractiveAssistantResponseSchema, responseEndpoint: AgentQueueApiEndpoints.completeInteractiveAssistant.path,
+      policy: AgentApiClient.publicMethodPolicies.completeInteractiveAssistant,
+    });
+  }
+
   async createStreamingAssistant(input: AgentApiCreateStreamingAssistantRequest) {
     return await this.request<AgentApiCreateStreamingAssistantResponse>(
       AgentApiEndpoints.createStreamingAssistant.path,
@@ -823,6 +854,19 @@ export class AgentApiClient {
         timeoutMs: options?.timeoutMs,
       },
     );
+  }
+
+  checkRuntimeAdmission(input: AgentApiCheckRuntimeAdmissionRequest) {
+    return this.request<AgentApiCheckRuntimeAdmissionResponse>(AgentApiEndpoints.checkRuntimeAdmission.path, {
+      method: "POST", body: input, responseSchema: AgentApiCheckRuntimeAdmissionResponseSchema,
+      responseEndpoint: AgentApiEndpoints.checkRuntimeAdmission.path, policy: "controlRead", forceStrictResponseValidation: true
+    });
+  }
+  retireRuntimeAdmission(input: AgentApiCheckRuntimeAdmissionRequest) {
+    return this.request<AgentApiRetireRuntimeAdmissionResponse>(AgentApiEndpoints.retireRuntimeAdmission.path, {
+      method: "POST", body: input, responseSchema: AgentApiRetireRuntimeAdmissionResponseSchema,
+      responseEndpoint: AgentApiEndpoints.retireRuntimeAdmission.path, policy: "idempotentControlWrite", forceStrictResponseValidation: true
+    });
   }
 
   async getPromptContext(input: AgentApiPromptContextRequest) {

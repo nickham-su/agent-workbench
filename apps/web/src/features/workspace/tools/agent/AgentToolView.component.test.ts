@@ -1,3 +1,4 @@
+import { AGENT_QUEUE_INITIAL_STOP_GENERATION } from "@agent-workbench/shared";
 import assert from "node:assert/strict";
 import test, { afterEach } from "node:test";
 
@@ -59,7 +60,7 @@ class FakeXMLHttpRequest {
 
 Object.defineProperty(globalThis, "XMLHttpRequest", { value: FakeXMLHttpRequest, configurable: true, writable: true });
 
-const [{ mount }, component, { createI18n }, { KeepAlive, h, nextTick, ref }, { workspaceHostKey }, { message, notification }, enUS, zhCN] = await Promise.all([
+const [{ mount }, component, { createI18n }, { KeepAlive, h, nextTick, ref }, { workspaceHostKey }, { message, notification, Modal }, enUS, zhCN] = await Promise.all([
   import("@vue/test-utils"),
   import("./AgentToolView.vue"),
   import("vue-i18n"),
@@ -78,6 +79,7 @@ afterEach(async () => {
   await new Promise<void>((resolve) => setImmediate(resolve));
   message.destroy();
   notification.destroy();
+  Modal.destroyAll();
   // Use this vite-node module instance; the notification unmount is asynchronous.
   await nextTick();
   await new Promise<void>((resolve) => setImmediate(resolve));
@@ -161,13 +163,14 @@ function respondDefaults(request: FakeXMLHttpRequest, workspaceId = "ws-a") {
   return request.respond(200, {});
 }
 
-function mountView(workspaceId = "ws-a", openSessionRequest?: { sessionId: string; sequence: number }, options: { renderPicker?: boolean; renderRealPane?: boolean } = {}) {
+function mountView(workspaceId = "ws-a", openSessionRequest?: { sessionId: string; sequence: number }, options: { renderPicker?: boolean; renderRealPane?: boolean; onPaneMounted?: (vm: any) => void } = {}) {
   const i18n = createI18n({ legacy: false, locale: "en-US", messages: { "en-US": enUS.default, "zh-CN": zhCN.default } });
   return mount(AgentToolView, {
     attachTo: document.body,
     props: { workspaceId, toolId: "agent-tool", openSessionRequest },
     global: {
       plugins: [i18n],
+      mixins: [{ mounted() { if ((this.$options.name ?? this.$options.__name) === "AgentClientPane") options.onPaneMounted?.(this); } }],
       provide: {
         [workspaceHostKey as symbol]: {
           openTool() {}, minimizeTool() {}, toggleMinimize() {}, setToolDot() {},
@@ -179,7 +182,7 @@ function mountView(workspaceId = "ws-a", openSessionRequest?: { sessionId: strin
         "a-tab-pane": { template: "<div class='agent-tab-pane'><slot name='tab' /><slot /></div>" },
         "a-tooltip": { template: "<span><slot /></span>" },
         "a-button": { emits: ["click"], template: "<button @click='$emit(\"click\")'><slot /></button>" },
-        "a-modal": options.renderPicker ? { props: ["open"], template: "<div v-if='open'><slot /></div>" } : true,
+        "a-modal": options.renderPicker ? { props: ["open"], template: "<div v-if='open'><slot /></div>" } : options.renderRealPane ? false : true,
         "a-list": options.renderPicker ? { props: ["dataSource"], template: "<div><slot v-for='item in dataSource' name='renderItem' :item='item' /></div>" } : true,
         "a-list-item": options.renderPicker ? { emits: ["click"], template: "<div @click='$emit(\"click\")'><slot /></div>" } : true,
         "a-input": true,
@@ -2758,5 +2761,143 @@ test("0037 picker 取消未知开闭目标不臆造 false 补偿；显式读取�
     assert.equal(puts.length, 1, "unknown is not a known closed state and cannot authorize a false restore");
     assert.equal(vm.tabVisibilityController.getState("target").confirmed, true);
     assert.equal(vm.draftSessions.some((record: Session) => record.id === draft), true);
+  } finally { wrapper.unmount(); }
+});
+
+for (const outcome of ["timeout-query", "timeout-retry", "507-retry", "507-edited", "timeout-edited"] as const) {
+  test(`真实草稿首发 ${outcome}：父视图即时替换 Pane，真实 Session 接管迟到结果、原 ID、文字和 File`, async () => {
+    const realId = `handoff-${outcome}`;
+    let firstReceipt: FakeXMLHttpRequest | undefined;
+    let origin: any; let originalId = "";
+    const postedIds: string[] = []; const acceptedIds = new Set<string>();
+    const file = new File(["private-image"], "original.png", { type: "image/png" });
+    const image = { id: "original-image", filename: file.name, file };
+    const laterFile = new File(["later-image"], "later.png", { type: "image/png" });
+    const laterImage = { id: "later-image", filename: laterFile.name, file: laterFile };
+    const queueSnapshot = (accepted = false) => ({ workspaceId: "ws-a", sessionId: realId, stopGeneration: "0".repeat(64), queueVersion: accepted ? 1 : 0,
+      mode: "active", pauseCode: null, pendingCount: accepted ? 1 : 0, pendingBytes: accepted ? 15 : 0,
+      inputIdentity: null, pendingIdentity: null, recoveryIdentity: null, unconfirmedInputCount: 0, unconfirmedInputSetHash: null,
+      stop: { state: "none", unresolvedOperationCount: 0, unresolvedTargetCount: 0, code: null }, items: [] });
+    const receipt = () => ({ id: `receipt-${realId}`, clientRequestId: originalId, sequence: 1, createdAt: 1, updatedAt: 1,
+      status: "queued", messageId: null, runId: null, confirmationState: null, confirmationSource: null });
+    FakeXMLHttpRequest.requests = [];
+    FakeXMLHttpRequest.responder = request => {
+      if (request.url.includes("/agents/available") || request.url.includes("/agent/available")) return request.respond(200, { agents: selectionAgents });
+      if (isListRead(request)) return respondSessions(request, []);
+      if (request.method === "POST" && request.url.endsWith("/agent/sessions")) return request.respond(200, session(realId, "ws-a"));
+      if (request.url.includes("/run-state")) return request.respond(200, selectionRunState("ws-a", realId, null));
+      if (request.url.includes("/message-queue")) return request.respond(200, queueSnapshot(acceptedIds.size > 0));
+      if (request.url.includes("/timeline")) return request.respond(200, { session: session(realId, "ws-a"), timelineReset: false, messages: [], toolExecutions: [] });
+      if (request.method === "POST" && request.url.endsWith("/receipts")) {
+        assert.equal(origin.$.isUnmounted, true, "production parent must unmount the draft before its receipt is submitted");
+        const payload = JSON.parse(String((request.requestBody as FormData).get("payload")));
+        assert.equal(payload.stopGeneration, AGENT_QUEUE_INITIAL_STOP_GENERATION);
+        postedIds.push(payload.clientRequestId);
+        assert.equal((request.requestBody as FormData).getAll("images").length, 1);
+        if (!firstReceipt) { firstReceipt = request; originalId = payload.clientRequestId; return; }
+        assert.equal(payload.clientRequestId, originalId); acceptedIds.add(originalId);
+        return request.respond(202, { receipt: receipt(), queue: queueSnapshot(true), deduplicated: outcome.startsWith("timeout") });
+      }
+      if (request.url.includes("/receipts/by-request")) {
+        assert.equal(new URL(request.url, "http://local").searchParams.get("clientRequestId"), originalId);
+        return request.respond(200, { receipt: receipt(), queue: queueSnapshot(true) });
+      }
+      return respondDefaults(request);
+    };
+    const wrapper = mountView("ws-a", undefined, { renderRealPane: true, onPaneMounted(vm) {
+      if (vm.$props.sessionId === realId && outcome.endsWith("edited")) { vm.$.setupState.draft = "new pane user input"; vm.$.setupState.pendingImages = [laterImage]; }
+    } });
+    try {
+      await settle(); const parent = wrapper.vm as any;
+      const draftId = parent.draftSessions[0].id; parent.setSessionAgent(draftId, "agent-a"); await settle();
+      const draftPane = wrapper.findAllComponents({ name: "AgentClientPane" }).find(pane => pane.props("sessionId") === draftId)!;
+      origin = draftPane.vm as any; origin.draft = "original private draft"; origin.pendingImages = [image];
+      const sending = origin.onSend(); await settle();
+      assert.ok(firstReceipt, "real Session receipt request must start after creation");
+      const successor = wrapper.findAllComponents({ name: "AgentClientPane" }).find(pane => pane.props("sessionId") === realId)!;
+      assert.ok(successor); assert.notEqual(successor.vm, origin); assert.equal(origin.$.isUnmounted, true);
+      const vm = successor.vm as any;
+      if (!outcome.endsWith("edited")) {
+        assert.equal(vm.draft, "original private draft"); assert.equal(vm.pendingImages[0].file, file);
+      } else {
+        assert.equal(vm.draft, "new pane user input"); assert.equal(vm.pendingImages[0].file, laterFile);
+      }
+      if (outcome.startsWith("timeout")) { acceptedIds.add(originalId); firstReceipt!.ontimeout?.(); }
+      else firstReceipt!.respond(507, { code: "AGENT_QUEUE_RETENTION_FULL", message: "retention full" });
+      await sending; await settle();
+      assert.equal(vm.queue.handoff.value.submission.payload.clientRequestId, originalId);
+      assert.equal(vm.queue.handoff.value.submission.images[0].file, file);
+      assert.equal(vm.queue.handoff.value.submission.draft, "original private draft");
+      assert.equal(vm.queue.handoff.value.phase, outcome.startsWith("timeout") ? "unknown" : "rejected");
+      assert.equal(successor.find('[data-testid="queue-retained-submission"]').exists(), false);
+      const actionText = enUS.default.agent.client[outcome === "timeout-query" ? "queueLookup" : "queueRetryOriginal"];
+      const action = [...document.body.querySelectorAll("button")].filter(button => button.textContent === actionText).at(-1);
+      assert.ok(action, "successor exposes recovery through an actual dialog action");
+      action.click(); await settle();
+      assert.equal(acceptedIds.size, 1, "lookup/retry reconciles the same logical receipt, never a new execution");
+      assert.deepEqual(postedIds, outcome === "timeout-query" ? [originalId] : [originalId, originalId]);
+      assert.equal(vm.queue.handoff.value, null);
+      if (outcome.endsWith("edited")) {
+        assert.equal(vm.draft, "new pane user input"); assert.equal(vm.pendingImages[0].file, laterFile);
+      } else { assert.equal(vm.draft, ""); assert.equal(vm.pendingImages.length, 0); }
+    } finally { wrapper.unmount(); }
+  });
+}
+
+
+for (const stopped of [false, true]) test(`fresh draft真实父子交接：创建响应前Stop=${stopped}仍冻结初始generation，保留File且后续独立发送成功`, async () => {
+  const realId = `fresh-generation-${stopped}`;
+  let createRequest: FakeXMLHttpRequest | undefined, origin: any;
+  let serverGeneration = AGENT_QUEUE_INITIAL_STOP_GENERATION, posts = 0, successful = 0;
+  const generations: string[] = [];
+  const file = new File(["first draft bytes"], "first.png", { type: "image/png" });
+  const receipt = () => ({ id: `receipt-${realId}`, clientRequestId: "fresh-generation-request", sequence: 1,
+    createdAt: 1, updatedAt: 1, status: "queued", messageId: null, runId: null, confirmationState: null, confirmationSource: null });
+  const snapshot = () => ({ workspaceId: "ws-a", sessionId: realId, queueVersion: successful ? 3 : stopped ? 2 : 0,
+    stopGeneration: serverGeneration, mode: successful || !stopped ? "active" : "paused", pauseCode: successful || !stopped ? null : "user_stop",
+    pendingCount: successful ? 1 : 0, pendingBytes: successful ? 17 : 0, pendingIdentity: null, inputIdentity: null,
+    recoveryIdentity: null, unconfirmedInputCount: 0, unconfirmedInputSetHash: null,
+    stop: { state: stopped ? "quiescent" : "none", unresolvedOperationCount: 0, unresolvedTargetCount: 0, code: null },
+    items: successful ? [{ ...receipt(), textPreview: "first private draft", attachmentCount: 1 }] : [] });
+  FakeXMLHttpRequest.requests = [];
+  FakeXMLHttpRequest.responder = request => {
+    if (request.url.includes("/agents/available") || request.url.includes("/agent/available")) return request.respond(200, { agents: selectionAgents });
+    if (isListRead(request)) return respondSessions(request, []);
+    if (request.method === "POST" && request.url.endsWith("/agent/sessions")) { createRequest = request; return; }
+    if (request.url.includes("/run-state")) return request.respond(200, selectionRunState("ws-a", realId, null));
+    if (request.url.includes("/message-queue")) return request.respond(200, snapshot());
+    if (request.url.includes("/timeline")) return request.respond(200, { session: session(realId, "ws-a"), timelineReset: false, messages: [], toolExecutions: [] });
+    if (request.method === "POST" && request.url.endsWith("/receipts")) {
+      assert.equal(origin.$.isUnmounted, true);
+      const form = request.requestBody as FormData, payload = JSON.parse(String(form.get("payload")));
+      posts++; generations.push(payload.stopGeneration); assert.equal(form.getAll("images").length, 1);
+      if (payload.stopGeneration !== serverGeneration) return request.respond(409, { code: "AGENT_QUEUE_STOP_GENERATION_CHANGED", message: "Stop generation changed" });
+      successful++; return request.respond(202, { receipt: receipt(), queue: snapshot(), deduplicated: false });
+    }
+    return respondDefaults(request);
+  };
+  const wrapper = mountView("ws-a", undefined, { renderRealPane: true });
+  try {
+    await settle(); const parent = wrapper.vm as any;
+    const draftId = parent.draftSessions[0].id; parent.setSessionAgent(draftId, "agent-a"); await settle();
+    const draft = wrapper.findAllComponents({ name: "AgentClientPane" }).find(pane => pane.props("sessionId") === draftId)!;
+    origin = draft.vm as any; origin.draft = "first private draft"; origin.pendingImages = [{ id: realId, filename: file.name, file }];
+    assert.equal(origin.queue.snapshot.value, null, "local draft has no server snapshot");
+    const sending = origin.onSend(); await settle(); assert.ok(createRequest); assert.equal(posts, 0);
+    if (stopped) serverGeneration = "b".repeat(64); // The fresh Session was created server-side, but its response is delayed.
+    createRequest!.respond(200, session(realId, "ws-a")); await sending; await settle();
+    const successor = wrapper.findAllComponents({ name: "AgentClientPane" }).find(pane => pane.props("sessionId") === realId)!;
+    const vm = successor.vm as any;
+    assert.deepEqual(generations, [AGENT_QUEUE_INITIAL_STOP_GENERATION]);
+    if (stopped) {
+      assert.equal(successful, 0); assert.equal(vm.draft, "first private draft"); assert.equal(vm.pendingImages[0].file, file);
+      assert.equal(vm.queue.handoff.value.phase, "rejected");
+      assert.equal(vm.queue.handoff.value.submission.images[0].file, file);
+      assert.equal(vm.queue.snapshot.value.stopGeneration, serverGeneration);
+      assert.equal(posts, 1, "post-Stop snapshot must not automatically resubmit the first action");
+      await vm.onSend(); await settle(); assert.deepEqual(generations, [AGENT_QUEUE_INITIAL_STOP_GENERATION, serverGeneration]);
+    }
+    assert.equal(successful, 1); assert.equal(vm.draft, ""); assert.equal(vm.pendingImages.length, 0);
+    assert.equal(vm.queue.handoff.value, null);
   } finally { wrapper.unmount(); }
 });

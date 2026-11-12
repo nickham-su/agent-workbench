@@ -3,6 +3,8 @@ import { test } from "node:test";
 import { Value } from "@sinclair/typebox/value";
 import {
   AgentMessagePartSchema,
+  AgentModelRequestErrorSchema,
+  AgentMessageSessionRunStateSchema,
   AgentMessageSchema,
   AgentTimelineDeltaResponseSchema,
   AgentTimelineToolExecutionSchema,
@@ -139,4 +141,23 @@ test("user Message image Part carries only attachment metadata through timeline"
     session: { id: "session-1", workspaceId: "workspace-1", title: "Session", kind: "primary", visibility: "unlisted", headMessageId: "message-user", contextRootMessageId: "message-user", revision: 1, forkedFromSessionId: null, forkedFromMessageId: null, createdAt: 1, updatedAt: 1 },
     messages: [userMessage], toolExecutions: [], timelineReset: false
   }), true);
+});
+
+
+test("模型错误详情有独立有限长契约，不扩大终态 detail 或携带请求字段", () => {
+  const detail = { statusCode: 429, responseBody: "rate limited", message: "HTTP 429", truncated: false };
+  assert.equal(Value.Check(AgentModelRequestErrorSchema, detail), true);
+  assert.equal(Value.Check(AgentModelRequestErrorSchema, { ...detail, statusCode: null, responseBody: null }), true);
+  for (const invalid of [{ ...detail, responseBody: "x".repeat(32_769) }, { ...detail, message: "x".repeat(1001) },
+    { ...detail, statusCode: 999 }, { ...detail, requestBodyValues: { prompt: "private" } }]) {
+    assert.equal(Value.Check(AgentModelRequestErrorSchema, invalid), false);
+  }
+  const state = { workspaceId: "workspace", sessionId: "session", status: "idle", activeRunId: null,
+    runNoticeText: "Request failed", retryCount: 0, nextRetryAt: null, activeAssistantMessageId: null,
+    nonTerminalMessageIds: [], nonTerminalToolExecutionIds: [], updatedAt: 1 };
+  assert.equal(Value.Check(AgentMessageSessionRunStateSchema, state), true, "older states may omit diagnostics");
+  assert.equal(Value.Check(AgentMessageSessionRunStateSchema, { ...state, modelRequestError: detail }), true);
+  assert.equal(Value.Check(AgentMessageSessionRunStateSchema, { ...state, modelRequestError: null }), true);
+  assert.equal(Value.Check(AgentRunStatusResponseSchema, { workspaceId: "workspace", sessionId: "session", runId: "run", runKind: "user",
+    status: "failed", code: "run_failed", detail: "response body must not be placed here", updatedAt: 1 }), false);
 });

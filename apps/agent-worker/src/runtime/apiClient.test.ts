@@ -3,8 +3,12 @@ import { createServer, type Server } from "node:http";
 import type { Socket } from "node:net";
 import { afterEach, test } from "node:test";
 import { Type } from "@sinclair/typebox";
+import { Value } from "@sinclair/typebox/value";
 import {
   AgentApiEndpoints,
+  AgentApiPrepareInteractiveInputResponseSchema,
+  AgentApiInjectInteractiveInputResponseSchema,
+  AgentApiCompleteInteractiveAssistantResponseSchema,
   type AgentApiCommitCompactionWithTerminalIntentRequest,
   type AgentApiCommitCompactionResponse,
   type AgentApiCompactionSourceRequest,
@@ -693,6 +697,8 @@ test("structured error messages with control, ANSI, and bidi characters are disc
 
 test("all public client methods are explicitly classified", () => {
   assert.deepEqual(AgentApiClient.publicMethodPolicies, {
+    checkRuntimeAdmission: "controlRead",
+    retireRuntimeAdmission: "idempotentControlWrite",
     createStreamingAssistant: "idempotentControlWrite",
     flushAssistantParts: "controlWrite",
     resumeStreamingAssistant: "controlWrite",
@@ -700,6 +706,9 @@ test("all public client methods are explicitly classified", () => {
     discardStreamingAssistant: "controlWrite",
     completeAssistant: "controlWrite",
     completeTerminalAssistant: "idempotentControlWrite",
+    prepareInteractiveInput: "idempotentControlWrite",
+    injectInteractiveInput: "idempotentControlWrite",
+    completeInteractiveAssistant: "idempotentControlWrite",
     updateToolExecution: "controlWrite",
     updateRunNotice: "controlWrite",
     markRunWorkInProgress: "terminalControl",
@@ -2428,3 +2437,32 @@ test("Workspace environment caller cancellation before/during RPC never retries"
   await assert.rejects(request);
   assert.equal(fixture.attempts.length, 1);
 });
+
+
+for (const method of ["prepareInteractiveInput", "injectInteractiveInput", "completeInteractiveAssistant"] as const) {
+  test(`${method} exposes loss to Runner and accepts its exact-operation replay`, async () => {
+    const schema = method === "prepareInteractiveInput" ? AgentApiPrepareInteractiveInputResponseSchema
+      : method === "injectInteractiveInput" ? AgentApiInjectInteractiveInputResponseSchema : AgentApiCompleteInteractiveAssistantResponseSchema;
+    const queue = { workspaceId: "WORKSPACE", sessionId: "SESSION", queueVersion: 1, mode: "active", pauseCode: null,
+      pendingCount: 0, pendingBytes: 0, pendingIdentity: null, unconfirmedInputCount: 0, unconfirmedInputSetHash: null, recoveryIdentity: null,
+      stop: { state: "none", unresolvedOperationCount: 0, unresolvedTargetCount: 0, code: null }, items: [] };
+    const body = method === "prepareInteractiveInput" ? { operationId: "same-operation", context: validPromptContextResponse, candidates: [], inputReceiptIds: [],
+      preparationSnapshotHash: "a".repeat(64), effectiveInputPolicyVersion: "agent-effective-input-v1", estimatorVersion: "queue-input-estimator-v1", decision: "prepare", queue }
+      : method === "injectInteractiveInput" ? { operationId: "same-operation", headMessageId: "HEAD", revision: 1, receipts: [{ id: "RECEIPT", clientRequestId: "request", sequence: 1,
+        createdAt: 1, updatedAt: 1, status: "injected", messageId: "HEAD", runId: "RUN", confirmationState: "unconfirmed", confirmationSource: null }], queue }
+      : { operationId: "same-operation", decision: "finish", queue };
+    assert.ok(Value.Check(schema, body), JSON.stringify([...Value.Errors(schema, body)]));
+    const fixture = await startTestServer(request => request.attempt === 1 ? { status: 200, destroySocket: true } : { status: 200, body: request.attempt === 2 ? body : {} });
+    const client = createShortTimeoutClient(fixture.origin);
+    const scope = { workspaceId: "WORKSPACE", sessionId: "SESSION", runId: "RUN", operationId: "same-operation" };
+    const invoke = (rpc = client) => method === "prepareInteractiveInput" ? rpc.prepareInteractiveInput(scope)
+      : method === "injectInteractiveInput" ? rpc.injectInteractiveInput({ ...scope, expectedHeadMessageId: "HEAD", expectedRevision: 1,
+        receiptIds: ["RECEIPT"], preparationSnapshotHash: "a".repeat(64), estimatorVersion: "queue-input-estimator-v1" })
+      : rpc.completeInteractiveAssistant({ ...scope, messageId: "MESSAGE", updatedAt: 1 });
+    await assert.rejects(() => invoke(), /internal rpc network failure/); assert.equal(fixture.attempts.length, 1);
+    await invoke();
+    assert.equal(fixture.attempts.length, 2); assert.deepEqual(fixture.attempts[0]!.body, fixture.attempts[1]!.body);
+    const warnClient = new AgentApiClient({ apiOrigin: fixture.origin, internalToken: "TOKEN", internalRpcTimeoutMs: 100, responseValidation: "warn", logger: { warn() {} } });
+    await assert.rejects(() => invoke(warnClient), InternalRpcInvalidResponseError);
+  });
+}

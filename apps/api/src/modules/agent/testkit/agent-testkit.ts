@@ -1,3 +1,4 @@
+import { waitForAgentRuntimeReadiness } from "../startup/agent-runtime-readiness.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { FastifyInstance } from "fastify";
@@ -32,8 +33,10 @@ export type CreateAgentTestFixtureOptions = {
   repoRoot?: string;
   /** Prefix for the directory created below `<repoRoot>/.tmp-tests`. */
   dataDirPrefix?: string;
-  /** Create and ready a real Fastify application. Defaults to false. */
+  /** Create and listen a real Fastify application, including production recovery. Defaults to false. */
   withApp?: boolean;
+  /** Set false only when the caller owns listening (for example a fixed Worker callback port). */
+  listen?: boolean;
   /**
    * Testkit self-test hook for fixture-construction failure coverage. It is
    * consulted only with `withApp: true`; ordinary API tests use real createApp.
@@ -194,7 +197,8 @@ export async function createAgentTestFixture(options: CreateAgentTestFixtureOpti
 
     if (options.withApp === true) {
       app = await (options.appFactory ?? createDefaultApp)(ctx);
-      await app.ready();
+      if (options.listen === false) await app.ready();
+      else await listenAgentTestApp(app);
     }
 
     let disposed = false;
@@ -336,4 +340,14 @@ export function createFakeAgentRuntime(options: FakeAgentRuntimeOptions = {}): F
       if (error !== undefined && error !== null) throw error;
     }
   };
+}
+
+
+/** Start the real lifecycle and await its recovery barrier, not merely Fastify's socket event. */
+export async function listenAgentTestApp(app: FastifyInstance, port = 0): Promise<string> {
+  if (!app.server.listening) await app.listen({host:"127.0.0.1",port});
+  await waitForAgentRuntimeReadiness(app);
+  const address = app.server.address();
+  if (!address || typeof address === "string") throw new Error("Agent fixture requires a loopback TCP listener");
+  return `http://127.0.0.1:${address.port}`;
 }

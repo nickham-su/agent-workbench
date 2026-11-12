@@ -25,9 +25,7 @@ function imageSource(originRunId = "run") {
 
 test("compaction plans image tool tail as an authorized path reference, summary prefix only as text", () => {
   const source = imageSource();
-  const [first, assistant] = materializePrimaryBlocks({ source, profile: testProfile });
-  assert.equal(first!.containsTriggerMedia, false);
-  assert.equal(assistant!.containsTriggerMedia, false);
+  const [, assistant] = materializePrimaryBlocks({ source, profile: testProfile });
   assert.deepEqual(assistant!.messages.at(-1), { role: "tool", content: [{
     type: "tool-result", toolCallId: "provider-call", toolName: "view_image",
     output: { type: "image_ref", path: "repo/screenshot.png" },
@@ -49,7 +47,7 @@ test("prior Run tool image becomes path text with the original callId", () => {
   assert.equal(JSON.stringify(result).includes('"image_ref"'), false);
 });
 
-test("oversized earlier tool image call enters the summary prefix, never a user-media resend", () => {
+test("oversized earlier tool image call enters the summary prefix", () => {
   const source = imageSource();
   const block = source.blocks[1]!;
   const part = block.message.parts[0]!;
@@ -58,7 +56,6 @@ test("oversized earlier tool image call enters the summary prefix, never a user-
   const plan = planCompaction({ source, profile: testProfile, mode: "manual" });
   assert.equal(plan.kind, "planned");
   if (plan.kind === "planned") {
-    assert.equal(plan.plan.containsTriggerMedia, false);
     assert.ok(plan.plan.prefixSourceBlockIds.includes(block.sourceMessageId));
     assert.match(JSON.stringify(plan.summaryBlocks), /repo\/screenshot\.png/);
     assert.equal(JSON.stringify(plan.summaryBlocks).includes('"image_ref"'), false);
@@ -71,7 +68,6 @@ test("historical uploaded image is only a trusted path in primary and summary co
   const historical = materializePrimaryBlocks({ source, profile: testProfile })[0]!;
   assert.match(JSON.stringify(historical.messages), /repo\/screen\.png/);
   assert.equal(JSON.stringify(historical.messages).includes("attachment_ref"), false);
-  assert.equal(historical.containsTriggerMedia, false);
   const summary = summaryInputToModelMessages([materializeSummaryInputBlock(source.blocks[0]!)]);
   assert.match(JSON.stringify(summary), /repo\/screen\.png/);
   assert.equal(JSON.stringify(summary).includes("attachment_ref"), false);

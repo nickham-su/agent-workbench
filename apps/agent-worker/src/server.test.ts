@@ -83,7 +83,7 @@ async function createTestServer() {
     socketPath: null,
     internalToken: "test-token",
     runner: {
-      enqueueRun(run: unknown) {
+      enqueueRunAdmitted(run: unknown) {
         runs.push(run);
       },
       cancelSession(sessionId: string) {

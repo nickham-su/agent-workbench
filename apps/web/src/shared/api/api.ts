@@ -181,7 +181,8 @@ export class ApiError extends Error {
   }
 }
 
-function toApiError(err: unknown) {
+export function toApiError(err: unknown) {
+  if (err instanceof ApiError) return err;
   if (axios.isAxiosError(err)) {
     const data = err.response?.data as any;
     return new ApiError({

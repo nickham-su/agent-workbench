@@ -57,6 +57,14 @@
     "./node/analytics-root": {
       "types": "./dist/node/analytics-root.d.ts",
       "default": "./dist/node/analytics-root.js"
+    },
+    "./node/agent-runtime-retirement": {
+      "types": "./dist/node/agent-runtime-retirement.d.ts",
+      "default": "./dist/node/agent-runtime-retirement.js"
+    },
+    "./node/agent-run-stop": {
+      "types": "./dist/node/agent-run-stop.d.ts",
+      "default": "./dist/node/agent-run-stop.js"
     }
   },
   "scripts": {

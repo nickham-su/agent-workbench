@@ -175,6 +175,18 @@ export class AgentService {
     return this.capabilities.lifecycle.completeAssistantFromWorker(...args);
   }
 
+  prepareInteractiveInputFromWorker(...args: Parameters<AgentServiceCapabilities["lifecycle"]["prepareInteractiveInputFromWorker"]>): ReturnType<AgentServiceCapabilities["lifecycle"]["prepareInteractiveInputFromWorker"]> {
+    return this.capabilities.lifecycle.prepareInteractiveInputFromWorker(...args);
+  }
+
+  injectInteractiveInputFromWorker(...args: Parameters<AgentServiceCapabilities["lifecycle"]["injectInteractiveInputFromWorker"]>): ReturnType<AgentServiceCapabilities["lifecycle"]["injectInteractiveInputFromWorker"]> {
+    return this.capabilities.lifecycle.injectInteractiveInputFromWorker(...args);
+  }
+
+  completeInteractiveAssistantFromWorker(...args: Parameters<AgentServiceCapabilities["lifecycle"]["completeInteractiveAssistantFromWorker"]>): ReturnType<AgentServiceCapabilities["lifecycle"]["completeInteractiveAssistantFromWorker"]> {
+    return this.capabilities.lifecycle.completeInteractiveAssistantFromWorker(...args);
+  }
+
   completeTerminalAssistantFromWorker(...args: Parameters<AgentServiceCapabilities["lifecycle"]["completeTerminalAssistantFromWorker"]>): ReturnType<AgentServiceCapabilities["lifecycle"]["completeTerminalAssistantFromWorker"]> {
     return this.capabilities.lifecycle.completeTerminalAssistantFromWorker(...args);
   }

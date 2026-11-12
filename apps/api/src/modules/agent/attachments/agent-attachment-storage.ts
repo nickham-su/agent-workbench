@@ -1,5 +1,5 @@
 import fs from "node:fs/promises";
-import { fstatSync, lstatSync, linkSync } from "node:fs";
+import { fstatSync, lstatSync, linkSync, readSync } from "node:fs";
 import { constants as fsConstants } from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
@@ -280,8 +280,14 @@ export async function prepareAgentWorkspaceAttachmentPublication(input: {
   storageKey: string;
   mediaType: AgentImageMediaType;
   tempId: string;
+  expectedContent?: { byteSize: number; byteSha256: string };
   afterLinkForTest?: () => void;
 }): Promise<{ checkAvailable(): void; publish(): OwnedAgentAttachmentFile; close(): Promise<void> }> {
+  if (input.expectedContent && (!Number.isSafeInteger(input.expectedContent.byteSize)
+    || input.expectedContent.byteSize < 1 || input.expectedContent.byteSize > AGENT_IMAGE_MAX_BYTES
+    || !/^[0-9a-f]{64}$/.test(input.expectedContent.byteSha256))) {
+    throw new Error("Invalid expected attachment content");
+  }
   const storageKey = assertAgentAttachmentStorageKey(input.attachmentId, input.storageKey, input.mediaType);
   const sourceName = `${assertAgentAttachmentTempId(input.tempId)}.part`;
   const source = await openAttachmentDirectories({ dataDir: input.dataDir, create: false });
@@ -299,6 +305,27 @@ export async function prepareAgentWorkspaceAttachmentPublication(input: {
     const original = await handle.stat();
     if (!original.isFile() || original.size < 1 || original.size > AGENT_IMAGE_MAX_BYTES) throw new Error("Invalid attachment source");
     await verifyOwnedFile({ directory: source.temp, name: sourceName, expected: original });
+    const verifyExpectedContent = () => {
+      if (!input.expectedContent) return;
+      if (fstatSync(handle!.fd).size !== input.expectedContent.byteSize) throw new Error("Attachment source size changed");
+      const hash = createHash("sha256");
+      const buffer = Buffer.alloc(Math.min(64 * 1024, input.expectedContent.byteSize));
+      let position = 0;
+      while (position < input.expectedContent.byteSize) {
+        const bytesRead = readSync(handle!.fd, buffer, 0,
+          Math.min(buffer.length, input.expectedContent.byteSize - position), position);
+        if (bytesRead === 0) throw new Error("Attachment source ended unexpectedly");
+        if (position === 0 && detectAgentImageMediaType(buffer.subarray(0, bytesRead)) !== input.mediaType) {
+          throw new Error("Attachment source media type changed");
+        }
+        hash.update(buffer.subarray(0, bytesRead));
+        position += bytesRead;
+      }
+      if (hash.digest("hex") !== input.expectedContent.byteSha256) throw new Error("Attachment source content changed");
+    };
+    // Same-inode writes are possible in a mutable Workspace. Bind the bytes as
+    // well as the path/inode, and recheck synchronously around the hard link.
+    verifyExpectedContent();
     const pinnedSource = handle;
     const pinnedTarget = target;
     let attempted = false;
@@ -337,6 +364,7 @@ export async function prepareAgentWorkspaceAttachmentPublication(input: {
               || !sourceEntry.isFile() || sourceEntry.isSymbolicLink() || sourceEntry.dev !== original.dev || sourceEntry.ino !== original.ino) {
             throw new Error("attachment source changed before publication");
           }
+          verifyExpectedContent();
           const finalPath = path.join(pinnedTarget.attachments.fdPath, storageKey);
           linkSync(sourcePath, finalPath); // EEXIST and EXDEV fail closed; never overwrite or copy.
           linked = true;
@@ -345,6 +373,7 @@ export async function prepareAgentWorkspaceAttachmentPublication(input: {
           if (!final.isFile() || final.isSymbolicLink() || final.dev !== current.dev || final.ino !== current.ino) {
             throw new Error("attachment final changed after publication");
           }
+          verifyExpectedContent();
           return { dev: current.dev, ino: current.ino };
         } catch (error) {
           // Never rename or unlink in the mutable Workspace, even when our link succeeded.
@@ -439,12 +468,14 @@ export async function stageAgentImageUpload(input: {
   const handle = await createAgentAttachmentTempFile(input);
   let byteSize = 0;
   let signaturePrefix = Buffer.alloc(0);
+  const hash = createHash("sha256");
   try {
     for await (const rawChunk of input.stream) {
       const chunk = Buffer.isBuffer(rawChunk) ? rawChunk : Buffer.from(rawChunk);
       byteSize += chunk.byteLength;
       assertAgentImageByteSize(byteSize);
       input.onBytes(chunk.byteLength);
+      hash.update(chunk);
       if (signaturePrefix.byteLength < 12) {
         signaturePrefix = Buffer.concat([signaturePrefix, chunk.subarray(0, 12 - signaturePrefix.byteLength)]);
       }
@@ -468,6 +499,7 @@ export async function stageAgentImageUpload(input: {
     filename: sanitizeAgentImageFilename(input.filename, extensionForAgentImageMediaType(mediaType)),
     mediaType,
     byteSize,
+    byteSha256: hash.digest("hex"),
   };
 }
 

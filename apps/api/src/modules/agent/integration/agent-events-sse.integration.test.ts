@@ -1,3 +1,4 @@
+import { listenAgentTestApp } from "../testkit/agent-testkit.js";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createMessageRunRecord } from "../agent-message.store.js";
@@ -11,7 +12,7 @@ test("internal events/sse 返回 run-complete 事件 chunk", async (t) => {
     await fixture.dispose();
   });
 
-  await fixture.app.listen({ host: "127.0.0.1", port: 0 });
+  await listenAgentTestApp(fixture.app, 0);
   const addr = fixture.app.server.address();
   const port = typeof addr === "object" && addr ? addr.port : 0;
   assert.ok(port > 0, "listen should allocate a port");

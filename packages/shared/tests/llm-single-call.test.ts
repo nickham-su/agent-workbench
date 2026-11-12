@@ -155,12 +155,12 @@ test("generateSingleCallText 允许 null 关闭单次调用超时", async () => 
   }
 });
 
-test("single-call 传递共享 headers 与 allowSystemInMessages", async () => {
+test("single-call 默认允许系统消息并传递共享 headers", async (t) => {
+  const warn = t.mock.method(console, "warn", () => {});
   const profile = createMockProfile();
   profile.model.options = {
     aiSdk: {
       headers: { "x-model-config": "single-call" },
-      allowSystemInMessages: true,
     },
   };
   let configuredHeader = "";
@@ -199,9 +199,24 @@ test("single-call 传递共享 headers 与 allowSystemInMessages", async () => {
     assert.equal(configuredHeader, "single-call");
     assert.equal(authorizationHeader, "Bearer sk-test");
     assert.match(requestBody, /message-level system/);
+    assert.equal(warn.mock.callCount(), 0);
   } finally {
     await new Promise<void>((resolve, reject) => server.close((err) => err ? reject(err) : resolve()));
   }
+});
+
+test("single-call 保留显式禁止系统消息的配置", async () => {
+  const profile = createMockProfile();
+  profile.model.options = { aiSdk: { allowSystemInMessages: false } };
+  await assert.rejects(
+    () => generateSingleCallText(profile, {
+      messages: [
+        { role: "system", content: "message-level system" },
+        { role: "user", content: "hello" },
+      ],
+    }, { disableSdkRetries: true }),
+    /System messages are not allowed/,
+  );
 });
 
 test("single-call 历史敏感 header 在 fetch 前明确失败且不泄漏值", async () => {
