@@ -306,21 +306,15 @@ export class RunLifecycleApplication {
     await this.enqueueActivatedRunOrReconcile({ runtime, run: { ...run, ...context } });
   }
 
-  async startQueuedUserRun(command: { workspaceId: string; sessionId: string; receiptId: string; inputText: string; runtime: StartUserRunCommand["runtime"]; assertDispatchAdmission?: () => void }) {
+  /** Called synchronously inside the ordinary send's publication transaction. */
+  activateAcceptedUserRun(command: { workspaceId: string; sessionId: string; receiptId: string }) {
     if (this.closed) throw new HttpError(503, "Agent lifecycle is stopping", "AGENT_LIFECYCLE_STOPPING");
-    command.assertDispatchAdmission?.();
     workspaceDeletingFence.assertWritable(command.workspaceId);
-    const context = this.dependencies.workspaceRunContextReader.get(command.workspaceId);
-    if (!context) throw new HttpError(404, "Workspace not found");
-    const activate = this.dependencies.persistence.activateQueuedUserRun;
-    if (!activate) throw new Error("Queue activation persistence is not configured");
-    const activation = activate.call(this.dependencies.persistence, { workspaceId: command.workspaceId, sessionId: command.sessionId,
-      receiptId: command.receiptId, assertDispatchAdmission: command.assertDispatchAdmission, runId: this.dependencies.ids.newId("run"), createdAt: this.dependencies.clock.nowMs() });
-    if (activation.kind === "session-running") return null;
-    // A duplicate is a durable accepted identity, not authorization to replay a finished Run.
-    if (activation.kind !== "deduplicated") await this.enqueueActivatedRunOrReconcile({ runtime: command.runtime,
-      run: { workspaceId: command.workspaceId, sessionId: command.sessionId, runId: activation.runId, inputText: command.inputText, ...context } });
-    return { sessionId: command.sessionId, runId: activation.runId, messageId: activation.messageId, deduplicated: activation.kind === "deduplicated" };
+    const activate = this.dependencies.persistence.activateAcceptedUserRun;
+    if (!activate) throw new Error("Ordinary receipt activation is not configured");
+    const activation = activate.call(this.dependencies.persistence, { ...command, runId: this.dependencies.ids.newId("run"), createdAt: this.dependencies.clock.nowMs() });
+    if (activation.kind === "session-running") throw new HttpError(409, "Session is running", "SESSION_RUNNING");
+    return { runId: activation.runId };
   }
 
   failRunAfterEnqueueFailure(params: { workspaceId: string; sessionId: string; runId: string; updatedAt?: number }): EnqueueFailureSettlement {

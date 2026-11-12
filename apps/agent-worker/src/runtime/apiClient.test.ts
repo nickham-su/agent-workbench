@@ -2443,7 +2443,7 @@ for (const method of ["prepareInteractiveInput", "injectInteractiveInput", "comp
   test(`${method} exposes loss to Runner and accepts its exact-operation replay`, async () => {
     const schema = method === "prepareInteractiveInput" ? AgentApiPrepareInteractiveInputResponseSchema
       : method === "injectInteractiveInput" ? AgentApiInjectInteractiveInputResponseSchema : AgentApiCompleteInteractiveAssistantResponseSchema;
-    const queue = { workspaceId: "WORKSPACE", sessionId: "SESSION", queueVersion: 1, mode: "active", pauseCode: null,
+    const queue = { workspaceId: "WORKSPACE", sessionId: "SESSION", queueVersion: 1, stopGeneration: "0".repeat(64),
       pendingCount: 0, pendingBytes: 0, pendingIdentity: null, unconfirmedInputCount: 0, unconfirmedInputSetHash: null, recoveryIdentity: null,
       stop: { state: "none", unresolvedOperationCount: 0, unresolvedTargetCount: 0, code: null }, items: [] };
     const body = method === "prepareInteractiveInput" ? { operationId: "same-operation", context: validPromptContextResponse, candidates: [], inputReceiptIds: [],

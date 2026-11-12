@@ -3,12 +3,10 @@ import { Value } from "@sinclair/typebox/value";
 import type { TSchema } from "@sinclair/typebox";
 import {
   AgentAcceptUserMessageResponseSchema, AgentMessageQueueSnapshotSchema, AgentReceiptResponseSchema,
-  AgentReceiptDetailResponseSchema, AgentStopMessageQueueResponseSchema, AgentResumeMessageQueueResponseSchema,
-  AgentAbandonUnconfirmedInputResponseSchema,
+  AgentReceiptDetailResponseSchema, AgentStopMessageQueueResponseSchema,
   type AgentAcceptUserMessageRequest, type AgentAcceptUserMessageResponse, type AgentMessageQueueSnapshot,
   type AgentReceiptResponse, type AgentReceiptDetailResponse, type AgentStopMessageQueueRequest,
-  type AgentStopMessageQueueResponse, type AgentResumeMessageQueueRequest, type AgentResumeMessageQueueResponse,
-  type AgentAbandonUnconfirmedInputRequest, type AgentAbandonUnconfirmedInputResponse,
+  type AgentStopMessageQueueResponse,
 } from "@agent-workbench/shared";
 import { apiClient, ApiError, toApiError } from "./api";
 
@@ -47,13 +45,6 @@ export function clearAgentMessageQueue(sessionId: string, body: AgentClearMessag
 export function stopAgentMessageQueue(sessionId: string, body: AgentStopMessageQueueRequest) {
   return queueRequest<AgentStopMessageQueueResponse>("POST", `${sessionPath(sessionId)}/message-queue/stop`, AgentStopMessageQueueResponseSchema, { data: body });
 }
-export function resumeAgentMessageQueue(sessionId: string, body: AgentResumeMessageQueueRequest) {
-  return queueRequest<AgentResumeMessageQueueResponse>("POST", `${sessionPath(sessionId)}/message-queue/resume`, AgentResumeMessageQueueResponseSchema, { data: body });
-}
-export function abandonAgentUnconfirmedInput(sessionId: string, body: AgentAbandonUnconfirmedInputRequest) {
-  return queueRequest<AgentAbandonUnconfirmedInputResponse>("POST", `${sessionPath(sessionId)}/message-queue/abandon-unconfirmed`, AgentAbandonUnconfirmedInputResponseSchema, { data: body });
-}
-
 export async function getAgentReceiptAttachmentContent(sessionId: string, workspaceId: string, receiptId: string, attachmentId: string): Promise<Blob> {
   try {
     const response = await apiClient.get(`${sessionPath(sessionId)}/receipts/${encodeURIComponent(receiptId)}/attachments/${encodeURIComponent(attachmentId)}/content`, { params: { workspaceId }, responseType: "blob", timeout: 15_000 });

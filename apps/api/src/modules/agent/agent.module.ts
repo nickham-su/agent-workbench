@@ -71,7 +71,6 @@ export async function registerAgentModule(app: FastifyInstance, ctx: AppContext)
       diagnoseOutboxCorrupt: ctx.analyticsDiagnostics?.outboxCorrupt,
       onRuntimeStarting: (runtimeInstanceId,processIdentity) => {
         runtimeRecoveryEpoch++;
-        messageQueue?.suspendRuntimeDispatch();
         runtimeControl.blockAdmission();
         runtimeControlStore.createInstance({runtimeInstanceId,ownerApiInstanceId,runtimeKind:"worker"},processIdentity);
       },
@@ -85,33 +84,31 @@ export async function registerAgentModule(app: FastifyInstance, ctx: AppContext)
         if (!lifecycleOpen) return;
         if (runtimeControl.currentRuntimeInstanceId === runtimeInstanceId) {
           runtimeRecoveryEpoch++;
-          messageQueue?.suspendRuntimeDispatch();
           runtimeControl.blockAdmission();
         }
         runtimeControlStore.recordInstanceExit(runtimeInstanceId,ownerApiInstanceId,"child_exit",evidence);
-        messageQueue?.dispatcher.wake();
       },
       onReady: async (generation) => {
         if (closing) return;
         const recoveryEpoch = runtimeRecoveryEpoch;
         try {
-        runtimeControl.recover();
-        await recoverAfterAgentRuntimeReady({
-          runtime,
-          generation,
-          resumeWorkspaceDeletions: () => resumePendingWorkspaceDeletions(ctx, app.log),
-          recoverRuns: ({ runtime: readyRuntime, generation: readyGeneration }) =>
-            startupCoordinator.recoverWhenRuntimeReady(readyRuntime, readyGeneration),
-          reconcileTerminals: () => reconcilePendingTerminals(ctx, app.log),
-          logger: app.log,
-        });
-        await runtimeControl.reconcileStops();
-        if (closing || recoveryEpoch !== runtimeRecoveryEpoch) return;
-        runtimeControl.openAdmission();
-        messageQueue?.openAfterRuntimeRecovery();
-        runtimeControl.startReconciler();
-        scheduledScheduler?.start();
-        runtimeReadiness.complete();
+          runtimeControl.recover();
+          await recoverAfterAgentRuntimeReady({
+            runtime,
+            generation,
+            resumeWorkspaceDeletions: () => resumePendingWorkspaceDeletions(ctx, app.log),
+            recoverRuns: ({ runtime: readyRuntime, generation: readyGeneration }) =>
+              startupCoordinator.recoverWhenRuntimeReady(readyRuntime, readyGeneration),
+            reconcileTerminals: () => reconcilePendingTerminals(ctx, app.log),
+            logger: app.log,
+          });
+          await runtimeControl.reconcileStops();
+          if (closing || recoveryEpoch !== runtimeRecoveryEpoch) return;
+          runtimeControl.openAdmission();
+          messageQueue?.openAfterRuntimeRecovery();
+          runtimeControl.startReconciler();
+          scheduledScheduler?.start();
+          runtimeReadiness.complete();
         } catch(error) { runtimeReadiness.fail(error); throw error; }
       },
       });
@@ -125,7 +122,7 @@ export async function registerAgentModule(app: FastifyInstance, ctx: AppContext)
       runtimeInstanceId:incarnation,
       bindingMatches: run => runtimeControlStore.checkAdmission({...run,runtimeInstanceId:incarnation}).bindingMatches,
       admissionAllowed: run => runtimeControlStore.checkAdmission({...run,runtimeInstanceId:incarnation}).admitted,
-      onRunQuiescent: run => { if (!lifecycleOpen) return {retired:false}; const result = runtimeControlStore.retireAdmission({...run,runtimeInstanceId:incarnation}); messageQueue?.dispatcher.wake(); return result; }
+      onRunQuiescent: run => { if (!lifecycleOpen) return {retired:false}; const result = runtimeControlStore.retireAdmission({...run,runtimeInstanceId:incarnation}); return result; }
     });
     app.addHook("onClose", async () => { await localAnalytics.close(); });
     localRuntime.bootstrap();
@@ -161,9 +158,8 @@ export async function registerAgentModule(app: FastifyInstance, ctx: AppContext)
 
   messageQueue = createMessageQueue(runtimeControl);
   await registerAgentMessageQueueRoutes(app, { service: messageQueue.service, dataDir: ctx.dataDir });
-  const unsubscribeQueueWake = runCompletedEventHub.subscribe(() => messageQueue?.dispatcher.wake());
 
-  await registerAgentRuntimeControlRoutes(app,runtimeControlStore,ctx.agentInternalToken, () => messageQueue?.dispatcher.wake());
+  await registerAgentRuntimeControlRoutes(app,runtimeControlStore,ctx.agentInternalToken);
   await registerAgentRoutes(app, { service, runtime, internalToken: ctx.agentInternalToken, dataDir: ctx.dataDir, pluginHost: pluginHostClient, runCompletedEventHub });
   const scheduledTasks = new ScheduledTaskService(ctx, service, runtime, Date.now, ({ executionId, reason }) => {
     // No raw Agent errors, Prompt or source content in this bounded diagnostic.
@@ -185,10 +181,9 @@ export async function registerAgentModule(app: FastifyInstance, ctx: AppContext)
   app.addHook("onClose", async () => {
     closing = true;
     // Seal public receipts and internal injection synchronously before awaiting
-    // any scanner, publisher or runtime. Terminal writeback stays available.
+    // any publisher or runtime. Terminal writeback stays available.
     const queueClosing = messageQueue!.close(1_000);
     runtimeControl.blockAdmission();
-    unsubscribeQueueWake();
     await scheduledScheduler?.stop();
     let queueSettled = await queueClosing;
     await runtimeControl.stopAllForShutdown();

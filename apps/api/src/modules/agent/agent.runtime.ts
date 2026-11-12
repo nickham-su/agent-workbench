@@ -170,7 +170,7 @@ export class AgentRuntime implements AgentRuntimePort {
       while (this.stopRegistry.mayRegister(run.runId)) {
         const interactive = ctx.interactiveInput?.interactive === true;
         if (steps++ >= maxSteps) {
-          this.execution.updateRunNoticeFromWorker({ ...run, runNoticeText: "budget_exhausted", queuePauseCode: "budget_exhausted", updatedAt: nowMs() });
+          this.execution.updateRunNoticeFromWorker({ ...run, runNoticeText: "budget_exhausted", terminalFailure: true, updatedAt: nowMs() });
           throw new Error("local fallback step budget exhausted");
         }
         if (interactive && !continuation) {
@@ -182,9 +182,9 @@ export class AgentRuntime implements AgentRuntimePort {
           }
           if (prepared.decision === "expired") continue;
           if (prepared.decision === "rejected") {
-            const pauseCode = prepared.reason === "snapshot_too_large" ? "prepare_snapshot_too_large" : "prepare_cache_capacity";
-            this.execution.updateRunNoticeFromWorker({ ...run, runNoticeText: pauseCode, queuePauseCode: pauseCode, updatedAt: nowMs() });
-            throw new Error(pauseCode);
+            const reason = prepared.reason === "snapshot_too_large" ? "prepare_snapshot_too_large" : "prepare_cache_capacity";
+            this.execution.updateRunNoticeFromWorker({ ...run, runNoticeText: reason, terminalFailure: true, updatedAt: nowMs() });
+            throw new Error(reason);
           }
           if (prepared.candidates.length) this.execution.injectInteractiveInputFromWorker({ ...run, operationId: newSortableId("queue-inject"),
             expectedHeadMessageId: prepared.context.headMessageId, expectedRevision: prepared.context.sessionRevision,

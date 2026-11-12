@@ -1765,9 +1765,7 @@ for (const round of queueToolRounds) test(`worker 队列: ${round.name}整轮闭
   queue.service.recoverPublications(); queue.service.openAdmission();
   // This independent assembly uses the real fixture Worker, already identity-ready above.
   // Open dispatch explicitly without starting a second background scanner.
-  queue.dispatcher.resumeRuntimeDispatch();
   const scope = { workspaceId: fixture.workspaceId, sessionId: session.id };
-  const first = await queue.service.accept(session.id, { workspaceId: fixture.workspaceId, clientRequestId: "queue-first", text: "queue initial" });
   const deferred = () => { let resolve!: () => void; const promise = new Promise<void>(next => { resolve = next; }); return { promise, resolve }; };
   const entered = round.tools.map(() => deferred()), release = round.tools.map(() => deferred());
   const terminalIndexes = new Map<string, number>();
@@ -1781,13 +1779,15 @@ for (const round of queueToolRounds) test(`worker 队列: ${round.name}整轮闭
     entered[index]?.resolve(); await release[index]?.promise;
   };
   t.after(() => release.forEach(gate => gate.resolve()));
-  const activated = await queue.dispatcher.dispatchSession(scope); assert.ok(activated);
+  const first = await queue.service.accept(session.id, { workspaceId: fixture.workspaceId, clientRequestId: "queue-first", text: "queue initial" });
+  assert.equal(first.receipt.status,"injected");
+  const activated = {runId:first.receipt.runId};
   await entered[0]!.promise;
   assert.equal(fixture.llmStub!.requests.length, 1);
   const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
   const image = await stageAgentImageUpload({ dataDir: fixture.ctx.dataDir, attachmentId: `att_${randomUUID()}`, tempId: `tmp_${randomUUID()}`,
     filename: "queue.png", stream: Readable.from([png]), onBytes: () => undefined });
-  const accepted = await queue.service.accept(session.id, { workspaceId: fixture.workspaceId, clientRequestId: "queue-second", text: "queued second exact text", images: [image] });
+  const accepted = await queue.service.accept(session.id, { workspaceId: fixture.workspaceId, targetRunId:activated.runId, clientRequestId: "queue-second", text: "queued second exact text", images: [image] });
   assert.equal(accepted.receipt.status, "queued"); assert.equal(accepted.queue.pendingCount, 1);
   for (let index = 1; index < round.tools.length; index++) {
     // Each bash/bash pair is one real parallel batch: both terminal writes must
@@ -1836,15 +1836,19 @@ async function interactiveWorkerFixture(t: TestContext) {
   const worker = new AgentWorkerClient({ workerOrigin: `http://${fixture.ctx.agentWorkerHost}:${fixture.ctx.agentWorkerPort}`,
     workerSocketPath: fixture.ctx.agentWorkerSocketPath, internalToken: fixture.ctx.agentInternalToken, responseValidation: "strict", logger: fixture.app.log });
   const identity = await worker.getRuntimeIdentity();
-  const runtime = new AgentRuntimeControlService(new AgentRuntimeControlStore(fixture.db), worker); runtime.ready(identity.runtimeInstanceId);
+  let pending: Parameters<AgentWorkerClient["enqueueRun"]>[0] | null = null;
+  const runtime = new AgentRuntimeControlService(new AgentRuntimeControlStore(fixture.db), {
+    enqueueRun: run => { pending=run; }, cancelSession: worker.cancelSession.bind(worker), stopRunsAndWait: worker.stopRunsAndWait.bind(worker),
+  }); runtime.ready(identity.runtimeInstanceId);
+  const startRun = async () => { assert.ok(pending); const run=pending;pending=null;await worker.enqueueRun(run);return {runId:run.runId}; };
   const composition = createAgentComposition(fixture.ctx, fixture.app.log), queue = composition.createMessageQueue(runtime);
   t.after(async () => { await queue.close(); await runtime.close(); composition.dispose(); });
   queue.service.recoverPublications(); queue.service.openAdmission();
   // This independent assembly uses the real fixture Worker, already identity-ready above.
   // Open dispatch explicitly without starting a second background scanner.
-  queue.dispatcher.resumeRuntimeDispatch();
   const scope = { workspaceId: fixture.workspaceId, sessionId: session.id };
-  const accept = (id: string) => queue.service.accept(session.id, { workspaceId: fixture.workspaceId, clientRequestId: id, text: id });
+  const accept = (id: string) => { const state=getMessageRunState(fixture.db,fixture.workspaceId,session.id);
+    return queue.service.accept(session.id, { workspaceId: fixture.workspaceId, clientRequestId: id, text: id, targetRunId:state?.status==="running"?state.activeRunId:null }); };
   const snapshot = () => new Promise<{ activeCount: number }>((resolve, reject) => {
     const request = httpRequest({ ...(fixture.ctx.agentWorkerSocketPath ? { socketPath: fixture.ctx.agentWorkerSocketPath }
       : { hostname: fixture.ctx.agentWorkerHost, port: fixture.ctx.agentWorkerPort }), path: "/_internal/analytics-snapshot",
@@ -1855,7 +1859,7 @@ async function interactiveWorkerFixture(t: TestContext) {
     });
     request.setTimeout(2000, () => request.destroy(new Error("Worker snapshot timed out"))); request.on("error", reject); request.end();
   });
-  return { fixture, session, worker, runtime, queue, scope, accept, snapshot, runtimeInstanceId: identity.runtimeInstanceId };
+  return { fixture, session, worker, runtime, queue, scope, accept, startRun, snapshot, runtimeInstanceId: identity.runtimeInstanceId };
 }
 
 for (const mode of ["prepare", "continue", "finish", "persistent_continue"] as const) test(`worker 队列H1: 已提交${mode}无效回包后同operation重放，无孤儿Run`, { timeout: 45_000 }, async t => {
@@ -1873,7 +1877,7 @@ for (const mode of ["prepare", "continue", "finish", "persistent_continue"] as c
     const body = call.body as { operationId: string; runId: string }, response = call.responseBody as { decision: string };
     assert.equal(response.decision, mode === "prepare" ? "prepare" : mode === "finish" ? "finish" : "continue");
     operationId ??= body.operationId; assert.equal(body.operationId, operationId);
-    if (mode === "finish" && !queued) queued = await f.accept("h1-after-committed-finish");
+    if (mode === "finish" && !queued) await assert.rejects(f.accept("h1-after-committed-finish"),{code:"AGENT_SUPPLEMENT_TARGET_CLOSED"});
     if (mode === "persistent_continue" && failures === 1) {
       // Beyond the ordinary terminal retry window, remain tracked rather than retire.
       assert.equal(getRunRecord(f.fixture.db, body.runId)!.status, "running");
@@ -1884,7 +1888,7 @@ for (const mode of ["prepare", "continue", "finish", "persistent_continue"] as c
     }
     damaged++; failures--; return damaged % 2 ? "{}" : "{invalid-json";
   };
-  const activated = await f.queue.dispatcher.dispatchSession(f.scope); assert.ok(activated);
+  const activated = await f.startRun(); assert.ok(activated);
   await retired.promise; await waitRunIdle(f.fixture.baseUrl, f.scope.sessionId, f.scope.workspaceId);
   assert.equal(getRunRecord(f.fixture.db, activated.runId)!.status, "completed"); assert.equal((await f.snapshot()).activeCount, 0);
   assert.equal(damaged, mode === "persistent_continue" ? 8 : 1);
@@ -1892,10 +1896,12 @@ for (const mode of ["prepare", "continue", "finish", "persistent_continue"] as c
   assert.equal(repeated.length, damaged + 1); assert.ok(repeated.every(call => JSON.stringify(call.body) === JSON.stringify(repeated[0]!.body)));
   assert.equal(f.fixture.llmStub!.requests.length, mode === "continue" || mode === "persistent_continue" ? 2 : 1);
   assert.equal((f.fixture.db.prepare("select count(*) as n from agent_run where session_id=?").get(f.scope.sessionId) as { n: number }).n, 1);
-  assert.equal(f.queue.service.detail(f.scope, first.receipt.id).receipt.confirmationState, "confirmed"); assert.ok(queued);
-  const input = f.queue.service.detail(f.scope, queued.receipt.id).receipt;
-  if (mode === "finish") { assert.equal(input.status, "queued"); assert.equal(f.queue.service.snapshot(f.scope).pendingCount, 1); }
-  else { assert.equal(input.status, "injected"); assert.equal(input.runId, activated.runId); assert.equal(input.confirmationState, "confirmed"); }
+  assert.equal(f.queue.service.detail(f.scope, first.receipt.id).receipt.confirmationState, "confirmed");
+  if (mode === "finish") { assert.equal(queued, undefined); assert.equal(f.queue.service.snapshot(f.scope).pendingCount, 0); }
+  else {
+    assert.ok(queued); const input = f.queue.service.detail(f.scope, queued.receipt.id).receipt;
+    assert.equal(input.status, "injected"); assert.equal(input.runId, activated.runId); assert.equal(input.confirmationState, "confirmed");
+  }
   assert.equal(f.fixture.internalRpcCalls.filter(call => call.url === AgentApiEndpoints.retireRuntimeAdmission.path && !(call.responseBody as { retired?: boolean }).retired).length, 0);
 });
 
@@ -1909,12 +1915,13 @@ for (const decision of ["continue", "finish"] as const) test(`worker 队列H1: S
   f.fixture.internalRpcGate.after = async call => {
     if (call.url !== AgentApiEndpoints.completeInteractiveAssistant.path) return;
     assert.equal((call.responseBody as { decision: string }).decision, decision);
-    if (decision === "finish" && !queued) queued = await f.accept("h1-stop-after-committed-finish");
+    if (decision === "finish" && !queued) await assert.rejects(f.accept("h1-stop-after-committed-finish"),{code:"AGENT_SUPPLEMENT_TARGET_CLOSED"});
     if (++calls === 1) return "{}";
     waiting.resolve(); await release.promise;
   };
-  const activated = await f.queue.dispatcher.dispatchSession(f.scope); assert.ok(activated); await waiting.promise;
-  assert.equal((await f.snapshot()).activeCount, 1); assert.ok(queued);
+  const activated = await f.startRun(); assert.ok(activated); await waiting.promise;
+  assert.equal((await f.snapshot()).activeCount, 1);
+  if (decision === "continue") assert.ok(queued); else assert.equal(queued, undefined);
   f.queue.service.stop(f.scope, "h1-stop-during-control");
   await f.runtime.reconcileStops();
   await waitUntil(async () => f.queue.service.snapshot(f.scope).stop?.state === "quiescent", 10_000);
@@ -1922,7 +1929,8 @@ for (const decision of ["continue", "finish"] as const) test(`worker 队列H1: S
   const before = f.queue.service.snapshot(f.scope); release.resolve();
   await waitUntil(async () => f.fixture.internalRpcCalls.filter(call => call.url === AgentApiEndpoints.completeInteractiveAssistant.path).every(call => call.statusCode === 200), 10_000);
   assert.deepEqual(f.queue.service.snapshot(f.scope), before); assert.equal(f.fixture.llmStub!.requests.length, 1);
-  assert.equal(f.queue.service.detail(f.scope, queued.receipt.id).receipt.status, "cancelled");
+  if (queued) assert.equal(f.queue.service.detail(f.scope, queued.receipt.id).receipt.status, "cancelled");
+  assert.equal(f.queue.service.snapshot(f.scope).pendingCount, 0);
   assert.equal(getMessageRunState(f.fixture.db, f.scope.workspaceId, f.scope.sessionId)!.status, "idle");
   await assert.rejects(f.worker.enqueueRun({ ...f.scope, runtimeInstanceId: f.runtimeInstanceId, runId: activated.runId, workspacePath: f.fixture.workspacePath, workspaceRepoDirNames: [] }));
   assert.equal((await f.snapshot()).activeCount, 0);
@@ -1951,12 +1959,12 @@ for(const fault of ["request_lost","continuous_failure","committed_reply_lost"] 
       if (!(call.responseBody as {retired?:boolean}).retired) return;
       assert.equal((call.responseBody as {retired:boolean}).retired,true);
       queued=await f.accept(`arrived-after-retirement-proof-${fault}`);
-      assert.equal(f.queue.service.snapshot(f.scope).pendingCount,1);
+      assert.equal(f.queue.service.snapshot(f.scope).pendingCount,0);
+      await f.startRun();
     }
     if(fault==="committed_reply_lost"&&attempts===1) return "{}";
   };
-  const activated=await f.queue.dispatcher.dispatchSession(f.scope);assert.ok(activated);
-  f.queue.dispatcher.start();
+  const activated=await f.startRun();assert.ok(activated);
   await waitUntil(async()=>{
     const receipt=queued&&f.queue.service.detail(f.scope,queued.receipt.id).receipt;
     return !!receipt&&receipt.status==="injected"&&receipt.confirmationState==="confirmed"&&attempts===failures+1;
@@ -1973,7 +1981,7 @@ for(const fault of ["request_lost","continuous_failure","committed_reply_lost"] 
   assert.equal(replay.statusCode,200,replay.body);assert.equal(replay.json().decision,"expired");
 });
 
-for (const networkUnknown of [false, true]) test(`worker 队列H2: 真实容量拒绝 unknown=${networkUnknown} 收敛failed/paused并发布SSE，无孤儿或误确认`, { timeout: 45_000 }, async t => {
+for (const networkUnknown of [false, true]) test(`worker 队列H2: 真实容量拒绝 unknown=${networkUnknown} 收敛failed并丢弃缓冲并发布SSE，无孤儿或误确认`, { timeout: 45_000 }, async t => {
   const f = await interactiveWorkerFixture(t);
   const originalPrepare = AgentInteractiveInputService.prototype.prepare;
   const configured = new WeakSet<AgentInteractiveInputService>();
@@ -2002,7 +2010,7 @@ for (const networkUnknown of [false, true]) test(`worker 队列H2: 真实容量�
   });
   assert.equal(stream.status, 200);
   assert.equal(f.fixture.app.server.listening, true, "fixture server is still listening after opening SSE");
-  const activated = await f.queue.dispatcher.dispatchSession(f.scope);
+  const activated = await f.startRun();
   assert.ok(activated);
   const reader = stream.body!.getReader(), decoder = new TextDecoder(); let chunks = "";
   while (!chunks.includes(`"runId":"${activated.runId}"`)) {
@@ -2013,10 +2021,10 @@ for (const networkUnknown of [false, true]) test(`worker 队列H2: 真实容量�
   await waitUntil(async () => (await f.snapshot()).activeCount === 0 && f.fixture.internalRpcCalls.some(call =>
     call.url === AgentApiEndpoints.retireRuntimeAdmission.path && (call.responseBody as { retired?: boolean })?.retired === true), 10_000);
   const run = getRunRecord(f.fixture.db, activated.runId)!; assert.equal(run.status, "failed"); assert.equal(run.executionPhase, "terminal");
-  const snapshot = f.queue.service.snapshot(f.scope); assert.equal(snapshot.mode, "paused"); assert.equal(snapshot.pauseCode, "prepare_snapshot_too_large");
-  assert.equal(snapshot.pendingCount, 1); assert.equal(snapshot.unconfirmedInputCount, 1);
+  const snapshot = f.queue.service.snapshot(f.scope);
+  assert.equal(snapshot.pendingCount, 0); assert.equal(snapshot.unconfirmedInputCount, 1);
   assert.equal(f.queue.service.detail(f.scope, first.receipt.id).receipt.confirmationState, "unconfirmed");
-  assert.equal(f.queue.service.detail(f.scope, queued.receipt.id).receipt.status, "queued");
+  assert.equal(f.queue.service.detail(f.scope, queued.receipt.id).receipt.status, "cancelled");
   const calls = f.fixture.internalRpcCalls.filter(call => call.url === AgentApiEndpoints.prepareInteractiveInput.path);
   assert.equal(calls.length, networkUnknown ? 2 : 1); assert.equal(attempts, calls.length);
   assert.ok(calls.every(call => JSON.stringify(call.body) === JSON.stringify(calls[0]!.body)));
@@ -2027,7 +2035,7 @@ for (const networkUnknown of [false, true]) test(`worker 队列H2: 真实容量�
     response: { operationId: (calls[0]!.body as { operationId: string }).operationId, decision: "rejected", reason: "snapshot_too_large" } });
   assert.equal(f.fixture.llmStub!.requests.length, 0);
   assert.equal(f.fixture.internalRpcCalls.filter(call => (call.url === AgentApiEndpoints.createStreamingAssistant.path || call.url === AgentApiEndpoints.injectInteractiveInput.path)).length, 0);
-  assert.equal(await f.queue.dispatcher.dispatchSession(f.scope), null);
+  assert.equal(getMessageRunState(f.fixture.db,f.scope.workspaceId,f.scope.sessionId)!.status,"idle");
   assert.equal((f.fixture.db.prepare("select count(*) as n from agent_run where session_id=?").get(f.scope.sessionId) as { n: number }).n, 1);
   assert.equal(contextReads, 1); assert.equal((inputService as any).frozen.bytes, 0);
   const replay = await f.fixture.app.inject({ method: "POST", url: calls[0]!.url,
@@ -2038,6 +2046,7 @@ for (const networkUnknown of [false, true]) test(`worker 队列H2: 真实容量�
     oversized = false;
     const resumed = await f.queue.service.resume(f.scope.sessionId, { workspaceId: f.scope.workspaceId,
       operationId: "h2-explicit-resume", expectedQueueVersion: snapshot.queueVersion });
+    await f.startRun();
     assert.equal(resumed.action, "continued_unconfirmed"); assert.ok(resumed.runId); assert.notEqual(resumed.runId, activated.runId);
     await waitRunIdle(f.fixture.baseUrl, f.scope.sessionId, f.scope.workspaceId);
     assert.equal(getRunRecord(f.fixture.db, resumed.runId)!.status, "completed");
@@ -2048,6 +2057,6 @@ for (const networkUnknown of [false, true]) test(`worker 队列H2: 真实容量�
   // Existing explicit recovery remains usable; abandoning does not delete or confirm User input.
   const abandoned = f.queue.service.abandon(f.scope.sessionId, { workspaceId: f.scope.workspaceId, operationId: "h2-explicit-abandon",
     expectedQueueVersion: snapshot.queueVersion, expectedUnconfirmedInputSetHash: snapshot.unconfirmedInputSetHash!, confirmIrreversible: true });
-  assert.equal(abandoned.queue.unconfirmedInputCount, 0); assert.equal(abandoned.queue.pendingCount, 1);
+  assert.equal(abandoned.queue.unconfirmedInputCount, 0); assert.equal(abandoned.queue.pendingCount, 0);
   assert.equal(f.queue.service.detail(f.scope, first.receipt.id).receipt.confirmationState, "abandoned");
 });

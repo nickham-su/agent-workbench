@@ -1,4 +1,3 @@
-import { AgentQueuePauseCodeSchema } from "../contracts/agent-queue.js";
 import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { AgentInteractiveInputBindingSchema } from "./agent-input-binding.js";
@@ -210,7 +209,7 @@ export const AgentApiUpdateRunNoticeRequestSchema = Type.Object({
   runId: IdSchema,
   runNoticeText: Type.String(),
   /** Protected Worker-only failure reason; cannot unpause or select a terminal tuple. */
-  queuePauseCode: Type.Optional(AgentQueuePauseCodeSchema),
+  terminalFailure: Type.Optional(Type.Boolean()),
   modelRequestError: Type.Optional(Type.Union([AgentModelRequestErrorSchema, Type.Null()])),
   /** Only compaction progress/cleanup uses this CAS guard; ordinary notices omit it. */
   compactionExpectedRevision: Type.Optional(Type.Integer({ minimum: 0 })),

@@ -25,8 +25,7 @@ import { AgentApiEndpoints } from "../src/internal-contracts/agent-api.js";
 const hash = "a".repeat(64);
 const runtime = "00000000-0000-4000-8000-000000000001";
 const receipt = { id: "receipt", clientRequestId: "request", sequence: 1, status: "queued", messageId: null, runId: null, confirmationState: null, confirmationSource: null, createdAt: 1, updatedAt: 1 };
-const queue = { workspaceId: "w", sessionId: "s", queueVersion: 1, stopGeneration: "0".repeat(64), mode: "active", pauseCode: null,
-  pendingCount: 1, pendingBytes: 5, pendingIdentity: { agentId: "a", providerId: "p", modelId: "m" },
+const queue = { workspaceId: "w", sessionId: "s", queueVersion: 1, stopGeneration: "0".repeat(64), pendingCount: 1, pendingBytes: 5, pendingIdentity: { agentId: "a", providerId: "p", modelId: "m" },
   unconfirmedInputCount: 0, unconfirmedInputSetHash: null, recoveryIdentity: null,
   stop: { state: "none", unresolvedOperationCount: 0, unresolvedTargetCount: 0, code: null },
   items: [{ ...receipt, textPreview: "hello", attachmentCount: 0 }] };
@@ -167,4 +166,15 @@ test("fresh Session Stop generation is the canonical empty Stop identity hash", 
   const { AGENT_QUEUE_INITIAL_STOP_GENERATION } = await import("../src/index.js");
   assert.equal(AGENT_QUEUE_INITIAL_STOP_GENERATION, createHash("sha256").update(JSON.stringify([])).digest("hex"));
   assert.equal(Value.Check(AgentMessageQueueSnapshotSchema, { ...queue, stopGeneration: AGENT_QUEUE_INITIAL_STOP_GENERATION }), true);
+});
+
+
+test("supplements bind a nonempty target Run; snapshots reject removed pause state", () => {
+  const request = { workspaceId: "w", clientRequestId: "extra", text: "extra" };
+  for (const schema of [AgentAcceptUserMessageRequestSchema, AgentAcceptUserMessageMultipartPayloadSchema]) {
+    for (const targetRunId of [null, "target-run"]) assert.equal(Value.Check(schema, { ...request, targetRunId }), true);
+    for (const targetRunId of ["", 1, {}]) assert.equal(Value.Check(schema, { ...request, targetRunId }), false);
+  }
+  assert.equal(Value.Check(AgentMessageQueueSnapshotSchema, { ...queue, mode: "active" }), false);
+  assert.equal(Value.Check(AgentMessageQueueSnapshotSchema, { ...queue, pauseCode: null }), false);
 });

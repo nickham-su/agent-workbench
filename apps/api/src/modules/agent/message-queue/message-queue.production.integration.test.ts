@@ -25,7 +25,7 @@ test("production fallback: public receipts remain sealed before real onListen, t
   await f.app.listen({ host: "127.0.0.1", port: 0 }); await waitForAgentRuntimeReadiness(f.app);
   const accepted = await f.app.inject({ method: "POST", url: `${base}/receipts`, payload: input });
   assert.equal(accepted.statusCode, 202);
-  assert.equal(accepted.json().receipt.status, "queued");
+  assert.equal(accepted.json().receipt.status, "injected");
   assert.deepEqual(accepted.json().queue.inputIdentity, { agentId: "default", providerId: "ppchat", modelId: "gpt-5.2" });
   const replay = await f.app.inject({ method: "POST", url: `${base}/receipts`, payload: input });
   assert.equal(replay.statusCode, 202); assert.equal(replay.json().deduplicated, true);
@@ -40,7 +40,7 @@ test("production routes retain the application authentication boundary", async t
   assert.equal(response.statusCode, 401);
   assert.equal((f.db.prepare("select count(*) as n from agent_user_message_receipt").get() as { n: number }).n, 0);
 });
-test("production dispatcher executes fallback and the timeline reports only local_fallback confirmation", async t => {
+test("production explicit send executes fallback and the timeline reports only local_fallback confirmation", async t => {
   const f = await createAgentTestFixture({ withApp: true });
   t.after(() => f.dispose()); assert.ok(f.app);
   await configureDefaultAgentSettings(f.app);
@@ -80,64 +80,4 @@ test("production close does not treat close(false) as a drained publisher; it se
   await f.app.close();
   assert.equal(closes, 2); assert.equal(drains, 2, "unproven local exit must also be awaited, not treated as drained");
   assert.equal((f.db.prepare("select 1 as n").get() as { n: number }).n, 1, "application close does not own or close the DB");
-});
-
-for (const window of ["starting", "exit"] as const) test(`production Worker ${window} callback suspends scans but not durable receipts; trusted ready reopens once`, async t => {
-  const [{ createApp }, { AgentWorkerProcessManager }, { AgentWorkerClient }, { AgentMessageQueueDispatcher },
-    { AgentRuntimeControlStore }, { persistRunTerminalIntent, convergeRunTerminal }, { randomUUID }] = await Promise.all([
-    import("../../../app/createApp.js"), import("../agent.worker-manager.js"), import("../agent.worker-client.js"),
-    import("./message-queue.dispatcher.js"), import("../runtime-control/runtime-control.store.js"),
-    import("../agent-message.store.js"), import("node:crypto"),
-  ]);
-  type Callbacks = ConstructorParameters<typeof AgentWorkerProcessManager>[0];
-  let callbacks!: Callbacks; let dispatcher!: InstanceType<typeof AgentMessageQueueDispatcher>;
-  let currentId = randomUUID(); let sends = 0;
-  // Only the process/transport boundary is replaced. The module's actual
-  // callbacks, assembly, HTTP receipt service, SQLite and lifecycle run below.
-  t.mock.method(AgentWorkerProcessManager.prototype, "start", async function(this: unknown) {
-    callbacks = (this as { params: Callbacks }).params;
-  });
-  t.mock.method(AgentWorkerProcessManager.prototype, "stop", async () => undefined);
-  t.mock.method(AgentWorkerClient.prototype, "getRuntimeIdentity", async () => ({ runtimeInstanceId: currentId, stopProtocolVersion: 1 as const }));
-  const start = AgentMessageQueueDispatcher.prototype.start;
-  t.mock.method(AgentMessageQueueDispatcher.prototype, "start", function(this: InstanceType<typeof AgentMessageQueueDispatcher>) { dispatcher = this; start.call(this); });
-  const f = await createAgentTestFixture({ withApp: true, listen: false, appFactory: ctx => createApp({ ...ctx, agentWorkerEnabled: true }) });
-  t.after(() => f.dispose()); assert.ok(f.app);
-  await configureDefaultAgentSettings(f.app);
-  const workspace = await createTestWorkspace(f); const base = createSession(f, workspace.id);
-  const spawn = { pid: null, spawnObservedAt: Date.now(), spawnNonce: randomUUID() };
-  const ready = { ...spawn, pid: process.pid };
-  callbacks.onRuntimeStarting!(currentId, spawn); await callbacks.onRuntimeReady!(currentId, ready); await callbacks.onReady!(1);
-  const firstId = currentId;
-  const staleReady = callbacks.onReady!(2);
-  const nextSpawn = { ...spawn, spawnNonce: randomUUID() };
-  if (window === "starting") { currentId = randomUUID(); callbacks.onRuntimeStarting!(currentId, nextSpawn); }
-  else callbacks.onRuntimeExit!(firstId, { ...ready, code: 0, signal: null, observedAt: Date.now() });
-  const head = f.db.prepare("select head_message_id,revision from agent_session where id='production-queue'").get();
-  const accepted = await f.app.inject({ method: "POST", url: `${base}/receipts`, payload: {
-    workspaceId: workspace.id, clientRequestId: `worker-${window}`, text: "accepted while Worker unavailable",
-  } });
-  assert.equal(accepted.statusCode, 202); assert.equal(accepted.json().receipt.status, "queued");
-  await staleReady;
-  await dispatcher.scanOnce(); await dispatcher.dispatchSession({ workspaceId: workspace.id, sessionId: "production-queue" });
-  const paused = await f.app.inject({ method: "GET", url: `${base}/message-queue?workspaceId=${workspace.id}` });
-  assert.equal(paused.json().mode, "active"); assert.equal(paused.json().pendingCount, 1); assert.equal(paused.json().unconfirmedInputCount, 0);
-  assert.deepEqual(f.db.prepare("select head_message_id,revision from agent_session where id='production-queue'").get(), head);
-  assert.equal((f.db.prepare("select count(*) as n from agent_run").get() as { n: number }).n, 0); assert.equal(sends, 0);
-  if (window === "exit") { currentId = randomUUID(); callbacks.onRuntimeStarting!(currentId, nextSpawn); }
-  t.mock.method(AgentWorkerClient.prototype, "enqueueRun", async (run: Parameters<InstanceType<typeof AgentWorkerClient>["enqueueRun"]>[0]) => {
-    sends++;
-    // Deterministic trusted transport completion keeps shutdown independent of
-    // a live child process; no production activation/storage behavior is mocked.
-    persistRunTerminalIntent(f.db, { ...run, status: "completed", code: "run_completed", detail: null, updatedAt: Date.now() });
-    convergeRunTerminal(f.db, { ...run, updatedAt: Date.now() });
-    new AgentRuntimeControlStore(f.db).retireAdmission({ ...run, runtimeInstanceId: currentId });
-  });
-  await callbacks.onRuntimeReady!(currentId, { ...nextSpawn, pid: process.pid }); await callbacks.onReady!(3);
-  await dispatcher.scanOnce(); await dispatcher.dispatchSession({ workspaceId: workspace.id, sessionId: "production-queue" });
-  assert.equal(sends, 1); assert.equal((f.db.prepare("select count(*) as n from agent_run").get() as { n: number }).n, 1);
-  assert.equal((f.db.prepare("select status from agent_user_message_receipt").get() as { status: string }).status, "injected");
-  await f.app.close(); await callbacks.onReady!(4);
-  assert.equal(await dispatcher.dispatchSession({ workspaceId: workspace.id, sessionId: "production-queue" }), null);
-  assert.equal(sends, 1, "late ready cannot reopen a closed production assembly");
 });

@@ -1,5 +1,5 @@
 import { computed, onBeforeUnmount, ref, shallowReactive, shallowRef, watch } from "vue";
-import type { AgentMessageQueueSnapshot, AgentAcceptUserMessageMultipartPayload, AgentResumeMessageQueueRequest, AgentAbandonUnconfirmedInputRequest } from "@agent-workbench/shared";
+import type { AgentMessageQueueSnapshot, AgentAcceptUserMessageMultipartPayload } from "@agent-workbench/shared";
 import * as queueApi from "@/shared/api/agentMessageQueueApi";
 import { ApiError } from "@/shared/api/api";
 import { createAgentClientRequestId } from "./agentClientRequestId";
@@ -16,7 +16,6 @@ export type QueueSubmission = {
   // Presentation-only hint, carried to the real Session's Pane during draft handoff.
   idleStartup?: boolean;
 };
-type PendingControl = { kind: "resume"; body: AgentResumeMessageQueueRequest } | { kind: "abandon"; body: AgentAbandonUnconfirmedInputRequest };
 // Keep exact submissions (including Files) across session switches and KeepAlive
 // remounts. Never persist private message contents to browser storage.
 export type QueueSubmissionHandoff = {
@@ -28,9 +27,7 @@ export type QueueSubmissionHandoff = {
 // A real Session can mount before its draft Pane publishes the first attempt.
 // Reactive publication, not a one-time lookup at mount, is the ownership handoff.
 const submissionHandoffs = shallowReactive(new Map<string, QueueSubmissionHandoff>());
-const uncertainClears = new Map<string, string[]>();
 const uncertainStops = new Map<string, string>();
-const uncertainControls = new Map<string, PendingControl>();
 const keyOf = (scope: Scope) => JSON.stringify([scope.workspaceId, scope.sessionId]);
 const uncertain = (error: unknown) => !(error instanceof ApiError) || error.status == null || (error.status >= 500 && error.status !== 507);
 
@@ -38,7 +35,7 @@ const uncertain = (error: unknown) => !(error instanceof ApiError) || error.stat
 // Runtime-derived inputIdentity and internal proof metadata are not versioned here.
 function versionedQueueFields(q: AgentMessageQueueSnapshot) {
   const identity = (value: AgentMessageQueueSnapshot["pendingIdentity"]) => value ? [value.agentId, value.providerId, value.modelId] : null;
-  return JSON.stringify([q.stopGeneration, q.mode, q.pauseCode, q.pendingCount, q.pendingBytes, identity(q.pendingIdentity),
+  return JSON.stringify([q.stopGeneration, q.pendingCount, q.pendingBytes, identity(q.pendingIdentity),
     q.unconfirmedInputCount, q.unconfirmedInputSetHash, identity(q.recoveryIdentity),
     [q.stop.state, q.stop.unresolvedOperationCount, q.stop.unresolvedTargetCount, q.stop.code],
     q.items.map(item => [item.id, item.clientRequestId, item.sequence, item.createdAt, item.updatedAt,
@@ -51,8 +48,6 @@ export function useAgentMessageQueue(getScope: () => Scope, api = queueApi) {
   const handoff = computed(() => submissionHandoffs.get(keyOf(getScope())) ?? null);
   const unknownSubmission = computed(() => handoff.value && (handoff.value.phase === "sending" || handoff.value.phase === "unknown") ? handoff.value.submission : null);
   const unknownStop = ref(false);
-  const unknownClear = ref(false);
-  const unknownControl = shallowRef<PendingControl | null>(null);
   const busy = ref(false);
   let generation = 0;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -60,7 +55,7 @@ export function useAgentMessageQueue(getScope: () => Scope, api = queueApi) {
   let stopped = false;
   let diagnosedConflictVersion: number | null = null;
   const stopBlocked = computed(() => unknownStop.value || snapshot.value?.stop.state === "pending" || snapshot.value?.stop.state === "unknown");
-  const historyBlocked = computed(() => !snapshot.value || stopBlocked.value || !!unknownControl.value || !!unknownSubmission.value || snapshot.value.mode === "paused" || snapshot.value.pendingCount > 0 || snapshot.value.unconfirmedInputCount > 0);
+  const historyBlocked = computed(() => !snapshot.value || stopBlocked.value || !!unknownSubmission.value || snapshot.value.pendingCount > 0 || snapshot.value.unconfirmedInputCount > 0);
   const identity = computed(() => snapshot.value?.inputIdentity ?? snapshot.value?.recoveryIdentity ?? snapshot.value?.pendingIdentity ?? null);
   function apply(next: AgentMessageQueueSnapshot, scope = getScope(), token = generation) {
     const current = getScope();
@@ -82,7 +77,7 @@ export function useAgentMessageQueue(getScope: () => Scope, api = queueApi) {
     clearTimeout(timer);
     if (stopped || !getScope().active) return;
     const q = snapshot.value;
-    const frequent = getScope().running || !q || q.pendingCount > 0 || q.mode === "paused" || q.unconfirmedInputCount > 0 || (q.stop.state === "pending" || q.stop.state === "unknown") || unknownSubmission.value || unknownStop.value || unknownClear.value || unknownControl.value;
+    const frequent = getScope().running || !q || q.pendingCount > 0 || q.unconfirmedInputCount > 0 || (q.stop.state === "pending" || q.stop.state === "unknown") || unknownSubmission.value || unknownStop.value;
     timer = setTimeout(() => void refresh(), frequent ? 800 : 3000);
   }
   async function refresh() {
@@ -133,7 +128,8 @@ export function useAgentMessageQueue(getScope: () => Scope, api = queueApi) {
         apply(result.queue, scope, token);
         return { result, submission };
       } catch (cause) {
-        publishSubmission(submission, attempted && uncertain(cause) ? "unknown" : "rejected", { status: cause instanceof ApiError ? cause.status : undefined });
+        if (submission.payload.targetRunId) acknowledgeHandoff(submission);
+        else publishSubmission(submission, attempted && uncertain(cause) ? "unknown" : "rejected", { status: cause instanceof ApiError ? cause.status : undefined });
         throw cause;
       }
     });
@@ -153,21 +149,12 @@ export function useAgentMessageQueue(getScope: () => Scope, api = queueApi) {
     if (entry?.phase === "accepted" && entry.queue) apply(entry.queue);
   }, { immediate: true, flush: "sync" });
   async function clear() {
-    return scopedAction(async (scope, token, key) => {
-      const receiptIds = uncertainClears.get(key) ?? snapshot.value?.items.map(item => item.id);
-      if (!receiptIds) throw new ApiError({ message: "Queue state is unavailable", code: "AGENT_QUEUE_STATE_UNKNOWN" });
-      uncertainClears.set(key, [...receiptIds]);
-      if (token === generation) unknownClear.value = true;
-      try {
-        const result = await api.clearAgentMessageQueue(scope.sessionId, { workspaceId: scope.workspaceId, receiptIds });
-        uncertainClears.delete(key);
-        if (token === generation) unknownClear.value = false;
-        apply(result.queue, scope, token);
-        return result;
-      } catch (cause) {
-        if (!uncertain(cause)) { uncertainClears.delete(key); if (token === generation) unknownClear.value = false; }
-        throw cause;
-      }
+    return scopedAction(async (scope, token) => {
+      const receiptIds = snapshot.value?.items.map(item => item.id);
+      if (!receiptIds?.length) return;
+      const result = await api.clearAgentMessageQueue(scope.sessionId, { workspaceId: scope.workspaceId, receiptIds });
+      apply(result.queue, scope, token);
+      return result;
     });
   }
   async function stop() {
@@ -186,34 +173,6 @@ export function useAgentMessageQueue(getScope: () => Scope, api = queueApi) {
       }
     });
   }
-  async function control(kind: "resume" | "abandon", confirmedSnapshot = snapshot.value) {
-    if (stopBlocked.value) return;
-    const q = confirmedSnapshot;
-    if (!q) return;
-    return scopedAction(async (scope, token, key) => {
-      let pending = uncertainControls.get(key);
-      if (pending && pending.kind !== kind) throw new Error("AGENT_QUEUE_CONTROL_UNKNOWN");
-      if (!pending) {
-        const body = { workspaceId: scope.workspaceId, operationId: createAgentClientRequestId(), expectedQueueVersion: q.queueVersion };
-        if (kind === "abandon") {
-          if (!q.unconfirmedInputSetHash) return;
-          pending = { kind, body: { ...body, expectedUnconfirmedInputSetHash: q.unconfirmedInputSetHash, confirmIrreversible: true } };
-        } else pending = { kind, body };
-      }
-      uncertainControls.set(key, pending);
-      unknownControl.value = pending;
-      try {
-        const result = pending.kind === "resume" ? await api.resumeAgentMessageQueue(scope.sessionId, pending.body) : await api.abandonAgentUnconfirmedInput(scope.sessionId, pending.body);
-        uncertainControls.delete(key);
-        if (token === generation) unknownControl.value = null;
-        apply(result.queue, scope, token);
-        return result;
-      } catch (cause) {
-        if (!uncertain(cause)) { uncertainControls.delete(key); if (token === generation) unknownControl.value = null; }
-        throw cause;
-      }
-    });
-  }
   async function cancel(receiptId: string) {
     return scopedAction(async (scope, token) => {
       const result = await api.cancelAgentQueuedReceipt(scope.sessionId, scope.workspaceId, receiptId);
@@ -228,11 +187,9 @@ export function useAgentMessageQueue(getScope: () => Scope, api = queueApi) {
     generation++; diagnosedConflictVersion = null; abort?.abort(); clearTimeout(timer); snapshot.value = null; error.value = null; busy.value = false;
     const key = keyOf(getScope());
     unknownStop.value = uncertainStops.has(key);
-    unknownClear.value = uncertainClears.has(key);
-    unknownControl.value = uncertainControls.get(key) ?? null;
     void refresh();
   }, { immediate: true });
   watch([() => getScope().active, () => getScope().running], () => { if (getScope().active) void refresh(); else { clearTimeout(timer); abort?.abort(); } });
   onBeforeUnmount(() => { stopped = true; generation++; clearTimeout(timer); abort?.abort(); document.removeEventListener("visibilitychange", visible); });
-  return { handoff, acknowledgeHandoff, snapshot, error, busy, identity, stopBlocked, historyBlocked, unknownSubmission, unknownStop, unknownClear, unknownControl, apply, refresh, submit, resolveUnknown, clear, stop, control, cancel };
+  return { handoff, acknowledgeHandoff, snapshot, error, busy, identity, stopBlocked, historyBlocked, unknownSubmission, unknownStop, apply, refresh, submit, resolveUnknown, clear, stop, cancel };
 }

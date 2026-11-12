@@ -1,109 +1,65 @@
-# 需求背景与产品方案
+# 临时补充输入缓冲：需求与产品规则
 
-## 背景与已核实的现状
+> 本页是本轮改造的现行产品规则。0038 其他文档中有关持久可靠队列、`mode` / `pause_code`、暂停与恢复 queued、后台 dispatcher 自动创建 Run 的内容属于历史设计，不再适用。Stop、运行准入、正式输入确认、附件安全和 Worker 写入 fence 等既有边界继续有效。本轮实现仍待独立审查，历史验收结论不覆盖此次变更。
 
-用户希望Agent长任务执行中能补充要求，不等整个Run结束。先改造Web，飞书／IM连接器暂停。
+## 定位与范围
 
-- 现有sendMessage和激活事务都拒绝busy，单删409不成立。
-- Worker整轮工具完成后重读上下文，有安全插入点。
-- 现有成功响应必有messageId/runId，不能用空ID冒充未激活输入。
-- 图片投影及压缩materializer存在trigger-only分支，必须共同改造。
-- 现有预算是启发式，不是完整动态请求的精确token计算；Workspace附件物理删除明确拒绝不安全unlink。
-- 代码证据见[实施代码地图](05-implementation-plan.md#已核验代码地图)。
+缓冲仅用于正常交互 Run 内的临时补充，尽力而为，不保证送达。它不是待执行任务，也不负责恢复执行。
 
-## 需求清单
-
-| 标识 | 本次必须实现 |
+| 场景 | 权威行为 |
 | --- | --- |
-| R-ACCEPT | Web文本／图片运行中持久受理，不因busy拒绝 |
-| R-INJECT | 整轮工具安全边界注入当前Run，不等Run完成 |
-| R-COUNT | 输入框上方“有 N 条消息等待处理”，0隐藏 |
-| R-CONTROL | 查看／取消queued，Esc先清队列再停止，发送统一启动 |
-| R-IDENTITY | 固定Agent/provider/model身份，不因多端切换漂移 |
-| R-ATTACHMENT | 运行中新图片进入真实输入，保持现有限制与安全路径 |
-| R-RECOVERY | 停止屏障等安全条件满足后，正常发送创建新Run并续接未确认正式输入，或显式全量放弃，不因未确认输入卡死 |
-| R-CONFIRM | 确认有worker_model/local_fallback来源；retry替换不丢绑定、不提前确认 |
-| R-RETAIN | 已发布附件安全保留，发布前独立记账，1GiB额度和维护成本诚实可见 |
-| R-COMPAT | 不将scheduled/subtask/旧强制启动等入口顺便队列化 |
-| R-BOUNDARY | 终态、幂等、恢复、压缩、历史、删除和多端都有明确结果 |
+| 空闲时显式发送 | 在附件发布最终同步事务中创建正式 user 和 Run，提交后 handoff Worker；保留 requestId 幂等和 unknown 诊断 |
+| 运行中补充 | 请求携带冻结的 `targetRunId`，仅该 Run 可以消费；不能创建或恢复 Run |
+| 正常 `complete_or_continue` | 可以在同一 Run 消费 FIFO 补充；无输入时按既有协议完成 |
+| 取消、明确失败、任何终态（含 completed） | 取消该 Run 尚未消费的 queued；不自动执行剩余补充 |
+| API 首次启动开放收件 | 丢弃所有遗留 queued，包括旧暂停积压；Worker ready/reconnect 不重复清理 |
 
-非目标：IM、结果回传、模型／工具抢占、队列编辑／优先级、多Run并发、旧工具checkpoint自动恢复、危险附件清理工具、精确tokenizer。
+不扩大到 scheduled、subtask、IM 或旧强制启动入口；不增加失败列表、重试、恢复、优先级或编辑补充功能。
 
-## 输入区与数量提示——硬验收
+## 目标 Run 与安全边界
 
-- 固定在输入框上方显示“有 N 条消息等待处理”。N是服务端status=queued数量，包含暂停，不含injected／cancelled。
-- 本地草稿、上传中及未确认HTTP请求不直接计N；0时隐藏。
-- 入队、注入、取消、刷新、重连后更新；不能依赖正式消息revision自增。
-- N=0也可能有未确认正式输入或暂停：数量隐藏，但仍显示“有 K 条已进入会话的输入尚未确认，可发送消息处理或放弃”的独立恢复提示。
-- timeline对unconfirmed显示“尚未确认”，abandoned显示“未处理，已放弃”；不把fallback回显标为模型成功。
+- 收件前及异步发布的最终 SQLite 事务内均校验：同 Workspace / Session、目标为当前交互 user Run、status 为 running、phase 为 `work_pending` / `work_in_progress`，且 Stop 未阻断。
+- `targetRunId` 是输入的目标身份，不是新的队列持久状态。跨终态、跨 Stop、跨后续 Run 到达的文字和图片均不得串入下一 Run。
+- 当前模型响应的整轮工具闭合后，按已有 prepare / inject 协议消费有限 FIFO 前缀；保留操作幂等、revision、绑定和 preparation fence。
+- 明确失败通过既有 terminal intent 立即关闭注入窗口，不等待公开终态写入；旧 Run notice / terminal 重放不得清除新 Run 缓冲。
+- 不引入代替 `mode` / `pause_code` 的同义持久状态，不再存在后台 dispatcher 自动创建 Run。
 
-## 发送、草稿与查看
+## queued 与正式输入
 
-- 运行中输入和发送可用；单次提交去重不锁死整个Run。
-- 已受理／查询确认后只清理对应草稿版本，不能清掉提交后继续编辑的新内容。
-- 超时显示“正在确认是否已接收”，保留稳定clientRequestId、提交副本和附件；同ID查询／重试，不能换ID重复发。
-- 明确拒绝保留草稿，显示安全错误。重复回包合并同receipt，不能重复计数。
-- 轻量待处理列表按FIFO展示摘要／图片数量，支持取消未注入消息；不支持编辑，修改需取消再提交。
-- cancel与inject先提交者决定：已注入409并刷新正式历史，不本地假删。
+- queued 尚未进入正式历史；消费时才生成正式 user。首发例外：在接收事务内立即正式化。
+- 丢弃统一取消 receipt，不物理删除 receipt；保留去重墓碑、queueVersion 单调性和附件 retain 账本。
+- injected / unconfirmed 已是正式输入，不能随缓冲清理而 abandon、删除或丢失其绑定，也不能删除助手输出和工具结果。
+- 安全条件满足后的新普通发送创建本次新 user / Run，并承接可见的全部未确认正式输入；不重复插入旧 user，不自动重放旧工具。
+- 后端兼容 resume 仅可续接正式 unconfirmed；没有正式输入时返回 `no_unconfirmed`，不恢复 queued。兼容 abandon 仍需原显式不可逆确认、版本和完整输入集合校验，不由补充失败自动调用。Web 不增加相关恢复入口。
 
-## Esc、停止与发送统一启动
+## 输入区、草稿与数量
 
-输入区不再显示停止按钮或“继续处理”按钮；Esc维持原聊天输入框生效范围，不扩展为全局快捷键。
+- 运行中可补充文字和图片。发送动作开始即冻结目标 Run，异步建 Session、上传或晚到响应不能改写该目标。
+- 补充提交失败或被丢弃静默结束，不保留重试副本、不弹恢复 UI。仅清理对应提交的草稿 / 图片版本，不清掉用户后来编辑的内容。
+- 普通首发 HTTP unknown 仍保留 requestId、文字及 File 副本，允许查询或重试原请求；不能换 ID 重发。明确拒绝保留草稿与必要诊断。
+- 输入框上方“有 N 条消息等待处理”只统计服务端 queued，0 隐藏；本地草稿、上传、HTTP 未确认和 injected 不计 N。
+- messageID、时间、工具摘要独立显示，不受 Fork / 回退权限影响；结构操作本身仍受 Session 类型、Stop 和历史安全限制。
 
-| 状态 | Esc | Placeholder |
-| --- | --- | --- |
-| 运行中，queued非空 | 清空按键时快照所列queued，成功message提示；不停止／不暂停 | 输入消息加入队列，Esc 清空等待消息 |
-| 运行中，queued为空 | 调用独立Stop，服务端同时兜底清空queued | 输入消息加入队列，Esc 停止运行 |
-| 未运行 | 无操作；正常发送启动新Run | 输入消息，Enter 发送 |
-| 正在停止／停止未知 | 忽略新的Esc，保留停止诊断及原操作查询／重试 | 正在停止，请稍候… |
+## Esc 与 Stop
 
-- 忽略IME组合输入和`event.repeat`，请求期间真正互斥；清空实际0条仍是清空成功，绝不自动fallback Stop。只有请求完成、权威状态更新后下一次独立按键才重新分流。
-- clear接口固定receipt IDs，仅取消其中仍queued的收件；先注入的跳过，后续新入队不在原目标内。响应丢失重试原集合，不重新选取当前列表。
-- Web Stop在同一事务关闭运行准入、设paused(user_stop)、取消当前Session全部queued并冻结Stop屏障／版本；不删除已注入历史、不撤回工具副作用。旧operationId只重放，不能停止或清除后来消息。
-- 不允许Web用户停止后留下queued。pending／unknown及旧执行未drained时拒绝新收件；停止前在途文字／图片即使在停止完全解除后才提交，也通过持久Stop代际拒绝。拒绝保留文字／File副本。
-- Stop受理或DB终态不证明Runner退出；仍保留等待、重试原Stop和离线维护诊断，无force-resume，不重启整个Worker处理单Session。
+| 状态 | Esc |
+| --- | --- |
+| 运行中且 queued 非空 | 尽力清空按键时快照列出的 receipt IDs，不 Stop，不影响后来补充 |
+| 运行中且 queued 为空 | 独立 Stop；服务端同事务关闭准入、清 queued 并冻结原目标屏障 |
+| 未运行 | 无操作；显式发送创建新 Run |
+| Stop pending / unknown | 保留原 Stop 诊断和原 operationId 重试；不得强制恢复 |
 
-### 正常发送即启动／恢复
+忽略 IME 和 repeat。清空实际 0 条也不能自动 fallback Stop；清空失败不新增恢复流程。Stop 受理或 DB 终态不是 Runner 退出证明，继续要求 admission / drained / 固定实例和目标证明。持久 Stop generation 阻止停止前在途请求晚到；旧 Stop 重放不得停止或清除后续 Run。
 
-- 停止安全完成后，直接发送消息开始新Run，不需额外继续操作。异常暂停也由新发送作为统一启动入口，不因后台queued自动恢复。
-- 复用原恢复检查：Stop屏障解除、旧Run DB及实际执行收敛、历史工具安全、配置／身份可用。入队和解除暂停／必要续接激活在最终附件提交同一同步事务内；物理Worker handoff在提交之后。
-- 有未确认正式输入：新Run绑定最早既有user及全部未确认可信输入，不重插旧user、不自动重放旧工具；本次新消息按FIFO及原安全边界追加。无未确认输入时普通队首激活。
-- confirmed或abandoned输入不触发空队列重放。旧resume HTTP保留兼容，Web不再提供独立入口。
+## 身份、图片与同步
 
-### 放弃全部未确认输入
+- 补充固定当前 Run 的 Agent / provider / model；普通发送承接未确认正式输入的身份，不静默切模型。配置错误仅拒绝当前请求，不建立暂停状态。
+- 图片维持原数量 / 大小限制、受控读取、路径与软链边界。发布前独立预留，DataDir 留存额度维持 1 GiB；取消、终态、逻辑删除不释放已发布额度，不删除附件文件或账本。
+- queueVersion 独立于消息 revision；低版本回包不能覆盖高版本，同版本不同快照需要诊断。
+- 活动页面 running / queued / unconfirmed 时 800 ms 轮询，完全 idle 时 3000 ms；恢复可见立即刷新。断网保留最近可信快照，不能伪置 0；切换 Session 隔离旧回包。
 
-- 仅相关停止屏障已解除且旧Run完全收敛时显示可用；用户需确认不可逆，说明对象条数及“历史保留、后续模型不再读取、不撤销工具操作”。
-- 一次处理当前全部未确认正式输入，不支持选部分；请求只回传服务端快照的expectedQueueVersion与expectedUnconfirmedInputSetHash，不传ID数组。版本／完整集合变化则刷新并重新确认。
-- 已confirmed输入不能放弃。放弃不是取消receipt、不是确认、不是删历史。
-- queued保持不变，Session继续暂停；若要执行queued需正常发送新消息，避免放弃操作同时启动工具。
-- 放弃后图片及正文不再进入任何有效模型／压缩／provider replay输入，历史和安全留存附件仍在。
+## 数据升级与验证边界
 
-## 执行身份
+v26 → v27 前向迁移删除 control 表中的 `mode` / `pause_code`，保留 control 版本和序号、receipt、正式历史、绑定、去重墓碑、附件账本；receipt 增加 `target_run_id`。保留严格旧 canonical 识别、事务回滚和 FK 校验。迁移本身不清 queued，首次 API 开放收件负责取消遗留缓冲。
 
-运行中锁定当前交互Run；无Run时优先沿用未确认输入身份，其次queued队首。显式不同Agent409，省略沿用；配置失效暂停，不换模型。只有未确认输入已处理／放弃且queued清空后，新的输入批次才按默认选择解析。
-
-## 图片留存与空间成本
-
-- 图片类型／大小保持既有4张、单张10MiB、合计20MiB；后插图片不降级成历史路径占位。
-- 同UID工具可能替换路径，应用无法安全自动unlink已发布Workspace文件。本次取消、放弃、发布后DB回滚及Workspace逻辑删除不保证物理回收。
-- 发布前独立持久预留，新增DataDir级本功能留存上限1GiB；未知结果、取消／已注入／逻辑删除仍计额，不因pendingCount减少而释放。
-- 空间满新图片507并保留草稿；文本仍可受理。显示“附件留存额度已满，需要离线维护”，不泄露路径或文件内容。
-- 离线排他维护／人工对账是已发布减额出口，本次不实现危险清理工具；该额度不保证整个磁盘不会满，也不涵盖用户工具生成文件。
-
-## 同步与可见性
-
-- 服务端queueVersion覆盖收件、暂停、确认、放弃与可见停止屏障变化，独立于消息revision。
-- active页running／N>0／paused／有未确认输入时800ms轮询，完全idle时3000ms；隐藏后恢复立即刷新。
-- 断网保留最近可信快照并提示异常，不伪置0；低版本回包不覆盖高版本。
-- 会话切换隔离旧回包，双标签页以服务端为准，不通过本地自增同步。
-
-## 关键取舍
-
-- 整轮闭合优先于即时抢占，保护协议与副作用边界。
-- receipt与正式历史分离，解决“数据库有了但模型没看过”的错位。
-- 发送承接续接／显式放弃解决未确认输入卡死，失败不自动重放旧工具。
-- 保守估算与明确超限暂停优于虚假精确保证；新输入确认前不被压缩掉。
-- 安全留存+有界发布账本优于不安全GC；空间成本向用户明确。
-- 新Web协议独立，旧强制启动语义保持，避免扩大范围。
-
-业务规则见[状态机](02-business-rules-and-state-machine.md)，精确公式、实体和恢复事务见[技术方案](03-architecture-and-data-model.md)，验收见[测试](06-testing-and-acceptance.md)。
+本轮验证覆盖迁移、发布晚到、终态 / Stop fence、正式输入承接、Worker 重放及前端元信息。独立审查、真实用户数据库与外部 provider / 多端人工验收不能由作者自测代替。

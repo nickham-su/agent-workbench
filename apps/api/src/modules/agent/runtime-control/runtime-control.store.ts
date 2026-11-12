@@ -243,11 +243,11 @@ export class AgentRuntimeControlStore {
         return { retired: this.admission(input)?.state === "retired" };
     }
     private ensureControl(workspaceId: string, sessionId: string) {
-        this.db.prepare(`insert into agent_session_queue_control(workspace_id,session_id,mode,pause_code,queue_version,next_sequence,updated_at) values(?,?,'active',null,0,1,?) on conflict(session_id) do nothing`).run(workspaceId, sessionId, this.now());
+        this.db.prepare(`insert into agent_session_queue_control(workspace_id,session_id,queue_version,next_sequence,updated_at) values(?,?,0,1,?) on conflict(session_id) do nothing`).run(workspaceId, sessionId, this.now());
     }
-    private pause(workspaceId: string, sessionId: string, code: string) {
+    private touchControl(workspaceId: string, sessionId: string) {
         this.ensureControl(workspaceId, sessionId);
-        const result = this.db.prepare(`update agent_session_queue_control set mode='paused',pause_code=?,queue_version=queue_version+1,updated_at=? where workspace_id=? and session_id=? and queue_version<9007199254740991`).run(code, this.now(), workspaceId, sessionId);
+        const result = this.db.prepare(`update agent_session_queue_control set queue_version=queue_version+1,updated_at=? where workspace_id=? and session_id=? and queue_version<9007199254740991`).run(this.now(), workspaceId, sessionId);
         if (result.changes !== 1)
             throw new HttpError(409, "Queue version exhausted", "AGENT_QUEUE_VERSION_CONFLICT");
     }
@@ -316,7 +316,7 @@ export class AgentRuntimeControlStore {
                 this.db.prepare(`update agent_run_runtime_admission set state='closed',updated_at=? where run_id=? and state<>'retired'`).run(this.now(), run.runId);
             }
             for (const sessionId of sessions)
-                this.pause(input.workspaceId, sessionId, input.reason ?? "user_stop");
+                this.touchControl(input.workspaceId, sessionId);
             // Only the explicit Web Stop policy clears this Session; replay returned above.
             if (input.clearQueued) {
                 const queued = this.db.prepare("select id from agent_user_message_receipt where workspace_id=? and session_id=? and status='queued'")

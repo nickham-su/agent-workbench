@@ -198,12 +198,10 @@ test("agent startup pre-listen 保持 in-flight run，fenced recovery 在 onList
   assert.equal(getRunRecord(db,runId)?.status,"failed");
   assert.equal(getRunRecord(db,runId)?.terminalResultCode,"run_startup_recovery_failed");
   assert.equal((db.prepare("select status from agent_tool_execution where id=?").get(toolExecutionId) as {status:string}).status,"cancelled");
-  // S4: recovery pauses the failed pre-listen Session. Legacy sends must not
-  // bypass that durable control state, even once the global runtime is ready.
-  const paused=await app.inject({method:"POST",url:`/api/agent/sessions/${fresh.id}/messages`,payload:{...message,clientRequestId:"after-listen"}});
-  assert.equal(paused.statusCode,409,paused.body);
-  assert.equal(paused.json().code,"AGENT_QUEUE_PAUSED");
-  assert.equal((db.prepare("select count(*) as n from agent_run where session_id=?").get(fresh.id) as {n:number}).n,1);
+  // Startup failure terminates the old Run, without a durable queue pause.
+  const restarted=await app.inject({method:"POST",url:`/api/agent/sessions/${fresh.id}/messages`,payload:{...message,clientRequestId:"after-listen"}});
+  assert.equal(restarted.statusCode,201,restarted.body);
+  assert.equal((db.prepare("select count(*) as n from agent_run where session_id=?").get(fresh.id) as {n:number}).n,2);
   const clean=await createPrimarySession({app,workspaceId});
   const accepted=await app.inject({method:"POST",url:`/api/agent/sessions/${clean.id}/messages`,payload:{...message,clientRequestId:"after-listen-clean"}});
   assert.equal(accepted.statusCode,201,accepted.body);

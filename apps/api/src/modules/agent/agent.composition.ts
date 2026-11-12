@@ -3326,7 +3326,6 @@ function createAgentApplications(
     createMessageQueue: (runtimeControl: AgentRuntimeControlService) => createAgentMessageQueueAssembly({
       db: environment.db, dataDir: environment.dataDir, lifecycle: runLifecycleApplication, runtimeControl,
       closeInputAdmission: closeInteractiveInputAdmission,
-      onScanError: () => logger.warn("message queue scan failed; retrying without activating new inputs"),
       resolveProfile: (input) => {
         if (!input.fixedIdentity) return resolvePrimarySessionModel(input);
         const profile = environment.resolveExecutionProfile({

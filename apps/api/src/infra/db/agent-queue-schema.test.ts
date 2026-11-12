@@ -23,7 +23,7 @@ function fixture() {
   return db;
 }
 function control(session = "s1", workspace = "w1") {
-  return { workspace_id: workspace, session_id: session, mode: "active", queue_version: 0, next_sequence: 1, updated_at: 1 };
+  return { workspace_id: workspace, session_id: session, queue_version: 0, next_sequence: 1, updated_at: 1 };
 }
 function receipt(id = "receipt", session = "s1", workspace = "w1") {
   return { id, workspace_id: workspace, session_id: session, client_request_id: id, sequence: 1, payload_hash: hash,
@@ -100,7 +100,7 @@ test("NULL cannot bypass confirmation/proof checks and counters are safe integer
       "status='queued',text=null", "sequence=1.5", "sequence=9007199254740992", "id=null"
     ];
     for (const update of invalidReceipt) assert.throws(() => db.exec(`update agent_user_message_receipt set ${update} where id='receipt'`), /CHECK|NOT NULL/);
-    for (const update of ["mode='paused',pause_code=null", "queue_version=-1", "queue_version=1.5", "next_sequence=9007199254740992"])
+    for (const update of ["queue_version=-1", "queue_version=1.5", "next_sequence=9007199254740992"])
       assert.throws(() => db.exec(`update agent_session_queue_control set ${update} where session_id='s1'`), /CHECK/);
     assert.throws(() => insert(db, "agent_session_stop_target", { ...target(), state: "quiescent" }), /CHECK/);
     assert.throws(() => db.exec("update agent_runtime_instance set state='exited'"), /CHECK/);

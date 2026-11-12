@@ -133,7 +133,7 @@ for (const npm of ["@ai-sdk/moonshotai", "@ai-sdk/deepseek"]) test(`interactive 
 test("interactive provider context limit is finite and never confirms input or retries the model", async () => {
   const error = Object.assign(new Error("context limit"), { code: "context_length_exceeded" });
   const f = fixture({ providerError: error });
-  await assert.rejects(f.invoke(), (error: unknown) => error instanceof QueueInputBudgetError && error.pauseCode === "provider_context_too_large");
+  await assert.rejects(f.invoke(), (error: unknown) => error instanceof QueueInputBudgetError && error.reason === "provider_context_too_large");
   assert.equal(f.requests.length, 1); assert.equal(f.replacements.length, 0); assert.equal(f.completions, 0);
 });
 
@@ -141,7 +141,7 @@ test("interactive recovery rejects changed image bytes even with the same truste
   const bytes = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
   const changed = Uint8Array.from(bytes); changed[7] = 11;
   const f = fixture({ ctx: imageContext(bytes), attachmentStorage: { async read() { return { bytes: changed, mediaType: "image/png" }; } } });
-  await assert.rejects(f.invoke(profile(), true), (error: unknown) => error instanceof QueueInputBudgetError && error.pauseCode === "attachment_integrity_failed");
+  await assert.rejects(f.invoke(profile(), true), (error: unknown) => error instanceof QueueInputBudgetError && error.reason === "attachment_integrity_failed");
   assert.equal(f.requests.length, 0); assert.equal(f.creates.length, 0); assert.equal(f.completions, 0);
 });
 
@@ -395,7 +395,7 @@ for (const reason of ["snapshot_too_large", "cache_capacity"] as const) {
       return { operationId: request.operationId, decision: "rejected", reason, queue: {} };
     } });
     await assert.rejects(f.invoke(), error => error instanceof QueueInputBudgetError
-      && error.pauseCode === (reason === "snapshot_too_large" ? "prepare_snapshot_too_large" : "prepare_cache_capacity"));
+      && error.reason === (reason === "snapshot_too_large" ? "prepare_snapshot_too_large" : "prepare_cache_capacity"));
     assert.equal(operations.length, unknown ? 2 : 1);
     assert.ok(operations.every(operation => operation === operations[0]));
     assert.equal(f.requests.length, 0); assert.equal(f.creates.length, 0); assert.equal(f.injections, 0);

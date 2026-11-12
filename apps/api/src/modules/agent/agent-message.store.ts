@@ -1,12 +1,12 @@
+import { discardRunQueuedReceipts } from "./message-queue/queued-receipt-cancellation.js";
 import type { AgentInteractiveInputBinding } from "@agent-workbench/shared/internal-contracts/agent-api";
 import { bindInteractiveAssistant, replaceInteractiveAssistantBinding, claimInteractiveAssistantBinding, confirmInteractiveAssistantInput, interactiveRunEnabled, readEffectiveInputPolicy, type InputConfirmationSource } from "./message-queue/interactive-input-binding.store.js";
-import { assertSessionQueueUnoccupied, pauseMessageQueue } from "./message-queue/message-queue.guard.js";
+import { assertSessionQueueUnoccupied } from "./message-queue/message-queue.guard.js";
 import { assertSessionRuntimeUnblocked, registerRunRuntimeAdmission } from "./runtime-control/runtime-control.store.js";
 import { HttpError } from "../../app/errors.js";
 import { resolveSessionVisibility, type SessionVisibilityInput } from "./session/session-visibility.js";
 import { insertInitialAgentSessionTabState } from "../../infra/db/agent-session-tab-state.js";
 import type {
-  AgentQueuePauseCode,
   PrimaryProjectionProfile,
   AgentCompactionMessage,
   AgentOrdinaryMessage,
@@ -751,7 +751,7 @@ export function updateToolExecution(db: Db, input: { workspaceId: string; sessio
   })();
 }
 
-export function updateMessageRunNotice(db: Db, input: { workspaceId: string; sessionId: string; runId: string; runNoticeText: string; queuePauseCode?: AgentQueuePauseCode; modelRequestError?: AgentModelRequestError | null; compactionExpectedRevision?: number; retryCount?: number; nextRetryAt?: number | null; updatedAt: number }): FencedWriteResult {
+export function updateMessageRunNotice(db: Db, input: { workspaceId: string; sessionId: string; runId: string; runNoticeText: string; terminalFailure?: boolean; modelRequestError?: AgentModelRequestError | null; compactionExpectedRevision?: number; retryCount?: number; nextRetryAt?: number | null; updatedAt: number }): FencedWriteResult {
   return db.transaction(() => {
     if (!assertFence(db, input)) return "ignored";
     // A delayed compaction progress RPC must not resurrect its notice after
@@ -776,7 +776,13 @@ export function updateMessageRunNotice(db: Db, input: { workspaceId: string; ses
       input.sessionId,
       input.runId
     );
-    if (input.queuePauseCode && interactiveRunEnabled(db, input)) pauseMessageQueue(db, input.workspaceId, input.sessionId, input.queuePauseCode, input.updatedAt);
+    // A terminal failure closes the existing Run phase immediately, including
+    // the gap before the Worker requests final convergence. No queue state is needed.
+    if (input.terminalFailure && interactiveRunEnabled(db, input)) {
+      const run = getRunRecord(db, input.runId);
+      if (run && ["work_pending", "work_in_progress"].includes(run.executionPhase))
+        persistRunTerminalIntent(db, { ...input, status: "failed", code: "run_failed", detail: null });
+    }
     return "updated";
   })();
 }
@@ -850,7 +856,7 @@ export function moveMessageHead(db: Db, input: { workspaceId: string; sessionId:
   db.transaction(() => {
     const session = assertCurrent(db, input);
     assertSessionRuntimeUnblocked(db,input.workspaceId,input.sessionId);
-    assertSessionQueueUnoccupied(db, input.workspaceId, input.sessionId, { allowPaused: true });
+    assertSessionQueueUnoccupied(db, input.workspaceId, input.sessionId);
     if (!isAncestor(db, input.workspaceId, input.expectedHeadMessageId, input.nextHeadMessageId)) throw new AgentMessageDomainError("MESSAGE_TARGET_INVALID");
     if (session.contextRootMessageId && !isAncestor(db, input.workspaceId, input.nextHeadMessageId, session.contextRootMessageId)) throw new AgentMessageDomainError("MESSAGE_TARGET_BEFORE_CONTEXT_ROOT");
     const target = messageRow(db, input.nextHeadMessageId);
@@ -867,7 +873,7 @@ export function revertBeforeUserMessage(db: Db, input: { workspaceId: string; se
   db.transaction(() => {
     const session = assertCurrent(db, input);
     assertSessionRuntimeUnblocked(db, input.workspaceId, input.sessionId);
-    assertSessionQueueUnoccupied(db, input.workspaceId, input.sessionId, { allowPaused: true });
+    assertSessionQueueUnoccupied(db, input.workspaceId, input.sessionId);
     if (!isAncestor(db, input.workspaceId, input.expectedHeadMessageId, input.targetMessageId)) throw new AgentMessageDomainError("MESSAGE_TARGET_INVALID");
     if (session.contextRootMessageId && !isAncestor(db, input.workspaceId, input.targetMessageId, session.contextRootMessageId)) throw new AgentMessageDomainError("MESSAGE_TARGET_BEFORE_CONTEXT_ROOT");
     const target = messageRow(db, input.targetMessageId);
@@ -1553,28 +1559,30 @@ export function markRunWorkInProgress(db: Db, input: {
  * 不同三元组或非法 phase 均拒绝；公开终态由 convergeRunTerminal 统一收敛。
  */
 export function persistRunTerminalIntent(db: Db, input: TerminalIntentInput): "updated" | "already_persisted" {
-  const run = getRunRecord(db, input.runId);
-  if (!run || run.workspaceId !== input.workspaceId || run.sessionId !== input.sessionId) {
-    throw new Error("terminal intent run is not eligible");
-  }
-  assertTerminalTuple(run, input.status, input.code, input.detail);
-  const result = db.prepare(`
-    update agent_run
-    set execution_phase='terminal_intent_persisted', intended_terminal_status=@status,
-      intended_terminal_code=@code, intended_terminal_detail=@detail, updated_at=@updatedAt
-    where run_id=@runId and workspace_id=@workspaceId and session_id=@sessionId
-      and status='running' and execution_phase in ('work_pending','work_in_progress')
-  `).run(input);
-  if (result.changes === 1) return "updated";
-  const current = getRunRecord(db, input.runId);
-  if (current?.workspaceId === input.workspaceId && current.sessionId === input.sessionId
-    && current.executionPhase === "terminal_intent_persisted"
-    && current.intendedTerminalStatus === input.status
-    && current.intendedTerminalCode === input.code
-    && current.intendedTerminalDetail === input.detail) {
-    return "already_persisted";
-  }
-  throw new Error("terminal intent conflicts with current run state");
+  return db.transaction(() => {
+    const run = getRunRecord(db, input.runId);
+    if (!run || run.workspaceId !== input.workspaceId || run.sessionId !== input.sessionId) {
+      throw new Error("terminal intent run is not eligible");
+    }
+    assertTerminalTuple(run, input.status, input.code, input.detail);
+    const result = db.prepare(`
+      update agent_run
+      set execution_phase='terminal_intent_persisted', intended_terminal_status=@status,
+        intended_terminal_code=@code, intended_terminal_detail=@detail, updated_at=@updatedAt
+      where run_id=@runId and workspace_id=@workspaceId and session_id=@sessionId
+        and status='running' and execution_phase in ('work_pending','work_in_progress')
+    `).run(input);
+    if (result.changes === 1) { discardRunQueuedReceipts(db, input, input.updatedAt); return "updated" as const; }
+    const current = getRunRecord(db, input.runId);
+    if (current?.workspaceId === input.workspaceId && current.sessionId === input.sessionId
+      && current.executionPhase === "terminal_intent_persisted"
+      && current.intendedTerminalStatus === input.status
+      && current.intendedTerminalCode === input.code
+      && current.intendedTerminalDetail === input.detail) {
+      return "already_persisted" as const;
+    }
+    throw new Error("terminal intent conflicts with current run state");
+  })();
 }
 
 /** 读取已持久化的 terminal intent，供幂等重放与终态收敛验证使用。 */
@@ -1746,8 +1754,7 @@ export function convergeRunTerminal(db: Db, input: {
     if (!settleMessageRunIfCurrent(db, { ...input, preserveModelRequestError: intent.status === "failed" })) {
       throw new Error("terminal convergence active run unexpectedly changed");
     }
-    if (intent.status !== "completed") pauseMessageQueue(db, input.workspaceId, input.sessionId,
-      intent.status === "cancelled" ? "user_stop" : "run_failed", input.updatedAt);
+    discardRunQueuedReceipts(db, input, input.updatedAt);
     return { kind: "transitioned" as const, finalStatus: intent.status };
   })();
 }

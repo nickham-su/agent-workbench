@@ -88,7 +88,7 @@
             :data-message-id="row.message.id"
           >
             <AgentMessageActions
-              v-if="isMessageActionTextRow(row) && (showFork(row.message) || showRevert(row.message))"
+              v-if="isMessageActionTextRow(row)"
               :disabled="isSessionMessageMutationPending || queueHistoryBlocked"
               :message-id="row.message.id"
               :copy-message-id-label="t('agent.client.copyMessageId')"
@@ -678,8 +678,8 @@ const queue = useAgentMessageQueue(() => ({
 }));
 const { snapshot: queueSnapshot, busy: queueBusy, identity: queueIdentity,
   stopBlocked: queueStopBlocked, historyBlocked: queueHistoryBlocked,
-  handoff: queueSubmissionHandoff, unknownSubmission: queueUnknownSubmission, unknownStop: queueUnknownStop, unknownClear: queueUnknownClear, unknownControl: queueUnknownControl } = queue;
-const queueIdentityLocked = computed(() => !!queueIdentity.value || queueStopBlocked.value || !!queueUnknownSubmission.value || !!queueUnknownControl.value);
+  handoff: queueSubmissionHandoff, unknownSubmission: queueUnknownSubmission, unknownStop: queueUnknownStop } = queue;
+const queueIdentityLocked = computed(() => !!queueIdentity.value || queueStopBlocked.value || !!queueUnknownSubmission.value);
 
 const modelErrorModalVisible = ref(false);
 const modelErrorSnapshot = ref<AgentModelRequestError | null>(null);
@@ -782,15 +782,15 @@ const processingPastedImages = ref(0);
 const pendingAttempt = ref<PendingAgentSendAttempt | null>(null);
 const pendingCompactAttempt = ref<PendingAgentCompactAttempt | null>(null);
 watch(
-  [queueStartupRequestId, queueSnapshot, queueStopBlocked, queueUnknownControl, cancelling,
+  [queueStartupRequestId, queueSnapshot, queueStopBlocked, cancelling,
     () => runState.value.status, awaitingRunStateRunId],
   () => {
     const requestId = queueStartupRequestId.value;
     if (!requestId) return;
     const snapshot = queueSnapshot.value;
     // Only this first receipt gets a grace period. Never conceal real backlog or recovery.
-    if (queueStopBlocked.value || queueUnknownControl.value || cancelling.value ||
-      (snapshot && (snapshot.mode !== "active" || snapshot.stop.state !== "none" || snapshot.unconfirmedInputCount > 0 ||
+    if (queueStopBlocked.value || cancelling.value ||
+      (snapshot && (snapshot.stop.state !== "none" || snapshot.unconfirmedInputCount > 0 ||
         (snapshot.pendingCount > 0 && (snapshot.pendingCount !== 1 || snapshot.items[0]?.clientRequestId !== requestId))))) {
       clearQueueStartup();
     } else if (snapshot?.pendingCount === 0 &&
@@ -1567,7 +1567,7 @@ function onInputKeydown(event: KeyboardEvent) {
     event.preventDefault();
     if (event.repeat || queueBusy.value || sending.value || cancelling.value) return;
     if (showQueueRecovery() || !queueSnapshot.value) return;
-    if (queueUnknownClear.value || queueSnapshot.value.pendingCount > 0) void onQueueClear();
+    if (queueSnapshot.value.pendingCount > 0) void onQueueClear();
     else void onCancel();
   }
 }
@@ -1639,6 +1639,8 @@ async function onSend() {
     message.warning(t("agent.client.queueStateLoading"));
     return; // Loading never resumes this user action automatically.
   }
+  const submittedTargetRunId = runState.value.status === "running" ? runState.value.activeRunId : null;
+  let submittedSupplement: QueueSubmission | null = null;
   const submittedDraft = draft.value;
   const submittedRevision = draftRevision;
   const submittedImages = [...pendingImages.value];
@@ -1662,11 +1664,11 @@ async function onSend() {
     message.warning(t("agent.client.queueCompactBlocked"));
     return;
   }
-  const idleStartup = !showRunLoading.value && runState.value.status !== "running" &&
-    !queueStopBlocked.value && !queueUnknownControl.value && !queueUnknownSubmission.value &&
-    (creatingFreshSession || (!!trustedGeneration && currentQueue?.mode === "active" &&
+  const idleStartup = !!(!showRunLoading.value && runState.value.status !== "running" &&
+    !queueStopBlocked.value && !queueUnknownSubmission.value &&
+    (creatingFreshSession || (!!trustedGeneration && currentQueue &&
       currentQueue.pendingCount === 0 && currentQueue.unconfirmedInputCount === 0 &&
-      currentQueue.stop.state === "none" && !currentQueue.inputIdentity));
+      currentQueue.stop.state === "none" && !currentQueue.inputIdentity)));
   sending.value = true;
   try {
     if (!agentSelectionReady.value || !effectiveAgentId.value) return;
@@ -1716,16 +1718,18 @@ async function onSend() {
       if (queueSubmissionHandoff.value?.phase === "rejected") pendingAttempt.value = null;
       const attempt = resolveAgentSendAttempt({ attempt: pendingAttempt.value, fingerprint, makeClientRequestId: createAgentClientRequestId });
       pendingAttempt.value = attempt;
-      const acknowledged = await queue.submit({
+      const submission: QueueSubmission = {
         sessionId: ensuredId, composerId, draft: submittedDraft, draftRevision: submittedRevision, images: submittedImages, idleStartup,
-        payload: { workspaceId: sendScope.workspaceId, clientRequestId: attempt.clientRequestId, stopGeneration: submittedStopGeneration,
+        payload: { workspaceId: sendScope.workspaceId, clientRequestId: attempt.clientRequestId, stopGeneration: submittedStopGeneration, targetRunId: submittedTargetRunId,
           agentId: effectiveAgentId.value || undefined, uiLocale: getInitialLocale(), ...(sendText ? { text: sendText } : {}) },
-      });
-      if (acknowledged.result.receipt.status === "injected") {
+      };
+      submittedSupplement = submittedTargetRunId ? submission : null;
+      const acknowledged = await queue.submit(submission);
+      if (!submittedTargetRunId && acknowledged.result.receipt.status === "injected") {
         registerPendingAgentRun(pendingRunRegistry, { workspaceId: sendScope.workspaceId, sessionId: ensuredId, runKind: "user", runId: acknowledged.result.receipt.runId }, statusStore);
       }
       if (!isCurrentAgentRequestScope(requestScope, sendScope)) return;
-      if (acknowledged.result.receipt.status === "injected") {
+      if (!submittedTargetRunId && acknowledged.result.receipt.status === "injected") {
         bridgeRunState(acknowledged.result.receipt.runId);
         void pendingRunController.pollNow();
       }
@@ -1741,7 +1745,10 @@ async function onSend() {
   } catch (error) {
     if (isCurrentAgentRequestScope(requestScope, sendScope)) {
       if (action.kind === "compact" && shouldClearPendingAgentCompactAttempt(error)) pendingCompactAttempt.value = null;
-      if (!disposed) showQueueError(error);
+      if (submittedSupplement) {
+        confirmQueueSubmission(submittedSupplement);
+        pendingAttempt.value = null;
+      } else if (!disposed) showQueueError(error);
     }
   } finally {
     if (isCurrentAgentRequestScope(requestScope, sendScope)) sending.value = false;
@@ -1792,10 +1799,9 @@ function closeQueueRecovery() {
 }
 function showQueueRecovery(includeRejected = false): boolean {
   const handoff = queueSubmissionHandoff.value;
-  const control = queueUnknownControl.value;
-  const kind = queueUnknownStop.value ? "stop" : queueUnknownClear.value ? "clear"
+  const kind = queueUnknownStop.value ? "stop"
     : handoff && (handoff.phase === "unknown" || (includeRejected && handoff.phase === "rejected")) ? "submission"
-    : control ? "control" : null;
+    : null;
   if (!kind) {
     if (queueStopBlocked.value) {
       message.warning(t(queueSnapshot.value?.stop.state === "pending" ? "agent.client.queueStopPending" : "agent.client.queueStopUnknown"));
@@ -1827,14 +1833,8 @@ function showQueueRecovery(includeRejected = false): boolean {
       button("agent.client.queueRestoreDraft", () => { if (sameSubmission()) restoreQueueSubmission(); }),
     ]);
   } else {
-    const key = kind === "stop" ? "agent.client.queueStopUnknown" : kind === "clear" ? "agent.client.queueClearUnknown" : "agent.client.queueControlUnknown";
-    content = h("div", [h("p", t(key)), button(kind === "stop" ? "agent.client.queueRetryStop" : kind === "clear" ? "agent.client.queueRetryClear" : "agent.client.queueRetryOperation", async () => {
-      if (kind === "stop") { if (queueUnknownStop.value) await onCancel(); }
-      else if (kind === "clear") { if (queueUnknownClear.value) await onQueueClear(); }
-      else if (control && queueUnknownControl.value === control) {
-        try { await queue.control(control.kind); await refreshStructuralTimeline(); }
-        catch (error) { if (current()) showQueueError(error); }
-      }
+    content = h("div", [h("p", t("agent.client.queueStopUnknown")), button("agent.client.queueRetryStop", async () => {
+      if (queueUnknownStop.value) await onCancel();
     })]);
   }
   queueRecoveryModal = Modal.info({
@@ -2367,6 +2367,9 @@ watch(queueSubmissionHandoff, (entry, previous) => {
     confirmQueueSubmission(entry.submission);
     return;
   }
+  // Supplements are best-effort, not recoverable first sends. A successor
+  // composer must not inherit their draft/Files while the request is in flight.
+  if (entry.submission.payload.targetRunId) return;
   // The draft Pane may already be gone when its first receipt fails. Its
   // successor must expose that failure without relying on the old catch path.
   if (entry.submission.composerId !== composerId && (entry.phase === "unknown" || entry.phase === "rejected"))

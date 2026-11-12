@@ -46,27 +46,14 @@ create table agent_runtime_instance (
     and exit_proof_json is null and exit_observed_at is null), 0))
 );
 `;
-const DOMAIN_DDL = `
+const domainDdl = (legacyV26: boolean) => `
 create unique index uq_agent_session_scope on agent_session(workspace_id, id);
 create unique index uq_agent_attachment_scope on agent_attachment(workspace_id, id);
 create unique index uq_agent_run_scope on agent_run(workspace_id, session_id, run_id);
 create unique index uq_agent_message_origin_scope
   on agent_message(workspace_id, origin_session_id, id);
 
-create table agent_session_queue_control (
-  workspace_id text not null,
-  session_id text primary key not null,
-  mode text not null check(mode in ('active','paused')),
-  pause_code text,
-  queue_version integer not null check(typeof(queue_version)='integer' and queue_version between 0 and 9007199254740991),
-  next_sequence integer not null check(typeof(next_sequence)='integer' and next_sequence between 1 and 9007199254740991),
-  updated_at integer not null,
-  unique(workspace_id, session_id),
-  foreign key(workspace_id, session_id)
-    references agent_session(workspace_id, id) on delete cascade,
-  check((mode='active' and pause_code is null) or
-        (mode='paused' and pause_code is not null))
-);
+${legacyV26 ? LEGACY_QUEUE_CONTROL_SQL : QUEUE_CONTROL_SQL}
 
 create table agent_user_message_receipt (
   id text primary key not null,
@@ -86,6 +73,7 @@ create table agent_user_message_receipt (
   ui_locale text,
   message_id text unique,
   injected_run_id text,
+  ${legacyV26 ? "" : "target_run_id text,"}
   confirmation_state text check(confirmation_state in ('unconfirmed','confirmed','abandoned')),
   confirmed_at integer,
   confirmation_source text check(confirmation_source in ('worker_model','local_fallback')),
@@ -270,6 +258,42 @@ export function ensureAgentQueueIndependentSchema(db: Db) {
   })();
 }
 
-export function createAgentQueueDomainSchema(db: Db) {
-  db.exec(DOMAIN_DDL);
+const LEGACY_QUEUE_CONTROL_SQL = `create table agent_session_queue_control (
+  workspace_id text not null,
+  session_id text primary key not null,
+  mode text not null check(mode in ('active','paused')),
+  pause_code text,
+  queue_version integer not null check(typeof(queue_version)='integer' and queue_version between 0 and 9007199254740991),
+  next_sequence integer not null check(typeof(next_sequence)='integer' and next_sequence between 1 and 9007199254740991),
+  updated_at integer not null,
+  unique(workspace_id, session_id),
+  foreign key(workspace_id, session_id)
+    references agent_session(workspace_id, id) on delete cascade,
+  check((mode='active' and pause_code is null) or
+        (mode='paused' and pause_code is not null))
+);`;
+export const QUEUE_CONTROL_SQL = `create table agent_session_queue_control (
+  workspace_id text not null,
+  session_id text primary key not null,
+  queue_version integer not null check(typeof(queue_version)='integer' and queue_version between 0 and 9007199254740991),
+  next_sequence integer not null check(typeof(next_sequence)='integer' and next_sequence between 1 and 9007199254740991),
+  updated_at integer not null,
+  unique(workspace_id, session_id),
+  foreign key(workspace_id, session_id)
+    references agent_session(workspace_id, id) on delete cascade
+);`;
+
+export function createAgentQueueDomainSchema(db: Db, legacyV26 = false) {
+  db.exec(domainDdl(legacyV26));
+}
+
+/** Caller holds the writer transaction with FK enforcement temporarily disabled.
+ * Rebuild only the control table: all referencing receipts, bindings and ledgers stay intact. */
+export function upgradeAgentQueueBufferSchema(db: Db) {
+  db.exec(`create temp table queue_control_backup as select workspace_id,session_id,queue_version,next_sequence,updated_at from agent_session_queue_control;
+    drop table agent_session_queue_control;
+    ${QUEUE_CONTROL_SQL}
+    insert into agent_session_queue_control select * from queue_control_backup;
+    drop table queue_control_backup;
+    alter table agent_user_message_receipt add column target_run_id text;`);
 }

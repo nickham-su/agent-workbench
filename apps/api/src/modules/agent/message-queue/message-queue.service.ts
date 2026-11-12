@@ -1,4 +1,3 @@
-import { newSortableId } from "../../../utils/ids.js";
 import type { AgentResumeMessageQueueRequest, AgentResumeMessageQueueResponse, AgentAbandonUnconfirmedInputRequest } from "@agent-workbench/shared";
 import { AgentQueueRecoveryStore } from "./queue-recovery.store.js";
 import { createHash } from "node:crypto";
@@ -18,21 +17,20 @@ import { AgentMessageQueueStore, queuePayloadHash, sameQueueIdentity, toQueueRec
 export type AcceptQueueMessage = AgentAcceptUserMessageMultipartPayload & { images?: readonly StagedQueuePublicationImage[] };
 export type QueueProfileResolver = (input: QueueScope & { requestedAgentId?: string; fixedIdentity: AgentQueueIdentity | null; hasImages: boolean }) => AgentQueueIdentity;
 
-/** User-facing receipt authority; accepting durable inputs does not require an available Worker. */
+/** Ordinary sends activate atomically; supplements are a best-effort buffer for one Run. */
 export class AgentMessageQueueService {
   private closed = false;
   private accepting: boolean;
   private readonly activeAccepts = new Set<Promise<void>>();
-  private wakeDispatcher: (() => void) | null = null;
   constructor(readonly store: AgentMessageQueueStore, private readonly dependencies: {
     admissionInitiallyClosed?: boolean; dataDir: string; publications: AgentAttachmentPublicationService;
     runtimeControl: Pick<AgentRuntimeControlService, "stopSession" | "reconcileStops">;
     resolveProfile: QueueProfileResolver;
+    activateOrdinarySend?: (input: QueueScope & { receiptId: string }) => { runId: string; inputText: string };
     handoffContinuation?: (run: QueueScope & { runId: string; inputText: string }) => Promise<void>;
     resumeSession?: (request: AgentResumeMessageQueueRequest & { sessionId: string }) => Promise<AgentResumeMessageQueueResponse>;
   }) { this.accepting = !dependencies.admissionInitiallyClosed; }
 
-  setDispatcherWake(wake: () => void) { this.wakeDispatcher = wake; }
   openAdmission() { if (!this.closed) this.accepting = true; }
   closeAdmission() { this.closed = true; this.accepting = false; }
   /** False means the caller must keep DB/publication resources alive until requests settle. */
@@ -53,7 +51,7 @@ export class AgentMessageQueueService {
 
   private fingerprint(input: AcceptQueueMessage) {
     return queuePayloadHash({ version: "agent-user-receipt-v1", inputText: input.text ?? "", agentId: input.agentId?.trim() || null,
-      uiLocale: input.uiLocale ?? null, images: (input.images ?? []).map((image, position) => ({ position, filename: image.filename,
+      uiLocale: input.uiLocale ?? null, ...(input.targetRunId ? { targetRunId: input.targetRunId } : {}), images: (input.images ?? []).map((image, position) => ({ position, filename: image.filename,
         mediaType: image.mediaType, byteSize: image.byteSize, byteSha256: image.byteSha256 })) });
   }
 
@@ -104,7 +102,8 @@ export class AgentMessageQueueService {
       };
       const recovery = new AgentQueueRecoveryStore(this.store.db);
       assertSendGeneration();
-      recovery.validateSend(scope);
+      if (input.targetRunId) this.store.assertSupplementTarget(scope, input.targetRunId);
+      else recovery.validateSend(scope);
       const payloadBytes = Buffer.byteLength(inputText, "utf8") + images.reduce((sum, image) => sum + image.byteSize, 0);
       // Predictable validation before publication; repeat it after await inside the actual receipt transaction.
       this.store.assertCapacity(scope, payloadBytes);
@@ -115,26 +114,23 @@ export class AgentMessageQueueService {
         const duplicate = checkExisting();
         if (duplicate) return { receiptId: duplicate.id, value: { receipt: toQueueReceipt(duplicate), deduplicated: true } };
         assertSendGeneration();
-        const needsRecovery = recovery.validateSend(scope);
+        if (input.targetRunId) this.store.assertSupplementTarget(scope, input.targetRunId);
+        else recovery.validateSend(scope);
         const identity = this.resolveProfile(scope, input);
         const row = this.store.insert({ ...scope, clientRequestId: input.clientRequestId, payloadHash, inputText, text: inputText.trim(),
-          payloadBytes, identity, uiLocale: input.uiLocale ?? null, images: published });
-        if (needsRecovery) {
-          if (this.store.listUnconfirmed(scope).length && !this.dependencies.handoffContinuation)
-            throw new Error("Queue continuation handoff is not configured");
-          activationState.continuation = recovery.activateForSend(scope, newSortableId("run"), Date.now());
+          payloadBytes, targetRunId: input.targetRunId, identity, uiLocale: input.uiLocale ?? null, images: published });
+        if (!input.targetRunId) {
+          if (!this.dependencies.activateOrdinarySend || !this.dependencies.handoffContinuation)
+            throw new Error("Ordinary send activation is not configured");
+          activationState.continuation = this.dependencies.activateOrdinarySend({ ...scope, receiptId: row.id });
         }
-        return { receiptId: row.id, value: { receipt: toQueueReceipt(row), deduplicated: false } };
+        return { receiptId: row.id, value: { receipt: toQueueReceipt(this.store.get(scope, row.id)), deduplicated: false } };
       });
       if (activationState.continuation) {
         if (!this.dependencies.handoffContinuation) throw new Error("Queue continuation handoff is not configured");
         await this.dependencies.handoffContinuation({ ...scope, ...activationState.continuation });
       }
-      this.wakeDispatcher?.();
       return { ...accepted, queue: this.store.snapshot(scope) };
-    } catch (error) {
-      if (error instanceof HttpError && error.code === "AGENT_QUEUE_IDENTITY_INVARIANT") this.store.pause(scope, "invariant_violation");
-      throw error;
     } finally {
       try {
         await Promise.all(images.map(image => removeAgentAttachmentTempFile({ dataDir: this.dependencies.dataDir, tempId: image.tempId }).catch(() => undefined)));
@@ -184,7 +180,7 @@ export class AgentMessageQueueService {
     let settled!: () => void;
     const pending = new Promise<void>(resolve => { settled = resolve; });
     this.activeAccepts.add(pending);
-    try { const result = await this.dependencies.resumeSession(scope); this.wakeDispatcher?.(); return result; }
+    try { return await this.dependencies.resumeSession(scope); }
     finally { this.activeAccepts.delete(pending); settled(); }
   }
   abandon(sessionId: string, input: AgentAbandonUnconfirmedInputRequest) {

@@ -152,7 +152,7 @@ export class AgentInteractiveInputService {
       const continuation = this.db.prepare(`select 1 from agent_queue_operation where workspace_id=? and session_id=? and kind='complete_or_continue'
         and json_extract(result_json,'$.runId')=? and json_extract(result_json,'$.continuationHeadMessageId')=? limit 1`)
         .get(input.workspaceId, input.sessionId, input.runId, head.headMessageId);
-      const queued = snapshot.mode === "active" ? this.queue.listQueued(input) : [];
+      const queued = this.queue.listQueued(input, input.runId);
       const finish = !!continuation && queued.length === 0;
       if (finish && persistRunTerminalIntent(this.db, { ...input, status: "completed", code: "run_completed", detail: null, updatedAt: this.now() }) !== "updated") throw stale("Run cannot finish at this boundary");
       const candidates = queued.slice(0, AGENT_QUEUE_MAX_INJECT_BATCH).map(row => {
@@ -188,7 +188,6 @@ export class AgentInteractiveInputService {
       if (replay) return replay;
       const run = this.assertActive(input);
       const snapshot = this.queue.snapshot(input);
-      if (snapshot.mode !== "active") throw stale("Queue is paused");
       const preparation = this.db.prepare(`select result_json from agent_queue_operation where workspace_id=? and session_id=? and kind='prepare'
         and json_extract(result_json,'$.runId')=? and json_extract(result_json,'$.response.preparationSnapshotHash')=? limit 1`)
         .get(input.workspaceId, input.sessionId, input.runId, input.preparationSnapshotHash) as { result_json: string } | undefined;
@@ -199,7 +198,7 @@ export class AgentInteractiveInputService {
       const head = getMessageSessionHead(this.db, input)!;
       if (prepared.decision !== "prepare" || head.headMessageId !== input.expectedHeadMessageId || head.revision !== input.expectedRevision
         || head.headMessageId !== prepared.headMessageId || head.revision !== prepared.sessionRevision) throw stale("Prepared revision is stale");
-      const prefix = this.queue.listQueued(input).slice(0, input.receiptIds.length);
+      const prefix = this.queue.listQueued(input, input.runId).slice(0, input.receiptIds.length);
       if (!prefix.length || prefix.length !== input.receiptIds.length || prefix.some((row, index) => row.id !== input.receiptIds[index]
         || row.id !== prepared.candidateReceiptIds?.[index] || !sameQueueIdentity(queueIdentity(row), run))) throw stale("Prepared FIFO prefix changed");
       const at = this.now();
@@ -235,7 +234,7 @@ export class AgentInteractiveInputService {
       if (state.activeAssistantMessageId !== input.messageId) throw stale("Assistant is no longer current");
       if (completeAssistantWithExecutions(this.db, { ...input, executions: [], inputSource: source, interactiveDecision: true }) !== "updated") throw stale("Assistant completion rejected");
       const queue = this.queue.snapshot(input);
-      const decision = queue.mode === "active" && this.queue.listQueued(input).length ? "continue" : "finish";
+      const decision = this.queue.listQueued(input, input.runId).length ? "continue" : "finish";
       if (decision === "finish" && persistRunTerminalIntent(this.db, { ...input, status: "completed", code: "run_completed", detail: null }) !== "updated") throw stale("Terminal intent rejected");
       this.db.prepare("update agent_session_queue_control set queue_version=queue_version+1,updated_at=? where workspace_id=? and session_id=?")
         .run(input.updatedAt, input.workspaceId, input.sessionId);

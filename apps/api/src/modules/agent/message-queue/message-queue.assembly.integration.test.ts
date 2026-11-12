@@ -19,25 +19,23 @@ test("production exposes receipts while an independent composition factory stays
   const composition = createAgentComposition(f.ctx, f.app.log);
   t.after(() => composition.dispose());
   const runtime = new AgentRuntimeControlService(new AgentRuntimeControlStore(f.db), {
-    enqueueRun: () => { throw new Error("S4 assembly must never enqueue in this test"); }, cancelSession: () => undefined,
+    enqueueRun: () => undefined, cancelSession: () => undefined,
     stopRunsAndWait: async () => { throw new Error("No runtime targets"); },
   });
   t.after(() => runtime.close());
+  runtime.ready((f.db.prepare("select runtime_instance_id as id from agent_runtime_instance where state='ready'").get() as { id: string }).id);
   const queue = composition.createMessageQueue(runtime); t.after(() => queue.close());
   const input = { workspaceId: workspace.id, clientRequestId: "profile", text: "hello" };
   await assert.rejects(queue.service.accept("queue-profile", input), errorIs(503));
   // Explicit isolated opt-in only; production is already open after real onListen.
   queue.service.recoverPublications(); queue.service.openAdmission();
   const accepted = await queue.service.accept("queue-profile", input);
-  assert.deepEqual(accepted.queue.pendingIdentity, { agentId: "default", providerId: "ppchat", modelId: "gpt-5.2" });
+  assert.deepEqual(accepted.queue.inputIdentity, { agentId: "default", providerId: "ppchat", modelId: "gpt-5.2" });
   assert.equal((await f.app.inject({ method: "POST", url: "/api/agent/sessions/queue-profile/receipts", payload: input })).statusCode, 202);
   const settings = getAgentProvidersSettingsInternal(f.ctx);
   setSettingJson(f.db, "agent_providers_v1", { ...settings, providers: [] }, Date.now());
   assert.equal((await queue.service.accept("queue-profile", input)).deduplicated, true);
-  await assert.rejects(queue.service.accept("queue-profile", { ...input, clientRequestId: "new" }), errorIs(400));
-  queue.dispatcher.resumeRuntimeDispatch();
-  await queue.dispatcher.dispatchSession({ workspaceId: workspace.id, sessionId: "queue-profile" });
-  assert.equal(queue.service.snapshot({ workspaceId: workspace.id, sessionId: "queue-profile" }).pauseCode, "profile_unavailable");
+  await assert.rejects(queue.service.accept("queue-profile", { ...input, clientRequestId: "new", targetRunId: accepted.receipt.runId }), errorIs(400));
 });
 
 for (const mode of ["cold", "warm", "disposed"] as const) test(`composition closes interactive injection admission without reopening a ${mode} service`, async t => {

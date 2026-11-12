@@ -23,3 +23,10 @@ export function cancelQueuedReceipts(db: Db, scope: { workspaceId: string; sessi
     return queued.length;
   }).immediate();
 }
+
+/** Run-scoped cleanup: delayed failure/terminal replays cannot touch a later Run's buffer. */
+export function discardRunQueuedReceipts(db: Db, scope: { workspaceId: string; sessionId: string; runId: string }, at: number) {
+  const rows = db.prepare("select id from agent_user_message_receipt where workspace_id=? and session_id=? and target_run_id=? and status='queued'")
+    .all(scope.workspaceId, scope.sessionId, scope.runId) as Array<{ id: string }>;
+  return cancelQueuedReceipts(db, scope, rows.map(row => row.id), at);
+}

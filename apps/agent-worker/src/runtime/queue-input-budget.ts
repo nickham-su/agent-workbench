@@ -3,8 +3,8 @@ import { createHash } from "node:crypto";
 export type BudgetImage = { stableRef: string; mediaType: string; byteSize: number };
 export type QueueBudgetTool = { name: string; description: string; inputSchema: unknown };
 export class QueueInputBudgetError extends Error {
-  constructor(readonly pauseCode: "budget_configuration_invalid" | "provider_context_too_large" | "attachment_integrity_failed" | "prepare_snapshot_too_large" | "prepare_cache_capacity") {
-    super(pauseCode); this.name = "QueueInputBudgetError";
+  constructor(readonly reason: "budget_configuration_invalid" | "provider_context_too_large" | "attachment_integrity_failed" | "prepare_snapshot_too_large" | "prepare_cache_capacity") {
+    super(reason); this.name = "QueueInputBudgetError";
   }
 }
 const compareUnicode = (left: string, right: string) => {

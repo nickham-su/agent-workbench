@@ -13,8 +13,7 @@ import { useAgentMessageQueue, type QueueSubmission } from "./useAgentMessageQue
 
 const identity = { agentId: "server-agent", providerId: "server-provider", modelId: "server-model" };
 function snapshot(overrides: Partial<AgentMessageQueueSnapshot> = {}): AgentMessageQueueSnapshot {
-  return { workspaceId: "queue-w", sessionId: "queue-s", queueVersion: 0, stopGeneration: "0".repeat(64), mode: "active", pauseCode: null,
-    pendingCount: 0, pendingBytes: 0, inputIdentity: null, pendingIdentity: null, recoveryIdentity: null,
+  return { workspaceId: "queue-w", sessionId: "queue-s", queueVersion: 0, stopGeneration: "0".repeat(64), pendingCount: 0, pendingBytes: 0, inputIdentity: null, pendingIdentity: null, recoveryIdentity: null,
     unconfirmedInputCount: 0, unconfirmedInputSetHash: null, stop: { state: "none", unresolvedOperationCount: 0, unresolvedTargetCount: 0, code: null }, items: [], ...overrides };
 }
 function accepted(queue = snapshot()): AgentAcceptUserMessageResponse {
@@ -42,13 +41,13 @@ function panel(props: Partial<InstanceType<typeof Panel>["$props"]> = {}, locale
 }
 
 test("队列面板：只显示服务端 queued 数量，N=0 无文字与间距，不展示内部状态或管理入口", async () => {
-  const wrapper = panel({ snapshot: snapshot({ mode: "paused", pauseCode: "user_stop", pendingCount: 2,
+  const wrapper = panel({ snapshot: snapshot({ pendingCount: 2,
     unconfirmedInputCount: 1, stop: { state: "unknown", code: "transport_timeout", unresolvedOperationCount: 1, unresolvedTargetCount: 1 },
     items: [{ ...queuedItem(), textPreview: "private queued text" }] }) });
   try {
     assert.equal(wrapper.text(), "有 2 条消息等待处理");
     assert.equal(wrapper.findAll("button, details, li").length, 0);
-    await wrapper.setProps({ snapshot: snapshot({ mode: "paused", unconfirmedInputCount: 1 }) });
+    await wrapper.setProps({ snapshot: snapshot({ unconfirmedInputCount: 1 }) });
     assert.equal(wrapper.text(), "");
     assert.equal(wrapper.element.childElementCount, 0);
     assert.equal(wrapper.attributes("class"), undefined);
@@ -86,7 +85,7 @@ test("队列状态：低版本与旧 Session 回包不能覆盖新快照，断�
     assert.equal(disconnected.queue.snapshot.value?.pendingCount, 3); assert.ok(disconnected.queue.error.value);
   } finally { disconnected.wrapper.unmount(); }
 });
-test("队列轮询：idle 3000ms，running/queued/paused/unconfirmed 800ms，可见性恢复立即查询", async t => {
+test("队列轮询：idle 3000ms，running/queued/unconfirmed 800ms，可见性恢复立即查询", async t => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   let calls = 0;
   let server = snapshot();
@@ -100,7 +99,7 @@ test("队列轮询：idle 3000ms，running/queued/paused/unconfirmed 800ms，可
   t.mock.timers.tick(1); await settle(); assert.equal(calls, 4);
   f.scope.running = false; server = snapshot({ queueVersion: 1, pendingCount: 1 }); await settle();
   const before = calls; t.mock.timers.tick(800); await settle(); assert.equal(calls, before + 1);
-  for (const next of [snapshot({ queueVersion: 2, mode: "paused" }), snapshot({ queueVersion: 3, unconfirmedInputCount: 1 })]) {
+  for (const next of [snapshot({ queueVersion: 2, pendingCount: 1 }), snapshot({ queueVersion: 3, unconfirmedInputCount: 1 })]) {
     server = next; await f.queue.refresh(); const n: number = calls; t.mock.timers.tick(800); await settle(); assert.equal(calls, n + 1);
   }
   document.dispatchEvent(new Event("visibilitychange")); await settle(); assert.ok(calls > before + 2);
@@ -137,33 +136,11 @@ test("507 是明确拒收，草稿副本由输入框保留，不进入未知重�
 });
 test("Stop：未知结果复用原 operationId，成功后新 Stop 使用新 ID，且不带版本", async () => {
   const bodies: Array<{ workspaceId: string; operationId: string }> = [];
-  const f = fixture({ stopAgentMessageQueue: async (_id, body) => { bodies.push(body); if (bodies.length === 1) throw new ApiError({ message: "timeout" }); return { stopOperation: { operationId: body.operationId, acceptedQueueVersion: 1, targetCount: 0 }, queue: snapshot({ mode: "paused" }) }; } });
+  const f = fixture({ stopAgentMessageQueue: async (_id, body) => { bodies.push(body); if (bodies.length === 1) throw new ApiError({ message: "timeout" }); return { stopOperation: { operationId: body.operationId, acceptedQueueVersion: 1, targetCount: 0 }, queue: snapshot({ }) }; } });
   try {
     await assert.rejects(f.queue.stop()); assert.equal(f.queue.stopBlocked.value, true);
     await f.queue.stop(); assert.equal(bodies[0]!.operationId, bodies[1]!.operationId); assert.deepEqual(Object.keys(bodies[1]!).sort(), ["operationId", "workspaceId"]);
     await f.queue.stop(); assert.notEqual(bodies[1]!.operationId, bodies[2]!.operationId);
-  } finally { f.wrapper.unmount(); }
-});
-test("继续与放弃：确认快照 CAS、全集 hash、显式不可逆确认；未知操作重放不换 ID", async () => {
-  const bodies: unknown[] = [];
-  const f = fixture({ abandonAgentUnconfirmedInput: async (_id, body) => { bodies.push(body); if (bodies.length === 1) throw new ApiError({ message: "timeout" }); return { abandonedReceiptIds: ["r1"], queue: snapshot({ queueVersion: 10 }) }; } });
-  try {
-    const confirmed = snapshot({ queueVersion: 7, mode: "paused", unconfirmedInputCount: 1, unconfirmedInputSetHash: "a".repeat(64) });
-    f.queue.apply(confirmed); f.queue.apply(snapshot({ queueVersion: 8, unconfirmedInputCount: 2, unconfirmedInputSetHash: "b".repeat(64) }));
-    await assert.rejects(f.queue.control("abandon", confirmed));
-    await f.queue.control("abandon"); assert.deepEqual(bodies[0], bodies[1]);
-    const sent = bodies[0] as Record<string, unknown>;
-    assert.equal(sent.expectedQueueVersion, 7); assert.equal(sent.expectedUnconfirmedInputSetHash, "a".repeat(64)); assert.equal(sent.confirmIrreversible, true); assert.equal("receiptIds" in sent, false);
-  } finally { f.wrapper.unmount(); }
-});
-test("版本冲突清除旧控制尝试并刷新，pending/unknown 停止屏障不发送恢复请求", async () => {
-  let controls = 0, polls = 0;
-  const f = fixture({ getAgentMessageQueue: async () => { polls++; return snapshot({ queueVersion: 3 }); }, resumeAgentMessageQueue: async () => { controls++; throw new ApiError({ message: "conflict", code: "AGENT_QUEUE_VERSION_CONFLICT", status: 409 }); } });
-  try {
-    f.scope.active = true; await settle();
-    await assert.rejects(f.queue.control("resume")); await settle(); assert.equal(f.queue.unknownControl.value, null); assert.ok(polls >= 2);
-    f.queue.apply(snapshot({ queueVersion: 4, stop: { state: "unknown", unresolvedOperationCount: 1, unresolvedTargetCount: 1, code: "transport_timeout" } }));
-    await f.queue.control("resume"); await f.queue.control("abandon"); assert.equal(controls, 1);
   } finally { f.wrapper.unmount(); }
 });
 test("公共 API：坏的成功响应被判为结果未知，不伪造接收失败或运行 ID", async () => {
@@ -211,7 +188,7 @@ for (const [name, change] of stopConflicts) test(`同版本公开 Stop ${name} �
   t.mock.method(console, "warn", (...args: unknown[]) => logs.push(args));
   const f = fixture();
   try {
-    const trusted = snapshot({ queueVersion: 3, mode: "paused", pauseCode: "user_stop", stop: pendingStop });
+    const trusted = snapshot({ queueVersion: 3, stop: pendingStop });
     const changed = { ...trusted, stop: { ...pendingStop, ...change } };
     f.queue.apply(trusted); f.queue.apply(changed); f.queue.apply(changed);
     assert.equal(f.queue.snapshot.value, trusted);
@@ -231,7 +208,7 @@ test("公开 Stop 高版本 pending → unknown → quiescent 合法更新状态
       { ...pendingStop, state: "unknown", code: "runtime_exit_unproven" },
       { state: "quiescent", unresolvedOperationCount: 0, unresolvedTargetCount: 0, code: null }];
     for (const [index, stop] of stops.entries()) {
-      f.queue.apply(snapshot({ queueVersion: index + 3, mode: "paused", pauseCode: "user_stop", stop }));
+      f.queue.apply(snapshot({ queueVersion: index + 3, stop }));
       assert.deepEqual(f.queue.snapshot.value?.stop, stop); assert.equal(f.queue.error.value, null);
     }
     assert.equal(warn.mock.calls.length, 0);
@@ -311,58 +288,6 @@ test("生产同形scope：重复Run快照保留数量节点、内部取消busy�
   assert.equal(f.wrapper.find('[data-testid="queue-pending-count"]').exists(), false);
 });
 
-for (const kind of ["stop", "resume"] as const) test(`生产同形scope：重复Run快照保留${kind}未知操作与在途确认`, async () => {
-  const completion = deferred<AgentMessageQueueSnapshot>();
-  const f = productionScopeFixture({
-    getAgentMessageQueue: async (_id, workspaceId) => snapshot({ workspaceId, sessionId: "browser-watch-s" }),
-    stopAgentMessageQueue: async (_id, body) => ({ stopOperation: { operationId: body.operationId, acceptedQueueVersion: 1, targetCount: 0 }, queue: await completion.promise }),
-    resumeAgentMessageQueue: async () => ({ action: "continued_unconfirmed", runId: "continued-run", queue: await completion.promise }),
-  });
-  try {
-    await settle();
-    const action = kind === "stop" ? f.queue.stop() : f.queue.control("resume");
-    await settle(); assert.equal(f.queue.busy.value, true);
-    if (kind === "stop") assert.equal(f.queue.unknownStop.value, true);
-    else assert.equal(f.queue.unknownControl.value?.kind, "resume");
-    f.runState.value = { status: "running", revision: 1 }; await settle();
-    assert.equal(f.queue.busy.value, true);
-    if (kind === "stop") assert.equal(f.queue.unknownStop.value, true);
-    else assert.equal(f.queue.unknownControl.value?.kind, "resume");
-    completion.resolve(f.currentSnapshot({ queueVersion: 1, pendingCount: 2 })); await action; await settle();
-    assert.equal(f.queue.snapshot.value?.pendingCount, 2);
-    assert.equal(f.queue.busy.value, false); assert.equal(f.queue.unknownStop.value, false); assert.equal(f.queue.unknownControl.value, null);
-  } finally { f.wrapper.unmount(); }
-});
-
-for (const field of ["workspaceId", "sessionId"] as const) test(`生产同形scope：真实切换${field}清理状态并隔离旧轮询、旧操作及其finally`, async () => {
-  const oldPoll = deferred<AgentMessageQueueSnapshot>(), newPoll = deferred<AgentMessageQueueSnapshot>();
-  const oldCancel = deferred<Awaited<ReturnType<typeof api.cancelAgentQueuedReceipt>>>();
-  const newCancel = deferred<Awaited<ReturnType<typeof api.cancelAgentQueuedReceipt>>>();
-  let polls = 0, cancels = 0;
-  const f = productionScopeFixture({
-    getAgentMessageQueue: async () => ++polls === 1 ? snapshot({ workspaceId: "browser-watch-w", sessionId: "browser-watch-s", pendingCount: 3 }) : polls === 2 ? oldPoll.promise : newPoll.promise,
-    cancelAgentQueuedReceipt: async () => ++cancels === 1 ? oldCancel.promise : newCancel.promise,
-  });
-  try {
-    await settle(); assert.equal(f.queue.snapshot.value?.pendingCount, 3);
-    const stale = f.currentSnapshot({ queueVersion: 99, pendingCount: 99 });
-    const oldRefresh = f.queue.refresh(); const oldAction = f.queue.cancel("old-receipt");
-    await settle(); assert.equal(f.queue.busy.value, true);
-    f.scope[field] = `changed-${field}`; await settle();
-    assert.equal(f.queue.snapshot.value, null); assert.equal(f.queue.busy.value, false);
-    assert.equal(f.queue.unknownStop.value, false); assert.equal(f.queue.unknownControl.value, null);
-    const newAction = f.queue.cancel("new-receipt"); await settle(); assert.equal(f.queue.busy.value, true);
-    oldPoll.resolve(stale); oldCancel.resolve({ receipt: { ...queuedItem(), status: "cancelled" }, queue: stale });
-    await Promise.all([oldRefresh, oldAction]); await settle();
-    assert.equal(f.queue.snapshot.value, null); assert.equal(f.queue.busy.value, true, "old finally cannot clear the new operation's busy flag");
-    newPoll.resolve(f.currentSnapshot({ queueVersion: 7, pendingCount: 2 })); await settle();
-    const applied = f.queue.snapshot.value as AgentMessageQueueSnapshot | null;
-    assert.equal(applied?.[field], f.scope[field]); assert.equal(applied?.pendingCount, 2);
-    newCancel.resolve({ receipt: { ...queuedItem(), status: "cancelled" }, queue: f.currentSnapshot({ queueVersion: 8, pendingCount: 1 }) });
-    await newAction; await settle(); assert.equal((f.queue.snapshot.value as AgentMessageQueueSnapshot | null)?.pendingCount, 1); assert.equal(f.queue.busy.value, false);
-  } finally { f.wrapper.unmount(); }
-});
-
 test("队列面板：pending、unknown 与 quiescent 停止状态均不产生常驻提示", async () => {
   const wrapper = panel();
   try {
@@ -372,26 +297,6 @@ test("队列面板：pending、unknown 与 quiescent 停止状态均不产生常
       assert.equal(wrapper.find('[data-testid="queue-stop-barrier"]').exists(), false);
     }
   } finally { wrapper.unmount(); }
-});
-
-test("清空未知结果始终重试原 targets，不误删后来消息，busy 真实互斥", async () => {
-  const bodies: Array<{ workspaceId: string; receiptIds: string[] }> = [];
-  const blocked = deferred<Awaited<ReturnType<typeof api.clearAgentMessageQueue>>>();
-  let calls = 0;
-  const receipt = accepted().receipt; assert.equal(receipt.status, "queued"); if (receipt.status !== "queued") return;
-  const item = { ...receipt, textPreview: "old", attachmentCount: 0 };
-  const f = fixture({ clearAgentMessageQueue: async (_id, body) => { bodies.push(body); if (++calls === 1) return blocked.promise; return { cancelledCount: 0, queue: snapshot({ queueVersion: 3, pendingCount: 1, items: [{ ...item, id: "later" }] }) }; } });
-  try {
-    f.queue.apply(snapshot({ queueVersion: 1, pendingCount: 1, items: [item] }));
-    const first = f.queue.clear();
-    await assert.rejects(f.queue.clear(), /already in progress/);
-    blocked.reject(new ApiError({ message: "timeout" })); await assert.rejects(first);
-    assert.equal(f.queue.unknownClear.value, true);
-    f.queue.apply(snapshot({ queueVersion: 2, pendingCount: 1, items: [{ ...item, id: "later" }] }));
-    await f.queue.clear();
-    assert.deepEqual(bodies.map(body => body.receiptIds), [["receipt"], ["receipt"]]);
-    assert.equal(f.queue.snapshot.value?.items[0]?.id, "later"); assert.equal(f.queue.unknownClear.value, false);
-  } finally { f.wrapper.unmount(); }
 });
 
 test("发送保留的重试副本冻结 Stop generation，明确停止拒收保留 File 与草稿", async () => {
@@ -424,8 +329,7 @@ test("submit requires action-frozen generation: a first snapshot after Stop neve
     original.images = [{ id: "retained-image", filename: file.name, file }];
     await assert.rejects(f.queue.submit(original), { code: "AGENT_QUEUE_STATE_UNKNOWN" });
     assert.equal(posts, 0); assert.equal(f.queue.handoff.value, null);
-    loaded.resolve(snapshot({ queueVersion: 2, stopGeneration: "b".repeat(64), mode: "paused", pauseCode: "user_stop",
-      stop: { state: "quiescent", unresolvedOperationCount: 0, unresolvedTargetCount: 0, code: null } }));
+    loaded.resolve(snapshot({ queueVersion: 2, stopGeneration: "b".repeat(64), stop: { state: "quiescent", unresolvedOperationCount: 0, unresolvedTargetCount: 0, code: null } }));
     await settle(); assert.equal(posts, 0); assert.equal(original.payload.stopGeneration, undefined);
     assert.equal(original.draft, "original"); assert.equal(original.images[0]!.file, file);
     // Even an already loaded snapshot must not backfill missing action metadata.
@@ -433,4 +337,15 @@ test("submit requires action-frozen generation: a first snapshot after Stop neve
     const explicit = submission(); explicit.payload.stopGeneration = f.queue.snapshot.value!.stopGeneration;
     await f.queue.submit(explicit); assert.equal(posts, 1);
   } finally { f.wrapper.unmount(); }
+});
+
+test("补充消息失败静默丢弃，不保留查询、重试或恢复副本", async () => {
+  let calls=0;
+  const f=fixture({acceptAgentUserMessage:async()=>{calls++;throw new ApiError({message:"timeout"});}});
+  try {
+    const value=submission();value.payload.targetRunId="current-run";
+    await assert.rejects(f.queue.submit(value));
+    assert.equal(f.queue.handoff.value,null);assert.equal(f.queue.unknownSubmission.value,null);
+    assert.equal(await f.queue.resolveUnknown(true),null);assert.equal(calls,1);
+  } finally {f.wrapper.unmount();}
 });

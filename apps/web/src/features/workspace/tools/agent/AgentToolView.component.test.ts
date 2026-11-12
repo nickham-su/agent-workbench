@@ -2775,7 +2775,7 @@ for (const outcome of ["timeout-query", "timeout-retry", "507-retry", "507-edite
     const laterFile = new File(["later-image"], "later.png", { type: "image/png" });
     const laterImage = { id: "later-image", filename: laterFile.name, file: laterFile };
     const queueSnapshot = (accepted = false) => ({ workspaceId: "ws-a", sessionId: realId, stopGeneration: "0".repeat(64), queueVersion: accepted ? 1 : 0,
-      mode: "active", pauseCode: null, pendingCount: accepted ? 1 : 0, pendingBytes: accepted ? 15 : 0,
+      pendingCount: accepted ? 1 : 0, pendingBytes: accepted ? 15 : 0,
       inputIdentity: null, pendingIdentity: null, recoveryIdentity: null, unconfirmedInputCount: 0, unconfirmedInputSetHash: null,
       stop: { state: "none", unresolvedOperationCount: 0, unresolvedTargetCount: 0, code: null }, items: [] });
     const receipt = () => ({ id: `receipt-${realId}`, clientRequestId: originalId, sequence: 1, createdAt: 1, updatedAt: 1,
@@ -2854,7 +2854,7 @@ for (const stopped of [false, true]) test(`fresh draft真实父子交接：创�
   const receipt = () => ({ id: `receipt-${realId}`, clientRequestId: "fresh-generation-request", sequence: 1,
     createdAt: 1, updatedAt: 1, status: "queued", messageId: null, runId: null, confirmationState: null, confirmationSource: null });
   const snapshot = () => ({ workspaceId: "ws-a", sessionId: realId, queueVersion: successful ? 3 : stopped ? 2 : 0,
-    stopGeneration: serverGeneration, mode: successful || !stopped ? "active" : "paused", pauseCode: successful || !stopped ? null : "user_stop",
+    stopGeneration: serverGeneration,
     pendingCount: successful ? 1 : 0, pendingBytes: successful ? 17 : 0, pendingIdentity: null, inputIdentity: null,
     recoveryIdentity: null, unconfirmedInputCount: 0, unconfirmedInputSetHash: null,
     stop: { state: stopped ? "quiescent" : "none", unresolvedOperationCount: 0, unresolvedTargetCount: 0, code: null },

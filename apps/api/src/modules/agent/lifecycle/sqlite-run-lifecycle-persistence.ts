@@ -86,9 +86,8 @@ export class SqliteRunLifecyclePersistence
     return new AgentQueueRecoveryStore(this.db).resume(input, runId, createdAt);
   }
 
-  activateQueuedUserRun(input: { workspaceId: string; sessionId: string; receiptId: string; runId: string; createdAt: number; assertDispatchAdmission?: () => void }): UserRunActivationResult {
+  activateAcceptedUserRun(input: { workspaceId: string; sessionId: string; receiptId: string; runId: string; createdAt: number }): UserRunActivationResult {
     return this.db.transaction(() => {
-      input.assertDispatchAdmission?.();
       const queue = new AgentMessageQueueStore(this.db);
       queue.assertScope(input);
       const receipt = queue.get(input, input.receiptId);
@@ -98,9 +97,8 @@ export class SqliteRunLifecyclePersistence
       if (queue.hasUndrainedExecution(input))
         return { kind: "session-running" as const };
       const snapshot = queue.snapshot(input);
-      if (receipt.status !== "queued" || snapshot.mode !== "active" || snapshot.unconfirmedInputCount > 0 || snapshot.items[0]?.id !== receipt.id)
+      if (receipt.status !== "queued" || receipt.target_run_id !== null || snapshot.items[0]?.id !== receipt.id)
         throw new HttpError(409, "Message queue is not dispatchable", "AGENT_QUEUE_NOT_DISPATCHABLE");
-      input.assertDispatchAdmission?.();
       return this.activateUserRunInternal({ ...input, clientRequestId: receipt.client_request_id, text: receipt.text!, ...queueIdentity(receipt),
         uiLocale: receipt.ui_locale, images: queue.attachments(input, receipt.id).map(image => ({
           attachmentId: image.id, storageKey: image.storageKey, filename: image.filename, mediaType: image.mediaType,
@@ -249,6 +247,10 @@ export class SqliteRunLifecyclePersistence
         createdAt: input.createdAt,
       });
       if (queueReceiptId) {
+        const unconfirmed = new AgentMessageQueueStore(this.db).listUnconfirmed(input);
+        if (unconfirmed.some(receipt => receipt.session_id !== input.sessionId)) throw new HttpError(409, "A fork cannot claim another Session's inputs", "AGENT_QUEUE_INPUT_SCOPE_CONFLICT");
+        for (const receipt of unconfirmed) this.db.prepare("insert into agent_interactive_run_input(workspace_id,session_id,run_id,receipt_id) values (?,?,?,?)")
+          .run(input.workspaceId,input.sessionId,input.runId,receipt.id);
         this.db.prepare(`update agent_user_message_receipt set status='injected',message_id=?,injected_run_id=?,confirmation_state='unconfirmed',updated_at=? where id=? and status='queued'`)
           .run(message.id, input.runId, input.createdAt, queueReceiptId);
         this.db.prepare("insert into agent_interactive_run_input(workspace_id,session_id,run_id,receipt_id) values (?,?,?,?)")

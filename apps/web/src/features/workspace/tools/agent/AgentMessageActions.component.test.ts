@@ -82,7 +82,12 @@ test("真实 AgentMessageActions：独立控制 Fork 与 Revert 按钮组合", a
   await wrapper.setProps({ showFork: true, showRevert: true });
   assert.deepEqual(wrapper.findAll("button").map((button) => button.attributes("aria-label")), ["fork", "revert"]);
   await wrapper.setProps({ showFork: false, showRevert: false });
-  assert.equal(wrapper.find('[data-testid="agent-message-actions"]').exists(), false);
+  assert.equal(wrapper.findAll("button").length, 0);
+  await wrapper.setProps({ messageId: "cancelled-message", timeText: "14:32:08", disabled: true });
+  assert.equal(wrapper.get('[data-testid="agent-message-time"]').text(), "14:32:08");
+  assert.equal(wrapper.get("button").text(), "cancelled-message");
+  await wrapper.get("button").trigger("click");
+  assert.equal(wrapper.emitted("copyMessageId")?.length, 1);
   wrapper.unmount();
 });
 

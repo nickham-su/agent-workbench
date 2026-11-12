@@ -62,7 +62,7 @@ export type AtomicLifecyclePersistence = {
   listActiveSessionIdsForCancel(input: CancelSessionsInput): string[];
   activateUserRun(input: UserRunActivationInput, publishImages?: () => void): UserRunActivationResult;
   resumeQueuedSession?(input: AgentResumeMessageQueueRequest & { sessionId: string }, runId: string, createdAt: number): QueueResumeActivation;
-  activateQueuedUserRun?(input: { workspaceId: string; sessionId: string; receiptId: string; runId: string; createdAt: number; assertDispatchAdmission?: () => void }): UserRunActivationResult;
+  activateAcceptedUserRun?(input: { workspaceId: string; sessionId: string; receiptId: string; runId: string; createdAt: number }): UserRunActivationResult;
   canEnqueueUserRunIfCurrent(input: { workspaceId: string; sessionId: string; runId: string }): boolean;
   failRunAfterEnqueueFailureIfCurrent(input: EnqueueFailureInput): EnqueueFailureSettlement;
   getCancelSessionSnapshot(sessionId: string): CancelSessionSnapshot | null;

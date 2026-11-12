@@ -4206,7 +4206,7 @@ export class AgentRunner {
         if (shouldStopForMaxSteps(step, LOOP_MAX_STEPS)) {
           if (context.interactiveInput?.interactive) {
             try { await this.apiClient.updateRunNotice({ workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId,
-              runNoticeText: "budget_exhausted", queuePauseCode: "budget_exhausted", updatedAt: this.nowMsFn() }); } catch { /* Keep terminal convergence authoritative. */ }
+              runNoticeText: "budget_exhausted", terminalFailure: true, updatedAt: this.nowMsFn() }); } catch { /* Keep terminal convergence authoritative. */ }
           }
           await finishOnce("failed");
           return;
@@ -4292,7 +4292,7 @@ export class AgentRunner {
 
       if (err instanceof QueueInputBudgetError) {
         try { await this.apiClient.updateRunNotice({ workspaceId: run.workspaceId, sessionId: run.sessionId, runId: run.runId,
-          runNoticeText: err.pauseCode, queuePauseCode: err.pauseCode, updatedAt: this.nowMsFn() }); } catch { /* Terminal convergence still pauses generically if the control RPC is unavailable. */ }
+          runNoticeText: err.reason, terminalFailure: true, updatedAt: this.nowMsFn() }); } catch { /* Terminal convergence still pauses generically if the control RPC is unavailable. */ }
       }
       const cause = err;
       const failedTuple: TerminalTuple = err instanceof CompactionConflictError && (run.runKind === "user" || run.runKind === "manual_compaction")

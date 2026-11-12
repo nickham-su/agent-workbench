@@ -56,19 +56,9 @@ export class AgentQueueRecoveryStore {
       .run(input.workspaceId, input.sessionId, input.operationId, kind, queuePayloadHash(input), JSON.stringify(Object.fromEntries(Object.entries(response as object).filter(([key]) => key !== "queue"))), at);
     return response;
   }
-  /** Send does not require idle recovery while an active Run is accepting inputs. */
-  validateSend(scope: QueueScope): boolean {
-    const snapshot = this.queue.snapshot(scope);
-    assertSessionRuntimeUnblocked(this.db, scope.workspaceId, scope.sessionId);
-    if (snapshot.mode === "active" && getMessageRunState(this.db, scope.workspaceId, scope.sessionId)?.status === "running") return false;
-    this.assertRecoverable(scope, snapshot.queueVersion);
-    return snapshot.mode === "paused" || snapshot.unconfirmedInputCount > 0;
-  }
-
-  /** Called inside the final receipt transaction; physical handoff is strictly post-commit. */
-  activateForSend(scope: QueueScope, runId: string, at: number): { runId: string; inputText: string } | null {
+  /** Explicit ordinary sends may bind formal unconfirmed inputs, never replay a buffer. */
+  validateSend(scope: QueueScope): void {
     this.assertRecoverable(scope, this.queue.snapshot(scope).queueVersion);
-    return this.activateRecoveredInputs(scope, runId, at);
   }
 
   private activateRecoveredInputs(scope: QueueScope, runId: string, at: number): { runId: string; inputText: string } | null {
@@ -77,7 +67,7 @@ export class AgentQueueRecoveryStore {
       const unconfirmed = this.queue.listUnconfirmed(scope).sort((a, b) => positions.get(a.message_id!)! - positions.get(b.message_id!)!);
       const trigger = unconfirmed[0];
       if (trigger && unconfirmed.some(row => row.session_id !== scope.sessionId)) throw new HttpError(409, "A fork cannot claim another Session's inputs", "AGENT_QUEUE_INPUT_SCOPE_CONFLICT");
-      this.db.prepare("update agent_session_queue_control set mode='active',pause_code=null,queue_version=queue_version+1,updated_at=? where workspace_id=? and session_id=?")
+      this.db.prepare("update agent_session_queue_control set queue_version=queue_version+1,updated_at=? where workspace_id=? and session_id=?")
         .run(at, scope.workspaceId, scope.sessionId);
       if (trigger) {
         if (!identity) throw new Error("Recovery input identity is missing");
@@ -98,7 +88,7 @@ export class AgentQueueRecoveryStore {
       const activation = this.activateRecoveredInputs(input, runId, at);
       const response: AgentResumeMessageQueueResponse = activation
         ? { action: "continued_unconfirmed", runId: activation.runId, queue: this.queue.snapshot(input) }
-        : { action: this.queue.listQueued(input).length ? "dispatch_queued" : "unpaused_only", runId: null, queue: this.queue.snapshot(input) };
+        : { action: "no_unconfirmed", runId: null, queue: this.queue.snapshot(input) };
       this.record(input, "resume", response, at);
       return { response, activated: activation !== null, inputText: activation?.inputText ?? "" };
     }).immediate();
@@ -119,7 +109,7 @@ export class AgentQueueRecoveryStore {
         this.db.prepare("update agent_user_message_receipt set confirmation_state='abandoned',abandoned_at=?,updated_at=? where id=? and confirmation_state='unconfirmed'").run(at, at, receipt.id);
         new AgentAttachmentPublicationStore(this.db, this.now).retainReceipt({ ...input, receiptId: receipt.id }, "abandoned");
       }
-      this.db.prepare("update agent_session_queue_control set mode='paused',pause_code='inputs_abandoned',queue_version=queue_version+1,updated_at=? where workspace_id=? and session_id=?")
+      this.db.prepare("update agent_session_queue_control set queue_version=queue_version+1,updated_at=? where workspace_id=? and session_id=?")
         .run(at, input.workspaceId, input.sessionId);
       return this.record(input, "abandon", { abandonedReceiptIds: receipts.map(row => row.id), queue: this.queue.snapshot(input) }, at);
     }).immediate();

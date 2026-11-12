@@ -57,7 +57,7 @@ function fixture(t: TestContext) {
     function stop(operationId = "stop", rootSessionId = "s") { return store.stop({ workspaceId: "w", rootSessionId, operationId }, () => undefined).record; }
     return { db, store, owner, instance, run, state, proof, stop, exit };
 }
-test("Stop before binding retires never-sent admission, records empty barrier and stable pause version", t => {
+test("Stop before binding retires never-sent admission, records empty barrier and stable queue version", t => {
     const f = fixture(t);
     const run = f.run();
     const instance = f.instance();
@@ -71,9 +71,7 @@ test("Stop before binding retires never-sent admission, records empty barrier an
     assert.equal(replay.replayed, true);
     assert.equal(settled, false);
     assert.deepEqual(f.db.prepare("select * from agent_session_queue_control").get(), before);
-    assert.equal((before as {
-        mode: string;
-    }).mode, "paused");
+    assert.equal("mode" in (before as object), false);
 });
 test("binding before physical enqueue commits exact stop target and rejects the delayed physical admission", t => {
     const f = fixture(t);
@@ -98,7 +96,7 @@ test("DB terminal and barrier are atomic; existing completed intent remains auth
     assert.equal(result.terminalConvergences?.[0]?.result.kind, "transitioned");
     assert.throws(() => f.run("s", "new"), /not confirmed/);
 });
-test("terminal settlement failure rolls back closing, pause, operation and barrier together", t => {
+test("terminal settlement failure rolls back closing, queue version, operation and barrier together", t => {
     const f = fixture(t);
     const run = f.run();
     const instance = f.instance();
@@ -122,9 +120,7 @@ test("two independent Stops retain their own targets and proofs; old proof canno
     assert.throws(() => assertSessionRuntimeUnblocked(f.db, "w", "s"));
     f.store.confirmStopGroup(second, instance, f.proof(second, instance));
     assert.doesNotThrow(() => assertSessionRuntimeUnblocked(f.db, "w", "s"));
-    assert.equal((f.db.prepare("select mode from agent_session_queue_control").get() as {
-        mode: string;
-    }).mode, "paused");
+    assert.equal("mode" in (f.db.prepare("select * from agent_session_queue_control").get() as object), false);
     f.store.markGroupUnknown(first, instance, "late_error");
     assert.equal(f.state("first"), "quiescent");
 });
@@ -283,9 +279,7 @@ test("fallback stays pending until the real asynchronous execution finally; no l
     await service.reconcileStops();
     assert.equal(f.state(record.operationId), "quiescent");
     assert.equal(writes, 0);
-    assert.equal((f.db.prepare("select mode from agent_session_queue_control").get() as {
-        mode: string;
-    }).mode, "paused");
+    assert.equal("mode" in (f.db.prepare("select * from agent_session_queue_control").get() as object), false);
 });
 test("workspace cleanup refuses pending runtime evidence, and keeps runtime instance records after confirmed cleanup", t => {
     const f = fixture(t);
@@ -526,7 +520,7 @@ test("online exit requires the original nonce, PID and spawn observation; malfor
     f.exit(instance);
     assert.equal(f.state("stop"), "quiescent");
 });
-test("retirement cannot bypass a pending target, and an empty new Stop still advances its independent pause version", t => {
+test("retirement cannot bypass a pending target, and an empty new Stop still advances its independent queue version", t => {
     const f = fixture(t);
     const run = f.run();
     const instance = f.instance();

@@ -48,13 +48,13 @@ test("isolated HTTP accepts JSON 202, exposes by-request/detail/snapshot without
   const response = await f.app.inject({ method: "POST", url: `${base}/receipts`, payload: { workspaceId: "w1", clientRequestId: "a", text: " hello " } });
   assert.equal(response.statusCode, 202, response.body);
   const accepted = response.json(); assert.equal(Value.Check(AgentAcceptUserMessageResponseSchema, accepted), true);
-  assert.equal(accepted.receipt.status, "queued"); assert.equal(accepted.receipt.messageId, null); assert.equal(accepted.receipt.runId, null);
+  assert.equal(accepted.receipt.status, "injected"); assert.ok(accepted.receipt.messageId); assert.ok(accepted.receipt.runId);
   const query = await f.app.inject({ url: `${base}/receipts/by-request?workspaceId=w1&clientRequestId=a` });
   assert.equal(query.statusCode, 200); assert.equal(query.json().receipt.id, accepted.receipt.id);
   const detail = await f.app.inject({ url: `${base}/receipts/${accepted.receipt.id}?workspaceId=w1` });
   assert.equal(detail.statusCode, 200); assert.equal(detail.json().inputText, " hello "); assert.equal(detail.json().text, "hello");
   const snapshot = await f.app.inject({ url: `${base}/message-queue?workspaceId=w1` });
-  assert.equal(snapshot.json().pendingCount, 1); assert.equal(snapshot.json().queueVersion, 1);
+  assert.equal(snapshot.json().pendingCount, 0); assert.ok(snapshot.json().queueVersion >= 1);
   const missing = await f.app.inject({ url: `${base}/receipts/by-request?workspaceId=w1&clientRequestId=missing` });
   assert.equal(missing.statusCode, 404);
   assert.ok(f.app.swagger().paths?.[`${base.replace("s1", "{sessionId}")}/receipts`]);
@@ -75,13 +75,13 @@ test("strict route validation rejects missing bodies and extra fields without si
     const response = await f.app.inject(input);
     assert.equal(response.statusCode, 400, `${input.url}: ${response.body}`);
   }
-  assert.equal(f.store.snapshot(scope).pendingCount, 1);
-  assert.equal(f.store.snapshot(scope).mode, "active");
+  assert.equal(f.store.snapshot(scope).pendingCount, 0);
 });
 
 test("HTTP multipart uses shared receipt payload, deduplicates changed temp IDs and revokes cancelled image authorization", async t => {
   const f = await httpFixture(t);
-  const input = { workspaceId: "w1", clientRequestId: "image", text: "" };
+  const trigger = await f.accept("image-trigger");
+  const input = { workspaceId: "w1", clientRequestId: "image", text: "", targetRunId: trigger.receipt.runId };
   const first = await f.app.inject({ method: "POST", url: `${base}/receipts`, ...form(input) });
   assert.equal(first.statusCode, 202, first.body);
   const accepted = first.json();
@@ -126,16 +126,15 @@ test("HTTP controlled image rejects a modified published file without exposing i
 });
 
 test("HTTP Stop replays stable acceptance and current snapshot; recovery routes reject malformed input", async t => {
-  const f = await httpFixture(t); await f.accept("first");
+  const f = await httpFixture(t);
   const stop = () => f.app.inject({ method: "POST", url: `${base}/message-queue/stop`, payload: { workspaceId: "w1", operationId: "stop" } });
   const first = await stop(); assert.equal(first.statusCode, 200, first.body);
   assert.equal(Value.Check(AgentStopMessageQueueResponseSchema, first.json()), true);
   assert.equal(first.json().queue.stop.state, "quiescent", "no sent runtime targets, not inferred from DB terminal");
-  await f.accept("after-stop");
+  await f.accept("after-stop"); await f.accept("after-stop-supplement");
   const retry = await stop();
   assert.deepEqual(retry.json().stopOperation, first.json().stopOperation);
-  assert.equal(retry.json().queue.pendingCount, 1); assert.equal(retry.json().queue.mode, "active");
-  for (const endpoint of ["resume", "abandon-unconfirmed"]) {
+  assert.equal(retry.json().queue.pendingCount, 1); for (const endpoint of ["resume", "abandon-unconfirmed"]) {
     assert.equal((await f.app.inject({ method: "POST", url: `${base}/message-queue/${endpoint}`, payload: {} })).statusCode, 400);
   }
 });
@@ -162,7 +161,7 @@ test("HTTP multipart staging rejects an unsafe private directory without echoing
 
 
 test("recovery HTTP never strips extra receipt IDs, hashes, or explicit confirmation fields", async t => {
-  const f = await httpFixture(t); await f.accept("recovery-http"); f.service.stop(scope, "stop-recovery-http");
+  const f = await httpFixture(t);
   const snapshot = f.store.snapshot(scope);
   const resume = { workspaceId: "w1", operationId: "resume-http", expectedQueueVersion: snapshot.queueVersion };
   const abandon = { ...resume, operationId: "abandon-http", expectedUnconfirmedInputSetHash: "0".repeat(64), confirmIrreversible: true };
@@ -172,16 +171,16 @@ test("recovery HTTP never strips extra receipt IDs, hashes, or explicit confirma
     assert.equal(response.statusCode, 400, response.body); assert.equal(f.store.snapshot(scope).queueVersion, snapshot.queueVersion);
   }
   const resumed = await f.app.inject({ method: "POST", url: `${base}/message-queue/resume`, payload: resume });
-  assert.equal(resumed.statusCode, 200, resumed.body); assert.equal(resumed.json().action, "unpaused_only"); assert.equal(f.enqueued.length, 0);
+  assert.equal(resumed.statusCode, 200, resumed.body); assert.equal(resumed.json().action, "no_unconfirmed"); assert.equal(f.enqueued.length, 0);
 });
 
 for (const kind of ["resume", "abandon"] as const) test(`HTTP ${kind} replay preserves its original action but reports Stop/enqueue/cancel current snapshot`, async t => {
   const f = await httpFixture(t);
   const trigger = await f.accept("replay-trigger");
-  if (kind === "abandon") {
-    await f.dispatcher.dispatchSession(scope); const run = f.enqueued[0]!;
+  {
+    const run = f.enqueued[0]!;
     f.finish(run.runId, "failed"); f.runtimeStore.retireAdmission({ ...scope, runId: run.runId, runtimeInstanceId: f.runtimeInstanceId });
-  } else f.service.stop(scope, "stop-before-resume-replay");
+  }
   const initial = f.store.snapshot(scope), payload = { workspaceId: scope.workspaceId, operationId: `http-${kind}-replay`, expectedQueueVersion: initial.queueVersion,
     ...(kind === "abandon" ? { expectedUnconfirmedInputSetHash: initial.unconfirmedInputSetHash!, confirmIrreversible: true } : {}) };
   const url = `${base}/message-queue/${kind === "resume" ? "resume" : "abandon-unconfirmed"}`;
@@ -197,18 +196,18 @@ for (const kind of ["resume", "abandon"] as const) test(`HTTP ${kind} replay pre
     assert.equal(f.stopCalls.length, calls); assert.equal(f.enqueued.length, enqueues);
     assert.deepEqual(f.db.prepare("select count(*) as n from agent_queue_operation").get(), operations);
   };
-  f.service.stop(scope, `stop-after-${kind}`); await assertReplay();
+  if (kind === "abandon") await f.accept("after-abandon-trigger");
   const later = await f.accept(`queued-after-${kind}`); await assertReplay();
   const cancelled = await f.app.inject({ method: "POST", url: `${base}/receipts/${later.receipt.id}/cancel`, payload: { workspaceId: scope.workspaceId } });
   assert.equal(cancelled.statusCode, 200, cancelled.body); await assertReplay();
-  assert.equal(f.store.snapshot(scope).pauseCode, null);
+  f.service.stop(scope, `stop-after-${kind}`); await new Promise(resolve => setImmediate(resolve)); await assertReplay();
   if (kind === "abandon") assert.equal(f.store.get(scope, trigger.receipt.id).confirmation_state, "abandoned");
 });
 
 for (const empty of [true, false]) test(`HTTP abandon uses the shared ${empty ? "empty-input" : "stale-set"} error code without mutation`, async t => {
   const f = await httpFixture(t);
   if (!empty) {
-    await f.accept("unconfirmed-set"); await f.dispatcher.dispatchSession(scope); const run = f.enqueued[0]!;
+    await f.accept("unconfirmed-set"); await f.currentRun(); const run = f.enqueued[0]!;
     f.finish(run.runId, "failed"); f.runtimeStore.retireAdmission({ ...scope, runId: run.runId, runtimeInstanceId: f.runtimeInstanceId });
   }
   const before = f.store.snapshot(scope);
@@ -228,7 +227,7 @@ for (const empty of [true, false]) test(`HTTP abandon uses the shared ${empty ? 
 
 for(const fault of ["stop_pending","invalid_profile"] as const) test(`HTTP recovery CAS wins over ${fault} without mutations or a new Run`,async t=>{
   const f=await httpFixture(t); await f.accept("cas-first");
-  const activated=await f.dispatcher.dispatchSession(scope); assert.ok(activated);
+  const activated=await f.currentRun(); assert.ok(activated);
   const version=f.store.snapshot(scope).queueVersion;
   if(fault==="stop_pending") {
     f.runtime.stopSession({...scope,rootSessionId:scope.sessionId,operationId:"pending-stop"});
@@ -270,11 +269,10 @@ for (const image of [false, true]) test(`HTTP legacy ${image ? "multipart image"
   const response = await reply;
   assert.equal(response.status, 409, response.body);
   assert.equal(JSON.parse(response.body).code, "AGENT_QUEUE_STOP_GENERATION_CHANGED");
-  assert.equal(f.store.snapshot(scope).pendingCount, 0); assert.equal(f.store.snapshot(scope).mode, "paused");
-});
+  assert.equal(f.store.snapshot(scope).pendingCount, 0); });
 
 test("HTTP clear is strict, scoped and independent from Stop; retries use only original receipt IDs", async t => {
-  const f = await httpFixture(t); const a = await f.accept("http-clear");
+  const f = await httpFixture(t); await f.accept("clear-trigger"); const a = await f.accept("http-clear");
   const clear = (payload: unknown) => f.app.inject({ method: "POST", url: `${base}/message-queue/clear`, payload: payload as object });
   for (const payload of [null, {}, { workspaceId: "w1", receiptIds: [a.receipt.id, a.receipt.id] },
     { workspaceId: "w1", receiptIds: [], operationId: "not-supported" }, { workspaceId: "w1", receiptIds: Array.from({ length: 101 }, (_, i) => String(i)) }]) {
@@ -285,7 +283,7 @@ test("HTTP clear is strict, scoped and independent from Stop; retries use only o
   assert.deepEqual(f.store.snapshot(scope), before);
   const cleared = await clear({ workspaceId: "w1", receiptIds: [a.receipt.id] });
   assert.equal(cleared.statusCode, 200, cleared.body); assert.equal(cleared.json().cancelledCount, 1);
-  assert.equal(cleared.json().queue.mode, "active"); assert.equal(cleared.json().queue.stop.state, "none");
+  assert.equal(cleared.json().queue.stop.state, "none");
   const later = await f.accept("http-clear-later");
   const retry = await clear({ workspaceId: "w1", receiptIds: [a.receipt.id] });
   assert.equal(retry.statusCode, 200); assert.equal(retry.json().cancelledCount, 0);
@@ -302,5 +300,21 @@ test("HTTP explicit Stop generation rejects stale new sends but never enters the
   assert.equal(Value.Check(AgentQueueErrorCodeSchema, stale.json().code), true);
   const replay = await send("fenced-dedup"); assert.equal(replay.statusCode, 202, replay.body);
   assert.equal(replay.json().deduplicated, true); assert.equal(replay.json().receipt.id, original.receipt.id);
-  assert.equal(replay.json().receipt.status, "cancelled"); assert.equal(replay.json().queue.mode, "paused");
+  assert.equal(replay.json().receipt.status, "injected"); });
+
+
+test("HTTP late multipart supplement cannot cross terminal into the next Run", async t => {
+  const f = await httpFixture(t), first = await f.accept("multipart-target");
+  assert.equal(first.receipt.status, "injected");
+  const runId = first.receipt.runId;
+  f.finish(runId, "completed");
+  f.runtimeStore.retireAdmission({ ...scope, runId, runtimeInstanceId: f.runtimeInstanceId });
+  const next = await f.accept("multipart-next");
+  const response = await f.app.inject({ method: "POST", url: `${base}/receipts`,
+    ...form({ workspaceId: "w1", clientRequestId: "late-multipart", targetRunId: runId, text: "late" }) });
+  assert.equal(response.statusCode, 409, response.body);
+  assert.equal(response.json().code, "AGENT_SUPPLEMENT_TARGET_CLOSED");
+  assert.equal(f.store.snapshot(scope).pendingCount, 0);
+  assert.equal(f.enqueued.length, 2); assert.notEqual(next.receipt.runId, runId);
+  assert.equal((await fs.readdir(agentAttachmentTempDir(f.dataDir))).length, 0);
 });

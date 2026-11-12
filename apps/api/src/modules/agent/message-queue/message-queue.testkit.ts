@@ -18,7 +18,6 @@ import { SqliteRunLifecyclePersistence } from "../lifecycle/sqlite-run-lifecycle
 import { workspaceDeletingFence } from "../lifecycle/workspace-deleting-fence.js";
 import { AgentRuntimeControlService } from "../runtime-control/runtime-control.service.js";
 import { AgentRuntimeControlStore } from "../runtime-control/runtime-control.store.js";
-import { AgentMessageQueueDispatcher } from "./message-queue.dispatcher.js";
 import { AgentMessageQueueService, type QueueProfileResolver } from "./message-queue.service.js";
 import { AgentMessageQueueStore } from "./message-queue.store.js";
 
@@ -77,22 +76,31 @@ export async function queueFixture(t: TestContext, runtimeKind: "worker" | "loca
   };
   const publications = new AgentAttachmentPublicationService({ db, dataDir });
   const service = new AgentMessageQueueService(store, { dataDir, publications, runtimeControl: runtime, resolveProfile,
+    activateOrdinarySend: input => ({ ...lifecycle.activateAcceptedUserRun(input), inputText: store.get(input, input.receiptId).input_text! }),
     handoffContinuation: run => lifecycle.handoffQueuedContinuation({ ...run, runtime }),
     resumeSession: request => lifecycle.resumeQueuedSession({ ...request, runtime }) });
-  const dispatcher = new AgentMessageQueueDispatcher(store, { lifecycle, runtime, resolveProfile });
+  const currentRun = async () => {
+    const state = getMessageRunState(db, scope.workspaceId, scope.sessionId);
+    if (state?.status !== "running" || !state.activeRunId) return null;
+    const row = db.prepare("select trigger_message_id as messageId from agent_run where run_id=?").get(state.activeRunId) as { messageId: string };
+    return { ...scope, runId: state.activeRunId, messageId: row.messageId };
+  };
   const upload = (filename = "image.png", bytes = PNG) => stageAgentImageUpload({ dataDir, attachmentId: `att_${randomUUID()}`, tempId: `tmp_${randomUUID()}`,
     filename, stream: Readable.from([bytes]), onBytes: () => undefined });
-  const accept = (clientRequestId: string, text = "hello") => service.accept("s1", { workspaceId: "w1", clientRequestId, text });
+  const accept = (clientRequestId: string, text = "hello") => {
+    const state = getMessageRunState(db, scope.workspaceId, scope.sessionId);
+    return service.accept("s1", { workspaceId: "w1", clientRequestId, text, targetRunId: state?.status === "running" ? state.activeRunId : null });
+  };
   const finish = (runId: string, status: "completed" | "failed" | "cancelled" = "completed") => {
     const runScope = { ...scope, runId };
     persistRunTerminalIntent(db, { ...runScope, status, code: status === "completed" ? "run_completed" : status === "failed" ? "run_failed" : "run_cancelled", detail: null, updatedAt: Date.now() });
     return convergeRunTerminal(db, { ...runScope, updatedAt: Date.now() });
   };
   t.after(async () => {
-    service.closeAdmission(); await service.close(); await dispatcher.close(); await runtime.close(); lifecycle.dispose();
+    service.closeAdmission(); await service.close(); await runtime.close(); lifecycle.dispose();
     workspaceDeletingFence.end("w1"); db.close(); await fs.rm(dataDir, { recursive: true, force: true });
   });
-  return { db, dbPath, dataDir, workspacePath, store, persistence, lifecycle, runtime, runtimeStore, runtimeInstanceId, publications, service, dispatcher,
+  return { db, dbPath, dataDir, workspacePath, store, persistence, lifecycle, runtime, runtimeStore, runtimeInstanceId, publications, service, currentRun,
     resolveProfile, enqueued, stopCalls, accept, upload, finish,
     setEnqueueError: (error: unknown) => { enqueueError = error; }, setProfileError: (error: unknown) => { profileError = error; },
     setDefaultIdentity: (value: AgentQueueIdentity) => { defaultIdentity = value; } };

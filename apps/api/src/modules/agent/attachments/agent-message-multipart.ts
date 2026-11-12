@@ -16,6 +16,8 @@ export type NormalizedSendMessageBody = {
   text: string;
   agentId?: string;
   uiLocale?: "zh-CN" | "en-US";
+  targetRunId?: string | null;
+  stopGeneration?: string;
   images: Array<{
     attachmentId: string;
     storageKey: string;
@@ -124,13 +126,15 @@ export async function parseAgentMessageMultipart(
     if (!Value.Check(payloadSchema, payload)) {
       throw new Error("multipart payload is invalid");
     }
-    const parsed = payload as { workspaceId: string; clientRequestId: string; text?: string; agentId?: string; uiLocale?: "zh-CN" | "en-US" };
+    const parsed = payload as Omit<NormalizedSendMessageBody, "images" | "text"> & { text?: string };
     return {
       workspaceId: parsed.workspaceId,
       clientRequestId: parsed.clientRequestId,
       text: parsed.text ?? "",
       ...(parsed.agentId ? { agentId: parsed.agentId } : {}),
       ...(parsed.uiLocale ? { uiLocale: parsed.uiLocale } : {}),
+      ...(parsed.targetRunId !== undefined ? { targetRunId: parsed.targetRunId } : {}),
+      ...(parsed.stopGeneration !== undefined ? { stopGeneration: parsed.stopGeneration } : {}),
       images,
     };
   } catch (error) {

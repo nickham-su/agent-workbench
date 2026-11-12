@@ -4,24 +4,25 @@ import { createHash } from "node:crypto";
 import { canonicalRuntimeStopJson } from "@agent-workbench/shared/node/agent-run-stop";
 import {
   AGENT_QUEUE_MAX_PENDING_BYTES, AGENT_QUEUE_MAX_PENDING_COUNT,
-  type AgentMessageQueueSnapshot, type AgentQueueIdentity, type AgentQueuePauseCode,
+  type AgentMessageQueueSnapshot, type AgentQueueIdentity,
   type AgentReceiptDetailResponse, type AgentUserMessageReceipt,
 } from "@agent-workbench/shared";
 import type { Db } from "../../../infra/db/db.js";
 import { HttpError } from "../../../app/errors.js";
 import { newSortableId } from "../../../utils/ids.js";
-import { getMessageSession, getVisibleMessageChain } from "../agent-message.store.js";
+import { getMessageSession, getVisibleMessageChain, getRunRecord, getMessageRunState } from "../agent-message.store.js";
 import type { PublishedQueueImage } from "../attachments/agent-attachment-publication.service.js";
 import { AgentAttachmentPublicationStore } from "../attachments/agent-attachment-publication.store.js";
 import { workspaceDeletingFence } from "../lifecycle/workspace-deleting-fence.js";
-import { pauseMessageQueue } from "./message-queue.guard.js";
+import { interactiveRunEnabled } from "./interactive-input-binding.store.js";
+import { assertSessionRuntimeUnblocked } from "../runtime-control/runtime-control.store.js";
 
 export type QueueScope = { workspaceId: string; sessionId: string };
 export type QueueReceiptRow = {
   id: string; workspace_id: string; session_id: string; client_request_id: string; sequence: number;
   payload_hash: string; status: "queued" | "injected" | "cancelled"; text: string | null; input_text: string | null;
   payload_bytes: number; attachment_count: number; agent_id: string; provider_id: string; model_id: string;
-  ui_locale: "zh-CN" | "en-US" | null; message_id: string | null; injected_run_id: string | null;
+  ui_locale: "zh-CN" | "en-US" | null; message_id: string | null; injected_run_id: string | null; target_run_id: string | null;
   confirmation_state: "unconfirmed" | "confirmed" | "abandoned" | null;
   confirmation_source: "worker_model" | "local_fallback" | null; created_at: number; updated_at: number;
 };
@@ -50,8 +51,8 @@ export class AgentMessageQueueStore {
   }
 
   ensureControl(scope: QueueScope) {
-    this.db.prepare(`insert into agent_session_queue_control(workspace_id,session_id,mode,queue_version,next_sequence,updated_at)
-      values (?,?,'active',0,1,?) on conflict(session_id) do nothing`).run(scope.workspaceId, scope.sessionId, this.now());
+    this.db.prepare(`insert into agent_session_queue_control(workspace_id,session_id,queue_version,next_sequence,updated_at)
+      values (?,?,0,1,?) on conflict(session_id) do nothing`).run(scope.workspaceId, scope.sessionId, this.now());
   }
 
   getByRequest(scope: QueueScope & { clientRequestId: string }): QueueReceiptRow | null {
@@ -66,9 +67,9 @@ export class AgentMessageQueueStore {
     return row;
   }
 
-  listQueued(scope: QueueScope) {
-    return this.db.prepare("select * from agent_user_message_receipt where workspace_id=? and session_id=? and status='queued' order by sequence")
-      .all(scope.workspaceId, scope.sessionId) as QueueReceiptRow[];
+  listQueued(scope: QueueScope, runId?: string) {
+    return this.db.prepare("select * from agent_user_message_receipt where workspace_id=? and session_id=? and status='queued'" + (runId ? " and target_run_id=?" : "") + " order by sequence")
+      .all(scope.workspaceId, scope.sessionId, ...(runId ? [runId] : [])) as QueueReceiptRow[];
   }
 
   /** Only the authoritative visible ancestry can contribute recovery inputs. */
@@ -116,16 +117,16 @@ export class AgentMessageQueueStore {
 
   /** Called by publication service inside its real, top-level receipt transaction. */
   insert(input: QueueScope & { clientRequestId: string; payloadHash: string; inputText: string; text: string; payloadBytes: number;
-    identity: AgentQueueIdentity; uiLocale: "zh-CN" | "en-US" | null; images: readonly PublishedQueueImage[] }) {
+    targetRunId?: string | null; identity: AgentQueueIdentity; uiLocale: "zh-CN" | "en-US" | null; images: readonly PublishedQueueImage[] }) {
     this.ensureControl(input);
     this.assertNamespaceAvailable(input);
     this.assertCapacity(input, input.payloadBytes);
     const control = this.db.prepare("select next_sequence as sequence from agent_session_queue_control where session_id=?").get(input.sessionId) as { sequence: number };
     const id = this.newId(); const at = this.now();
     this.db.prepare(`insert into agent_user_message_receipt(id,workspace_id,session_id,client_request_id,sequence,payload_hash,status,input_text,text,
-      payload_bytes,attachment_count,agent_id,provider_id,model_id,ui_locale,created_at,updated_at)
+      payload_bytes,attachment_count,agent_id,provider_id,model_id,ui_locale,target_run_id,created_at,updated_at)
       values (@id,@workspaceId,@sessionId,@clientRequestId,@sequence,@payloadHash,'queued',@inputText,@text,@payloadBytes,@attachmentCount,
-        @agentId,@providerId,@modelId,@uiLocale,@at,@at)`).run({ ...input, ...input.identity, id, sequence: control.sequence, attachmentCount: input.images.length, at });
+        @agentId,@providerId,@modelId,@uiLocale,@targetRunId,@at,@at)`).run({ ...input, ...input.identity, targetRunId: input.targetRunId ?? null, id, sequence: control.sequence, attachmentCount: input.images.length, at });
     for (let position = 0; position < input.images.length; position++) {
       const image = input.images[position]!;
       this.db.prepare(`insert into agent_attachment(id,workspace_id,storage_key,filename,media_type,byte_size,created_at) values (?,?,?,?,?,?,?)`)
@@ -171,15 +172,22 @@ export class AgentMessageQueueStore {
 
   stopGeneration(scope: QueueScope) { return sessionStopGeneration(this.db, scope); }
 
-  pause(scope: QueueScope, code: AgentQueuePauseCode) {
-    this.db.transaction(() => { this.ensureControl(scope); pauseMessageQueue(this.db, scope.workspaceId, scope.sessionId, code, this.now()); }).immediate();
+  /** Checked before async publication and again in its final SQLite transaction. */
+  assertSupplementTarget(scope: QueueScope, runId: string) {
+    assertSessionRuntimeUnblocked(this.db, scope.workspaceId, scope.sessionId);
+    const run = getRunRecord(this.db, runId);
+    const state = getMessageRunState(this.db, scope.workspaceId, scope.sessionId);
+    if (!run || run.workspaceId !== scope.workspaceId || run.sessionId !== scope.sessionId || run.runKind !== "user" || !interactiveRunEnabled(this.db, { ...scope, runId })
+      || run.status !== "running" || !["work_pending", "work_in_progress"].includes(run.executionPhase)
+      || state?.status !== "running" || state.activeRunId !== runId)
+      throw new HttpError(409, "Supplement target Run is no longer accepting input", "AGENT_SUPPLEMENT_TARGET_CLOSED");
   }
 
   snapshot(scope: QueueScope): AgentMessageQueueSnapshot {
     return this.db.transaction(() => {
       this.assertScope(scope);
-      const control = this.db.prepare("select mode,pause_code as pauseCode,queue_version as queueVersion from agent_session_queue_control where session_id=?")
-        .get(scope.sessionId) as { mode: "active" | "paused"; pauseCode: AgentQueuePauseCode | null; queueVersion: number } | undefined;
+      const control = this.db.prepare("select queue_version as queueVersion from agent_session_queue_control where session_id=?")
+        .get(scope.sessionId) as { queueVersion: number } | undefined;
       const rows = this.listQueued(scope); const unconfirmed = this.listUnconfirmed(scope);
       // Chain order, not receipt sequence across different source Sessions, is authoritative.
       const positions = new Map(getVisibleMessageChain(this.db, scope).map((message, index) => [message.id, index]));
@@ -193,7 +201,7 @@ export class AgentMessageQueueStore {
       const unresolved = barriers.filter(row => row.state !== "quiescent");
       const state: AgentMessageQueueSnapshot["stop"]["state"] = unresolved.some(row => row.state === "unknown") ? "unknown" : unresolved.length ? "pending" : barriers.length ? "quiescent" : "none";
       const selected = unresolved.find(row => row.state === state);
-      return { workspaceId: scope.workspaceId, sessionId: scope.sessionId, queueVersion: control?.queueVersion ?? 0, mode: control?.mode ?? "active", pauseCode: control?.pauseCode ?? null,
+      return { workspaceId: scope.workspaceId, sessionId: scope.sessionId, queueVersion: control?.queueVersion ?? 0,
         inputIdentity: this.fixedIdentity(scope), stopGeneration: this.stopGeneration(scope),
         pendingCount: rows.length, pendingBytes: rows.reduce((sum, row) => sum + row.payload_bytes, 0), pendingIdentity: rows[0] ? queueIdentity(rows[0]) : null,
         unconfirmedInputCount: unconfirmed.length, recoveryIdentity: unconfirmed[0] ? queueIdentity(unconfirmed[0]) : null,

@@ -21,13 +21,6 @@ const nullableId = Type.Union([AgentQueueIdSchema, Type.Null()]);
 const literals = <T extends string>(values: readonly T[]) => Type.Union(values.map(value => Type.Literal(value)));
 const strict = { additionalProperties: false } as const;
 
-export const AgentQueuePauseCodeSchema = literals([
-  "user_stop", "run_failed", "budget_exhausted", "recovery_required", "profile_unavailable",
-  "input_too_large", "budget_configuration_invalid", "provider_context_too_large",
-  "prepare_snapshot_too_large", "prepare_cache_capacity",
-  "context_preparation_failed", "attachment_integrity_failed", "invariant_violation", "inputs_abandoned"
-] as const);
-export type AgentQueuePauseCode = Static<typeof AgentQueuePauseCodeSchema>;
 export const AgentQueueStopDiagnosticCodeSchema = literals([
   "stop_requested", "runner_not_quiescent", "transport_timeout", "transport_unavailable",
   "invalid_stop_response", "runtime_instance_mismatch", "runtime_exit_unproven", "runtime_identity_unverified"
@@ -69,7 +62,6 @@ export type AgentQueueStopSnapshot = Static<typeof AgentQueueStopSnapshotSchema>
 export const AgentMessageQueueSnapshotSchema = Type.Object({
   workspaceId: AgentQueueIdSchema, sessionId: AgentQueueIdSchema, queueVersion: AgentQueueVersionSchema,
   stopGeneration: AgentQueueHashSchema,
-  mode: literals(["active", "paused"] as const), pauseCode: Type.Union([AgentQueuePauseCodeSchema, Type.Null()]),
   pendingCount: Type.Integer({ minimum: 0, maximum: AGENT_QUEUE_MAX_PENDING_COUNT }),
   pendingBytes: Type.Integer({ minimum: 0, maximum: AGENT_QUEUE_MAX_PENDING_BYTES }),
   pendingIdentity: Type.Union([AgentQueueIdentitySchema, Type.Null()]),
@@ -89,6 +81,8 @@ export type AgentMessageQueueSnapshot = Static<typeof AgentMessageQueueSnapshotS
 const acceptFields = {
   workspaceId: AgentQueueIdSchema, clientRequestId: AgentQueueIdSchema,
   stopGeneration: Type.Optional(AgentQueueHashSchema),
+  /** Null/absent is an explicit ordinary send; a supplement belongs only to this Run. */
+  targetRunId: Type.Optional(nullableId),
   agentId: Type.Optional(AgentQueueIdSchema), uiLocale: Type.Optional(AgentUiLocaleSchema)
 };
 /** UTF-8 byte limit is enforced by the application; schema maxLength is only an early ceiling. */
@@ -147,7 +141,7 @@ export const AgentResumeMessageQueueRequestSchema = Type.Object({
 export type AgentResumeMessageQueueRequest = Static<typeof AgentResumeMessageQueueRequestSchema>;
 export const AgentResumeMessageQueueResponseSchema = Type.Union([
   Type.Object({ action: Type.Literal("continued_unconfirmed"), runId: AgentQueueIdSchema, queue: AgentMessageQueueSnapshotSchema }, strict),
-  Type.Object({ action: literals(["dispatch_queued", "unpaused_only"] as const), runId: nullableId, queue: AgentMessageQueueSnapshotSchema }, strict)
+  Type.Object({ action: Type.Literal("no_unconfirmed"), runId: nullableId, queue: AgentMessageQueueSnapshotSchema }, strict)
 ]);
 export type AgentResumeMessageQueueResponse = Static<typeof AgentResumeMessageQueueResponseSchema>;
 export const AgentAbandonUnconfirmedInputRequestSchema = Type.Object({
@@ -187,7 +181,7 @@ export const AgentQueueErrorCodeSchema = literals([
   "AGENT_STOP_OPERATION_CONFLICT", "AGENT_QUEUE_RUN_DRAINING", "AGENT_QUEUE_RUN_ACTIVE",
   "AGENT_NO_UNCONFIRMED_INPUT", "AGENT_QUEUE_INPUT_NOT_CONFIRMED", "AGENT_ATTACHMENT_PUBLICATION_UNCERTAIN",
   "AGENT_QUEUE_STOP_GENERATION_CHANGED", "AGENT_QUEUE_EXECUTION_NOT_DRAINED", "AGENT_QUEUE_TOOL_STATE_UNSAFE",
-  "AGENT_QUEUE_PAUSED", "SESSION_HAS_PENDING_INPUT", "AGENT_QUEUE_TEXT_TOO_LARGE",
+  "SESSION_HAS_PENDING_INPUT", "AGENT_SUPPLEMENT_TARGET_CLOSED", "AGENT_QUEUE_TEXT_TOO_LARGE",
   "AGENT_QUEUE_CAPACITY_EXCEEDED", "AGENT_ATTACHMENT_RETENTION_CAPACITY_EXCEEDED"
 ] as const);
 export type AgentQueueErrorCode = Static<typeof AgentQueueErrorCodeSchema>;
